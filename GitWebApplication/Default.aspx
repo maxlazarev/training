@@ -12,6 +12,7 @@
     <div>
     <p>Hello git</p>dsd
         <h1>Some text</h1>additional
+        <asp:Label runat="server" ID="lblMessage" Text="" />
     </div>
     </form>
 </body>
