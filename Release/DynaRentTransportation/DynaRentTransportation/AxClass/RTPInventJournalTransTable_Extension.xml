@@ -1,0 +1,339 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RTPInventJournalTransTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(InventJournalTrans))]
+public final class RTPInventJournalTransTable_Extension
+{
+    // chain-of-command wrapper methods
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initFromInventTable</Name>
+				<Source><![CDATA[
+    public void initFromInventTable(
+        InventTable     _inventTable,
+        boolean         _initQty,
+        boolean         _initInventDim,
+        boolean         _initCostPrice,
+        boolean         _initInventoryStatus)
+    {
+        next initFromInventTable(_inventTable,
+            _initQty,
+            _initInventDim,
+            _initCostPrice,
+            _initInventoryStatus);
+
+        if (_initInventDim)
+        {
+            InventJournalTable inventJournalTable = this.inventJournalTable();
+            InventDim inventDim = this.inventDim();
+
+            if (inventJournalTable.JournalType == InventJournalType::RTPReturn && inventJournalTable.RTPReturnInventLocationId != inventDim.InventLocationId)
+            {
+                this.RTPInitInventLocationFromInventJournalTable(inventJournalTable.RTPReturnInventLocationId);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInventDimId</Name>
+				<Source><![CDATA[
+    public void setInventDimId(
+        InventDimId     _inventDimId,
+        InventDim       _inventDim)
+    {
+        InventJournalTable inventJournalTable = this.inventJournalTable();
+
+        //if (!inventJournalTable.RTPIsReturnJournal)
+        {
+            next setInventDimId(_inventDimId, _inventDim);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insert</Name>
+				<Source><![CDATA[
+    public void insert(NoYes _dropEstimated)
+    {
+        if (this.JournalType == InventJournalType::RTPReturn)
+        {
+            _dropEstimated = NoYes::Yes;
+        }
+        
+        next insert(_dropEstimated);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update(NoYes _dropEstimated)
+    {
+        if (this.JournalType == InventJournalType::RTPReturn)
+        {
+            _dropEstimated = NoYes::Yes;
+        }
+        
+        next update(_dropEstimated);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RTPAddOrderReference</Name>
+				<Source><![CDATA[
+    // extension methods
+       
+    [SysObsolete('Obsolete method', false)]
+    public void RTPAddOrderReference()
+    {
+        SalesTable          salesTable;
+        SalesLine           salesLine;
+        InventDim           inventDim;
+        BOBRentalType       rentalType;
+        CustAccount         custAccount;
+        boolean             bulkItems = this.inventTable().BOBIsBulkRentalItem();
+        InventLocationId    inventLocationId;
+        InventSiteId        inventSiteId;
+        InventSerialId      inventSerialId;
+        InventJournalTable  inventJournalTable = this.inventJournalTable();
+        RTPReturnNoteLinesGenerate  returnNoteLinesGenerate;
+        RTPInventJournalTransSalesLineReference inventJournalTransSalesLineReference;
+        RecordInsertList recordInsertList = new RecordInsertList(tableNum(RTPInventJournalTransSalesLineReference));
+        
+    
+        inventDim = this.inventDim();
+        inventLocationId    = inventDim.InventLocationId;
+        inventSiteId        = inventDim.InventSiteId;
+        inventSerialId      = inventDim.InventSerialId;
+    
+        if (inventLocationId && inventSiteId && (bulkItems || inventSerialId))
+        {
+            returnNoteLinesGenerate = RTPReturnNoteLinesGenerate::construct();
+            returnNoteLinesGenerate.parmInventJournalTable(inventJournalTable);
+            returnNoteLinesGenerate.parmIsManualCreation(true);
+    
+            custAccount = inventJournalTable.RTPCustAccount;
+    
+            while select salesTable
+            order by salesLine.ItemId, inventDim.InventSiteId, inventDim.InventLocationId, salesLine.SalesUnit
+            where salesTable.CustAccount == custAccount
+            &&  (!inventJournalTable.RTPVenueCode || salesTable.RORVenueCode == inventJournalTable.RTPVenueCode)
+                join salesLine
+                where salesLine.SalesId == salesTable.SalesId
+                &&    salesLine.ItemId == this.ItemId
+                &&   !salesLine.Blocked
+                &&   (salesLine.RORTradeType == RORTradeType::Rental ||
+                      salesLine.RORTradeType == RORTradeType::SubRental)
+                    join inventSiteId, inventLocationId, InventSerialId from inventDim
+                    where inventDim.inventDimId == salesLine.InventDimId
+                    &&   inventDim.InventSiteId     == inventSiteId
+                    &&   inventDim.InventLocationId == inventLocationId
+                    &&   (bulkItems || inventDim.InventSerialId == inventSerialId)
+                        outer join rentalType
+                        where rentalType.RentalTypeId == salesLine.BOBRentalTypeIdRequested
+            {
+                if ((bulkItems && rentalType && rentalType.Classification == BOBRentalTypeClassification::Serialized)
+                || (!bulkItems && (!rentalType || rentalType.Classification != BOBRentalTypeClassification::Serialized)))
+                {
+                    continue;
+                }
+    
+                if (returnNoteLinesGenerate.canCreateLine(salesTable, salesLine, inventJournalTable.RTPReturnDateTime))
+                {
+                    inventJournalTransSalesLineReference.clear();
+                    inventJournalTransSalesLineReference.InventJournalTransRecId = this.RecId;
+                    inventJournalTransSalesLineReference.SalesLineRecId = salesLine.RecId;
+                    inventJournalTransSalesLineReference.RemainSalesReturn = salesLine.RORRemainSalesReturn;
+                    recordInsertList.add(inventJournalTransSalesLineReference);
+                }
+            }
+        }
+
+        recordInsertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RTPDisplayReturnQtyDifference</Name>
+				<Source><![CDATA[
+    display RTPReturnRemainder RTPDisplayReturnQtyDifference()
+    {
+        return this.RTPAvailableReturnQty - this.RORDisplayTotalReturnQty() + this.RORSurplusQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateField</Name>
+				<Source><![CDATA[
+    public boolean validateField(FieldId _id)
+    {
+        boolean ret = next validateField(_id);
+
+        if (this.RORSurplusQty && this.RTPDisplayReturnQtyDifference())
+        {
+            ret = checkFailed(strFmt("@DNR10009", fieldId2pname(tableNum(InventJournalTrans), _id), "@SYS53728"));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RTPInitInventLocationFromInventJournalTable</Name>
+				<Source><![CDATA[
+    public void RTPInitInventLocationFromInventJournalTable(InventLocationId _inventLocationId)
+    {
+        InventDim   inventDim;
+            
+        if (_inventLocationId)
+        {
+            inventDim = this.inventDim();
+            inventDim.InventLocationId  = _inventLocationId;
+            inventDim.initFromInventLocation(inventDim.inventLocation());
+            inventDim = InventDim::findOrCreate(inventDim);
+    
+            this.InventDimId = inventDim.inventDimId;
+            this.setInventDimId(inventDim.InventDimId, inventDim);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RTPInitFromInventJournalTable</Name>
+				<Source><![CDATA[
+    public void RTPInitFromInventJournalTable(InventJournalTable _inventJournalTable)
+    {
+        if (_inventJournalTable.RTPReturnInventLocationId)
+        {
+            this.RTPInitInventLocationFromInventJournalTable(_inventJournalTable.RTPReturnInventLocationId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RTPValidateInventSerialId</Name>
+				<Source><![CDATA[
+    public boolean RTPValidateInventSerialId()
+    {
+        boolean             ret = true;
+        InventJournalTable  inventJournalTable = this.inventJournalTable();
+        InventDim           inventDim;
+        InventJournalTrans  inventJournalTransOther;
+        InventSerialId      inventSerialId;
+        ;
+    
+        if (inventJournalTable.JournalType == InventJournalType::RTPReturn)
+        {
+            inventSerialId = this.inventDim().inventSerialId;
+    
+            if (inventSerialId)
+            {
+                select firstOnly inventJournalTransOther
+                where inventJournalTransOther.JournalId == this.JournalId
+                &&    inventJournalTransOther.RecId     != this.RecId
+                    exists join inventDim
+                    where inventDim.inventDimId     == inventJournalTransOther.InventDimId
+                    &&    inventDim.inventSerialId  == inventSerialId;
+    
+                if (inventJournalTransOther)
+                {
+                    ret = checkFailed(strFmt("@DNR8561", inventSerialId, inventJournalTransOther.LineNum));
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RTPValidateRentalItemType</Name>
+				<Source><![CDATA[
+    public boolean RTPValidateRentalItemType()
+    {
+        boolean             ret = true;
+        InventTable         inventTable;
+        ;
+    
+        if (this.inventJournalTable().JournalType == InventJournalType::RTPReturn)
+        {
+            inventTable = this.inventTable();
+    
+            if (inventTable && inventTable.RORItemTradeType == RORItemTradeType::SalesPurch)
+            {
+                ret = checkFailed(strFmt("@DNR8571", this.ItemId, RORItemTradeType::SalesPurch));
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_OnValidatedWrite</Name>
+				<Source><![CDATA[
+    // event handler methods
+        
+    [DataEventHandler(tableStr(InventJournalTrans), DataEventType::ValidatedWrite)]
+    public static void DNREvent_OnValidatedWrite(Common _sender, DataEventArgs _eventArgs)
+    {
+        InventJournalTrans  hostObject      = _sender as InventJournalTrans;
+        ValidateEventArgs   validateArgs    = _eventArgs as ValidateEventArgs;
+        boolean             ret             = validateArgs.parmValidateResult();
+
+        if (ret)
+        {            
+            ret = ret && hostObject.RTPValidateInventSerialId();
+            ret = ret && hostObject.RTPValidateRentalItemType();
+
+            if (ret
+            &&  hostObject.inventJournalTable().JournalType == InventJournalType::RTPReturn
+            &&  (hostObject.RTPAvailableReturnQty - hostObject.RORDisplayTotalReturnQty() + hostObject.RORSurplusQty < 0))
+            {
+                ret = checkFailed("@DFM115");
+            }
+
+            validateArgs.parmValidateResult(ret);
+        }
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RTPEvent_DNRMayCreateCompensatingTrans_Post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(DNRInventJournalTransTable_Extension), methodStr(DNRInventJournalTransTable_Extension, DNRMayCreateCompensatingTrans))]
+    public static void RTPEvent_DNRMayCreateCompensatingTrans_Post(XppPrePostArgs _args)
+    {
+        boolean ret = _args.getReturnValue();
+        InventJournalTrans hostObject = _args.getThis() as InventJournalTrans;
+        
+        if (ret && hostObject.inventJournalTable().JournalType == InventJournalType::RTPReturn)
+        {
+            _args.setReturnValue(false);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

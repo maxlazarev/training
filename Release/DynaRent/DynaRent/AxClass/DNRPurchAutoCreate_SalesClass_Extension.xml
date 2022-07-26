@@ -1,0 +1,508 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchAutoCreate_SalesClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchAutoCreate_Sales))]
+public final class DNRPurchAutoCreate_SalesClass_Extension
+{
+    private RORRentalDateSynchroniser   rentalDateSynchroniser;
+    private InventSerialId              newInventSerialId;
+    private InventLocationId            subRentalWarehouse;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createLine</Name>
+				<Source><![CDATA[
+    void createLine()
+    {
+        next createLine();
+
+        newInventSerialId = "";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPurchaseLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Cannot be refactored without altering functionality of method")]
+    protected void createPurchaseLine(PurchLine _purchLine)
+    {
+        boolean isSubRental = (salesTable.SalesType == SalesType::RORRental && purchTable.PurchaseType == PurchaseType::RORSubRental
+                            && (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental));
+        boolean isSerializedSubRental = (isSubRental && salesLine.inventTable().BOBIsSerializedRentalItem());
+
+        if (isSubRental)
+        {
+            InventDim inventDim = _purchLine.inventDim();
+
+            if (isSerializedSubRental)
+            {
+                _purchLine.RORTradeType = RORTradeType::SubRental;
+    
+                // don't create new serial number if using rental direct delivery
+                if (!purchTable.InterCompanyDirectDelivery
+                || !purchTable.InterCompanyOrder)
+                {
+                    // create a new serial number, then stamp it on the PurchLine and update the trade type
+                    newInventSerialId = this.RORCreateInventSerial(_purchLine.PurchId, salesLine.inventTable());
+    
+                    inventDim = _purchLine.inventDim();
+                    inventDim.inventSerialId = newInventSerialId;
+    
+                    _purchLine.setInventDimIdFromInventDim(inventDim);
+    
+                    // create a new business object
+                    BOBObjectManager::newSubRentalObject(_purchLine, newInventSerialId,'');
+                }
+                else
+                {
+                    _purchLine.setPriceDisc(inventDim);
+                }
+            }
+
+            if (!this.DNRParmBack2BackRentalDateTimes())
+            {
+                // Overwriting the InventLocationId is only allowed when the purchase order
+                // that is going to be created is of type SubRental
+                if (!subRentalWarehouse)
+                {
+                    subRentalWarehouse = RORParameters::find().SubRentalWarehouse;
+                }
+            
+                if (subRentalWarehouse && inventDim.InventLocationId != subRentalWarehouse)
+                {
+                    inventDim.InventLocationId  = subRentalWarehouse;
+                    inventDim.InventSiteId      = InventLocation::find(subRentalWarehouse).InventSiteId;
+                    _purchLine.setInventDimIdFromInventDim(inventDim);
+                }
+            }
+        }
+
+        if (this.DNRParmBack2BackRentalDateTimes())
+        {
+            _purchLine.DNRBack2Back = NoYes::Yes;
+        }
+
+        next createPurchaseLine(_purchLine);
+
+        // Synchronise rental dates from sales line - don't warn on missing parent as it's possible to just
+        // create a single component sub-rental and then the date parent from the sales order might not exist
+        // in the purchase order
+        if (purchTable.PurchaseType == PurchaseType::RORSubRental && _purchLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            if (this.DNRParmBack2BackRentalDateTimes())  
+            {
+                RORRentalDateTimes rentalDateTimesLocal;
+
+                Set recordSet = Set::create(this.DNRParmBack2BackRentalDateTimes());
+                SetEnumerator se = recordSet.getEnumerator();
+                while(se.moveNext())
+                {
+                    rentalDateTimesLocal = se.current();
+
+                    if (rentalDateTimesLocal.RefTableId == SalesLine.TableId && rentalDateTimesLocal.RefRecId == salesLine.RecId)
+                    {
+                        this.RORCopyRentalDateTimes(rentalDateTimesLocal, _purchLine);
+                        _purchLine.reread();
+
+                        break;
+                    }
+                }
+
+            }
+            else
+            {
+                this.RORCopyRentalDateTimes(salesLine.RORRentalDateTimesHost::rentalDateTimes(), _purchLine);
+            }
+        }
+       
+        if (isSerializedSubRental)
+        {
+            RORRentalLineEditorForm::createSupplementaryItemsLines(_purchLine);
+            ItemId itemIdWarranty = RAGParameters::find().ItemIdWarranty;
+
+            if (_purchLine.ItemId != itemIdWarranty
+            && !_purchLine.RORParentLineRecId)
+            {
+                _purchLine.RORRentalLine::updateKitComponentPricing(RORKitPricingActionType::CreateLines);
+            }
+
+            if (!purchTable.InterCompanyDirectDelivery || !purchTable.InterCompanyOrder)
+            {
+                // assign the new business object to the caller SalesLine
+                BOBObjectAssignmentEngine::construct(salesLine, newInventSerialId).runOperation();
+    
+                // for some reason the serial number on the new PurchLine's compensating
+                // InventTrans is not populated correctly, so we need to do it ourselves
+                InventTrans inventTrans;
+                InventTransOriginPurchLine originPurchLine;
+
+                select firstonly forupdate inventTrans
+                    where inventTrans.inventDimId != _purchLine.InventDimId
+                        exists join originPurchLine
+                        where originPurchLine.PurchLineDataAreaId == _purchLine.dataAreaId
+                        &&    originPurchLine.PurchLineInventTransId == _purchLine.InventTransId
+                        &&    originPurchLine.InventTransOrigin == inventTrans.InventTransOrigin;
+    
+                if (inventTrans)
+                {
+                    InventUpdate inventUpdate = InventUpdate::newChangeTransDim(InventMovement::construct(_purchLine));
+                    inventUpdate.BOBParmIsCompensatingTrans(true);
+                    inventUpdate.updateTransDimReceipt(inventTrans, inventTrans.inventDim(), _purchLine.inventDim(), inventTrans.Qty);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPurchTable</Name>
+				<Source><![CDATA[
+    void createPurchTable()
+    {         
+        if (this.DNRParmBack2BackRentalDateTimes())
+        {
+            purchTable.DNRBack2Back = NoYes::Yes;
+            purchTable.MCRDropShipment = NoYes::No;
+        }
+
+        next createPurchTable();
+
+        if(!this.skipInitializePurchTable())
+        {
+            this.RORCreateRentalDatesForHeader();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initPurchLine</Name>
+				<Source><![CDATA[
+    protected PurchLine initPurchLine()
+    {
+        PurchLine ret = next initPurchLine();
+        
+        if (salesTable.SalesType == SalesType::RORRental && salesLine.RORTradeType == RORTradeType::Rental)
+        {
+            ret.RORTradeType = RORTradeType::SubRental;
+            
+            //*** Repeated code
+            ret.initFromPurchTable(purchTable);
+            ret.initFromInventTable(salesLine.inventTable());
+            ret.initFromSalesLine(salesLine);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSalesLineReferenceFields</Name>
+				<Source><![CDATA[
+    protected void initSalesLineReferenceFields(PurchLine _localPurchLine)
+    {
+        next initSalesLineReferenceFields(_localPurchLine);
+
+        if (salesLine.RORTradeType == RORTradeType::Rental)
+        {
+            if(_localPurchLine.RORTradeType == RORTradeType::SubRental && !newInventSerialId)
+            {
+                salesLine.RORTradeType  = RORTradeType::SubRental;
+    
+                InventDim salesInventDim = salesLine.inventDim();
+
+                if (subRentalWarehouse)
+                {
+                    salesInventDim.InventLocationId = subRentalWarehouse;
+                    salesInventDim.InventSiteId = InventLocation::find(subRentalWarehouse).InventSiteId;
+                }
+    
+                salesLine.InventDimId = InventDim::findOrCreate(salesInventDim).InventDimId;
+    
+                RORSubRentalReference reference;
+
+                reference.SalesId = salesLine.SalesId;
+                reference.SalesInventTransId = salesLine.InventTransId;
+                reference.PurchId = _localPurchLine.PurchId;
+                reference.PurchInventTransId = _localPurchLine.InventTransId;
+                reference.insert();
+            }
+    
+            // standard AX has created a marking between the caller SalesLine and the new PurchLine which will mess with
+            // our sub rental order line's compensating inventory transaction, which is why we want to remove that marking
+            InventTransOrigin::deleteMarking(InventTransOriginPurchLine::findInventTransOriginId(_localPurchLine.dataAreaId, _localPurchLine.InventTransId),
+                                             InventTransOriginSalesLine::findInventTransOriginId(salesLine.dataAreaId, salesLine.InventTransId),
+                                             _localPurchLine.PurchQty,
+                                             true);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>purchType</Name>
+				<Source><![CDATA[
+    public PurchaseType purchType()
+    {
+        PurchaseType ret = next purchType();
+
+        if (salesTable.SalesType == SalesType::RORRental)
+        {
+            ret = this.RORparmForcePurchTypePurchase() ? PurchaseType::Purch : PurchaseType::RORSubRental;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setPurchTable</Name>
+				<Source><![CDATA[
+    void setPurchTable()
+    {
+        boolean tmpTransferAddress = transferAddress;
+        transferAddress = false;
+
+        ProjId tmpProjId = purchTable.ProjId;
+
+        next setPurchTable();
+        
+        if(this.skipInitializePurchTable())
+        {
+            return;
+        }
+
+        if (tmpPurchLinePrice.RORRequester)
+        {
+            purchTable.Requester = tmpPurchLinePrice.RORRequester;
+        }
+
+        transferAddress = tmpTransferAddress;
+
+        if(purchTable.PurchaseType == PurchaseType::RORSubRental
+        && RORVenueTable::find(purchTable.RORVenueCode).WPPProjId)
+        {
+            purchTable.ProjId = tmpProjId;
+        }
+
+        purchTable.InventLocationId = salesTable.InventLocationId;
+        purchTable.modifiedField(fieldNum(purchTable, InventLocationId));
+    
+        purchTable.InventSiteId = salesTable.InventSiteId;
+        purchTable.modifiedField(fieldNum(purchTable, InventSiteId));
+        if (transferAddress && (!this.DNRParmBack2BackRentalDateTimes()))
+        {
+            purchTable.DeliveryName = salesTable.DeliveryName;
+            purchTable.DeliveryPostalAddress = salesTable.DeliveryPostalAddress;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showInfo</Name>
+				<Source><![CDATA[
+    public boolean showInfo()
+    {
+        next showInfo();
+
+        return salesTable && salesTable.SalesType != SalesType::RORRental;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>skipInitializePurchTable</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Cannot be refactored without altering functionality of method")]
+    protected boolean skipInitializePurchTable()
+    {
+        boolean ret = next skipInitializePurchTable();
+        
+        if(tmpPurchLinePrice.RORPurchId)
+        {
+            if(tmpPurchLinePrice.RORPurchId != purchTable.PurchId)
+            {
+                // The record need to be select for an update as the Purchase order record can be updated further in the process
+                purchTable = PurchTable::find(tmpPurchLinePrice.RORPurchId, true);  
+            }
+
+            if(purchTable)
+            {
+                ret = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transferDeliveryAddress</Name>
+				<Source><![CDATA[
+    protected void transferDeliveryAddress(PurchLine _purchLine)
+    {
+        boolean isSerializedSubRental = (salesTable.SalesType == SalesType::RORRental
+                                         && salesLine.RORTradeType == RORTradeType::Rental
+                                         && salesLine.inventTable().BOBIsSerializedRentalItem());
+
+        if (isSerializedSubRental && salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            _purchLine.setPriceDisc(_purchLine.inventDim());
+        }
+
+        next transferDeliveryAddress(_purchLine);
+
+        if (this.DNRParmBack2BackRentalDateTimes())
+        {
+            LogisticsPostalAddress LogisticsPostalAddress = salesLine.inventDim().inventLocation().LogisticsPostalAddress();
+                    
+            if (LogisticsPostalAddress)
+            {
+                _purchLine.DeliveryPostalAddress = LogisticsPostalAddress.RecId;
+
+                LogisticsLocation location = LogisticsLocation::find(LogisticsPostalAddress.Location);
+                if (location.Description)
+                {
+                    _purchLine.DeliveryName = location.Description;
+                }
+                else
+                {
+                    _purchLine.DeliveryName = salesLine.DeliveryName;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmSalesLine</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public SalesLine DNRParmSalesLine(SalesLine _salesLine = salesLine)
+    {
+        salesLine = _salesLine;
+        return salesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmSalesTable</Name>
+				<Source><![CDATA[
+    public SalesTable DNRParmSalesTable(SalesTable _salesTable = salesTable)
+    {
+        salesTable = _salesTable;
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmTmpPurchLinePrice</Name>
+				<Source><![CDATA[
+    public TmpPurchLinePrice DNRParmTmpPurchLinePrice(TmpPurchLinePrice _tmpPurchLinePrice = tmpPurchLinePrice)
+    {
+        tmpPurchLinePrice = _tmpPurchLinePrice;
+        return tmpPurchLinePrice;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCopyRentalDateTimes</Name>
+				<Source><![CDATA[
+    public void RORCopyRentalDateTimes(RORRentalDateTimes _rentalDateTimeFrom, RORRentalDateTimesHost _hostTo, boolean _createNewClassInstance = false)
+    {
+        RORRentalDateTimes rentalDateTimes;
+    
+        if (_hostTo.TableId == tableNum(purchLine))
+        {
+            rentalDateTimes = _hostTo.RORRentalDateTimesHost::rentalDateTimes();
+        }
+    
+        if (!rentalDateSynchroniser || _createNewClassInstance)
+        {
+            rentalDateSynchroniser = new RORRentalDateSynchroniser();
+        }
+
+        rentalDateSynchroniser.parmCheckClearTimes(false);
+        rentalDateSynchroniser.parmSkipUpdateMainRecord(true);
+        rentalDateSynchroniser.copyRentalDateTimes(_rentalDateTimeFrom, rentalDateTimes, _hostTo);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCreateInventSerial</Name>
+				<Source><![CDATA[
+    private InventSerialId RORCreateInventSerial(PurchId _purchId, InventTable _inventTable)
+    {
+        PurchLine       purchLineLocal;
+        InventDim       inventDim;
+        str             suffix;
+    
+        // creates a new serial number that follows the pattern [PurchId-xxxx]
+        // where xxxx is a four-digit sequence number
+    
+        select maxOf(InventSerialId) from inventDim
+        where inventDim.inventSerialId like (_purchId + '-????')
+            exists join purchLineLocal
+            where purchLineLocal.PurchId == _purchId
+            &&    purchLineLocal.InventDimId == inventDim.inventDimId;
+    
+        int nextNum = str2int(subStr(inventDim.inventSerialId, strLen(_purchId) + 2, 4));
+        nextNum ++;
+    
+        if (nextNum < 10)
+        {
+            suffix = '000' + int2str(nextNum);
+        }
+        else if (nextNum < 100)
+        {
+            suffix = '00' + int2str(nextNum);
+        }
+        else if (nextNum < 1000)
+        {
+            suffix = '0' + int2str(nextNum);
+        }
+        else
+        {
+            suffix = int2str(nextNum);
+        }
+
+        str ret = strFmt('%1-%2', _purchId, suffix);
+    
+        if (nextNum > 9999 || strLen(ret) > new SysDictType(extendedTypeNum(InventSerialId)).stringLen())
+        {
+            throw error("@DNR6002");
+        }
+    
+        InventSerial newSerialNumber;
+        newSerialNumber.InventSerialId          = ret;
+        newSerialNumber.ItemId                  = _inventTable.ItemId;
+        newSerialNumber.Description             = _inventTable.itemName();
+        newSerialNumber.BOBSkipObjectCreation   = NoYes::Yes; // business object will be created later
+        newSerialNumber.insert();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

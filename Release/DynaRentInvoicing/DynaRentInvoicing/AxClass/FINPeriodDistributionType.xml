@@ -1,0 +1,1096 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINPeriodDistributionType</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class FINPeriodDistributionType
+{
+    List                            resultList;
+    GeneralJournalEntry             generalJournalEntry;
+    RORParameters                   parameters;
+    boolean                         isMonthlyDistribution;
+
+    // parameters
+    InvoiceDate                     invoiceDate;
+    InvoiceId                       invoiceId;
+    Common                          ledgerRefBuffer;
+    Common                          documentSourceBuffer;
+    AmountCur                       amount;
+    AmountCur                       amountDisc;
+    CurrencyCode                    currencyCode;
+
+    LedgerDimensionDefaultAccount   dimensionAccountAmount;
+    LedgerDimensionDefaultAccount   dimensionAccountDisc;
+    Set                             setLedgerTransDate;
+
+    // caches
+    List                            periodCache; // [ startDate, endDate, postingDate, periodAmount, periodDisc ]
+
+    // additional parameters
+    boolean                         nothingToDistribute;
+    boolean                         forceDistribution;
+    
+    SalesLine                       salesLine;
+    PurchLine                       purchLine;
+    LedgerDimensionDefaultAccount   periodicLedgerDimDistributionAccount;
+    boolean                         isDistributionActive;
+    Counter                         rentalPeriodCount;
+    Map                             runningAmountMap = new Map(Types::Int64, Types::Container);
+    Amount                          runningRentalPeriodAmountFromMap;
+    Amount                          runningRentalPeriodAmountDiscFromMap;
+    Amount                          runningAmount, runningAmountDisc;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        this.runInit();
+        if (isDistributionActive
+        &&  (parameters.FINDistributionMethod == FINDistributionMethod::TransPeriod ||
+             parameters.FINDistributionMethod == FINDistributionMethod::AnalyticalDate))
+        {
+            this.runDistributed();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runInit</Name>
+				<Source><![CDATA[
+    protected void runInit()
+    {
+        // Implemented in subclasses if needed.
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runDistributed</Name>
+				<Source><![CDATA[
+    protected void runDistributed()
+    {
+        ListEnumerator      iterator;
+        StartDate           startDate;
+        EndDate             endDate;
+        TransDate           postingDate;
+        AmountCur           periodAmount;
+        AmountCur           periodDisc;
+        FINAnalyticalDate   analyticalDate;
+        ;
+    
+        // Calculate the periods / amounts
+        this.calcPeriods();
+    
+        iterator = periodCache.getEnumerator();
+    
+        while (iterator.moveNext())
+        {
+            [startDate, endDate, postingDate, periodAmount, periodDisc, analyticalDate] = iterator.current();
+    
+            if (postingDate && !this.checkTransDate(postingDate))
+            {
+                throw error("@DNR7653");
+            }
+    
+            if (!forceDistribution && periodCache.elements() == 1 && postingDate == invoiceDate && periodAmount == amount && periodDisc == amountDisc)
+            {
+                nothingToDistribute = true;
+                break;
+            }
+    
+            this.runPeriod(startDate, endDate, postingDate, periodAmount, periodDisc, analyticalDate);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runPeriod</Name>
+				<Source><![CDATA[
+    abstract protected void runPeriod(StartDate _startDate, EndDate _endDate, TransDate _postingDate, AmountCur _periodAmount, AmountCur _periodDisc, FINAnalyticalDate _analyticalDate = dateNull())
+    {
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkTransDate</Name>
+				<Source><![CDATA[
+    protected boolean checkTransDate(TransDate _transDate)
+    {
+        FiscalCalendarPeriod    fiscalCalendarPeriod;
+        RecId                   calendarRecId = Ledger::fiscalCalendar(CompanyInfo::find().RecId);
+    
+        if (! setLedgerTransDate)
+        {
+            setLedgerTransDate = new Set(Types::Date);
+        }
+    
+        if (! setLedgerTransDate.in(_transDate))
+        {
+            // For some reason that std ax function doesn't fetch a record when running in CIL
+            // fiscalCalendarPeriod = FiscalCalendars::findPeriodByPeriodCodeDate(calendarRecId,_transDate);
+            select firstOnly fiscalCalendarPeriod
+            where fiscalCalendarPeriod.FiscalCalendar   == calendarRecId
+            &&    fiscalCalendarPeriod.Type             == FiscalPeriodType::Operating
+            &&    fiscalCalendarPeriod.StartDate        <= _transDate
+            &&    fiscalCalendarPeriod.EndDate          >= _transDate;
+    
+            if (! fiscalCalendarPeriod)
+            {
+                return checkFailed(strFmt("@SYS17614",date2StrUsr(_transDate, DateFlags::FormatAll)));
+            }
+    
+            if (fiscalCalendarPeriod.currentLedgerPeriodStatus() !=  FiscalPeriodStatus::Open)
+            {
+                return checkFailed(strFmt("@SYS17615",date2StrUsr(_transDate, DateFlags::FormatAll)));
+            }
+    
+            setLedgerTransDate.add(_transDate);
+        }
+    
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcPeriods</Name>
+				<Source><![CDATA[
+    protected void calcPeriods()
+    {
+        Counter             rentalPeriodCountLocal;
+        Periods             chargeablePeriods;
+        TransDateTime       lastPeriodEndDateTime;
+        Common              common;
+              
+        if (!this.checkHasProjPeriods())
+        {
+            throw error(strFmt("@DNR8153", '', invoiceId));
+        }
+    
+        // init - determine the number of days / chargeable periods / end of the last period
+        [rentalPeriodCountLocal, chargeablePeriods, lastPeriodEndDateTime, common] = this.getDaysChargeablePeriods();
+        if (nothingToDistribute)
+        {
+            return;
+        }
+
+        this.prepareCache(rentalPeriodCountLocal, chargeablePeriods, lastPeriodEndDateTime, common);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkHasProjPeriods</Name>
+				<Source><![CDATA[
+    protected boolean checkHasProjPeriods()
+    {
+        boolean                         ret = true;
+        FINInvoicePeriodQtyPhysical     periodPhysical;
+        FINInvoicePeriodQtyFinancial    periodFinancial;
+                        
+        if (parameters.FINDistributionMethod == FINDistributionMethod::None)
+        {
+            return ret;
+        }
+
+        select firstonly PeriodEndDateTime, PeriodStartDateTime from periodFinancial
+        where periodFinancial.InvoiceId == InvoiceId
+            exists join periodPhysical
+            where periodPhysical.RecId == periodFinancial.InvPeriodQtyPhysicalRecId
+            &&    periodPhysical.RefTableId    == documentSourceBuffer.TableId
+            &&    periodPhysical.RefRecId      == documentSourceBuffer.RecId;
+    
+        if (!periodFinancial && ledgerRefBuffer.TableId == tableNum(SalesLine))
+        {
+            SalesParmLine salesParmLine;
+        
+            select firstonly RecId, TableId from salesParmLine
+            order by RecId desc
+            where salesParmLine.SalesLineRecId == documentSourceBuffer.RecId;
+    
+            select firstonly PeriodEndDateTime, PeriodStartDateTime from periodFinancial
+            where periodFinancial.InvoiceId == InvoiceId
+                exists join periodPhysical
+                where periodPhysical.RecId == periodFinancial.InvPeriodQtyPhysicalRecId
+                &&    periodPhysical.RefTableId    == salesParmLine.TableId
+                &&    periodPhysical.RefRecId      == salesParmLine.RecId;
+        }
+    
+        if (!periodFinancial && ledgerRefBuffer.TableId == tableNum(PurchLine))
+        {
+            VendInvoiceInfoLine vendInvoiceInfoLine;
+        
+            select firstonly RecId, TableId from vendInvoiceInfoLine
+            order by RecId desc
+            where vendInvoiceInfoLine.PurchLineRecId == documentSourceBuffer.RecId;
+    
+            select firstonly PeriodEndDateTime, PeriodStartDateTime from periodFinancial
+            where periodFinancial.InvoiceId == InvoiceId
+                exists join periodPhysical
+                where periodPhysical.RecId == periodFinancial.InvPeriodQtyPhysicalRecId
+                &&    periodPhysical.RefTableId    == vendInvoiceInfoLine.TableId
+                &&    periodPhysical.RefRecId      == vendInvoiceInfoLine.RecId;
+        }
+    
+        ProjPeriodLine      projPeriods;
+        TransDate           invPeriodStartDate, invPeriodEndDate;
+
+        // processed with time zone offset
+        invPeriodEndDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(periodFinancial.PeriodEndDateTime, this.timeZone()));
+        invPeriodStartDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(periodFinancial.PeriodStartDateTime, this.timeZone()));
+    
+        select firstonly RecId from projPeriods
+        where projPeriods.PeriodId  == parameters.FINPeriodId
+        &&   projPeriods.PeriodFrom <= invPeriodEndDate
+        &&   projPeriods.PeriodTo   >= invPeriodStartDate;
+        // END: processed with time zone offset
+    
+        if (!projPeriods.RecId)
+        {
+            ret = checkFailed(strFmt("@DNR8154", parameters.FINPeriodId));
+        }
+           
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>timeZone</Name>
+				<Source><![CDATA[
+    public TimeZone timeZone()
+    {
+        return DateTimeUtil::getUserPreferredTimeZone();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDaysChargeablePeriods</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInvalidInitFormMethodWarning", "Validation of caller must be performed before invoking super()"),
+     SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    protected container getDaysChargeablePeriods()
+    {
+        #DNRConstants
+        Periods             chargeablePeriods;
+        Counter             rentalPeriodCountLocal;
+
+        ProjPeriodLine      projPeriods;
+        // calulated date/time
+        TransDate           periodStartDate, periodEndDate;
+        TimeOfDay           periodStartTime, periodEndTime;
+        TransDateTime       periodStartDateTime, periodEndDateTime;
+        // date/time directly from INVInvoicePeriod table
+        TransDate           invPeriodStartDate, invPeriodEndDate;
+        TimeOfDay           invPeriodStartTime, invPeriodEndTime;
+        TransDateTime       invPeriodStartDateTime, invPeriodEndDateTime;
+        TransDate           startDate, endDate;
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+        TransDateTime       lastPeriodEndDateTime;
+        Common              common = documentSourceBuffer;       
+                                    
+        switch (parameters.FINDistributionType)
+        {
+            case FINDistributionType::DistributionByDay:
+                FINInvoicePeriodQtyPhysical     periodPhysicalFirst;
+                FINInvoicePeriodQtyFinancial    periodFinancialFirst;
+                
+                select firstonly PeriodStartDateTime from periodFinancialFirst
+                order by PeriodStartDateTime asc
+                where periodFinancialFirst.InvoiceId == InvoiceId
+                    exists join periodPhysicalFirst
+                    where periodPhysicalFirst.RecId == periodFinancialFirst.InvPeriodQtyPhysicalRecId
+                    &&    periodPhysicalFirst.RefTableId    == documentSourceBuffer.TableId
+                    &&    periodPhysicalFirst.RefRecId      == documentSourceBuffer.RecId;
+
+                FINInvoicePeriodQtyPhysical     periodPhysicalLast;
+                FINInvoicePeriodQtyFinancial    periodFinancialLast;
+
+                select firstonly PeriodEndDateTime from periodFinancialLast
+                order by PeriodEndDateTime desc
+                where periodFinancialLast.InvoiceId == InvoiceId
+                    exists join periodPhysicalLast
+                    where periodPhysicalLast.RecId == periodFinancialLast.InvPeriodQtyPhysicalRecId
+                    &&    periodPhysicalLast.RefTableId    == documentSourceBuffer.TableId
+                    &&    periodPhysicalLast.RefRecId      == documentSourceBuffer.RecId;
+
+                lastPeriodEndDateTime = periodFinancialLast.PeriodEndDateTime;
+                
+                if (!periodFinancialFirst && ledgerRefBuffer.TableId == tableNum(PurchLine))
+                {
+                    select firstonly RecId, TableId from vendInvoiceInfoLine
+                    order by RecId desc
+                    where vendInvoiceInfoLine.PurchLineRecId == documentSourceBuffer.RecId;
+
+
+                    common = vendInvoiceInfoLine;
+
+                    select firstonly PeriodStartDateTime from periodFinancialFirst
+                    order by PeriodStartDateTime asc                   
+                        exists join periodPhysicalFirst
+                        where periodPhysicalFirst.RecId == periodFinancialFirst.InvPeriodQtyPhysicalRecId
+                        &&    periodPhysicalFirst.RefTableId    == vendInvoiceInfoLine.TableId
+                        &&    periodPhysicalFirst.RefRecId      == vendInvoiceInfoLine.RecId;
+
+                    select firstonly PeriodEndDateTime from periodFinancialLast
+                    order by PeriodEndDateTime desc                    
+                        exists join periodPhysicalLast
+                        where periodPhysicalLast.RecId == periodFinancialLast.InvPeriodQtyPhysicalRecId
+                        &&    periodPhysicalLast.RefTableId    == vendInvoiceInfoLine.TableId
+                        &&    periodPhysicalLast.RefRecId      == vendInvoiceInfoLine.RecId;
+    
+                }
+    
+                // processed with time zone offset
+                invPeriodEndDateTime = DateTimeUtil::applyTimeZoneOffset(periodFinancialLast.PeriodEndDateTime, this.timeZone());
+                invPeriodStartDateTime = DateTimeUtil::applyTimeZoneOffset(periodFinancialFirst.PeriodStartDateTime, this.timeZone());
+    
+                if (DateTimeUtil::time(invPeriodEndDateTime) == 0)
+                {
+                    periodEndDateTime = DateTimeUtil::newDateTime(DateTimeUtil::date(invPeriodEndDateTime) - 1, #INVTimeMax);
+                }
+    
+                chargeablePeriods = DateTimeUtil::date(invPeriodEndDateTime) - DateTimeUtil::date(invPeriodStartDateTime) + 1;
+                chargeablePeriods = this.adjustMiddayBoundary(chargeablePeriods, DateTimeUtil::time(invPeriodStartDateTime), DateTimeUtil::time(invPeriodEndDateTime));
+                // End: processed with time zone offset
+                break;
+    
+            case FINDistributionType::DistributionByRentalPeriod:
+                FINInvoicePeriodQtyPhysical     periodPhysical;
+                FINInvoicePeriodQtyFinancial    periodFinancial;
+                                        
+                chargeablePeriods = 0;
+                rentalPeriodCountLocal = 0;
+    
+                while select PeriodStartDateTime, PeriodEndDateTime, RecId, NumOfChargeablePeriods from periodFinancial
+                order by PeriodStartDateTime asc
+                where periodFinancial.InvoiceId == InvoiceId
+                    exists join periodPhysical
+                    where periodPhysical.RecId == periodFinancial.InvPeriodQtyPhysicalRecId
+                    &&    periodPhysical.RefTableId    == documentSourceBuffer.TableId
+                    &&    periodPhysical.RefRecId      == documentSourceBuffer.RecId                   
+                {
+                    // processed with time zone offset
+                    [invPeriodStartDate, invPeriodStartTime, invPeriodEndDate, invPeriodEndTime] = this.startEndDateTime(periodFinancial.PeriodStartDateTime, periodFinancial.PeriodEndDateTime, this.timeZone());
+                        
+                    chargeablePeriods += periodFinancial.NumOfChargeablePeriods;
+
+                    while select RecId from projPeriods
+                    where projPeriods.PeriodId == parameters.FINPeriodId
+                    &&    (projPeriods.PeriodFrom < invPeriodEndDate || (projPeriods.PeriodFrom == periodEndDate && invPeriodEndTime))
+                    &&    projPeriods.PeriodTo >= invPeriodStartDate
+                    {
+                        rentalPeriodCountLocal ++;
+                    }
+    
+                    if (isMonthlyDistribution)
+                    {
+                        if (!startDate)
+                        {
+                            startDate = invPeriodStartDate;
+                        }
+                        endDate = max(endDate, DateTimeUtil::time(invPeriodEndDateTime) ? invPeriodEndDate : invPeriodEndDate - 1);
+                    }
+                    // END: processed with time zone offset
+
+                    lastPeriodEndDateTime = periodFinancial.PeriodEndDateTime;
+                }
+    
+                if (!forceDistribution
+                && isMonthlyDistribution
+                && dateEndMth(startDate) == dateEndMth(endDate)
+                && dateEndMth(startDate) == dateEndMth(invoiceDate))
+                {
+                    // no need to distribute
+                    nothingToDistribute = true;
+                    return  [0,0];
+                }
+    
+                if(chargeablePeriods <= 0 && amount)
+                {
+                    throw error("@DNR3422");
+                }
+    
+                break;
+        }
+
+        return [rentalPeriodCountLocal, chargeablePeriods, lastPeriodEndDateTime, common];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareCache</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInvalidInitFormMethodWarning", "Validation of caller must be performed before invoking super()"),
+     SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    protected void prepareCache(Counter             _rentalPeriodCount,
+                                Periods             _chargeablePeriods,
+                                TransDateTime       _lastPeriodEndDateTime,
+                                Common              _common)
+    {
+        FINInvoicePeriodQtyPhysical     periodPhysical;
+        FINInvoicePeriodQtyFinancial    periodFinancial;
+
+        rentalPeriodCount = _rentalPeriodCount;
+                        
+        while select PeriodStartDateTime, PeriodEndDateTime, NumOfChargeablePeriods, recId from periodFinancial
+        where (_common.TableId == tableNum(vendInvoiceInfoLine) || periodFinancial.InvoiceId == InvoiceId)
+            exists join periodPhysical
+            where periodPhysical.RecId == periodFinancial.InvPeriodQtyPhysicalRecId
+            &&    periodPhysical.RefTableId    == _common.TableId
+            &&    periodPhysical.RefRecId      == _common.RecId
+        {
+            this.prepareCacheForRentalPeriod(periodFinancial.PeriodStartDateTime, 
+                periodFinancial.PeriodEndDateTime, 
+                periodFinancial.NumOfChargeablePeriods, 
+                periodFinancial.RecId,
+                _chargeablePeriods,
+                _lastPeriodEndDateTime);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareCacheForRentalPeriod</Name>
+				<Source><![CDATA[
+    protected void prepareCacheForRentalPeriod( utcdatetime _periodStartDateTime, 
+                                                utcdatetime _periodEndDateTime, 
+                                                INVChargedPeriods _numOfChargeablePeriods, 
+                                                RecId _periodRecId,
+                                                Periods _chargeablePeriods,
+                                                TransDateTime _lastPeriodEndDateTime)
+    {
+        #DNRConstants
+        ProjPeriodLine      projPeriods;
+        TransDate           periodStartDate, periodEndDate;
+        TimeOfDay           periodStartTime, periodEndTime;
+        TransDateTime       periodStartDateTime, periodEndDateTime;
+        TransDate           invPeriodStartDate, invPeriodEndDate;
+        TimeOfDay           invPeriodStartTime, invPeriodEndTime;
+        TransDateTime       invPeriodStartDateTime, invPeriodEndDateTime;
+        TransDate           startDate, endDate;
+
+        Days                daysInPeriod;
+        FINAnalyticalDate   postingDate;
+        Amount              periodAmount;
+        Amount              periodAmountDisc;
+
+        Percent             periodPct;
+
+        // Distribution by Rental period variables
+        AmountCur           currentRentalPeriodAmount, runningRentalPeriodAmount;
+        AmountCur           currentRentalPeriodAmountDisc,   runningRentalPeriodAmountDisc;
+        RefRecId            currentRentalPeriodRecId;
+        Percent             rentalPeriodPct = _numOfChargeablePeriods / _chargeablePeriods;
+        Days                daysInRentalPeriod;
+        boolean             useMapValues;
+        FINAnalyticalDate   analyticalDate;
+
+        // processed with time zone offset
+        invPeriodEndDateTime = DateTimeUtil::applyTimeZoneOffset(_periodEndDateTime, this.timeZone());
+        invPeriodEndDate = DateTimeUtil::date(invPeriodEndDateTime);
+        invPeriodEndTime = DateTimeUtil::time(invPeriodEndDateTime);
+        invPeriodStartDateTime = DateTimeUtil::applyTimeZoneOffset(_periodStartDateTime, this.timeZone());
+        invPeriodStartDate = DateTimeUtil::date(invPeriodStartDateTime);
+
+        while select PeriodFrom, PeriodTo from projPeriods
+            where projPeriods.PeriodId == parameters.FINPeriodId
+            &&    (projPeriods.PeriodFrom < invPeriodEndDate || (projPeriods.PeriodFrom == invPeriodEndDate && invPeriodEndTime))
+            &&    projPeriods.PeriodTo >= invPeriodStartDate
+        {
+            periodStartDateTime = DNRDateTimeUtil::getLatestDateTime(DateTimeUtil::newDateTime(projPeriods.PeriodFrom, 0),
+                                                                    DateTimeUtil::applyTimeZoneOffset(_periodStartDateTime, this.timeZone()));
+            periodStartDate = DateTimeUtil::date(periodStartDateTime);
+            periodStartTime = DateTimeUtil::time(periodStartDateTime);
+
+            periodEndDateTime = DNRDateTimeUtil::getEarliestDateTime(DateTimeUtil::newDateTime(projPeriods.PeriodTo, #INVMidday),
+                                                                    DateTimeUtil::applyTimeZoneOffset(_periodEndDateTime, this.timeZone()));
+            periodEndDate = DateTimeUtil::date(periodEndDateTime);
+            periodEndTime = DateTimeUtil::time(periodEndDateTime);
+
+            daysInPeriod = periodEndDate - periodStartDate + 1;
+            daysInPeriod = this.adjustMiddayBoundary(daysInPeriod, periodStartTime, periodEndTime);
+
+            if (isMonthlyDistribution
+            && projPeriods.PeriodFrom <= invPeriodStartDate
+            && projPeriods.PeriodTo >= (DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(_periodEndDateTime, this.timeZone())) ? invPeriodEndDate : invPeriodEndDate - 1))
+            {
+                // if rental period is fully inside of projPeriod then just post it at the ond of proj period date
+                postingDate = projPeriods.PeriodTo;
+            }
+            else
+            {
+                postingDate = periodStartDate + daysInPeriod / 2;
+            }
+
+            switch (parameters.FINDistributionType)
+            {
+                case FINDistributionType::DistributionByDay:
+                    periodPct = _chargeablePeriods ? (daysInPeriod / _chargeablePeriods) : 0;
+
+                    if (DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_lastPeriodEndDateTime, this.timeZone())) > periodEndDate
+                    && !(DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_lastPeriodEndDateTime, this.timeZone())) == (periodEndDate + 1) &&
+                         DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(_lastPeriodEndDateTime, this.timeZone())) == 0))
+                    {
+                        periodAmount      = CurrencyExchangeHelper::amount(amount     * periodPct, currencyCode);
+                        periodAmountDisc  = CurrencyExchangeHelper::amount(amountDisc * periodPct, currencyCode);
+                    }
+                    else
+                    {
+                        // Last period
+                        periodAmount     = amount     - runningAmount;
+                        periodAmountDisc = amountDisc - runningAmountDisc;
+
+                    }
+                    break;
+
+                case FINDistributionType::DistributionByRentalPeriod:
+
+                    // Determine the rental period price
+                    if (currentRentalPeriodRecId != _periodRecId)
+                    {
+                        currentRentalPeriodAmount       = CurrencyExchangeHelper::amount(amount * rentalPeriodPct);
+                        currentRentalPeriodAmountDisc   = CurrencyExchangeHelper::amount(amountDisc * rentalPeriodPct);
+                        currentRentalPeriodRecId        = _periodRecId;
+                        runningRentalPeriodAmountDisc   = 0;
+                        runningRentalPeriodAmount       = 0;
+                        daysInRentalPeriod              = invPeriodEndDate - invPeriodStartDate + 1;
+                        daysInRentalPeriod = this.adjustMiddayBoundary(daysInRentalPeriod, invPeriodStartTime, invPeriodEndTime);
+                    }
+
+                    rentalPeriodCount--;
+
+                    if(rentalPeriodCount < 1)
+                    {
+                        // Last period in entire period doesn't need to be calculated. Just take remaining part.
+                        periodAmount     = amount - runningAmount;
+                        periodAmountDisc = amountDisc - runningAmountDisc;
+                    }
+                    else if (invPeriodEndDate <= periodEndDate
+                    || (invPeriodEndTime == 0 && (invPeriodEndDate - 1) == periodEndDate))
+                    {
+                        if (runningAmountMap.exists(_periodRecId))
+                        {
+                            [runningRentalPeriodAmountFromMap, runningRentalPeriodAmountDiscFromMap] = runningAmountMap.lookup(_periodRecId);
+                            useMapValues = true;
+                        }
+                        else
+                        {
+                            useMapValues = false;
+                        }
+                        // Last period in rental period
+                        periodAmount      = currentRentalPeriodAmount  - (useMapValues ? runningRentalPeriodAmountFromMap : runningRentalPeriodAmount);
+                        periodAmountDisc  = currentRentalPeriodAmountDisc - (useMapValues ? runningRentalPeriodAmountDiscFromMap : runningRentalPeriodAmountDisc);
+                    }
+                    else
+                    {
+                        periodAmount      = CurrencyExchangeHelper::amount(currentRentalPeriodAmount * (daysInPeriod / daysInRentalPeriod), currencyCode);
+                        periodAmountDisc  = CurrencyExchangeHelper::amount(currentRentalPeriodAmountDisc   * (daysInPeriod / daysInRentalPeriod), currencyCode);
+                    }
+
+                    runningRentalPeriodAmount     += periodAmount;
+                    runningRentalPeriodAmountDisc += periodAmountDisc;
+
+                    if (runningAmountMap.exists(_periodRecId))
+                    {
+                        [runningRentalPeriodAmountFromMap, runningRentalPeriodAmountDiscFromMap] = runningAmountMap.lookup(_periodRecId);
+                        runningRentalPeriodAmountFromMap += periodAmount;
+                        runningRentalPeriodAmountDiscFromMap += periodAmountDisc;
+                        runningAmountMap.remove(_periodRecId);
+                        runningAmountMap.insert(_periodRecId, [runningRentalPeriodAmountFromMap, runningRentalPeriodAmountDiscFromMap]);
+                    }
+                    else
+                    {
+                        runningAmountMap.insert(_periodRecId, [periodAmount, periodAmountDisc]);
+                    }
+                    break;
+            }
+
+
+            if (parameters.FINDistributionMethod == FINDistributionMethod::TransPeriod)
+            {
+                analyticalDate = postingDate;
+                postingDate = max(parameters.FINFirstOpenPostingDate, postingDate);
+            }
+
+            periodCache.addEnd([periodStartDate, periodEndDate, postingDate, periodAmount, periodAmountDisc, analyticalDate]);
+
+            runningAmount += periodAmount;
+            runningAmountDisc += periodAmountDisc;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>adjustMiddayBoundary</Name>
+				<Source><![CDATA[
+    protected int adjustMiddayBoundary(Days _totalDays, TimeOfDay _periodStartTime, TimeOfDay _periodEndTime)
+    {
+        #DNRConstants
+
+        Days correctedDays = _totalDays;
+
+        if (_periodStartTime > #INVMidday)
+        {
+            correctedDays --;
+        }
+        if (_periodEndTime <= #INVMidday)
+        {
+            correctedDays --;
+        }
+
+        return correctedDays;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>startEndDateTime</Name>
+				<Source><![CDATA[
+    protected container startEndDateTime(TransDateTime _periodStartDateTime, TransDateTime _periodEndDateTime, TimeZone _timeZone, boolean _applyTimeZone = true)
+    {
+        TransDate           periodStartDate, periodEndDate;
+        TimeOfDay           periodStartTime, periodEndTime;
+        TransDateTime       periodStartDateTime, periodEndDateTime;
+
+        if (_applyTimeZone)
+        {
+            periodStartDateTime = DateTimeUtil::applyTimeZoneOffset(_periodStartDateTime, _timeZone);
+        }
+        else
+        {
+            periodStartDateTime = _periodStartDateTime;
+        }
+        periodStartDate = DateTimeUtil::date(periodStartDateTime);
+        periodStartTime = DateTimeUtil::time(periodStartDateTime);
+
+        if (_applyTimeZone)
+        {
+            periodEndDateTime = DateTimeUtil::applyTimeZoneOffset(_periodEndDateTime, _timeZone);
+        }
+        else
+        {
+            periodEndDateTime = _periodEndDateTime;
+        }
+        periodEndDate = DateTimeUtil::date(periodEndDateTime);
+        periodEndTime = DateTimeUtil::time(periodEndDateTime);
+        
+        return [periodStartDate, periodStartTime, periodEndDate, periodEndTime];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalGeneratorParm</Name>
+				<Source><![CDATA[
+    /*
+    protected container periodAmountDistributionByDay(
+        Periods             _chargeablePeriods,
+        Days                _daysInPeriod,
+        TransDateTime       _lastPeriodEndDateTime,
+        TransDate           _periodEndDate,
+        AmountCur           _runningAmount,
+        AmountCur           _runningAmountDisc
+        )
+    {
+        Amount              periodAmount;
+        Amount              periodAmountDisc;
+        Percent             periodPct;
+        TransDate           lastPeriodEndDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_lastPeriodEndDateTime, this.timeZone()));
+        TimeOfDay           lastPeriodEndTime = DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(_lastPeriodEndDateTime, this.timeZone()));
+
+        periodPct = _chargeablePeriods ? (_daysInPeriod / _chargeablePeriods) : 0;
+    
+        if (lastPeriodEndDate > (lastPeriodEndTime ? _periodEndDate : (_periodEndDate + 1)))
+        {
+            periodAmount      = CurrencyExchangeHelper::amount(amount     * periodPct, currencyCode);
+            periodAmountDisc  = CurrencyExchangeHelper::amount(amountDisc * periodPct, currencyCode);
+        }
+        else
+        {
+            // Last period
+            periodAmount     = amount     - _runningAmount;
+            periodAmountDisc = amountDisc - _runningAmountDisc;
+    
+        }
+
+        return [periodAmount, periodAmountDisc];
+    }*/
+
+    /*protected container periodAmountDistributionByRentalPeriod(
+        Counter             _rentalPeriodCount,
+        Days                _daysInPeriod,
+        Days                _daysInRentalPeriod,
+        INVInvoicePeriod    _periods,
+        TransDate           _periodEndDate,
+        TransDate           _invPeriodEndDate,
+        TimeOfDay           _invPeriodEndTime,
+        AmountCur           _runningAmount,
+        AmountCur           _runningAmountDisc,
+        Map                 _runningAmountMap,
+        AmountCur           _currentRentalPeriodAmount,
+        AmountCur           _currentRentalPeriodAmountDisc,
+        AmountCur           _runningRentalPeriodAmount,
+        AmountCur           _runningRentalPeriodAmountDisc
+        )
+    {
+        Amount              periodAmount;
+        Amount              periodAmountDisc;
+        Amount              runningRentalPeriodAmountFromMap;
+        Amount              runningRentalPeriodAmountDiscFromMap;
+        boolean             useMapValues;
+
+        if (_rentalPeriodCount < 1)
+        {
+            // Last period in entire period doesn't need to be calculated. Just take remaining part.
+            periodAmount     = amount - _runningAmount;
+            periodAmountDisc = amountDisc - _runningAmountDisc;
+        }
+        else if (_invPeriodEndDate <= _periodEndDate || (_invPeriodEndTime == 0 && (_invPeriodEndDate - 1) == _periodEndDate))
+        {
+            if (_runningAmountMap.exists(_periods.RecId))
+            {
+                [runningRentalPeriodAmountFromMap, runningRentalPeriodAmountDiscFromMap] = _runningAmountMap.lookup(_periods.RecId);
+                useMapValues = true;
+            }
+            else
+            {
+                useMapValues = false;
+            }
+            // Last period in rental period
+            periodAmount      = _currentRentalPeriodAmount  - (useMapValues ? runningRentalPeriodAmountFromMap : _runningRentalPeriodAmount);
+            periodAmountDisc  = _currentRentalPeriodAmountDisc - (useMapValues ? runningRentalPeriodAmountDiscFromMap : _runningRentalPeriodAmountDisc);
+        }
+        else
+        {
+            periodAmount      = CurrencyExchangeHelper::amount(_currentRentalPeriodAmount * (_daysInPeriod / _daysInRentalPeriod), currencyCode);
+            periodAmountDisc  = CurrencyExchangeHelper::amount(_currentRentalPeriodAmountDisc   * (_daysInPeriod / _daysInRentalPeriod), currencyCode);
+        }
+
+        _runningRentalPeriodAmount     += periodAmount;
+        _runningRentalPeriodAmountDisc += periodAmountDisc;
+    
+        if (_runningAmountMap.exists(_periods.RecId))
+        {
+            [runningRentalPeriodAmountFromMap, runningRentalPeriodAmountDiscFromMap] = _runningAmountMap.lookup(_periods.RecId);
+            runningRentalPeriodAmountFromMap        += periodAmount;
+            runningRentalPeriodAmountDiscFromMap    += periodAmountDisc;
+            _runningAmountMap.remove(_periods.RecId);
+            _runningAmountMap.insert(_periods.RecId, [runningRentalPeriodAmountFromMap, runningRentalPeriodAmountDiscFromMap]);
+        }
+        else
+        {
+            _runningAmountMap.insert(_periods.RecId, [periodAmount, periodAmountDisc]);
+        }
+
+        return [periodAmount, periodAmountDisc, _runningRentalPeriodAmount, _runningRentalPeriodAmountDisc];
+    }
+
+    protected container postingAnalyticalDate(
+        ProjPeriodLine      _projPeriods,
+        INVInvoicePeriod    _periods,
+        TransDate           _periodStartDate,
+        TransDate           _invPeriodStartDate,
+        TransDate           _invPeriodEndDate,
+        Days                _daysInPeriod)
+    {
+        FINAnalyticalDate   postingDate;
+        FINAnalyticalDate   analyticalDate;
+
+        if (isMonthlyDistribution
+        && _projPeriods.PeriodFrom <= _invPeriodStartDate
+        && _projPeriods.PeriodTo >= (DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(_periods.PeriodEndDateTime, this.timeZone())) ? _invPeriodEndDate : _invPeriodEndDate - 1))
+        {
+            // if rental period is fully inside of projPeriod then just post it at the ond of proj period date
+            postingDate = _projPeriods.PeriodTo;
+        }
+        else
+        {
+            postingDate = _periodStartDate + _daysInPeriod / 2;
+        }
+
+        if (parameters.FINDistributionMethod == FINDistributionMethod::TransPeriod)
+        {
+            analyticalDate = postingDate;
+            postingDate = max(parameters.FINFirstOpenPostingDate, postingDate);
+        }
+
+        return [postingDate, analyticalDate];
+    }
+*/
+    protected FINTmpLedgerJournalGeneratorParm createJournalGeneratorParm(
+        LedgerDimensionDefaultAccount   _ledgerDimensionDefaultAccount,
+        DimensionDefault                _dimension,
+        AmountCur                       _amount,
+        TransDate                       _postingDate,
+        FINAnalyticalDate               _analyticalDate = dateNull())
+    {
+        FINTmpLedgerJournalGeneratorParm tmpLedgerJournalTrans;
+        tmpLedgerJournalTrans.initLedgerJournalGeneratorParm(
+            generalJournalEntry.SubledgerVoucherDataAreaId,
+            LedgerDimensionFacade::serviceCreateLedgerDimension(_ledgerDimensionDefaultAccount, _dimension),
+            0,
+            _amount,
+            currencyCode,
+            _dimension,
+            generalJournalEntry.PostingLayer,
+            _postingDate,
+            LedgerTransType::FINPeriodDistribution,
+            '',
+            LedgerJournalACType::Ledger,
+            _analyticalDate);
+        
+        return tmpLedgerJournalTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addTrans</Name>
+				<Source><![CDATA[
+    protected void addTrans(
+        LedgerPostingType               _ledgerPostingType,
+        LedgerDimensionDefaultAccount   _ledgerDimensionDefaultAccount,
+        DimensionDefault                _dimension,
+        AmountCur                       _amount,
+        TransDate                       _postingDate,
+        boolean                         _autoTransperiodPosting,
+        FINAnalyticalDate               _analyticalDate = dateNull())
+    {
+        FINTmpLedgerJournalGeneratorParm    tmpLedgerJournalTrans;
+        FINAnalyticalDate                   analyticalDate = _analyticalDate;
+    
+        if (parameters.FINDistributionMethod == FINDistributionMethod::AnalyticalDate)
+        {
+            analyticalDate = _postingDate;
+            _postingDate = InvoiceDate;
+
+            tmpLedgerJournalTrans = this.createJournalGeneratorParm(_ledgerDimensionDefaultAccount, _dimension, _amount, _postingDate, analyticalDate);
+            tmpLedgerJournalTrans.Txt = enum2Str(_ledgerPostingType);
+        }
+        else
+        {
+            analyticalDate = analyticalDate ? analyticalDate : _postingDate;
+            TransDate postingDate = max(parameters.FINFirstOpenPostingDate, _postingDate);
+            TransDate lastPostingDate = generalJournalEntry.AccountingDate;
+
+         
+            tmpLedgerJournalTrans = this.createJournalGeneratorParm(_ledgerDimensionDefaultAccount, _dimension, _amount, _postingDate, analyticalDate);
+            tmpLedgerJournalTrans.Txt = enum2Str(_ledgerPostingType);
+
+            if (analyticalDate > postingDate)
+            {
+                analyticalDate = postingDate;
+            }
+
+            if (postingDate != lastPostingDate
+            &&  _autoTransperiodPosting
+            &&  this.validateDistributionAccount())
+            {
+                // Add transaction from std ax account
+                resultList.addEnd(tmpLedgerJournalTrans);
+
+                // Use distribution account
+                tmpLedgerJournalTrans = this.createJournalGeneratorParm(periodicLedgerDimDistributionAccount, _dimension, - _amount, _postingDate, analyticalDate);
+                tmpLedgerJournalTrans.Txt = enum2Str(_ledgerPostingType);
+            }
+        }
+    
+        // Add transaction from std ax account or second tranasction from periodic distirbution
+        resultList.addEnd(tmpLedgerJournalTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateDistributionAccount</Name>
+				<Source><![CDATA[
+    private boolean validateDistributionAccount()
+    {
+        boolean ret = true
+        ;
+    
+        if (!periodicLedgerDimDistributionAccount)
+        {
+            ret = checkfailed(strFmt("@DNR1305",
+                               fieldPName(RORParameters, FINDistributionMethod),
+                               parameters.FINDistributionMethod,
+                               "@DNR1304"));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initialize</Name>
+				<Source><![CDATA[
+    public void initialize()
+    {
+        parameters              = RORParameters::find();
+        isMonthlyDistribution   = (ProjPeriodTable::find(parameters.FINPeriodId).TimeFrequency == PerDayWeekMthQtYr::Month);
+
+        resultList              = new List(Types::Record);
+        periodCache             = new List(Types::Container);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParameters</Name>
+				<Source><![CDATA[
+    public void initParameters(GeneralJournalEntry _generalJournalEntry,
+        InvoiceDate                         _invoiceDate,
+        InvoiceId                           _invoiceId,
+        Common                              _ledgerRefBuffer,
+        AmountCur                           _amount,
+        AmountCur                           _amountDisc,
+        CurrencyCode                        _currencyCode,
+        LedgerDimensionDefaultAccount       _dimensionAccountAmount,
+        LedgerDimensionDefaultAccount       _dimensionAccountDisc,//for markup will be 0
+        DimensionDefault                    _dimension,//for markup only
+        Common                              _sourceBuffer,//for markup only
+        LedgerPostingType                   _ledgerPostingTypeAccount)//for markup only
+    {
+        this.initialize();
+
+        generalJournalEntry     = _generalJournalEntry;
+
+        invoiceDate             = _invoiceDate;
+        invoiceId               = _invoiceId;
+        ledgerRefBuffer         = _ledgerRefBuffer;
+        amount                  = _amount;
+        amountDisc              = _amountDisc;
+        currencyCode            = _currencyCode;
+        dimensionAccountAmount  = _dimensionAccountAmount;
+        dimensionAccountDisc    = _dimensionAccountDisc;
+
+        salesLine = ledgerRefBuffer as SalesLine;
+        purchLine = ledgerRefBuffer as PurchLine;
+
+        if (_sourceBuffer)
+        {
+            salesLine = _sourceBuffer as SalesLine;
+            purchLine = _sourceBuffer as PurchLine;
+        }
+
+        if (!salesLine && !purchLine)
+        {
+            isDistributionActive = false;
+        }
+        else
+        {
+            isDistributionActive = (salesLine.RecId ? parameters.FINDistributionIsActiveRental : parameters.FINDistributionIsActiveSubRental);
+        }
+
+        if (salesLine)
+        {
+            documentSourceBuffer = salesLine;
+        }
+        else
+        {
+            documentSourceBuffer = purchLine;
+        }
+
+        if (isDistributionActive)
+        {
+            periodicLedgerDimDistributionAccount = (salesLine.RecId ? parameters.FINLedgerDimensionAccountRental : parameters.FINLedgerDimensionAccountSubRental);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>defaultDimension</Name>
+				<Source><![CDATA[
+    public DimensionDefault defaultDimension(Common _buffer)
+    {
+        return _buffer.(fieldName2id(_buffer.TableId,fieldStr(InventTransPosting,DefaultDimension)));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINPeriodDistributionType construct(FINPeriodDistributionEngineType _distributionEngineType,
+        GeneralJournalEntry                 _generalJournalEntry,
+        InvoiceDate                         _invoiceDate,
+        InvoiceId                           _invoiceId,
+        Common                              _ledgerRefBuffer,
+        AmountCur                           _amount,
+        AmountCur                           _amountDisc,
+        CurrencyCode                        _currencyCode,
+        LedgerDimensionDefaultAccount       _dimensionAccountAmount,
+        LedgerDimensionDefaultAccount       _dimensionAccountDisc,
+        DimensionDefault                    _defaultDimension = 0,//for markup only
+        Common                              _sourceBuffer = null,//for Markup only
+        LedgerPostingType                   _ledgerPostingTypeAccount = LedgerPostingType::None)//for Markup only
+    {
+        FINPeriodDistributionType               periodDistributionType;
+        FINPeriodDistributionTypeAttribute      periodDistributionTypeAttr;
+
+        periodDistributionTypeAttr = new FINPeriodDistributionTypeAttribute(_distributionEngineType);
+
+        periodDistributionType = SysExtensionAppClassFactory::getClassFromSysAttribute(classStr(FINPeriodDistributionType), periodDistributionTypeAttr);
+
+        if (!periodDistributionType)
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+
+        periodDistributionType.initParameters(_generalJournalEntry,
+            _invoiceDate,
+            _invoiceId,
+            _ledgerRefBuffer,
+            _amount,
+            _amountDisc,
+            _currencyCode,
+            _dimensionAccountAmount,
+            _dimensionAccountDisc,
+            _defaultDimension,
+            _sourceBuffer,
+            _ledgerPostingTypeAccount);
+
+        return periodDistributionType;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmNothingToDistribute</Name>
+				<Source><![CDATA[
+    public boolean parmNothingToDistribute(boolean _nothingToDistribute = nothingToDistribute)
+    {
+        nothingToDistribute = _nothingToDistribute;
+        return nothingToDistribute;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getResult</Name>
+				<Source><![CDATA[
+    public List getResult()
+    {
+        return resultList;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

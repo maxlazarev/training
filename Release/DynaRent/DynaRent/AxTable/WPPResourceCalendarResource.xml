@@ -1,0 +1,509 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPResourceCalendarResource</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class WPPResourceCalendarResource extends common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>findActiveForResource</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Finds the active calendar assignment for a resource.
+    /// </summary>
+    /// <param name="_resource">
+    /// The ID of the resource for which to search.
+    /// </param>
+    /// <param name="_dateTime">
+    /// The active date/time to search for; optional.
+    /// </param>
+    /// <param name="_forUpdate">
+    /// A Boolean value that specifies whether the found record should be selected for update.
+    /// </param>
+    /// <returns>
+    /// The active calendar assignment for a resource.
+    /// </returns>
+    public static WPPResourceCalendarResource findActiveForResource(WPPResourceId    _resource,
+                                                                    UtcDateTime      _dateTime  = DateTimeUtil::getSystemDateTime(),
+                                                                    boolean          _forUpdate = false)
+    {
+        WPPResourceCalendarResource resourceCalendar;
+    
+        if (_resource)
+        {
+            resourceCalendar.selectForUpdate(_forUpdate);
+    
+            select firstonly validTimeState(_dateTime) resourceCalendar
+            where resourceCalendar.ResourceId == _resource;
+        }
+    
+        return resourceCalendar;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeResourceCalendar</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Changes the calendar for a resource on a specific date by changing, splitting, or merging the
+    /// existing <c>WPPResourceCalendarResource</c> records.
+    /// </summary>
+    /// <param name="_resource">
+    /// The ID of the resource for which to change the calendar.
+    /// </param>
+    /// <param name="_fromDateTime">
+    /// The from date for which to change the calendar.
+    /// </param>
+    /// <param name="_toDateTime">
+    /// The to date for which to change the calendar.
+    /// </param>
+    /// <param name="_newCalendarId">
+    /// The ID of the new calendar to be applied.
+    /// </param>
+    /// <exception cref="M:Exception::Error">
+    /// No existing record on the date could be found.
+    /// </exception>
+    public static void changeResourceCalendar(WPPResourceId     _resource,
+                                              UtcDateTime       _fromDateTime,
+                                              UtcDateTime       _toDateTime,
+                                              DNRCalendarId     _newCalendarId)
+    {
+        WPPResourceCalendarResource resourceCalendar;
+        WPPResourceCalendarResource resourceCalendarPrevious;
+        WPPResourceCalendarResource resourceCalendarNext;
+        UtcDateTime                 previousDateTime, fromDateTime;
+        UtcDateTime                 nextDateTime, toDateTime;
+    
+        previousDateTime = DateTimeUtil::addSeconds(_fromDateTime, -1);
+        nextDateTime     = DateTimeUtil::addSeconds(_toDateTime, 1);
+        fromDateTime     = DateTimeUtil::removeTimeZoneOffset(_fromDateTime, DateTimeUtil::getUserPreferredTimeZone());
+        toDateTime       = DateTimeUtil::removeTimeZoneOffset(_toDateTime, DateTimeUtil::getUserPreferredTimeZone());
+    
+        // Select the record valid at the change date
+        select forUpdate validTimeState(fromDateTime, toDateTime) resourceCalendar
+        where resourceCalendar.ResourceId == _resource;
+    
+        if (!resourceCalendar.RecId)
+        {
+            throw error("@SYS301743");
+        }
+    
+        if (resourceCalendar.CalendarId == _newCalendarId)
+        {
+            // Nothing to change
+            return;
+        }
+    
+        if (resourceCalendar.ValidFrom == _fromDateTime)
+        {
+            // Find previous adjesant record where all fields match the current after the change of calendar
+            select forUpdate validTimeState(previousDateTime) resourceCalendarPrevious
+            where resourceCalendarPrevious.ResourceId       == resourceCalendar.ResourceId
+            &&    resourceCalendarPrevious.CalendarId       == _newCalendarId
+            &&    resourceCalendarPrevious.ValidTo          == previousDateTime;
+        }
+    
+        if (resourceCalendar.ValidTo == _toDateTime)
+        {
+            // Find next adjesant record where all fields match the current after the change of calendar
+            select forUpdate validTimeState(nextDateTime) resourceCalendarNext
+            where resourceCalendarNext.ResourceId         == resourceCalendar.ResourceId
+            &&    resourceCalendarNext.CalendarId         == _newCalendarId
+            &&    resourceCalendarNext.ValidFrom          == nextDateTime;
+        }
+    
+        resourceCalendar.validTimeStateUpdateMode(ValidTimeStateUpdate::Correction);
+    
+        ttsBegin;
+        if (resourceCalendarPrevious.RecId || resourceCalendarNext.RecId)
+        {
+            resourceCalendarPrevious.validTimeStateUpdateMode(ValidTimeStateUpdate::Correction);
+            resourceCalendarNext.validTimeStateUpdateMode(ValidTimeStateUpdate::Correction);
+    
+            if (resourceCalendarPrevious.RecId && resourceCalendarNext.RecId)
+            {
+                // Merge all by deleting the current and next and adjusting the previous
+                resourceCalendarPrevious.ValidTo = resourceCalendarNext.ValidTo;
+    
+                resourceCalendar.delete();
+                resourceCalendarNext.delete();
+    
+                resourceCalendarPrevious.update();
+            }
+            else
+            {
+                if (resourceCalendarPrevious.RecId)
+                {
+                    // Adjust previous and current
+                    if (resourceCalendar.ValidTo == _fromDateTime)
+                    {
+                        // Remove current record if not needed anymore
+                        resourceCalendar.delete();
+                    }
+                    else
+                    {
+                        resourceCalendar.ValidFrom = DateTimeUtil::addSeconds(_fromDateTime, 1);
+                        resourceCalendar.update();
+                    }
+    
+                    resourceCalendarPrevious.ValidTo = _fromDateTime;
+                    resourceCalendarPrevious.update();
+                }
+                else
+                {
+                    // Adjust current and next
+                    if (resourceCalendar.ValidFrom == _toDateTime)
+                    {
+                        // Remove current record if not needed anymore
+                        resourceCalendar.delete();
+                    }
+                    else
+                    {
+                        resourceCalendar.ValidTo = DateTimeUtil::addSeconds(_toDateTime, -1);
+                        resourceCalendar.update();
+                    }
+    
+                    resourceCalendarNext.ValidFrom = _toDateTime;
+                    resourceCalendarNext.update();
+                }
+            }
+        }
+        else
+        {
+    
+            if (resourceCalendar.ValidFrom == fromDateTime && resourceCalendar.ValidTo == toDateTime)
+            {
+                // Change the calendar only on the current record
+                resourceCalendar.validTimeStateUpdateMode(ValidTimeStateUpdate::Correction);
+                resourceCalendar.CalendarId = _newCalendarId;
+                resourceCalendar.doUpdate();
+            }
+            else
+            {
+                // Split into two or three intervals
+                WPPResourceCalendarResource::splitAndChangeCalendar(resourceCalendar, _fromDateTime, _toDateTime, _newCalendarId);
+            }
+    
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>splitAndChangeCalendar</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Splits an existing <c>WPPResourceCalendarResource</c> record into two or three date intervals and
+    /// changes the <c>CalendarId</c> value on the middle interval.
+    /// </summary>
+    /// <param name="_resourceCalendar">
+    /// The <c>WPPResourceCalendar</c> record for which change the calendar.
+    /// </param>
+    /// <param name="_fromDateTime">
+    /// The inclusive start date/time of the interval.
+    /// </param>
+    /// <param name="_toDateTime">
+    /// The inclusive end date/time of the interval.
+    /// </param>
+    /// <param name="_calendarId">
+    /// The <c>CalendarId</c> value to set for the interval.
+    /// </param>
+    public static void splitAndChangeCalendar(WPPResourceCalendarResource   _resourceCalendar,
+                                              utcDateTime                   _fromDateTime,
+                                              utcDateTime                   _toDateTime,
+                                              DNRCalendarId                 _calendarId)
+    {
+        WPPResourceCalendarResource resourceCalendarPre;
+        WPPResourceCalendarResource resourceCalendarPost;
+        boolean                     insertPre;
+        boolean                     insertPost;
+    
+        insertPre = false;
+        insertPost = false;
+    
+        ttsBegin;
+        if (_fromDateTime > _resourceCalendar.ValidFrom)
+        {
+            //Compose the record prior to the new interval
+            //No insertion is done yet to avoid overlapping records
+            resourceCalendarPre.data(_resourceCalendar);
+            resourceCalendarPre.ValidTo = DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::addSeconds(_fromDateTime, -1), DateTimeUtil::getUserPreferredTimeZone());
+            insertPre = true;
+        }
+    
+        if (_toDateTime < _resourceCalendar.ValidTo)
+        {
+            //Compose the record post the new interval
+            //No insertion is done yet to avoid overlapping records
+            resourceCalendarPost.data(_resourceCalendar);
+            resourceCalendarPost.ValidFrom = DateTimeUtil::removeTimeZoneOffset(_toDateTime, DateTimeUtil::getUserPreferredTimeZone());
+            insertPost = true;
+        }
+    
+        //Update the ValidFrom of the found record and insert the pre-record
+        _resourceCalendar.ValidFrom = DateTimeUtil::removeTimeZoneOffset(_fromDateTime, DateTimeUtil::getUserPreferredTimeZone());
+        _resourceCalendar.validTimeStateUpdateMode(ValidTimeStateUpdate::Correction);
+        _resourceCalendar.update();
+    
+        if (insertPre)
+        {
+            resourceCalendarPre.insert();
+        }
+    
+        //Update the ValidTo of the found record and insert the post-record
+        _resourceCalendar.ValidTo = DateTimeUtil::removeTimeZoneOffset(_toDateTime, DateTimeUtil::getUserPreferredTimeZone());
+        _resourceCalendar.CalendarId = _calendarId;
+        _resourceCalendar.validTimeStateUpdateMode(ValidTimeStateUpdate::Correction);
+        _resourceCalendar.update();
+    
+        if (insertPost)
+        {
+            resourceCalendarPost.insert();
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateField</Name>
+				<Source><![CDATA[
+    public boolean validateField(FieldId _fieldIdToCheck)
+    {
+        boolean ret = super(_fieldIdToCheck);
+
+        if (ret && _fieldIdToCheck == fieldNum(WPPResourceCalendarResource, ValidTo))
+        {
+            ret = this.validateResourcePlanning();    
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateResourcePlanning</Name>
+				<Source><![CDATA[
+    private boolean validateResourcePlanning()
+    {
+        WPPWorkOrderLineResource    workOrderLineResource;
+        WPPWorkOrderLine            workOrderLine;
+        boolean                     resourcePlanningRecordFound;
+        
+        boolean ret     = true;
+        str     boxText = strFmt("@DNR:ResourceCalendarExpirationWarning", this.ResourceId);
+
+        while select PlannedFromDateTime, PlannedToDateTime from workOrderLineResource
+        where workOrderLineResource.ResourceId      == this.ResourceId
+        &&    workOrderLineResource.ResourceType    == WrkCtrGroupWrkCtr::WrkCtr
+        &&    (workOrderLineResource.PlannedFromDateTime    >= this.ValidTo ||
+               workOrderLineResource.PlannedToDateTime      >  this.ValidTo)
+            join LineNumber, TaskId, WorkOrderId from workOrderLine
+            where workOrderLine.RecId == workOrderLineResource.WorkOrderLineRecId
+        {
+            resourcePlanningRecordFound = true;
+
+            boxText += strFmt(" (%1, %2, %3, %4, %5),", workOrderLine.WorkOrderId,
+                                                        workOrderLine.LineNumber,
+                                                        workOrderLine.TaskId,
+                                                        DateTimeUtil::applyTimeZoneOffset(workOrderLineResource.PlannedFromDateTime, DateTimeUtil::getUserPreferredTimeZone()),
+                                                        DateTimeUtil::applyTimeZoneOffset(workOrderLineResource.PlannedToDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+        }
+
+        if (resourcePlanningRecordFound)
+        {
+            // Removes "," from the end of the string 'boxText'.
+            boxText = strDel(boxText, strLen(boxText), 1);
+ 
+            boxText = strFmt("%1. %2", boxText, "@DNR:ResourceCalendarExpirationConfirmation");
+
+            if (Box::yesNo(boxText, DialogButton::No, "@DNR:ResourceCalendarExpirationTitle") == DialogButton::No)
+            {
+                ret = false;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR7578</DeveloperDocumentation>
+	<FormRef>WrkCtrTable</FormRef>
+	<Label>@DNR7156</Label>
+	<TableGroup>Main</TableGroup>
+	<TitleField1>ResourceId</TitleField1>
+	<TitleField2>CalendarId</TitleField2>
+	<CacheLookup>FoundAndEmpty</CacheLookup>
+	<ReplacementKey>ResourceCalendarIdx</ReplacementKey>
+	<SaveDataPerCompany>No</SaveDataPerCompany>
+	<ValidTimeStateFieldType>UtcDateTime</ValidTimeStateFieldType>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>CalendarId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ResourceId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>CalendarId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ValidFrom</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ValidTo</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ResourceId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ResourceId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ValidFrom</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ValidTo</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Calendar</Name>
+			<Label>@SYS80390</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>CalendarId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ValidFrom</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ValidTo</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Identification</Name>
+			<Label>@SYS53631</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ResourceId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>CalendarId</Name>
+			<ExtendedDataType>DNRCalendarId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>ValidFrom</Name>
+			<ExtendedDataType>ValidFromDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>ValidTo</Name>
+			<ExtendedDataType>ValidToDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ResourceId</Name>
+			<ExtendedDataType>WPPResourceId</ExtendedDataType>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>ResourceCalendarIdx</Name>
+			<AlternateKey>Yes</AlternateKey>
+			<ValidTimeStateKey>Yes</ValidTimeStateKey>
+			<ValidTimeStateMode>Gap</ValidTimeStateMode>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>ResourceId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>ValidFrom</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>ValidTo</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>Calendar</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EntityRelationshipRole>@SYS11839</EntityRelationshipRole>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>DNRCalendarTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>CalendarId</Name>
+					<SourceEDT>CalendarId</SourceEDT>
+					<Field>CalendarId</Field>
+					<RelatedField>CalendarId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>CalendarIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>WPPResourceTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>WPPResourceTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ResourceId</Name>
+					<Field>ResourceId</Field>
+					<RelatedField>ResourceId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

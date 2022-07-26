@@ -1,0 +1,745 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCustInvoiceTransJournalizerService</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class FINCustInvoiceTransJournalizerService
+{
+    FINCustInvoiceTrans finCustInvoiceTrans;
+    RecordInsertList custInvoiceTransPeriodPriceComponentRecordList;
+    FromDate fromDate;
+    ToDate toDate;
+    FINForceCreate forceCreate;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>journalize</Name>
+				<Source><![CDATA[
+    public void journalize(FINCustInvoiceTransJournalizerDataContract _dataContract)
+    {
+        this.initFromDataContract(_dataContract);
+      
+        this.journalizeInvoices();
+        this.createAveragePriceComponents();
+        this.journalizeProjectInvoices();
+        this.journalizeVendInvoices();
+        this.journalizeProjectJournals();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromDataContract</Name>
+				<Source><![CDATA[
+    protected void initFromDataContract(FINCustInvoiceTransJournalizerDataContract _dataContract)
+    {
+        fromDate = _dataContract.parmFromDate() ? _dataContract.parmFromDate() : DateTimeUtil::date(DateTimeUtil::minValue());
+        toDate = _dataContract.parmToDate() ? _dataContract.parmToDate() : DateTimeUtil::date(DateTimeUtil::maxValue());
+        forceCreate = _dataContract.parmForceCreate();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAveragePriceComponents</Name>
+				<Source><![CDATA[
+    protected void createAveragePriceComponents()
+    {
+        CustInvoiceTrans custInvoiceTrans;
+        FINCustInvoiceTransPeriod custInvoiceTransPeriod;
+
+        while select forupdate finCustInvoiceTrans
+            exists join custInvoiceTrans
+            where custInvoiceTrans.RecId == finCustInvoiceTrans.CustInvoiceTransRecId
+            && custInvoiceTrans.InvoiceDate >= fromDate
+            && custInvoiceTrans.InvoiceDate <= toDate
+                notexists join custInvoiceTransPeriod
+                where custInvoiceTransPeriod.CustInvoiceTransRecId == custInvoiceTrans.RecId
+        {
+            // Map( [InvoicePeriodQtyRecId, qtyInvoiced], Map([ FromDateTime, ToDateTime ] , List(FINPeriodSpecification)))
+            if (conLen(finCustInvoiceTrans.PeriodSpecificationPacked) < 4)
+            {
+                this.createPeriodFromOriginalBuffer();
+                continue;
+            }
+        
+            Map specificationMap = Map::create(finCustInvoiceTrans.PeriodSpecificationPacked);
+            Map specificationMapUpdated = new Map(Types::Container, Types::Class);
+        
+            if (!specificationMap.empty())
+            {
+                ttsbegin;
+
+                MapEnumerator enumerator = specificationMap.getEnumerator();
+
+                while (enumerator.moveNext())
+                {
+                    // qty is also stamped on periodSpec.lineQty so no need to pass the value here.
+                    Map periodDefinitionMap = enumerator.currentValue();
+
+                    RecId       invoicePeriodQtyRecId;
+                    Qty         invoiceQty;
+
+                    [invoicePeriodQtyRecId, invoiceQty] = enumerator.currentKey();
+
+                    Map periodDefinitionMapUpdated = this.updateSinglePeriodDefinition(periodDefinitionMap);
+
+                    specificationMapUpdated.insert(enumerator.currentKey(), periodDefinitionMapUpdated);
+                }
+
+                finCustInvoiceTrans.PeriodSpecificationPacked = specificationMapUpdated.pack();
+                finCustInvoiceTrans.update();
+                ttscommit;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSinglePeriodDefinition</Name>
+				<Source><![CDATA[
+    protected Map updateSinglePeriodDefinition(Map _periodDefinitionMap)
+    {
+        MapEnumerator specificationEnumerator = _periodDefinitionMap.getEnumerator();
+        Map periodSpecificationMapUpdated = new Map(Types::Container, Types::Class);
+        
+        while (specificationEnumerator.moveNext())
+        {
+            List specificationList = specificationEnumerator.currentValue();
+            List specificationListUpdated = new List(Types::Class);
+
+            ListEnumerator listEnumerator = specificationList.getEnumerator();
+        
+            while (listEnumerator.moveNext())
+            {
+                FINPeriodSpecification periodSpecification = listEnumerator.current();
+                
+                this.updatePeriodSpecification(periodSpecification);
+
+                specificationListUpdated.addEnd(periodSpecification);
+            }
+
+            periodSpecificationMapUpdated.insert(specificationEnumerator.currentKey(), specificationListUpdated);
+        }
+
+        return periodSpecificationMapUpdated;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePeriodSpecification</Name>
+				<Source><![CDATA[
+    protected FINPeriodSpecification updatePeriodSpecification(FINPeriodSpecification _periodSpecification)
+    {
+        //Price components are already recorded
+        if (_periodSpecification.PriceComponentMap.elements())
+        {
+            return _periodSpecification;
+        }
+
+        Map priceComponentsMap = new Map(Types::Enum, Types::Class);
+
+        Map discountPercent = new Map(Types::Real, Types::Integer);
+        discountPercent.insert(0, _periodSpecification.numOfChargedPeriods);
+
+        priceComponentsMap.insert(FINInvoicePeriodPriceComponent::LinePercent, discountPercent);
+
+        Map rentalMode = new Map(Types::Real, Types::Integer);
+        rentalMode.insert(1, _periodSpecification.numOfChargedPeriods);
+
+        priceComponentsMap.insert(FINInvoicePeriodPriceComponent::RentalModeId, rentalMode);
+
+        Map priceUnit = new Map(Types::Real, Types::Integer);
+        priceUnit.insert(_periodSpecification.numOfChargedPeriods ? (_periodSpecification.invoiceAmountCur / _periodSpecification.numOfChargedPeriods) : 0, _periodSpecification.numOfChargedPeriods);
+
+        priceComponentsMap.insert(FINInvoicePeriodPriceComponent::RentalPrice, priceUnit);
+
+        _periodSpecification.PriceComponentMap = priceComponentsMap;
+        _periodSpecification.PriceTimeUnit = UnitOfMeasure::find(CustInvoiceTrans::findRecId(finCustInvoiceTrans.CustInvoiceTransRecId).salesLine().RORPriceTimeUnit).Symbol;
+
+        return _periodSpecification;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalizeInvoices</Name>
+				<Source><![CDATA[
+    protected void journalizeInvoices()
+    {
+        CustInvoiceJour custInvoiceJour;
+        Counter         counter;
+        
+        ttsbegin;
+        while select custInvoiceJour
+        where custInvoiceJour.InvoiceDate >= fromDate
+        &&    custInvoiceJour.InvoiceDate <= toDate
+        {
+            if (this.mustProcessInvoice(custInvoiceJour))
+            {
+                FINRentalPeriodJournalizer::construct(custInvoiceJour, null).journalize();
+
+                counter++;
+            }
+        }
+
+        ttscommit;
+        Info(strFmt("@DNR:ProcessedXInvoices", counter));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustProcessInvoice</Name>
+				<Source><![CDATA[
+    protected boolean mustProcessInvoice(CustInvoiceJour _custInvoiceJour)
+    {
+        if (forceCreate)
+        {
+            this.clearCustInvoiceJourData(_custInvoiceJour);
+
+            return true;
+        }
+        else
+        {
+            FINCustInvoiceTransCalcResult   custInvoiceTransCalcResult;
+            CustInvoiceTrans                custInvoiceTrans;
+
+            select firstonly RecId from custInvoiceTransCalcResult
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransCalcResult.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+
+            return !custInvoiceTransCalcResult.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearCustInvoiceJourData</Name>
+				<Source><![CDATA[
+    protected void clearCustInvoiceJourData(CustInvoiceJour _custInvoiceJour)
+    {
+        CustInvoiceTrans                    custInvoiceTrans;
+        FINCustInvoiceTransPeriod           custInvoiceTransPeriod;
+        FINCustInvoiceTransCalcResult       custInvoiceTransCalcResult;
+        FINCustInvoiceTransPriceAmendment   custInvoiceTransPriceAmendment;
+        FINCustInvoiceTransCostPrice        custInvoiceTransCostPrice;
+        FINCustInvoiceTransManualComponent  custInvoiceTransManualComponent;
+        FINCustInvoiceTransProjHour         custInvoiceTransProjHour;
+        FINCustInvoiceTransCredit           custInvoiceTransCredit;
+        FINCustInvoiceTransTransportPrice   custInvoiceTransTransportPrice;
+
+        delete_from custInvoiceTransPeriod
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransPeriod.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+
+        delete_from custInvoiceTransCalcResult
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransCalcResult.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+
+        delete_from custInvoiceTransPriceAmendment
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransPriceAmendment.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+
+        delete_from custInvoiceTransCostPrice
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransCostPrice.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+
+        delete_from custInvoiceTransManualComponent
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransManualComponent.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+
+        delete_from custInvoiceTransProjHour
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransProjHour.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+
+        delete_from custInvoiceTransCredit
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransCredit.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+            
+        delete_from custInvoiceTransTransportPrice
+            exists join custInvoiceTrans
+            where  custInvoiceTrans.RecId               == custInvoiceTransTransportPrice.CustInvoiceTransRecId
+            &&     custInvoiceTrans.InvoiceId           == _custInvoiceJour.InvoiceId
+            &&     custInvoiceTrans.InvoiceDate         == _custInvoiceJour.InvoiceDate
+            &&     custInvoiceTrans.numberSequenceGroup == _custInvoiceJour.numberSequenceGroup;
+    }
+
+]]></Source>
+			</Method>
+			
+			<Method>
+				<Name>journalizeProjectInvoices</Name>
+				<Source><![CDATA[
+    protected void journalizeProjectInvoices()
+    {
+        ProjInvoiceJour projInvoiceJour;
+        Counter         counter;
+        
+        ttsbegin;
+        while select projInvoiceJour
+        where projInvoiceJour.InvoiceDate >= fromDate
+        &&    projInvoiceJour.InvoiceDate <= toDate
+        {
+            if (this.mustProcessProjInvoice(projInvoiceJour))
+            {
+                FINRentalPeriodJournalizer::construct(projInvoiceJour, null).journalize();
+
+                counter++;
+            }
+        }
+
+        ttscommit;
+        Info(strFmt("@DNR:ProcessedXProjInvoices", counter));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustProcessProjInvoice</Name>
+				<Source><![CDATA[
+    protected boolean mustProcessProjInvoice(ProjInvoiceJour _projInvoiceJour)
+    {
+        if (forceCreate)
+        {
+            this.clearProjInvoiceJourData(_projInvoiceJour);
+
+            return true;
+        }
+        else
+        {
+            FINProjInvoiceItemCalcResult   projInvoiceItemCalcResult;
+            ProjInvoiceItem                projInvoiceItem;
+
+            select firstonly RecId from projInvoiceItemCalcResult
+                exists join projInvoiceItem
+                where  projInvoiceItem.RecId            == projInvoiceItemCalcResult.ProjInvoiceItemRecId
+                &&     projInvoiceItem.ProjInvoiceId    == _projInvoiceJour.ProjInvoiceId
+                &&     projInvoiceItem.InvoiceDate      == _projInvoiceJour.InvoiceDate;
+        
+            return !projInvoiceItemCalcResult.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearProjInvoiceJourData</Name>
+				<Source><![CDATA[
+    protected void clearProjInvoiceJourData(ProjInvoiceJour _projInvoiceJour)
+    {
+        ProjInvoiceItem                    projInvoiceItem;
+        FINProjInvoiceItemPeriod           projInvoiceItemPeriod;
+        FINProjInvoiceItemCalcResult       projInvoiceItemCalcResult;
+        FINProjInvoiceItemPriceAmendment   projInvoiceItemPriceAmendment;
+        FINProjInvoiceItemCostPrice        projInvoiceItemCostPrice;
+        FINProjInvoiceItemCredit           projInvoiceItemCredit;
+        FINProjInvoiceItemManualComponent  projInvoiceItemManualComponent;
+        FINProjInvoiceItemProjHour         projInvoiceItemProjHour;
+        FINProjInvoiceItemTransportPrice   projInvoiceItemTransportPrice;
+
+        delete_from projInvoiceItemPeriod
+            exists join projInvoiceItem
+            where  projInvoiceItem.RecId            == projInvoiceItemPeriod.ProjInvoiceItemRecId
+            &&     projInvoiceItem.ProjInvoiceId    == _projInvoiceJour.ProjInvoiceId
+            &&     projInvoiceItem.InvoiceDate      == _projInvoiceJour.InvoiceDate;
+
+        delete_from projInvoiceItemCalcResult
+            exists join projInvoiceItem
+            where  projInvoiceItem.RecId            == projInvoiceItemCalcResult.ProjInvoiceItemRecId
+            &&     projInvoiceItem.ProjInvoiceId    == _projInvoiceJour.ProjInvoiceId
+            &&     projInvoiceItem.InvoiceDate      == _projInvoiceJour.InvoiceDate;
+
+        delete_from projInvoiceItemPriceAmendment
+            exists join projInvoiceItem
+            where  projInvoiceItem.RecId            == projInvoiceItemPriceAmendment.ProjInvoiceItemRecId
+            &&     projInvoiceItem.ProjInvoiceId    == _projInvoiceJour.ProjInvoiceId
+            &&     projInvoiceItem.InvoiceDate      == _projInvoiceJour.InvoiceDate;
+
+        delete_from projInvoiceItemCostPrice
+            exists join projInvoiceItem
+            where  projInvoiceItem.RecId            == projInvoiceItemCostPrice.ProjInvoiceItemRecId
+            &&     projInvoiceItem.ProjInvoiceId    == _projInvoiceJour.ProjInvoiceId
+            &&     projInvoiceItem.InvoiceDate      == _projInvoiceJour.InvoiceDate;
+
+        delete_from projInvoiceItemManualComponent
+            exists join projInvoiceItem
+            where  projInvoiceItem.RecId            == projInvoiceItemManualComponent.ProjInvoiceItemRecId
+            &&     projInvoiceItem.ProjInvoiceId    == _projInvoiceJour.ProjInvoiceId
+            &&     projInvoiceItem.InvoiceDate      == _projInvoiceJour.InvoiceDate;
+
+        delete_from projInvoiceItemProjHour
+            exists join projInvoiceItem
+            where  projInvoiceItem.RecId            == projInvoiceItemProjHour.ProjInvoiceItemRecId
+            &&     projInvoiceItem.ProjInvoiceId    == _projInvoiceJour.ProjInvoiceId
+            &&     projInvoiceItem.InvoiceDate      == _projInvoiceJour.InvoiceDate;
+
+        delete_from projInvoiceItemTransportPrice
+            exists join projInvoiceItem
+            where  projInvoiceItem.RecId            == projInvoiceItemTransportPrice.ProjInvoiceItemRecId
+            &&     projInvoiceItem.ProjInvoiceId    == _projInvoiceJour.ProjInvoiceId
+            &&     projInvoiceItem.InvoiceDate      == _projInvoiceJour.InvoiceDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalizeVendInvoices</Name>
+				<Source><![CDATA[
+    protected void journalizeVendInvoices()
+    {
+        VendInvoiceJour vendInvoiceJour;
+        Counter         counter;
+        
+        ttsbegin;
+        while select vendInvoiceJour
+        where vendInvoiceJour.InvoiceDate >= fromDate
+        &&    vendInvoiceJour.InvoiceDate <= toDate
+        {
+            if (this.mustProcessVendInvoice(vendInvoiceJour))
+            {
+                FINRentalPeriodJournalizer::construct(vendInvoiceJour, null).journalize();
+
+                counter++;
+            }
+        }
+
+        ttscommit;
+        Info(strFmt("@DNR:ProcessedXSubRentalInvoices", counter));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustProcessVendInvoice</Name>
+				<Source><![CDATA[
+    protected boolean mustProcessVendInvoice(VendInvoiceJour _vendInvoiceJour)
+    {
+        if (forceCreate)
+        {
+            this.clearVendInvoiceJourData(_vendInvoiceJour);
+
+            return true;
+        }
+        else
+        {
+            FINVendInvoiceTransCalcResult   vendInvoiceTransCalcResult;
+            VendInvoiceTrans                vendInvoiceTrans;
+
+            select firstonly RecId from vendInvoiceTransCalcResult
+                exists join vendInvoiceTrans
+                where vendInvoiceTrans.RecId                == vendInvoiceTransCalcResult.VendInvoiceTransRecId
+                &&    vendInvoiceTrans.PurchId              == _vendInvoiceJour.PurchId
+                &&    vendInvoiceTrans.InvoiceId            == _vendInvoiceJour.InvoiceId
+                &&    vendInvoiceTrans.InvoiceDate          == _vendInvoiceJour.InvoiceDate
+                &&    vendInvoiceTrans.numberSequenceGroup  == _vendInvoiceJour.numberSequenceGroup
+                &&    vendInvoiceTrans.InternalInvoiceId    == _vendInvoiceJour.InternalInvoiceId;
+
+            return !vendInvoiceTransCalcResult.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearVendInvoiceJourData</Name>
+				<Source><![CDATA[
+    protected void clearVendInvoiceJourData(VendInvoiceJour _vendInvoiceJour)
+    {
+        VendInvoiceTrans                    vendInvoiceTrans;
+        FINVendInvoiceTransPeriod           vendInvoiceTransPeriod;
+        FINVendInvoiceTransCalcResult       vendInvoiceTransCalcResult;
+        FINVendInvoiceTransPriceAmendment   vendInvoiceTransPriceAmendment;
+        FINVendInvoiceTransCostPrice        vendInvoiceTransCostPrice;
+        FINVendInvoiceTransCredit           vendInvoiceTransCredit;
+        FINVendInvoiceTransManualComponent  vendInvoiceTransManualComponent;
+        FINVendInvoiceTransProjHour         vendInvoiceTransProjHour;
+        FINVendInvoiceTransTransportPrice   vendInvoiceTransTransportPrice;
+
+        delete_from vendInvoiceTransPeriod
+            exists join vendInvoiceTrans
+            where  vendInvoiceTrans.RecId               == vendInvoiceTransPeriod.VendInvoiceTransRecId
+            &&     vendInvoiceTrans.InvoiceId           == _vendInvoiceJour.InvoiceId
+            &&     vendInvoiceTrans.InvoiceDate         == _vendInvoiceJour.InvoiceDate
+            &&     vendInvoiceTrans.numberSequenceGroup == _vendInvoiceJour.numberSequenceGroup
+            &&     vendInvoiceTrans.InternalInvoiceId   == _vendInvoiceJour.InternalInvoiceId;
+
+        delete_from vendInvoiceTransCalcResult
+            exists join vendInvoiceTrans
+            where  vendInvoiceTrans.RecId               == vendInvoiceTransCalcResult.VendInvoiceTransRecId
+            &&     vendInvoiceTrans.InvoiceId           == _vendInvoiceJour.InvoiceId
+            &&     vendInvoiceTrans.InvoiceDate         == _vendInvoiceJour.InvoiceDate
+            &&     vendInvoiceTrans.numberSequenceGroup == _vendInvoiceJour.numberSequenceGroup;
+
+        delete_from vendInvoiceTransPriceAmendment
+            exists join vendInvoiceTrans
+            where  vendInvoiceTrans.RecId               == vendInvoiceTransPriceAmendment.VendInvoiceTransRecId
+            &&     vendInvoiceTrans.InvoiceId           == _vendInvoiceJour.InvoiceId
+            &&     vendInvoiceTrans.InvoiceDate         == _vendInvoiceJour.InvoiceDate
+            &&     vendInvoiceTrans.numberSequenceGroup == _vendInvoiceJour.numberSequenceGroup;
+
+        delete_from vendInvoiceTransCostPrice
+            exists join vendInvoiceTrans
+            where  vendInvoiceTrans.RecId               == vendInvoiceTransCostPrice.VendInvoiceTransRecId
+            &&     vendInvoiceTrans.InvoiceId           == _vendInvoiceJour.InvoiceId
+            &&     vendInvoiceTrans.InvoiceDate         == _vendInvoiceJour.InvoiceDate
+            &&     vendInvoiceTrans.numberSequenceGroup == _vendInvoiceJour.numberSequenceGroup;
+        
+        delete_from vendInvoiceTransCredit
+            exists join vendInvoiceTrans
+            where  vendInvoiceTrans.RecId               == vendInvoiceTransCredit.VendInvoiceTransRecId
+            &&     vendInvoiceTrans.InvoiceId           == _vendInvoiceJour.InvoiceId
+            &&     vendInvoiceTrans.InvoiceDate         == _vendInvoiceJour.InvoiceDate
+            &&     vendInvoiceTrans.numberSequenceGroup == _vendInvoiceJour.numberSequenceGroup;
+
+        delete_from vendInvoiceTransManualComponent
+            exists join vendInvoiceTrans
+            where  vendInvoiceTrans.RecId               == vendInvoiceTransManualComponent.VendInvoiceTransRecId
+            &&     vendInvoiceTrans.InvoiceId           == _vendInvoiceJour.InvoiceId
+            &&     vendInvoiceTrans.InvoiceDate         == _vendInvoiceJour.InvoiceDate
+            &&     vendInvoiceTrans.numberSequenceGroup == _vendInvoiceJour.numberSequenceGroup;
+
+        delete_from vendInvoiceTransProjHour
+            exists join vendInvoiceTrans
+            where  vendInvoiceTrans.RecId               == vendInvoiceTransProjHour.VendInvoiceTransRecId
+            &&     vendInvoiceTrans.InvoiceId           == _vendInvoiceJour.InvoiceId
+            &&     vendInvoiceTrans.InvoiceDate         == _vendInvoiceJour.InvoiceDate
+            &&     vendInvoiceTrans.numberSequenceGroup == _vendInvoiceJour.numberSequenceGroup;
+
+        delete_from vendInvoiceTransTransportPrice
+            exists join vendInvoiceTrans
+            where  vendInvoiceTrans.RecId               == vendInvoiceTransTransportPrice.VendInvoiceTransRecId
+            &&     vendInvoiceTrans.InvoiceId           == _vendInvoiceJour.InvoiceId
+            &&     vendInvoiceTrans.InvoiceDate         == _vendInvoiceJour.InvoiceDate
+            &&     vendInvoiceTrans.numberSequenceGroup == _vendInvoiceJour.numberSequenceGroup;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPeriodFromOriginalBuffer</Name>
+				<Source><![CDATA[
+    protected void createPeriodFromOriginalBuffer()
+    {
+        FINJournalizedInvoicePeriod invoicePeriod;
+        RefRecId                    invPeriodQtyPhysicalRecId;
+        boolean                     hasAnyPeriod;
+        FINCustInvoiceTransPeriod   custInvoiceTransPeriod;
+        SalesLine                   salesLine = CustInvoiceTrans::findRecId(finCustInvoiceTrans.CustInvoiceTransRecId).salesLine();
+
+        RORInsuranceCalcBasis   insuranceCalcBasis  = salesLine.RORInsuranceCalcBasis;
+        DiscPct                 insurancePct = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? salesLine.RORInsuranceGrossPercentage : salesLine.RORInsuranceNetPercentage);
+        custInvoiceTransPeriodPriceComponentRecordList = new RecordInsertList(tableNum(FINCustInvoiceTransPeriodPriceComponent));
+        
+        while select invoicePeriod
+        order by InvPeriodQtyPhysicalRecId
+        where invoicePeriod.RefTableId == tableNum(CustInvoiceTrans)
+        &&    invoicePeriod.RefRecId == finCustInvoiceTrans.CustInvoiceTransRecId
+        {
+            hasAnyPeriod = true;
+
+            // One record per delivery
+            if (invPeriodQtyPhysicalRecId != invoicePeriod.InvPeriodQtyPhysicalRecId)
+            {
+                if (invPeriodQtyPhysicalRecId)
+                {
+                    custInvoiceTransPeriod.InsuranceAmount = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? (custInvoiceTransPeriod.LineAmount - custInvoiceTransPeriod.DiscAmount) * insurancePct / 100 : custInvoiceTransPeriod.LineAmount * insurancePct / 100);
+                    custInvoiceTransPeriod.setExchangeInfo(salesLine);
+                    custInvoiceTransPeriod.insert();
+
+                    this.createPriceComponent(custInvoiceTransPeriod.RecId, FINInvoicePeriodPriceComponent::LinePercent, 0, custInvoiceTransPeriod.NumOfChargeablePeriods);
+                    this.createPriceComponent(custInvoiceTransPeriod.RecId, FINInvoicePeriodPriceComponent::RentalModeId, 1, custInvoiceTransPeriod.NumOfChargeablePeriods);
+                    this.createPriceComponent(custInvoiceTransPeriod.RecId, FINInvoicePeriodPriceComponent::RentalPrice, custInvoiceTransPeriod.displayAvgGrossPrice(), custInvoiceTransPeriod.NumOfChargeablePeriods);
+                }
+
+                custInvoiceTransPeriod.clear();
+                custInvoiceTransPeriod.CustInvoiceTransRecId = finCustInvoiceTrans.CustInvoiceTransRecId;
+                custInvoiceTransPeriod.QtyInvoiced = invoicePeriod.QtyInvoiced;
+            }
+
+            custInvoiceTransPeriod.DiscAmount += invoicePeriod.DiscAmount;
+            custInvoiceTransPeriod.LineAmount += (invoicePeriod.LineAmount + invoicePeriod.DiscAmount);
+            custInvoiceTransPeriod.NumOfCalendarPeriods += invoicePeriod.NumOfCalendarPeriods;
+            custInvoiceTransPeriod.NumOfChargeablePeriods += invoicePeriod.NumOfChargeablePeriods;
+                
+            TransDateTime fromDateTime = invoicePeriod.PeriodStartDateTime;
+            TransDateTime toDateTime = invoicePeriod.PeriodEndDateTime;
+            if (custInvoiceTransPeriod.PeriodStartDateTime == DateTimeUtil::minValue())
+            {
+                custInvoiceTransPeriod.PeriodStartDateTime = fromDateTime;
+            }
+            custInvoiceTransPeriod.PeriodEndDateTime = toDateTime;
+          
+            invPeriodQtyPhysicalRecId = invoicePeriod.InvPeriodQtyPhysicalRecId;
+        }
+
+        if (hasAnyPeriod)
+        {
+            custInvoiceTransPeriod.InsuranceAmount = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? (custInvoiceTransPeriod.LineAmount - custInvoiceTransPeriod.DiscAmount) * insurancePct / 100 : custInvoiceTransPeriod.LineAmount * insurancePct / 100);
+            custInvoiceTransPeriod.PriceTimeUnit = UnitOfMeasure::find(salesLine.RORPriceTimeUnit).Symbol;
+            custInvoiceTransPeriod.setExchangeInfo(salesLine);
+            custInvoiceTransPeriod.insert();
+
+            this.createPriceComponent(custInvoiceTransPeriod.RecId, FINInvoicePeriodPriceComponent::LinePercent, 0, custInvoiceTransPeriod.NumOfChargeablePeriods);
+            this.createPriceComponent(custInvoiceTransPeriod.RecId, FINInvoicePeriodPriceComponent::RentalModeId, 1, custInvoiceTransPeriod.NumOfChargeablePeriods);
+            this.createPriceComponent(custInvoiceTransPeriod.RecId, FINInvoicePeriodPriceComponent::RentalPrice, custInvoiceTransPeriod.displayAvgGrossPrice(), custInvoiceTransPeriod.NumOfChargeablePeriods);
+        }
+
+        custInvoiceTransPeriodPriceComponentRecordList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPriceComponent</Name>
+				<Source><![CDATA[
+    protected void createPriceComponent(RefRecId _periodRecId, FINInvoicePeriodPriceComponent _priceComponentType, real _priceComponentValue, INVChargedPeriods _chargedPeriods)
+    {
+        FINCustInvoiceTransPeriodPriceComponent custInvoiceTransPeriodPriceComponent;
+
+        custInvoiceTransPeriodPriceComponent.CustInvoiceTransPeriodRecId = _periodRecId;
+        custInvoiceTransPeriodPriceComponent.InvoicePeriodPriceComponent = _priceComponentType;
+        custInvoiceTransPeriodPriceComponent.PriceComponentValue = _priceComponentValue;
+        custInvoiceTransPeriodPriceComponent.NumOfChargeablePeriods = _chargedPeriods;
+        
+        custInvoiceTransPeriodPriceComponentRecordList.add(custInvoiceTransPeriodPriceComponent);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalizeProjectJournals</Name>
+				<Source><![CDATA[
+    protected void journalizeProjectJournals()
+    {
+        ProjJournalTable projJournalTable;
+        Counter          counter;
+
+        JournalPostedDateTime fromDateTime = DateTimeUtil::newDateTime(fromDate, 0);
+        JournalPostedDateTime toDateTime = DateTimeUtil::newDateTime(toDate, 0);
+      
+        ttsbegin;
+        while select projJournalTable
+        where projJournalTable.PostedDateTime >= fromDateTime
+        &&    projJournalTable.PostedDateTime <= toDateTime
+        {
+            if (this.mustProcessProjJournal(projJournalTable))
+            {
+                FINRentalPeriodJournalizer::construct(projJournalTable, null).journalize();
+
+                counter++;
+            }
+        }
+
+        ttscommit;
+        Info(strFmt("@DNR:ProcessedX1ProjJournals", counter));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustProcessProjJournal</Name>
+				<Source><![CDATA[
+    protected boolean mustProcessProjJournal(ProjJournalTable _projJournalTable)
+    {
+        if (forceCreate)
+        {
+            this.clearProjJournalTableData(_projJournalTable);
+
+            return true;
+        }
+        else
+        {
+            FINProjJournalTransCalcResult   projJournalTransCalcResult;
+            ProjJournalTrans                projJournalTrans;
+
+            select firstonly RecId from projJournalTransCalcResult
+                exists join projJournalTrans
+                where  projJournalTrans.RecId       == projJournalTransCalcResult.ProjJournalTransRecId
+                &&     projJournalTrans.JournalId   == _projJournalTable.JournalId;
+        
+            return !projJournalTransCalcResult.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearProjJournalTableData</Name>
+				<Source><![CDATA[
+    protected void clearProjJournalTableData(ProjJournalTable _projJournalTable)
+    {
+        ProjJournalTrans                    projJournalTrans;
+        FINProjJournalTransPeriod           projJournalTransPeriod;
+        FINProjJournalTransCalcResult       projJournalTransCalcResult;
+        FINProjJournalTransPriceAmendment   projJournalTransPriceAmendment;
+        FINProjJournalTransCostPrice        projJournalTransCostPrice;
+        FINProjJournalTransCredit           projJournalTransCredit;
+        FINProjJournalTransManualComponent  projJournalTransManualComponent;
+        FINProjJournalTransTransportPrice   projJournalTransTransportPrice;
+
+        delete_from projJournalTransPeriod
+            exists join projJournalTrans
+            where  projJournalTrans.RecId       == projJournalTransPeriod.ProjJournalTransRecId
+            &&     projJournalTrans.JournalId   == _projJournalTable.JournalId;
+
+        delete_from projJournalTransCalcResult
+            exists join projJournalTrans
+            where  projJournalTrans.RecId       == projJournalTransCalcResult.ProjJournalTransRecId
+            &&     projJournalTrans.JournalId   == _projJournalTable.JournalId;
+
+        delete_from projJournalTransPriceAmendment
+            exists join projJournalTrans
+            where  projJournalTrans.RecId       == projJournalTransPriceAmendment.ProjJournalTransRecId
+            &&     projJournalTrans.JournalId   == _projJournalTable.JournalId;
+
+        delete_from projJournalTransCostPrice
+            exists join projJournalTrans
+            where  projJournalTrans.RecId       == projJournalTransCostPrice.ProjJournalTransRecId
+            &&     projJournalTrans.JournalId   == _projJournalTable.JournalId;
+
+        delete_from projJournalTransManualComponent
+            exists join projJournalTrans
+            where  projJournalTrans.RecId       == projJournalTransManualComponent.ProjJournalTransRecId
+            &&     projJournalTrans.JournalId   == _projJournalTable.JournalId;
+
+        delete_from projJournalTransTransportPrice
+            exists join projJournalTrans
+            where  projJournalTrans.RecId       == projJournalTransTransportPrice.ProjJournalTransRecId
+            &&     projJournalTrans.JournalId   == _projJournalTable.JournalId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

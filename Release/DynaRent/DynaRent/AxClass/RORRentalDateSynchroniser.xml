@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORRentalDateSynchroniser</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RORRentalDateSynchroniser
+{
+    // Used to link the old rental dates to the corresponding new one
+    Map                             mapOldNewRentalDatesReferences;
+
+    RORRentalDateTimes  rentalDateTimesFrom;
+    RORRentalDateTimes  rentalDateTimesTo;
+    boolean             checkClearTimes;
+    boolean             skipUpdateMainRecord;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>copyRentalDateTimes</Name>
+				<Source><![CDATA[
+    public void copyRentalDateTimes(
+        RORRentalDateTimes  _rentalDateTimesFrom,
+        RORRentalDateTimes  _rentalDateTimesTo,
+        Common              _hostTo,
+        boolean             _maySynchronize = (_hostTo.TableId == tableNum(SalesLine) || _hostTo.TableId == tableNum(PurchLine)))
+    {
+        rentalDateTimesFrom = _rentalDateTimesFrom;
+        rentalDateTimesTo = _rentalDateTimesTo;
+    
+        if (rentalDateTimesFrom)
+        {
+            ttsBegin;
+    
+            rentalDateTimesTo.selectForUpdate(true);
+    
+            rentalDateTimesTo.initFromHost(_hostTo);
+            rentalDateTimesTo.initFromRentalDateTimes(rentalDateTimesFrom);
+    
+            if (rentalDateTimesTo.validateWriteFromCode())
+            {
+                if (rentalDateTimesTo)
+                {
+                    RORSubrentalSynchroniser subrentalSynchroniser = RORSubrentalSynchroniser::construct(rentalDateTimesTo.RefTableId);
+                    subrentalSynchroniser.parmForceStopTierRangeRecalculation(false);
+                    subrentalSynchroniser.parmskipUpdateHostRecord(skipUpdateMainRecord);
+
+                    rentalDateTimesTo.update(subrentalSynchroniser, _maySynchronize, false, checkClearTimes);
+
+                    if (skipUpdateMainRecord)
+                    {
+                        RORRentalDateTimesHost  rentalDateTimesHost = _hostTo;
+                        rentalDateTimesHost.IsModified = NoYes::Yes;
+                    }
+                }
+                else
+                {
+                    rentalDateTimesTo.insert();
+                }
+            }
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    void new()
+    {
+        mapOldNewRentalDatesReferences = new Map(Types::Int64, Types::Int64);
+        checkClearTimes = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCheckClearTimes</Name>
+				<Source><![CDATA[
+    public boolean parmCheckClearTimes(boolean _checkClearTimes = checkClearTimes)
+    {
+        checkClearTimes = _checkClearTimes;
+        return checkClearTimes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSkipUpdateMainRecord</Name>
+				<Source><![CDATA[
+    public boolean parmSkipUpdateMainRecord(boolean _skipUpdateMainRecords = skipUpdateMainRecord)
+    {
+        skipUpdateMainRecord = _skipUpdateMainRecords;
+        return skipUpdateMainRecord;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>synchParents</Name>
+				<Source><![CDATA[
+    public void synchParents(
+        RORRentalDateTimes  _rentalDateTimesFrom = rentalDateTimesFrom,
+        RORRentalDateTimes  _rentalDateTimesTo = rentalDateTimesTo,
+        boolean             _copyDateValues = false,
+        boolean             _warnOnMissingParent = true)
+    {
+        rentalDateTimesFrom = _rentalDateTimesFrom;
+        rentalDateTimesTo = _rentalDateTimesTo;
+    
+        if (rentalDateTimesFrom)
+        {
+            mapOldNewRentalDatesReferences.insert(rentalDateTimesFrom.ParentRentalDateTimes, rentalDateTimesTo.ParentRentalDateTimes);
+    
+            if (_copyDateValues)
+            {
+                rentalDateTimesTo.initFromRentalDateTimes(rentalDateTimesFrom);
+            }
+    
+            if (rentalDateTimesFrom.ParentRentalDateTimes)
+            {
+                if (mapOldNewRentalDatesReferences.exists(rentalDateTimesFrom.ParentRentalDateTimes))
+                {
+                    rentalDateTimesTo.ParentRentalDateTimes = mapOldNewRentalDatesReferences.lookup(rentalDateTimesFrom.ParentRentalDateTimes);
+                }
+                // don't clear parent field if paren is in header level
+                else if (RORRentalDateTimes::find(rentalDateTimesFrom.ParentRentalDateTimes).hostHeadingLineLevel() == HeadingLine::Line)
+                {
+                    rentalDateTimesTo.ParentRentalDateTimes = 0; // Clear parent field as new parent record can't be found
+                    rentalDateTimesTo.SynchronizeFromParent = NoYes::No;
+    
+                    if (_warnOnMissingParent)
+                    {
+                        warning ("@DNR652"); // Warning shown if assumption that parents will always be processed before child turns out to be incorrect, or the parent
+                                             // hasn't been included for some reason (like when dates are linked to the invoice journal, and not all sales line are included
+                                             // in a particular invoice run)
+                    }
+    
+                }
+                // When creating sub-rental from rental and dates are based on dates from sales line
+                else if (!rentalDateTimesTo.ParentRentalDateTimes && rentalDateTimesTo.SynchronizeFromParent == NoYes::Yes)
+                {
+                    rentalDateTimesTo.SynchronizeFromParent = NoYes::No;
+                }
+            }
+    
+            if (rentalDateTimesTo.validateWriteFromCode())
+            {
+                if (rentalDateTimesTo)
+                {
+                    rentalDateTimesTo.update();
+                }
+                else
+                {
+                    rentalDateTimesTo.insert();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>synchronizeIC</Name>
+				<Source><![CDATA[
+    public void synchronizeIC(RORRentalDateTimes _rentalDateTimesFrom, RORRentalDateTimesHost _hostFrom)
+    {
+        RORRentalDateTimesHost  hostTo;
+        RORSubrentalReference   subrentalReference;
+        SalesLine       salesLine;
+        SalesTable      salesTable;
+        PurchLine       purchLine;
+        PurchTable      purchTable;
+        CompanyId       companyId = curext();
+    
+        void updateRentalOrder(companyId _companyId)
+        {
+            changeCompany(_companyId)
+            {
+                subrentalReference.clear();
+                select firstonly subrentalReference
+                where subrentalReference.PurchInventTransId == purchLine.InventTransId;
+    
+                salesLine = SalesLine::findInventTransId(subrentalReference.SalesInventTransId);
+                hostTo = salesLine;
+    
+                rentalDateTimesTo = salesLine.RORRentalDateTimes();
+    
+                if (rentalDateTimesFrom && rentalDateTimesTo && hostTo)
+                {
+                    this.copyRentalDateTimes(rentalDateTimesFrom, rentalDateTimesTo, hostTo, false);
+                }
+            }
+        }
+    
+        rentalDateTimesFrom.data(_rentalDateTimesFrom.data());
+    
+        if (_hostFrom.TableId == tableNum(SalesLine))
+        {
+            salesLine = _hostFrom;
+            salesTable = salesLine.salesTable();
+    
+            companyId = salesTable.InterCompanyCompanyId ? salesTable.InterCompanyCompanyId : companyId;
+            // reference is always in the same company as a rental order
+            subrentalReference = RORSubrentalReference::findPurch(salesLine.InventTransId);
+    
+            changeCompany(companyId)
+            {
+                purchLine = PurchLine::findInventTransId(subrentalReference.PurchInventTransId);
+                purchTable = purchLine.purchTable();
+                hostTo = purchLine;
+                rentalDateTimesTo = purchLine.RORRentalDateTimes();
+            }
+    
+            if (rentalDateTimesFrom && rentalDateTimesTo && hostTo)
+            {
+                changeCompany(companyId)
+                {
+                    this.copyRentalDateTimes(rentalDateTimesFrom, rentalDateTimesTo, hostTo, false);
+                }
+            }
+    
+            // now copy from sub rental
+            rentalDateTimesFrom.data(rentalDateTimesTo.data());
+    
+            // update IC rental order line
+            if (salesLine.dataAreaId == companyId)
+            {
+                companyId = purchTable.InterCompanyCompanyId;
+            }
+            // else update oryginal rental order line in the same company as sub rental
+    
+            updateRentalOrder(companyId);
+        }
+    
+        if (_hostFrom.TableId == tableNum(PurchLine))
+        {
+            purchLine = _hostFrom;
+            purchTable = purchLine.purchTable();
+    
+            // first update dates in oryginal rental order line
+            updateRentalOrder(purchTable.dataAreaId);
+    
+            // later update dates in IC rental order line
+            companyId = purchTable.InterCompanyCompanyId ? purchTable.InterCompanyCompanyId : companyId;
+    
+            updateRentalOrder(companyId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static RORRentalDateSynchroniser construct()
+    {
+        return new RORRentalDateSynchroniser();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmSkipUpdateMainRecord</Name>
+				<Source><![CDATA[
+    public boolean DNRParmSkipUpdateMainRecord(boolean _skipUpdateMainRecord = skipUpdateMainRecord)
+    {
+        skipUpdateMainRecord = _skipUpdateMainRecord;
+        return skipUpdateMainRecord;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

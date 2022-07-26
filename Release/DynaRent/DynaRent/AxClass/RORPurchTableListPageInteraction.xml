@@ -1,0 +1,663 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORPurchTableListPageInteraction</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+///    The interaction class for a model-driven <c>RORPurchTableListPage</c> form.
+/// </summary>
+class RORPurchTableListPageInteraction
+extends SysListPageInteractionBase
+{
+    PurchTableListPage          purchTableListPage;
+    PurchTable                  purchTable;
+
+    PurchTableInteractionHelper purchTableInteractionHelper;
+    PurchTableForm              purchTableForm;
+
+    boolean                     canInvoiceBeCreatedByVendor;
+    boolean                     useQualityManagement;
+
+    PurchRFQTable               purchRFQTable;
+
+    ListPage                    listPage;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>applyPurchRFQRange</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Applies the range on <c>PurchTable</c> table for <c>PurchId</c> field.
+    /// </summary>
+    /// <param name="_query">
+    ///     The input query.
+    /// </param>
+    /// <param name="_purchRFQTable">
+    ///     The <c>PurchRFQTable</c> table record.
+    /// </param>
+    /// <remarks>
+    ///     This method is called while initializing the query to filters the <c>PurchTable</c> table with the
+    ///     required <c>PurchId</c> field values.
+    /// </remarks>
+    private void applyPurchRFQRange(Query _query, PurchRFQTable _purchRFQTable)
+    {
+        PurchRFQLine            purchRFQLine;
+        QueryBuildDataSource    queryBuildDataSource;
+        QueryBuildRange         queryBuildRange;
+    
+        queryBuildDataSource = SysQuery::findOrCreateDataSource(_query, tableNum(PurchTable));
+        queryBuildDataSource.clearDynalinks();
+    
+        while select PurchId from purchRFQLine
+        group by PurchId
+        where purchRFQLine.rfqId == _purchRFQTable.rfqId
+        {
+            queryBuildRange = queryBuildDataSource.addRange(fieldNum(PurchTable, PurchId));
+            queryBuildRange.value(queryValue(purchRFQLine.PurchId));
+        }
+    
+        queryBuildRange.status(RangeStatus::Locked);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>currentPurchTable</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Gets an active <c>PurchTable</c> record.
+    /// </summary>
+    /// <returns>
+    ///    An active <c>PurchTable</c> record.
+    /// </returns>
+    private PurchTable currentPurchTable()
+    {
+        return this.listPage().activeRecord(queryDataSourceStr(RORPurchTableListPage, PurchaseTable)) as PurchTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>enableTemplateButton</Name>
+				<Source><![CDATA[
+    boolean enableTemplateButton()
+    {
+        return (this.currentPurchTable().RecId != 0);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getListPageType</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Gets the list page type.
+    /// </summary>
+    /// <returns>
+    ///    A list page type.
+    /// </returns>
+    private PurchTableListPage getListPageType()
+    {
+        return purchTableListPage;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initializeQuery</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Joins the <c>WorkflowWorkItemTable</c> table to a data source if the list page type is the
+    ///    <c>PurchTableListPage::AssignedToMe</c> enumeration value.
+    /// </summary>
+    /// <param name="_query">
+    ///    The input query.
+    /// </param>
+    /// <remarks>
+    ///    This method is called one time by the framework when the <c>data source</c> query is initialized.
+    /// </remarks>
+    public void initializeQuery(Query _query)
+    {
+        ListPageArgs            listPageArgs;
+        QueryBuildDataSource    qbds;
+        QueryBuildRange         rangeCompanyId;
+        QueryBuildRange         rangeUserId;
+        QueryBuildRange         rangeId;
+        QueryBuildRange         rangeStatus;
+        ProjInvoiceTable        projInvoiceTable;
+        smmBusRelTable          smmBusRelTable;
+    
+        listPageArgs = this.listPage().listPageArgs();
+    
+        super(_query);
+    
+        if (listPageArgs &&
+            listPageArgs.externalRecord() &&
+            listPageArgs.menuItemName() ==  menuitemDisplayStr(PurchTableListPage) &&
+            listPageArgs.externalRecord().TableId == tableNum(PurchRFQTable))
+        {
+            purchRFQTable = listPageArgs.externalRecord() as PurchRFQTable;
+            this.applyPurchRFQRange(_query, purchRFQTable);
+        }
+        else if (this.getListPageType() == PurchTableListPage::AssignedToMe)
+        {
+            qbds = _query.dataSourceTable(tableNum(PurchTable)).addDataSource(tableNum(WorkflowWorkItemTable));
+            qbds.joinMode(JoinMode::ExistsJoin);
+    
+            qbds.addLink(fieldNum(PurchTable, RecId), fieldNum(WorkflowWorkItemTable, RefRecId));
+            qbds.addLink(fieldNum(PurchTable, TableId), fieldNum(WorkflowWorkItemTable, RefTableId));
+    
+            rangeStatus = qbds.addRange(fieldNum(WorkflowWorkItemTable, Status));
+            rangeStatus.value(queryValue(WorkflowWorkItemStatus::Pending));
+            rangeStatus.status(RangeStatus::Locked);
+    
+            rangeCompanyId = qbds.addRange(fieldNum(WorkflowWorkItemTable, CompanyId));
+            rangeCompanyId.value(queryValue(curext()));
+            rangeCompanyId.status(RangeStatus::Locked);
+    
+            rangeUserId = qbds.addRange(fieldNum(WorkflowWorkItemTable, UserId));
+            rangeUserId.value(queryValue(curUserId()));
+            rangeUserId.status(RangeStatus::Locked);
+    
+            //The Id-range is only used to lock the query from the Ui
+            rangeId = qbds.addRange(fieldNum(WorkflowWorkItemTable, Id));
+            rangeId.status(RangeStatus::Locked);
+            rangeId.enabled(false);
+        }
+        else if (listPageArgs &&
+                 listPageArgs.externalRecord() &&
+                 listPageArgs.menuItemName() ==  menuitemDisplayStr(PurchTableListPageProject) &&
+                 listPageArgs.externalRecord().TableId == tableNum(ProjInvoiceTable))
+        {
+            projInvoiceTable = listPageArgs.externalRecord();
+            qbds = _query.dataSourceTable(tableNum(PurchTable)).addDataSource(tableNum(ProjTable));
+            qbds.relations(true);
+            qbds.joinMode(JoinMode::ExistsJoin);
+            qbds.addRange(fieldNum(ProjTable,ProjInvoiceProjId)).value(queryValue(projInvoiceTable.ProjInvoiceProjId));
+        }
+    
+        if (listPageArgs
+        &&  listPageArgs.externalRecord()
+        &&  listPageArgs.externalRecord().TableId == tableNum(smmBusRelTable))
+        {
+            qbds = _query.dataSourceTable(tablenum(VendTable));
+            qbds.joinMode(JoinMode::InnerJoin);
+            qbds.addDynalink(fieldnum(VendTable, Party),
+                             smmBusRelTable,
+                             fieldnum(smmBusRelTable, Party));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initializing</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Initializes a <c>UseQualityManagement</c> parameter.
+    /// </summary>
+    /// <remarks>
+    ///    This method is called one time by the framework when the list page is initialized.
+    /// </remarks>
+    public void initializing()
+    {
+        useQualityManagement = InventParameters::find().UseQualityManagement;
+    
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>selectionChanged</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Sets the current <c>PurchTable</c> record.
+    /// </summary>
+    /// <remarks>
+    ///    This method is called by the framework every time that a record is selected in the grid on the list
+    ///    page.
+    /// </remarks>
+    public void selectionChanged()
+    {
+        PurchTableFormId purchTableFormId = this.page().pageArgs().enumTypeParameter() == enumNum(PurchTableFormId) ? this.page().pageArgs().enumParameter() : PurchTableFormId::None;
+        purchTable = this.currentPurchTable();
+    
+        purchTableInteractionHelper = PurchTableInteractionHelper::construct(purchTableFormId, purchTable);
+    
+        purchTableInteractionHelper.initHeaderActions();
+        //this.listPage().actionPaneControlEnabled(formControlStr(RORPurchTableListPage, mbTemplatesButton), this.enableTemplateButton());
+    
+        this.setCaption();
+    
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonAmendment</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Determines whether the header level amendment menu items are enabled.
+    /// </summary>
+    protected void setButtonAmendment()
+    {
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, ROROrderAmendmentDialogType_LostOrder_Header), purchTableInteractionHelper.RORparmEnableAmendmentLostOrder());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, ROROrderAmendmentDialogType_ChangeDate_Header), purchTableInteractionHelper.RORparmEnableAmendmentDateChangeHeader());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonEnabled</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Enables or disables action pane buttons according to the active record data.
+    /// </summary>
+    protected void setButtonEnabled()
+    {
+        listPage = this.listPage();
+    
+        this.setButtonPurchase();
+        this.setButtonManage();
+        this.setButtonPreRental();
+        this.setButtonInvoice();
+        this.setButtonPostRental();
+        this.setButtonIntercompany();
+        this.setButtonGeneral();
+        this.setButtonAmendment();
+    
+        if (LedgerParameters::find().IsEncumbranceProcessEnabled == NoYes::No)
+        {
+            listPage.actionPaneControlVisible(formControlStr(RORPurchTableListPage, encumbranceSummary), false);
+        }
+        else
+        {
+            listPage.actionPaneControlVisible(formControlStr(RORPurchTableListPage, encumbranceSummary), true);
+        }
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, bankLGRequestForm), purchTableInteractionHelper.parmbankLGRequestFormEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonCreateBankLCImport), purchTableInteractionHelper.parmbuttonCreateBankLCImport());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonGeneral</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Enables or disables tab buttons on the general action pane according to the active record data.
+    /// </summary>
+    private void setButtonGeneral()
+    {
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, costControlCommittedCost),
+            (purchTable.ProjId && !purchTable.isProjectSalesItemReqPO()) ? true : false);
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, OrderReferences),
+                purchTableInteractionHelper.parmReferencesEnabled());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonPurchAgreement), purchTable.MatchingAgreement);
+    
+        // Rules related to document state
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, SetupGeneral), !purchTableInteractionHelper.parmHeaderIsFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, CreateActivity), !purchTableInteractionHelper.parmHeaderIsFinalized());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, ContactPerson), purchTableInteractionHelper.parmContactDetailsEnabled());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonIntercompany</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Enables or disables tab buttons on the intercompany action pane according to the active record data.
+    /// </summary>
+    private void setButtonIntercompany()
+    {
+    
+        if (purchTable.PurchaseType == PurchaseType::RORSubRental
+        && purchTable.InterCompanyDirectDelivery
+        && purchTable.InterCompanyOrder)
+        {
+            listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, interCompanySalesTable), false);
+            listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonOriginalSalesTable), false);
+    
+            listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, interCompanyRORSalesTable), purchTableInteractionHelper.parmintercompanySalesTableEnabled());
+            listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonOriginalRORSalesTable), purchTableInteractionHelper.parmoriginalSalesTableEnabled());
+        }
+        else
+        {
+            listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, interCompanySalesTable), purchTableInteractionHelper.parmintercompanySalesTableEnabled());
+            listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonOriginalSalesTable), purchTableInteractionHelper.parmoriginalSalesTableEnabled());
+    
+            listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, interCompanyRORSalesTable), false);
+            listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonOriginalRORSalesTable), false);
+        }
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonInterCompanyPickinglist), purchTableInteractionHelper.parmintercompanyPickingListEnabled());
+    
+        // applies for the rest of group buttons
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, ButtonInterCompanyCustPackingSlipJournal), purchTableInteractionHelper.parminterCompanyActionsEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, ButtonInterCompanyCustInvoiceJournal), purchTableInteractionHelper.parminterCompanyActionsEnabled());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonInvoice</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Enables or disables tab buttons on the invoice action pane according to the active record data.
+    /// </summary>
+    protected void setButtonInvoice()
+    {
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonUpdateInvoice), purchTableInteractionHelper.parmenableInvoiceButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonProformaInvoice), purchTableInteractionHelper.parmenableInvoiceButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonUpdatePrepayInvoice), purchTableInteractionHelper.parmButtonUpdatePrepayInvoice());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonPaymentSchedule), purchTableInteractionHelper.parmbuttonPaymentScheduleEnabled());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonJournalInvoice), purchTableInteractionHelper.parmbuttonJournalInvoiceEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, vendUnpostedInvoiceJournal), purchTableInteractionHelper.parmbuttonJournalPendingInvoiceEnabled() );
+    
+        // Rules related to document state
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, InvoiceProcess), !purchTableInteractionHelper.parmHeaderIsFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, SettleInvoice), !purchTableInteractionHelper.parmHeaderIsFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, InvoiceIntroduce), !purchTableInteractionHelper.parmHeaderIsFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, InvoiceChange), !purchTableInteractionHelper.parmHeaderIsFinalized());           
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonManage</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Enables or disables tab buttons on the manage action pane according to the active record data.
+    /// </summary>
+    private void setButtonManage()
+    {
+        // Rules related to document state
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, BudgetControl), !purchTableInteractionHelper.parmDocumentConfirmedOrFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, ManageBankDocument), !purchTableInteractionHelper.parmHeaderIsFinalized());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonPostRental</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Enables or disables tab buttons on the post-rental action pane according to the active record data.
+    /// </summary>
+    private void setButtonPostRental()
+    {
+            // DynaRent buttons
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusEventEnd), purchTableInteractionHelper.RORparmEnableEventEndButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusStrike), purchTableInteractionHelper.RORparmEnableStrikeButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusInbound), purchTableInteractionHelper.RORparmEnableInboundButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusReturn), purchTableInteractionHelper.RORparmEnableReturnNoteButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusReturnInspection), purchTableInteractionHelper.RORparmEnableInspectionButton());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalEventEnd_action), purchTableInteractionHelper.RORparmbuttonJournalEventEndEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalStrike_action), purchTableInteractionHelper.RORparmbuttonJournalStrikeEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalInbound_action), purchTableInteractionHelper.RORparmbuttonJournalInboundEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalReturnNote_actio), purchTableInteractionHelper.RORparmbuttonJournalReturnNoteEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalReturnInsp_actio), purchTableInteractionHelper.RORparmbuttonJournalInspectionEnabled());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonPreRental</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Enables or disables tab buttons on the pre-rental action pane according to the active record data.
+    /// </summary>
+    private void setButtonPreRental()
+    {
+         boolean isRentalDirectDelivery;
+        ;
+    
+        if (purchTable.InterCompanyDirectDelivery
+        && purchTable.PurchaseType == PurchaseType::RORSubRental
+        && purchTable.InterCompanyOrder)
+        {
+            isRentalDirectDelivery = true;
+        }
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, purchFormLetter_ReceiptsList), !isRentalDirectDelivery && purchTableInteractionHelper.parmenableReceiptsListButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonUpdatePackingSlip), !isRentalDirectDelivery && purchTableInteractionHelper.parmenablePackingSlipButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, purchFormLetter_Proforma_Receipts), purchTableInteractionHelper.parmenableReceiptsListButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, purchFormLetter_Proforma_Packing), purchTableInteractionHelper.parmenablePackingSlipButton());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, vendReceiptsJournal), purchTableInteractionHelper.parmbuttonJournalReceiptsListEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, vendPackingSlipJournal), purchTableInteractionHelper.parmbuttonJournalPackingSlipEnabled());
+    
+        // Rules related to document state
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, ReceiveProcess), !purchTableInteractionHelper.parmHeaderIsFinalized());
+    
+        // DynaRent buttons
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusPreparation), !isRentalDirectDelivery && purchTableInteractionHelper.RORparmEnablePreparationButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusOutbound), !isRentalDirectDelivery && purchTableInteractionHelper.RORparmEnableOutboundButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusBuild), !isRentalDirectDelivery && purchTableInteractionHelper.RORparmEnableBuildButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchFormLetter_RORSubStatusEventStart), !isRentalDirectDelivery && purchTableInteractionHelper.RORparmEnableEventStartButton());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalPreparation_acti), !isRentalDirectDelivery && purchTableInteractionHelper.RORparmbuttonJournalPreparationEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalOutbound_action), !isRentalDirectDelivery && purchTableInteractionHelper.RORparmbuttonJournalOutboundEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalEventStart_actio), !isRentalDirectDelivery && purchTableInteractionHelper.RORparmbuttonJournalEventStartEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, RORVendPurchOrderJournalBuild_action), !isRentalDirectDelivery && purchTableInteractionHelper.RORparmbuttonJournalBuildEnabled());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonPurchase</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Enables or disables tab buttons on the purchase action pane according to the active record data.
+    /// </summary>
+    private void setButtonPurchase()
+    {
+        // Rules related to change management
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonRequestChange), purchTableInteractionHelper.parmcanChangeBeRequested());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonPurchCancel), purchTableInteractionHelper.parmbuttonPurchCancelEnabled());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, prepayPurchTableHeading), purchTableInteractionHelper.parmbuttonPrepayPurchTableHeading());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonRemovePurchPrepayTable), purchTableInteractionHelper.parmbuttonRemovePurchPrepayTable());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonPurchTableCompare), purchTableInteractionHelper.parmHistoryExists());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonPurchTableVersion), purchTableInteractionHelper.parmHistoryExists());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, purchFormLetter_PurchaseOrder), purchTableInteractionHelper.parmenablePurchaseOrderButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, purchFormLetter_Proforma_Purchase), purchTableInteractionHelper.parmenablePurchaseOrderButton());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonFinalizePurchaseOrder), purchTableInteractionHelper.parmButtonFinalizeEnabled() );
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, buttonConfirm), purchTableInteractionHelper.parmenablePurchaseOrderButton());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, vendPurchOrderJournal), purchTableInteractionHelper.parmbuttonJournalPurchaseOrderEnabled());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, EditButton), purchTableInteractionHelper.parmButtonPurchEditEnabled());
+        //listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchTableForEdit_Action), purchTableInteractionHelper.parmButtonPurchEditEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchCreditNoteHeader_Action), purchTableInteractionHelper.parmbuttonCreditNoteHeaderEnabled());
+    
+        // Rules related to document state
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, Modify), !purchTableInteractionHelper.parmHeaderIsFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchOrderCopy), !purchTableInteractionHelper.parmHeaderIsFinalized());
+    
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, CreditNote), !purchTableInteractionHelper.parmHeaderIsFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, MarkupAllocation_Action), !purchTableInteractionHelper.parmHeaderIsFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, PurchasePrepay), !purchTableInteractionHelper.parmHeaderIsFinalized());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, Generate), !purchTableInteractionHelper.parmHeaderIsFinalized());
+    
+        // Calculate group
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, MultiLineDiscAction), purchTableInteractionHelper.parmbuttonMultiLineDiscEnabled());
+        listPage.actionPaneControlEnabled(formControlStr(RORPurchTableListPage, EndDiscAction), purchTableInteractionHelper.parmbuttonEndDiscEnabled() );
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setButtonVisibility</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Hides action pane buttons according to the list page type.
+    /// </summary>
+    /// <remarks>
+    ///    The method is only called one time when the list page is opened.
+    /// </remarks>
+    protected void setButtonVisibility()
+    {
+        switch (this.getListPageType())
+        {
+            case PurchTableListPage::NotSent:
+                // Purchase tab
+                //this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, AttachedDocumentsGeneral), false);
+    
+                // Receive tab
+                this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, ReceiveJournals), false);
+    
+                // Invoice tab
+                this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, InvoiceJournals), false);
+    
+                // Manage tab
+                this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, IntercompanyGeneral), false);
+    
+                break;
+    
+            case PurchTableListPage::Unconfirmed:
+                // Sell tab
+                this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, GroupNew), false);
+    
+                this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, Charges), false);
+                this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, CreditNote), false);
+    
+                // Invoice tab
+                this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, Invoice), false);
+    
+                break;
+    
+        }
+    
+    
+        // from form init UseQualityManagement
+        this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, manageQualityGeneral), useQualityManagement);
+    
+        this.listPage().actionPaneControlVisible(formControlStr(RORPurchTableListPage, buttonSubLedgerJournalLines), LedgerParameters::find().IsEncumbranceProcessEnabled == NoYes::Yes);
+    
+        // Set the visibility of LC/LG buttons
+        this.listPage().actionPaneControlVisible(
+            formControlStr(RORPurchTableListPage, bankLGRequestForm),
+            BankLGFeatureChecker::checkBankLGEnabled());
+    
+        this.listPage().actionPaneControlVisible(
+            formControlStr(RORPurchTableListPage, buttonCreateBankLCImport),
+            BankLCImportFeatureChecker::checkBankLCImportEnabled());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCaption</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Sets the form caption according to the list page type.
+    /// </summary>
+    /// <remarks>
+    ///    The method is only called one time when the list page is opened.
+    /// </remarks>
+    protected void setCaption()
+    {
+        //Name    name;
+    
+        //name = purchTable.isInterCompanyOrder() ? purchTable.DeliveryName : purchTable.PurchName;
+    
+        //this.listPage().caption(strfmt('%1 %2 %3 %4 %5', "@DNR1715", purchTable.PurchId, ',', "@SYS7399", name));
+    
+        /*switch (this.getListPageType())
+        {
+            case PurchTableListPage::Main :
+                //Don't change caption
+                break;
+            case PurchTableListPage::NotSent:
+                this.listPage().caption("@SYS117044");
+                break;
+            case PurchTableListPage::Unconfirmed:
+                this.listPage().caption("@SYS117045");
+                break;
+            case PurchTableListPage::ReceivedNotInvoiced:
+                this.listPage().caption("@SYS120064");
+                break;
+            case PurchTableListPage::Project:
+                this.listPage().caption("@SYS120701");
+                break;
+            case PurchTableListPage::AssignedToMe:
+                this.listPage().caption("@SYS302184");
+                break;
+            case PurchTableListPage::NotSubmitted:
+                this.listPage().caption("@SYS302185");
+                break;
+            case PurchTableListPage::Pending:
+                this.listPage().caption("@SYS302186");
+                break;
+    
+        }*/
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setGridFieldVisibility</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Hides fields in the grid.
+    /// </summary>
+    /// <remarks>
+    ///    The method is only called one time when the list page is opened.
+    /// </remarks>
+    protected void setGridFieldVisibility()
+    {
+        switch (this.getListPageType())
+        {
+            case PurchTableListPage::NotSent:
+            case PurchTableListPage::Unconfirmed:
+                // Grid
+                this.listPage().listPageFieldVisible(formControlStr(RORPurchTableListPage, PurchaseTable_PurchaseType), false);
+                this.listPage().listPageFieldVisible(formControlStr(RORPurchTableListPage, PurchaseTable_PurchStatus), false);
+                break;
+        }
+    
+        this.listPage().listPageFieldVisible(formControlStr(RORPurchTableListPage, qualityOrderStatusDisplayTable), useQualityManagement);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setListPageType</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Sets a list page type.
+    /// </summary>
+    /// <param name="_listPageArgs">
+    ///    The list page type.
+    /// </param>
+    protected void setListPageType(ListPageArgs _listPageArgs)
+    {
+        if (_listPageArgs && _listPageArgs.enumTypeParameter() == enumNum(PurchTableListPage))
+        {
+            purchTableListPage = _listPageArgs.enumParameter();
+        }
+        else
+        {
+            purchTableListPage = PurchTableListPage::Main;
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

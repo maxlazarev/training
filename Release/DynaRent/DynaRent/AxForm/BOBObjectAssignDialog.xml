@@ -1,0 +1,1254 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>BOBObjectAssignDialog</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class BOBObjectAssignDialog extends FormRun
+{
+    BOBObjectAvailabilityData   dataClass;
+    BOBObjectAssignmentEngine   engine;
+    BOBParameters               parameters;
+    RORRentalLine               callerRentalLine;
+    Timezone                    userTimeZone;
+
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInvalidInitFormMethodWarning", "Validation of caller must be performed before invoking super()")]
+    public void init()
+    {
+        if(element.args().caller())
+        {
+            DialogRunbase caller = element.args().caller();
+            engine = caller.runBase();
+            callerRentalLine = engine.parmRentalLine();
+
+            if(callerRentalLine.TradeType == RORTradeType::SalesPurch)
+            {
+                throw error(strFmt("@DNR8247", element.name(), "@SYS12223", "@DNR1720"));
+            }
+        }
+        else
+        {
+            throw error(error::missingRecord(element.name()));
+        }
+
+        parameters = BOBParameters::find();
+        userTimeZone = DateTimeUtil::getUserPreferredTimeZone();
+
+        dataClass = new BOBObjectAvailabilityData();
+        dataClass.parmCallerRentalLine(callerRentalLine);
+
+        element.updateAvailabilitySettings();
+
+       super(); 
+
+        element.linkPhysicalTableInstance();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        super();
+
+        element.refreshData();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSubRentalOrder</Name>
+				<Source><![CDATA[
+    private void createSubRentalOrder(BOBObjectAssignmentEngine _engine)
+    {
+        SalesLine salesLine = SalesLine::findRecId(callerRentalLine.RecId);
+        SalesTable salesTable = salesLine.salesTable();
+
+        if (!salesLine
+        ||  (salesLine.RORTradeType == RORTradeType::Rental     &&
+             salesLine.SalesType == SalesType::RORRental        &&
+             salesLine.SalesStatus == SalesStatus::Backorder    &&
+             salesLine.RemainInventPhysical != 0                &&
+             salesTable.FINCreditCheckNoWarning(true, false)    &&
+             salesTable.type().canCreatePurchOrder()            &&
+             // line should not have object assigned yet
+             !salesLine.inventDim().inventSerialId              &&
+             salesLine.type().RORcanCreatePurchOrder()))
+        {
+            Args args = new Args();
+            // Button is only available from Rental order lines
+            // so callerRentalLine is always a SalesLine
+            args.record(callerRentalLine);
+
+            MenuFunction mf = new MenuFunction(menuitemActionStr(PurchCreateFromSalesOrder_RORFromLine), MenuItemType::Action);
+            mf.run(args);
+
+            salesLine = SalesLine::findRecId(callerRentalLine.RecId);
+            PurchLine purchLine = purchLine::findInventTransId(salesLine.InventRefTransId);
+            InventDim inventDimPurchLine = purchLine.inventDim();
+
+            // Only close the form when a sub rental order has been created
+            if (_engine
+            &&  inventDimPurchLine.inventSerialId
+            &&  inventDimPurchLine.InventSerialId == salesLine.inventDim().InventSerialId)
+            {
+                _engine.parmWasSubRentalCreated(true);
+                element.closeCancel();
+            }
+        }
+        else
+        {
+            warning(strFmt("@DNR8597", salesLine.SalesId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateAvailabilitySettings</Name>
+				<Source><![CDATA[
+    private void updateAvailabilitySettings()
+    {
+        #TimeConstants
+
+        RORRentalDateTimes              rentalDateTimes;
+        BOBObjectAvailabilitySettings   settingsLocal;
+        Common                          common = callerRentalLine;
+        InventTransferLine              inventTransferLine = common as InventTransferLine;
+        BOBRentalType                   rentalType;
+        ;
+
+        ttsBegin;
+
+        if(callerRentalLine)
+        {
+            rentalType = BOBRentalType::find(callerRentalLine.BOBRentalTypeId);
+        }
+
+        settingsLocal = BOBObjectAvailabilitySettings::findOrCreate(curUserId(), true, true);
+
+        if (parameters.AssignmentFilterRentalTypeId && callerRentalLine)
+        {
+            settingsLocal.RentalTypeId = callerRentalLine.BOBRentalTypeId;
+        }
+        else if(!parameters.AssignmentFilterRentalTypeId)
+        {
+            settingsLocal.RentalTypeId = '';
+        }
+
+        if(parameters.AssignmentFilterObjectGroupId && callerRentalLine)
+        {
+            settingsLocal.ObjectGroupId = rentalType.ObjectGroupId;
+        }
+        else if(!parameters.AssignmentFilterObjectGroupId)
+        {
+            settingsLocal.ObjectGroupId = '';
+        }
+
+        if(parameters.AssignmentFilterObjectSubGroupId && callerRentalLine)
+        {
+            settingsLocal.ObjectSubGroupId = rentalType.ObjectSubGroupId;
+        }
+        else if(!parameters.AssignmentFilterObjectSubGroupId)
+        {
+            settingsLocal.ObjectSubGroupId = '';
+        }
+
+        if(parameters.AssignmentFilterCurrentDepotOnly)
+        {
+            settingsLocal.Depot = (callerRentalLine ?
+                                   InventDim::find(callerRentalLine.InventDimId).InventLocationId :
+                                   DNRWorkerDefaults::findByUserId().InventLocationId);
+        }
+        else
+        {
+            settingsLocal.Depot = '';
+        }
+
+        settingsLocal.Available         = parameters.AssignmentFilterBusObjAvailableOnly;
+        settingsLocal.CurrentCompany    = parameters.AssignmentFilterCurrentCompanyOnly;
+        settingsLocal.CurrentObjects    = parameters.AssignmentFilterCurrentObjectsOnly;
+        settingsLocal.BusObjAttrs       = parameters.AssignmentFilterBusObjAttrs && element.args().caller();
+
+        if(inventTransferLine)
+        {
+            settingsLocal.StartDateTime = inventTransferLine.shipTransDateTime();
+            settingsLocal.EndDateTime   = inventTransferLine.receiveTransDateTime();
+        }
+        else if(callerRentalLine)
+        {
+            rentalDateTimes = (callerRentalLine.RecId ?
+                               callerRentalLine.RORRentalDateTimesHost::rentalDateTimes() :
+                               callerRentalLine.RORGetHeader().RORRentalDateTimesHost::rentalDateTimes());
+
+            settingsLocal.StartDateTime = rentalDateTimes.OnRentDateTime;
+            settingsLocal.EndDateTime   = (DateTimeUtil::DNRIsDateTimePopulated(rentalDateTimes.OffRentDateTime) ?
+                                            rentalDateTimes.OffRentDateTime : rentalDateTimes.ExpectedOffRentDateTime);
+
+
+            settingsLocal.WPPDisplayMode = WPPPlanboardDisplayMode::Grid;
+        }
+        else if(!settingsLocal.StartDateTime || !settingsLocal.EndDateTime)
+        {
+            settingsLocal.StartDateTime   = DateTimeUtil::newDateTime((DateTimeUtil::getSystemDate(userTimeZone) - #daysPerWeek), 0, userTimeZone);
+            settingsLocal.EndDateTime     = DateTimeUtil::newDateTime((DateTimeUtil::getSystemDate(userTimeZone) + #daysPerWeek), timeMax(), userTimeZone);
+        }
+
+        // Graphical availability options
+        settingsLocal.RentalBusinessObject        = parameters.AssignmentFilterInclRentalBusObject;
+        settingsLocal.SubRentalBusinessObject     = parameters.AssignmentFilterInclSubRentalBusObject;
+        settingsLocal.ExternalBusinessObject      = parameters.AssignmentFilterInclExternalBusObject;
+        settingsLocal.SerializedBusinessObject    = parameters.AssignmentFilterInclSerializedBusObj;
+        settingsLocal.BulkBusinessObject          = parameters.AssignmentFilterInclBulkBusObject;
+
+        settingsLocal.update();
+
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>doAssignObject</Name>
+				<Source><![CDATA[
+    public void doAssignObject(InventSerialId _assignedSerialNumber)
+    {
+        engine.setNewSerialNum(_assignedSerialNumber);
+
+        if(engine.validate())
+        {
+            element.closeOk();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linkPhysicalTableInstance</Name>
+				<Source><![CDATA[
+    public void linkPhysicalTableInstance()
+    {
+        tmpObjectAvailability.linkPhysicalTableInstance(dataClass.parmTmpData());
+        tmpObjectAvailability_ds.executeQuery();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>refreshData</Name>
+				<Source><![CDATA[
+    public void refreshData()
+    {
+        dataClass.populateTmpData_Grid(BusinessObjectAttributes_ds);
+        element.linkPhysicalTableInstance();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="">
+			<DataSource>
+				<Name>tmpObjectAvailability</Name>
+				<Methods>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            QueryBuildDataSource qbdsTmpObjectAvailability;
+
+            super();
+
+            qbdsTmpObjectAvailability = this.query().dataSourceTable(tableNum(BOBTmpObjectAvailability));
+            qbdsTmpObjectAvailability.addSortField(fieldNum(BOBTmpObjectAvailability, RentalTypeSorting));
+            qbdsTmpObjectAvailability.addSortField(fieldNum(BOBTmpObjectAvailability, Priority));
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+			<DataSource>
+				<Name>ObjectAvailabilitySettings</Name>
+				<Methods>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            QueryBuildRange qbr;
+
+            super();
+
+            qbr = this.queryBuildDataSource().addRange(fieldNum(BOBObjectAvailabilitySettings, UserId));
+            qbr.value(curUserId());
+            qbr.status(RangeStatus::Hidden);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields>
+					<Field>
+						<DataField>InventLocationId</DataField>
+						<Methods>
+							<Method>
+								<Name>lookup</Name>
+								<Source><![CDATA[
+            public void lookup(FormControl _formControl, str _filterStr)
+            {
+                InventLocation::lookupByInventLocationType(_formControl, InventLocationType::Standard);
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>Prospect</DataField>
+						<Methods>
+							<Method>
+								<Name>lookup</Name>
+								<Source><![CDATA[
+            public void lookup(FormControl _formControl, str _filterStr)
+            {
+                smmBusRelTable::IRMLookupBusRelWithTypes(_formControl, true, false, false, true);
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+				</Fields>
+			</DataSource>
+			<DataSource>
+				<Name>BusinessObjectAttributes</Name>
+				<Methods>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            super();
+
+            this.populateBusinessObjectAttributes();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>populateBusinessObjectAttributes</Name>
+						<Source><![CDATA[
+        public void populateBusinessObjectAttributes()
+        {
+            // BP Deviation documented
+            BusinessObjectAttributes.setTmp();
+            BusinessObjectAttributes.setTmpData(dataClass.populateBusinessObjectAttributes(ObjectAvailabilitySettings ?  ObjectAvailabilitySettings : BOBObjectAvailabilitySettings::findOrCreate()));
+            BusinessObjectAttributes_ds.research();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields>
+					<Field>
+						<DataField>Value</DataField>
+						<Methods>
+							<Method>
+								<Name>lookup</Name>
+								<Source><![CDATA[
+            public void lookup(FormControl _formControl, str _filterStr)
+            {
+                DFMFieldLookupValue::lookupWithFieldId(_formControl, BusinessObjectAttributes.FieldId);
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+				</Fields>
+			</DataSource>
+		</DataSources>
+		<DataControls xmlns="">
+			<Control>
+				<Name>tmpObjectAvailability_StatusIcon</Name>
+				<Type>Image</Type>
+				<Methods>
+					<Method>
+						<Name>toolTip</Name>
+						<Source><![CDATA[
+        public str toolTip()
+        {
+            BOBConditionPriorities conditionPriorities = BOBConditionPriorities::findPriority(TmpObjectAvailability.Priority);
+            return strFmt("@SYS76498", conditionPriorities.Condition, conditionPriorities.Description);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>RORCreateSubRentalOrder</Name>
+				<Type>MenuFunctionButton</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            element.createSubRentalOrder(engine);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>RefreshButton</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            element.refreshData();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>OkButton</Name>
+				<Type>CommandButton</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            element.doAssignObject(TmpObjectAvailability.InventSerialId);
+
+            // closeOk is called from doAssignObject, so no need to call super here
+            // super();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources>
+		<AxFormDataSource xmlns="">
+			<Name>tmpObjectAvailability</Name>
+			<Table>BOBTmpObjectAvailability</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>Address</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>AssetId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>City</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DeliveryName</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FleetNumber</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventLocationId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventSerialId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventTransOrigin</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsAssignable</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ItemId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LastOnRentDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectAvailability</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectCategory</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectLocationPostalAddressRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectSubGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectTableRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PhysicalOwner</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Priority</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ProductDisplayNumber</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalTransRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalTypeDescription</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalTypeId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalTypeSorting</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RORExpectedOffRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ROROffRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ROROnRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StatusIcon</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Street</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ZipCode</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>ObjectAvailabilitySettings</Name>
+			<Table>BOBObjectAvailabilitySettings</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>Address</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Available</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BulkBusinessObject</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BusObjAttrs</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CellHeight</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>City</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CurrentCompany</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CurrentObjects</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Depot</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EndDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EndDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExternalBusinessObject</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>GraphicalAggregation</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventLocationId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ItemGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ItemSubGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MinHourWidth</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ObjectSubGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Prospect</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchOrderFormNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalBusinessObject</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalTypeId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RowItemWidth</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SalesId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SerializedBusinessObject</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StartDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StartDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Street</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SubRentalBusinessObject</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>UserId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>WPPDisplayMode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ZipCodeId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>BusinessObjectAttributes</Name>
+			<Table>DFMValueTrans</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>CreatedBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreatedDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FieldId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ModifiedBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ModifiedDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Value</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<OnlyFetchActive>Yes</OnlyFetchActive>
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+	</DataSources>
+	<Design>
+		<Caption xmlns="">@DNR6400</Caption>
+		<DialogSize xmlns="">Full</DialogSize>
+		<Pattern xmlns="">DialogFastTabs</Pattern>
+		<PatternVersion xmlns="">1.0</PatternVersion>
+		<Style xmlns="">Dialog</Style>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormTabControl">
+				<Name>Tab</Name>
+				<Type>Tab</Type>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>TabPageGrid</Name>
+						<Pattern>ToolbarList</Pattern>
+						<PatternVersion>1.2</PatternVersion>
+						<Type>TabPage</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>DateGroup</Name>
+								<Pattern>CustomFilters</Pattern>
+								<PatternVersion>1.1</PatternVersion>
+								<Type>Group</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateTimeControl">
+										<Name>ObjectAvailabilitySettings_StartDateTime</Name>
+										<Type>DateTime</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>StartDateTime</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateTimeControl">
+										<Name>ObjectAvailabilitySettings_EndDateTime</Name>
+										<Type>DateTime</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>EndDateTime</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+								</Controls>
+								<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+								<FrameType>None</FrameType>
+								<Style>CustomFilter</Style>
+								<ViewEditMode>Edit</ViewEditMode>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGridControl">
+								<Name>Grid</Name>
+								<Type>Grid</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormImageControl">
+										<Name>tmpObjectAvailability_StatusIcon</Name>
+										<ExtendedStyle>image_gridIcon</ExtendedStyle>
+										<HeightMode>Auto</HeightMode>
+										<Type>Image</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>StatusIcon</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+										<ShowLabel>No</ShowLabel>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormCheckBoxControl">
+										<Name>tmpObjectAvailability_ObjectAvailability</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>CheckBox</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ObjectAvailability</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+										<Label>@SYS5014</Label>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormCheckBoxControl">
+										<Name>tmpObjectAvailability_IsAssignable</Name>
+										<Type>CheckBox</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>IsAssignable</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_ObjectId</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ObjectId</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_InventSerialId</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>InventSerialId</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_FleetNumber</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>FleetNumber</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_AssetId</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>AssetId</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_RentalTypeId</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>RentalTypeId</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_ItemId</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<Visible>No</Visible>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ItemId</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_ProductDisplayNumber</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ProductDisplayNumber</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_Street</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>Street</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+										<DisplayHeight>1</DisplayHeight>
+										<DisplayHeightMode>Fixed</DisplayHeightMode>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>tmpObjectAvailability_City</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>City</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateTimeControl">
+										<Name>tmpObjectAvailability_ROROnRentDateTime</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>DateTime</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ROROnRentDateTime</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateTimeControl">
+										<Name>tmpObjectAvailability_RORExpectedOffRentDateTime</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>DateTime</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>RORExpectedOffRentDateTime</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateTimeControl">
+										<Name>tmpObjectAvailability_ROROffRentDateTime</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>DateTime</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ROROffRentDateTime</DataField>
+										<DataSource>tmpObjectAvailability</DataSource>
+									</AxFormControl>
+								</Controls>
+								<DataSource>tmpObjectAvailability</DataSource>
+								<MultiSelect>No</MultiSelect>
+								<ShowRowLabels>No</ShowRowLabels>
+							</AxFormControl>
+						</Controls>
+						<Caption>@DNR5871</Caption>
+						<FastTabExpanded>Always</FastTabExpanded>
+						<Style>DetailsFormGrid</Style>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>TabPageFilter</Name>
+						<Pattern>FieldsFieldGroups</Pattern>
+						<PatternVersion>1.1</PatternVersion>
+						<Type>TabPage</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>FilterGroupItem</Name>
+								<Type>Group</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ObjectAvailabilitySettings_RentalTypeId</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>RentalTypeId</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ObjectAvailabilitySettings_ObjectGroupId</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ObjectGroupId</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ObjectAvailabilitySettings_ObjectSubGroupId</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ObjectSubGroupId</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+								</Controls>
+								<Caption>@DNR7063</Caption>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>FilterGroupUser</Name>
+								<Type>Group</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ObjectAvailabilitySettings_Depot</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>Depot</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormCheckBoxControl">
+										<Name>ObjectAvailabilitySettings_Available</Name>
+										<Type>CheckBox</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>Available</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormCheckBoxControl">
+										<Name>ObjectAvailabilitySettings_CurrentCompany</Name>
+										<Type>CheckBox</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>CurrentCompany</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormCheckBoxControl">
+										<Name>ObjectAvailabilitySettings_CurrentObjects</Name>
+										<Type>CheckBox</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>CurrentObjects</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+								</Controls>
+								<Caption>@DNR7084</Caption>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>FilterGroupAddress</Name>
+								<Type>Group</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ObjectAvailabilitySettings_Street</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>Street</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ObjectAvailabilitySettings_City</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>City</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ObjectAvailabilitySettings_ZipCodeId</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ZipCodeId</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ObjectAvailabilitySettings_Address</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>Address</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+								</Controls>
+								<Caption>@SYS80373</Caption>
+							</AxFormControl>
+						</Controls>
+						<ColumnsMode>Fill</ColumnsMode>
+						<Caption>@DNR1332</Caption>
+						<FastTabExpanded>No</FastTabExpanded>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>TabPageBusinessObjectAttributes</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Pattern>ToolbarList</Pattern>
+						<PatternVersion>1.2</PatternVersion>
+						<Type>TabPage</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>FilterBusObjAttrsGrp</Name>
+								<Pattern>CustomFilters</Pattern>
+								<PatternVersion>1.1</PatternVersion>
+								<Type>Group</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormCheckBoxControl">
+										<Name>FilterBusObjAttrs</Name>
+										<Type>CheckBox</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>BusObjAttrs</DataField>
+										<DataSource>ObjectAvailabilitySettings</DataSource>
+									</AxFormControl>
+								</Controls>
+								<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+								<FrameType>None</FrameType>
+								<Style>CustomFilter</Style>
+								<ViewEditMode>Edit</ViewEditMode>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGridControl">
+								<Name>GridBusObjAttrs</Name>
+								<Type>Grid</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>BusinessObjectAttributes_FieldId</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>FieldId</DataField>
+										<DataSource>BusinessObjectAttributes</DataSource>
+										<Label>@SYS77030</Label>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>displayFieldName</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataMethod>displayFieldName</DataMethod>
+										<DataSource>BusinessObjectAttributes</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>BusinessObjectAttributes_Value</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>Value</DataField>
+										<DataSource>BusinessObjectAttributes</DataSource>
+										<Label>@DNR7062</Label>
+									</AxFormControl>
+								</Controls>
+								<DataSource>BusinessObjectAttributes</DataSource>
+							</AxFormControl>
+						</Controls>
+						<Caption>@DNR6192</Caption>
+					</AxFormControl>
+				</Controls>
+				<Style>FastTabs</Style>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormButtonGroupControl">
+				<Name>ButtonGroupCommit</Name>
+				<Type>ButtonGroup</Type>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormMenuFunctionButtonControl">
+						<Name>RORCreateSubRentalOrder</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>MenuFunctionButton</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<DataSource>TmpObjectAvailability</DataSource>
+						<MenuItemName>PurchCreateFromSalesOrder_RORFromLine</MenuItemName>
+						<MenuItemType>Action</MenuItemType>
+						<Text>@DNR7034</Text>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormButtonControl">
+						<Name>RefreshButton</Name>
+						<Type>Button</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Text>@SYS67314</Text>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>OkButton</Name>
+						<Type>CommandButton</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>OK</Command>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>CancelButton</Name>
+						<Type>CommandButton</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>Cancel</Command>
+						<SaveRecord>No</SaveRecord>
+					</AxFormControl>
+				</Controls>
+				<ArrangeMethod>HorizontalRight</ArrangeMethod>
+				<Style>DialogCommitContainer</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

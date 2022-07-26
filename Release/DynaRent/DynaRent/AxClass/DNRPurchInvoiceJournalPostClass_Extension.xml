@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchInvoiceJournalPostClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchInvoiceJournalPost))]
+public final class DNRPurchInvoiceJournalPostClass_Extension
+{
+    private Map projItemTransMap;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>postMarkupLine</Name>
+				<Source><![CDATA[
+    protected void postMarkupLine()
+    {
+        #ISOCountryRegionCodes
+        #define.easternEuropeAllandRU(['CZ','EE','HU','LT','LV','PL','RU'])
+
+        if (!SysCountryRegionCode::isLegalEntityInCountryRegion(#easternEuropeAllandRU) || !this.isProforma())
+        {
+            markup.parmINVInvoiceId(vendInvoiceJour.InvoiceId);
+        }
+
+        next postMarkupLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        next init();
+
+        projItemTransMap = new Map(Types::String, Types::Record);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postInventory</Name>
+				<Source><![CDATA[
+    protected void postInventory()
+    {
+        next postInventory();
+
+        VendInvoiceJour         vendInvoiceJour = this.parmJournalTable() as VendInvoiceJour;
+        PurchTable              purchTable      = vendInvoiceJour.purchTable();
+
+        if (purchTable.ProjId)
+        {
+            ProjItemTrans       projItemTrans;
+            InventTransOrigin   inventTransOrigin;
+
+            // Find item transactions on the project
+            select firstonly projItemTrans
+                exists join inventTransOrigin
+                where inventTransOrigin.InventTransId == vendInvoiceInfoLine.InventTransId
+            &&    inventTransOrigin.InventTransId == projItemTrans.InventTransId;
+    
+            if (projItemTrans)
+            {
+                this.WPPinsertIntoProjItemTransMap(vendInvoiceInfoLine.InventTransId, projItemTrans);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournalPost</Name>
+				<Source><![CDATA[
+    public void postJournalPost()
+    {
+        next postJournalPost();
+
+        this.WPPUpdateInvoiceStatus();
+        this.INVPostSubrentalCost2Project();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertMatchingSourceDocumentLine</Name>
+				<Source><![CDATA[
+    protected void insertMatchingSourceDocumentLine(SourceDocumentLineRecId _invoiceSourceDocumentLine,
+                                                    SourceDocumentLineRecId _packingSlipSourceDocumentLine,
+                                                    PurchQty _purchQuantity,
+                                                    InventQty _inventQuantity
+                                                    , PdsCWInventQty _cwQuantity
+                                                    )
+    {
+        next insertMatchingSourceDocumentLine(_invoiceSourceDocumentLine,
+                                                    _packingSlipSourceDocumentLine,
+                                                    _purchQuantity,
+                                                    _inventQuantity,
+                                                    _cwQuantity
+                                                    );
+
+        VendInvoicePackingSlipQuantityMatch vendInvoicePackingSlipQuantityMatch;
+        vendPackingSlipTrans vendPackingSlipTrans;
+        PurchLine purchLine;
+
+        select firstonly RecId from purchLine
+        where purchLine.RORTradeType != RORTradeType::SalesPurch
+            join vendPackingSlipTrans
+            where vendPackingSlipTrans.InventTransId == purchLine.InventTransId
+                join vendInvoicePackingSlipQuantityMatch
+                where vendInvoicePackingSlipQuantityMatch.PackingSlipSourceDocumentLine == vendPackingSlipTrans.SourceDocumentLine
+                &&    vendInvoicePackingSlipQuantityMatch.PackingSlipSourceDocumentLine == _packingSlipSourceDocumentLine;
+
+        if (purchLine)
+        {
+            vendInvoicePackingSlipQuantityMatch = VendInvoicePackingSlipQuantityMatch::find(_invoiceSourceDocumentLine, _packingSlipSourceDocumentLine, true);
+            if (vendInvoicePackingSlipQuantityMatch.RecId != 0)
+            {
+                vendInvoicePackingSlipQuantityMatch.Quantity -= _purchQuantity;
+                vendInvoicePackingSlipQuantityMatch.PdsCWQuantity -= _cwQuantity;
+                vendInvoicePackingSlipQuantityMatch.InventQuantity -= _inventQuantity;
+                vendInvoicePackingSlipQuantityMatch.update();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPinsertIntoProjItemTransMap</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public void WPPinsertIntoProjItemTransMap(InventTransId _inventTransId, ProjItemTrans _projItemTrans)
+    {
+        if (!projItemTransMap.exists(_inventTransId))
+        {
+            projItemTransMap.insert(_inventTransId, _projItemTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVVendInvoiceJour</Name>
+				<Source><![CDATA[
+    public VendInvoiceJour INVVendInvoiceJour()
+    {
+        return vendInvoiceJour;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPparmProjItemTransMap</Name>
+				<Source><![CDATA[
+    public Map WPPparmProjItemTransMap(Map _projItemTransMap = projItemTransMap)
+    {
+        projItemTransMap = _projItemTransMap;
+        return projItemTransMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPurchLine</Name>
+				<Source><![CDATA[
+    public PurchLine RORPurchLine()
+    {
+        return purchLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPUpdateInvoiceStatus</Name>
+				<Source><![CDATA[
+    public void WPPUpdateInvoiceStatus()
+    {
+        Map projItemTransMapLocal = projItemTransMap;
+
+        if (projItemTransMapLocal
+        &&  projItemTransMapLocal.elements())
+        {
+            WPPInvoiceStatusUpdate invoiceStatusUpdate = WPPInvoiceStatusUpdate::construct(WPPInvoiceStatusUpdateTrigger::PurchOrder);
+            invoiceStatusUpdate.parmProjItemTransMap(projItemTransMapLocal);
+            invoiceStatusUpdate.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVPostSubrentalCost2Project</Name>
+				<Source><![CDATA[
+    public void INVPostSubrentalCost2Project()
+    {
+        InvoiceId               invoiceId   = vendInvoiceJour.InvoiceId;
+        PurchTable              purchTableLocal  = vendInvoiceJour.purchTable();
+    
+        if (purchTableLocal.PurchaseType == PurchaseType::RORSubRental
+        &&  purchTableLocal.FINRentalProjectInvoicing())
+        {
+            RORSubrentalInvoiceProj::construct(this).run();
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

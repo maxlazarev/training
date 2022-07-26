@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>InventJournalCheckPost_BOBCounting</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class InventJournalCheckPost_BOBCounting extends InventJournalCheckPost_Movement
+{
+    BOBCountingJournalEngine    countingJournalEngine;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkTrans</Name>
+				<Source><![CDATA[
+    protected boolean checkTrans(JournalTransData _journalTransData)
+    {
+        InventQty           onHandQty;
+        InventDimParm       inventDimParmTrans;
+        InventDim           inventDimTrans;
+        InventJournalTrans  journalTrans;
+        BOBRentalType       rentalType;
+        boolean             ret = super(_journalTransData);
+    
+        if (ret)
+        {
+            journalTrans = _journalTransData.journalTrans();
+            inventDimTrans = journalTrans.inventDim();
+            inventDimParmTrans.initFromInventDim(inventDimTrans);
+
+            rentalType = BOBRentalType::findFromItemId(journalTrans.ItemId);
+    
+            if (rentalType && rentalType.Classification != BOBRentalTypeClassification::Virtual)
+            {
+                onHandQty = InventOnhand::newParameters(journalTrans.ItemId, inventDimTrans, inventDimParmTrans).availPhysical();
+
+                switch (rentalType.Classification)
+                {
+                    case BOBRentalTypeClassification::Serialized:
+                        if (!inventDimTrans.inventSerialId)
+                        {
+                            ret = checkFailed(strFmt("@DNR10086", journalTrans.ItemId));
+                        }
+    
+                        break;
+    
+                    case BOBRentalTypeClassification::Bulk:
+                        if (inventDimTrans.inventSerialId)
+                        {
+                            ret = checkFailed(strFmt("@DNR10089", journalTrans.ItemId));
+                        } 
+
+                        if(journalTrans.BOBCounted < 0)
+                        {
+                            ret = checkFailed(strFmt("@DNR10088", fieldPName(InventJournalTrans, Counted)));
+                        }
+                        break;
+    
+                    // no default case necessary
+                }
+            }
+            else
+            {
+                ret = checkFailed(strFmt("@DNR5945", journalTrans.ItemId));
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournal</Name>
+				<Source><![CDATA[
+    protected void postJournal(JournalTransList _journalTransList)
+    {
+        // We need to set the Posted flag on the journal table here (before the inventory
+        // is updated), because the BOBRentalTransManager needs to know whether the journal
+        // has been posted. The 'standard' update of the journal is performed too late.
+        this.updateJournalTablePosted(journalTableData.journalTable());
+    
+        super(_journalTransList);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postTrans</Name>
+				<Source><![CDATA[
+    protected void postTrans(JournalTransData _journalTransData)
+    {
+        InventJournalTrans journalTrans = _journalTransData.journalTrans();
+    
+        //Added since we do not call super()
+        progressCounter++;
+        progress.setCount(progressCounter);
+        progress.setText(this.progressText(_journalTransData));
+
+        BOBRentalType rentalType = BOBRentalType::find(journalTrans.BOBRentalTypeId);
+
+        if(journalTrans.BOBQty)
+        {
+            if(rentalType.Classification == BOBRentalTypeClassification::Bulk)
+            {
+        
+                //Update onHand
+                BOBRentalSumCorrection::runAdjustment(journalTrans.BOBRentalTypeId, 
+                                                      journalTrans.inventDim().InventLocationId, 
+                                                      DateTimeUtil::newDateTime(journalTrans.TransDate, journalTrans.BOBTransTime), 
+                                                      BOBExactDifference::Exact, 
+                                                      journalTrans.BOBQty);
+            }
+            else if(rentalType.Classification == BOBRentalTypeClassification::Serialized)
+            {
+                this.BOBAdjustSerializedObjectQty(journalTrans);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBAdjustSerializedObjectQty</Name>
+				<Source><![CDATA[
+    private void BOBAdjustSerializedObjectQty(InventJournalTrans _journalTrans)
+    {
+        BOBRentalTrans      rentalTrans;
+
+        rentalTrans.ObjectId            = BOBObjectTable::findInventSerialId(_journalTrans.inventDim().InventSerialId).ObjectId;
+        rentalTrans.RentalTypeId        = _journalTrans.BOBRentalTypeId;
+        rentalTrans.TransType           = BOBRentalTransType::InventCounting;
+        rentalTrans.ToDateTime          = DateTimeUtil::maxValue();
+        rentalTrans.FromDateTime        = DateTimeUtil::newDateTime(_journalTrans.TransDate, _journalTrans.BOBTransTime);
+        rentalTrans.CertaintyTo         = BOBDateTimeCertainty::Fixed;
+        rentalTrans.CertaintyFrom       = BOBDateTimeCertainty::Fixed;
+        rentalTrans.Active              = BOBRentalTransActive::Active;
+        rentalTrans.InventLocationId    = _journalTrans.inventDim().InventLocationId;
+        rentalTrans.SubStatus           = BOBRentalSubStatus::Delivered;
+        rentalTrans.Qty                 = _journalTrans.BOBQty;
+    
+        rentalTrans.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

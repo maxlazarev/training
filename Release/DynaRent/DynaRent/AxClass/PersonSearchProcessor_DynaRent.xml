@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>PersonSearchProcessor_DynaRent</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// The class <c>PersonSearchProcessor_DynaRent</c> executes personal information search criteria against:
+/// - DynaRent resources
+/// - DynaRent work locations
+/// </summary>
+[PersonSearchProcessorFactoryAttribute(PersonSearchModule::DynaRent)]
+public class PersonSearchProcessor_DynaRent extends PersonSearchProcessor
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>doSearch</Name>
+				<Source><![CDATA[
+    public void doSearch()
+    {
+        if (PersonSearchCriteriaKnownId::existAny(taskId))
+        {
+            // Note: It might not be required to explicitly find DynaRent resources based on a party number or a personnel number, because it is
+            // also possible to let the 'standard' framework find a party/worker based on a party number/personnel number, and then find the related
+            // DynaRent resource(s) based on the found party number(s) (i.e., from the method 'PersonSearchProcessor_onFindPartyLink()' in the class
+            // 'PersonSearch_DNREventHandler'). To be reviewed (i.e., it does no harm and performance is not a concern).
+            this.findResourceById();   
+        }
+
+        if (PersonSearchCriteriaName::existAny(taskId))
+        {
+            this.findResourceByName();   
+        }
+
+        if (PersonSearchCriteriaAddress::existAny(taskId))
+        {
+            this.findVenueByAddress();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findResourceById</Name>
+				<Source><![CDATA[
+    private void findResourceById()
+    {
+        WPPResourceTable            resourceTable;
+        HcmWorker                   hcmWorker;
+        DirPartyTable               dirPartyTable;
+        PersonSearchCriteriaKnownId personSearchCriteriaKnownId;
+
+        // 1) Find resources for which the resource category is 'Human resource' based on a party number or a personnel number.
+
+        while select RecId, TableId from resourceTable
+        where resourceTable.ResourceCategory == WPPResourceCategory::HumanResource
+            // For resources for which the resource category is 'Human resource', the relation account is mandatory, so use an 'inner join' instead
+            // of an 'outer join' (even though the related table cardinality is 'ZeroOne'). Furthermore, to find a resource for which the resource
+            // category is 'Human resource' based on a party number or a personnel number, the relation account must be populated. 
+            join TableId from hcmWorker
+            where hcmWorker.PersonnelNumber == resourceTable.RelationAccount
+                join PartyNumber from dirPartyTable
+                where dirPartyTable.RecId == hcmWorker.Person
+                    exists join personSearchCriteriaKnownId
+                    where personSearchCriteriaKnownId.TaskId == taskId
+                    &&    (
+                           (personSearchCriteriaKnownId.PartyNumber     != '' && dirPartyTable.PartyNumber == personSearchCriteriaKnownId.PartyNumber) ||
+                           (personSearchCriteriaKnownId.PersonnelNumber != '' && hcmWorker.PersonnelNumber == personSearchCriteriaKnownId.PersonnelNumber)
+                          )
+        {
+            PersonSearchResult::findOrCreateResult(
+                taskId,
+                PersonSearchResultCategory::WPPResource,
+                resourceTable.RecId,
+                resourceTable.TableId,
+                '',
+                dirPartyTable.PartyNumber);
+ 
+            PersonSearchPartyNumberTmp::findOrCreate(taskId, dirPartyTable.PartyNumber);
+        }
+
+        // 2) Find resources for which the resource category is 'Vendor' based on a party number.
+
+        while select RecId, TableId from resourceTable
+        where resourceTable.ResourceCategory == WPPResourceCategory::Vendor
+            // For resources for which the resource category is 'Vendor', the relation account is not mandatory. However, to find a resource for
+            // which the resource category is 'Vendor' based on a party number, the relation account must be populated. Therefore, use an 'inner 
+            // join' instead of an 'outer join' (even though the related table cardinality is 'ZeroOne').
+            join PartyNumber from dirPartyTable
+            where dirPartyTable.PartyNumber == resourceTable.RelationAccount
+                exists join personSearchCriteriaKnownId
+                where personSearchCriteriaKnownId.TaskId        == taskId
+                &&    personSearchCriteriaKnownId.PartyNumber   != ''
+                &&    resourceTable.RelationAccount             == personSearchCriteriaKnownId.PartyNumber
+        {
+            PersonSearchResult::findOrCreateResult(
+                taskId,
+                PersonSearchResultCategory::WPPResource,
+                resourceTable.RecId,
+                resourceTable.TableId,
+                '',
+                dirPartyTable.PartyNumber);
+ 
+            PersonSearchPartyNumberTmp::findOrCreate(taskId, dirPartyTable.PartyNumber);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findResourceByName</Name>
+				<Source><![CDATA[
+    private void findResourceByName()
+    {
+        WPPResourceTable            resourceTable;
+        HcmWorker                   hcmWorker;
+        DirPartyTable               dirPartyTable;
+        PersonSearchCriteriaName    personSearchCriteriaName;
+
+        str nameFilterFirstName, nameFilterMiddleName, nameFilterLastName, nameFilterLastNamePrefix, nameFilterNameAlias;
+
+        // 1) Find resources for which the resource category is 'Human resource' based on a name.
+
+        while select Name, RecId, TableId from resourceTable
+        where resourceTable.ResourceCategory == WPPResourceCategory::HumanResource
+            // For resources for which the resource category is 'Human resource', the relation account is mandatory, so use an 'inner join' instead
+            // of an 'outer join' (even though the related table cardinality is 'ZeroOne').
+            join TableId from hcmWorker
+            where hcmWorker.PersonnelNumber == resourceTable.RelationAccount
+                join PartyNumber from dirPartyTable
+                where dirPartyTable.RecId == hcmWorker.Person
+                    join FirstName, MiddleName, LastName, LastNamePrefix, NameAlias from personSearchCriteriaName
+                    where personSearchCriteriaName.TaskId == taskId
+        {
+            nameFilterFirstName         = '*' + personSearchCriteriaName.FirstName + '*';
+            nameFilterMiddleName        = '*' + personSearchCriteriaName.MiddleName + '*';
+            nameFilterLastName          = '*' + personSearchCriteriaName.LastName + '*';
+            nameFilterLastNamePrefix    = '*' + personSearchCriteriaName.LastNamePrefix + '*';
+            nameFilterNameAlias         = '*' + personSearchCriteriaName.NameAlias + '*';
+
+            // Including these conditions in the 'while select' statement results in unexpected behaviour, so execute the conditions separately.
+            if ((personSearchCriteriaName.FirstName         != '' && resourceTable.Name like nameFilterFirstName) ||
+                (personSearchCriteriaName.MiddleName        != '' && resourceTable.Name like nameFilterMiddleName) ||
+                (personSearchCriteriaName.LastName          != '' && resourceTable.Name like nameFilterLastName) ||
+                (personSearchCriteriaName.LastNamePrefix    != '' && resourceTable.Name like nameFilterLastNamePrefix) ||
+                (personSearchCriteriaName.NameAlias         != '' && resourceTable.Name like nameFilterNameAlias)
+               )
+            {
+                PersonSearchResult::findOrCreateResult(
+                    taskId,
+                    PersonSearchResultCategory::WPPResource,
+                    resourceTable.RecId,
+                    resourceTable.TableId,
+                    '',
+                    dirPartyTable.PartyNumber);
+
+                PersonSearchPartyNumberTmp::findOrCreate(taskId, dirPartyTable.PartyNumber);
+            }
+        }
+
+        // 2) Find resources for which the resource category is 'Vendor' based on a name.
+
+        while select Name, RecId, TableId from resourceTable
+        where resourceTable.ResourceCategory == WPPResourceCategory::Vendor
+            join FirstName, MiddleName, LastName, LastNamePrefix, NameAlias from personSearchCriteriaName
+            where personSearchCriteriaName.TaskId == taskId
+                outer join PartyNumber from dirPartyTable
+                where dirPartyTable.PartyNumber == resourceTable.RelationAccount
+        {
+            nameFilterFirstName         = '*' + personSearchCriteriaName.FirstName + '*';
+            nameFilterMiddleName        = '*' + personSearchCriteriaName.MiddleName + '*';
+            nameFilterLastName          = '*' + personSearchCriteriaName.LastName + '*';
+            nameFilterLastNamePrefix    = '*' + personSearchCriteriaName.LastNamePrefix + '*';
+            nameFilterNameAlias         = '*' + personSearchCriteriaName.NameAlias + '*';
+
+            // Including these conditions in the 'while select' statement results in unexpected behaviour, so execute the conditions separately.
+            if ((personSearchCriteriaName.FirstName         != '' && resourceTable.Name like nameFilterFirstName) ||
+                (personSearchCriteriaName.MiddleName        != '' && resourceTable.Name like nameFilterMiddleName) ||
+                (personSearchCriteriaName.LastName          != '' && resourceTable.Name like nameFilterLastName) ||
+                (personSearchCriteriaName.LastNamePrefix    != '' && resourceTable.Name like nameFilterLastNamePrefix) ||
+                (personSearchCriteriaName.NameAlias         != '' && resourceTable.Name like nameFilterNameAlias)
+               )
+            {
+                PersonSearchResult::findOrCreateResult(
+                    taskId,
+                    PersonSearchResultCategory::WPPResource,
+                    resourceTable.RecId,
+                    resourceTable.TableId,
+                    '',
+                    dirPartyTable.PartyNumber);
+
+                PersonSearchPartyNumberTmp::findOrCreate(taskId, dirPartyTable.PartyNumber);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findVenueByAddress</Name>
+				<Source><![CDATA[
+    private void findVenueByAddress()
+    {
+        RORVenueTable               venueTable;
+        LogisticsPostalAddress      logisticsPostalAddress;
+        PersonSearchCriteriaAddress personSearchCriteriaAddress;
+
+        while select crosscompany RecId, TableId, DataAreaId from venueTable
+            // The field 'PostalAddress' is not mandatory. However, to find a work location based on address information, the field 'PostalAddress'
+            // must be populated. Therefore, use an 'inner join' instead of an 'outer join' (even though the related table cardinality is 'ZeroOne').
+            join TableId from logisticsPostalAddress
+            where logisticsPostalAddress.RecId == venueTable.PostalAddress
+                exists join personSearchCriteriaAddress
+                where personSearchCriteriaAddress.TaskId == taskId
+                &&    (personSearchCriteriaAddress.Location         == 0    || logisticsPostalAddress.Location          == personSearchCriteriaAddress.Location)
+                &&    (personSearchCriteriaAddress.Street           == ''   || logisticsPostalAddress.Street            == personSearchCriteriaAddress.Street)
+                &&    (personSearchCriteriaAddress.StreetNumber     == ''   || logisticsPostalAddress.StreetNumber      == personSearchCriteriaAddress.StreetNumber)
+                &&    (personSearchCriteriaAddress.City             == ''   || logisticsPostalAddress.City              == personSearchCriteriaAddress.City)
+                &&    (personSearchCriteriaAddress.ZipCode          == ''   || logisticsPostalAddress.ZipCode           == personSearchCriteriaAddress.ZipCode)
+                &&    (personSearchCriteriaAddress.County           == ''   || logisticsPostalAddress.County            == personSearchCriteriaAddress.County)
+                &&    (personSearchCriteriaAddress.State            == ''   || logisticsPostalAddress.State             == personSearchCriteriaAddress.State)
+                &&    (personSearchCriteriaAddress.CountryRegionId  == ''   || logisticsPostalAddress.CountryRegionId   == personSearchCriteriaAddress.CountryRegionId)
+        {
+            PersonSearchResult::findOrCreateResult(
+                taskId,
+                PersonSearchResultCategory::RORVenue,
+                venueTable.RecId,
+                venueTable.TableId,
+                venueTable.DataAreaId);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

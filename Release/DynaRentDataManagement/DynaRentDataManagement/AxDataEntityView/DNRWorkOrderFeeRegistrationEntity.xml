@@ -1,0 +1,534 @@
+<?xml version='1.0' encoding='utf-8'?>
+<AxDataEntityView xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRWorkOrderFeeRegistrationEntity</Name>
+	<SourceCode>
+		<Declaration>
+public class DNRWorkOrderFeeRegistrationEntity extends common
+{
+}
+</Declaration>
+		<Methods>
+			<Method>
+				<Name>update</Name>
+				<Source>
+    public void update()
+    {
+        ttsbegin;
+        this.RecId = this.createFeeJournal();
+        ttscommit;
+    }
+
+</Source>
+			</Method>
+			<Method>
+				<Name>insert</Name>
+				<Source>
+    public void insert()
+    {
+        this.RecId = this.createFeeJournal();
+    }
+
+</Source>
+			</Method>
+			<Method>
+				<Name>createFeeJournal</Name>
+				<Source>
+    private RecId createFeeJournal()
+    {
+        ProjJournalTableData    JournalTableData;
+        ProjJournalTransData    journalTransData;
+        ProjJournalTable        journalTable, journalTableUpd;
+        ProjJournalTrans        journalTrans, journalTransSelect;
+        ProjTable               projTable = ProjTable::find(this.ProjId);
+        ProjInvoiceTable        projInvoiceTable;
+        NumberSeq               numberSeq;
+        ProjJournalCheckPost    jourPost;
+        JournalNumOfLines       numOfLines;
+        ResourceView            resourceView;
+        ProjParameters          projParameters = ProjParameters::find();
+        boolean                 differentJour = false, newLineCreated = false;
+
+        ttsBegin;
+
+        journalTableData = JournalTableData::newTable(journalTable);
+        journalTransData = journalTableData.journalStatic().newJournalTransData(journalTrans, journalTableData);
+
+        if (this.JournalId)
+        {
+            //First check if the journal already exists
+            select firstonly journalTable
+            where journalTable.JournalId     == this.JournalId
+            &amp;&amp;    journalTable.JournalType   == ProjJournalType::Revenue
+            &amp;&amp;    journalTable.ProjId        == this.ProjId
+            &amp;&amp;    !journalTable.Posted;
+        }
+        
+        if (!journalTable)
+        {
+            //Check if an open journal already exists
+            select firstonly journalTable
+            where journalTable.ProjId        == this.ProjId
+            &amp;&amp;    journalTable.JournalType   == ProjJournalType::Revenue
+            &amp;&amp;    journalTable.CategoryId    == ProjParameters.RevenueCategory
+            &amp;&amp;    journalTable.JournalNameId == projParameters.RevenueJournalNameId
+            &amp;&amp;    !journalTable.Posted;
+        }
+
+        if (!journalTable)
+        {
+            // Create a new JournalTable
+            journalTable.clear();
+            journalTable.JournalId      = journalTableData.nextJournalId();
+            journalTable.JournalType    = ProjJournalType::Revenue;
+            journalTable.JournalNameId  = projParameters.RevenueJournalNameId;
+            journalTable.CategoryId     = ProjParameters.RevenueCategory;
+            journalTable.ProjId         = this.ProjId;
+            journalTable.initFromProjJournalName(ProjJournalName::find(journalTable.JournalNameId));
+            journalTable.insert();
+
+            differentJour               = true;
+        }
+
+        if (this.LineNum &amp;&amp; !differentJour)
+        {
+            select firstonly forupdate journalTrans
+            where journalTrans.JournalId == journalTable.JournalId
+            &amp;&amp;    journalTrans.LineNum   == this.LineNum;
+        }
+
+        if (!journalTrans)
+        {
+            journalTrans.clear();
+            journalTransData.initFromJournalTable();
+
+            //select firstonly LineNum from journalTransSelect
+            select firstonly maxof(LineNum), count(RecId) from journalTransSelect
+            //order by LineNum desc
+            where journalTransSelect.JournalId == journalTrans.JournalId;
+
+            journalTrans.LineNum        = journalTransSelect.LineNum + 1;
+
+            journalTrans.ProjId         = this.ProjId;
+            journalTrans.CategoryId     = journalTable.CategoryId;
+
+            if (!journalTrans.CategoryId)
+            {
+                WPPWorkOrderLine  workOrderLine;
+                workOrderLine   = WPPWorkOrderLine::findTaskId(this.WorkOrderId, this.WorkOrderTaskId);
+                journalTrans.CategoryId = journalTrans.WPPDefaultProjCategory(workOrderLine.TaskId, workOrderLine.RecId);
+            }
+
+            if (!journalTrans.CategoryId)
+            {
+                journalTrans.CategoryId = projParameters.RevenueJournalNameId;
+            }
+
+            journalTrans.DefaultDimension   = projTable.DefaultDimension;
+            journalTrans.TaxGroupId         = ProjParameters::taxGroupInvoice(projTable.ProjId);
+
+            numberSeq                       = NumberSeq::newGetVoucherFromId(journalTable.VoucherNumberSequenceTable, false);
+            journalTrans.Voucher            = numberSeq.voucher();
+        }
+
+        // Init JournalTrans
+        journalTableData.initFromJournalName(journalTableData.journalStatic().findJournalName(journalTable.JournalNameId));
+        
+        projInvoiceTable                    = projTable.projInvoice();
+        journalTrans.setTransDate();
+        journalTrans.TransDate              = this.TransDate;
+        journalTrans.ProjTransDate          = systemDateGet();
+        journalTrans.LinePropertyId         = this.LineProperty; 
+        journalTrans.ActivityNumber         = this.ActivityNumber;
+        journalTrans.Txt                    = this.Description;
+        journalTrans.SalesPrice             = this.SalesPrice;
+
+        if (this.CurrencyId)
+        {
+            journalTrans.CurrencyId         = this.CurrencyId;
+        }
+        else if (projInvoiceTable.CurrencyId)
+        {
+            journalTrans.CurrencyId         = projInvoiceTable.CurrencyId;
+        }
+        else
+        {
+            journalTrans.CurrencyId         = 'EUR';
+        }
+        
+        select firstonly resourceView 
+        where resourceView.Name == this.ResourceName
+        &amp;&amp;    resourceView.ResourceCompanyId == this.ResourceCompanyId;
+
+        if (resourceView.RecId)
+        {
+            journalTrans.Resource           = resourceView.RecId;
+        }
+        else
+        {
+            throw error (strFmt("Resource with name %1 in company %2 not found", this.ResourceName, this.ResourceCompanyId));
+        }
+
+        if (journalTrans)
+        {
+            journalTrans.update();
+        }
+        else
+        {
+            journalTrans.insert();
+            
+            update_recordset journalTableUpd
+            //setting NumOfLines     = journalTrans.LineNum
+            setting NumOfLines     = journalTransSelect.RecId + 1
+            where journalTableUpd.JournalId == journalTable.JournalId;
+        }
+        //journalTransData.create();
+
+        ttsCommit;
+
+        if (this.PostJournal)
+        {
+            journalTable.reread();
+
+            // Validating the journal
+            jourPost = ProjJournalCheckPost::newJournalCheckPost(true,true,JournalCheckPostType::Check,tableNum(ProjJournalTable),journalTable.JournalId);
+
+            // Posting the journal
+            jourPost = ProjJournalCheckPost::newJournalCheckPost(true,true,JournalCheckPostType::Post,tableNum(ProjJournalTable), journalTable.JournalId);
+
+            jourPost.run();
+        }
+
+        return journalTrans.RecId;
+    }
+
+</Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source>
+    public boolean validateWrite()
+    {
+        boolean ret;
+    
+        ret = super();
+
+        if (ret)
+        {
+            WPPWorkOrderLine                workOrderLine;
+            WPPWorkOrderStatusRegistration  workOrderStatusRegistration;
+            WPPWorkOrderStatusGroup         workOrderStatusGroup;
+            WPPWorkOrderTaskTable           workOrderTaskTable;
+
+            workOrderLine = WPPWorkOrderLine::findTaskId(this.WorkOrderId, this.WorkOrderTaskId);
+
+            if (!workOrderLine)
+            {
+                throw error (strFmt("Work order line with work order id %1 and task id %2 not found", this.WorkOrderId, this.WorkOrderTaskId));
+            }
+            select firstOnly workOrderStatusRegistration
+            where workOrderStatusRegistration.Status == workOrderLine.Status
+                exists join workOrderStatusGroup
+                where workOrderStatusGroup.WorkOrderStatusGroupId == workOrderStatusRegistration.WorkOrderStatusGroupId
+                    join TableId from workOrderTaskTable
+                    where workOrderTaskTable.WorkOrderStatusGroupId == workOrderStatusGroup.WorkOrderStatusGroupId
+                    &amp;&amp;    workOrderTaskTable.TaskId                 == workOrderLine.TaskId;
+
+            WPPWorkOrderTableInteractionHelper workOrderTableInteractionHelper = WPPWorkOrderTableInteractionHelper::construct();
+            workOrderTableInteractionHelper.initLineActions(workOrderLine, workOrderStatusRegistration);
+            ret = workOrderTableInteractionHelper.parmButtonJournalsEnabled();
+
+            if (!ret)
+            {
+                throw error (strFmt("Fee journal posting is not allowed on work order id %1 and task id %2", this.WorkOrderId, this.WorkOrderTaskId));
+            }
+        }
+
+        return ret;
+    }
+
+</Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<ConfigurationKey>DNRDeletedObjects_DynaRentDataManagement</ConfigurationKey><DeveloperDocumentation>Exports/imports fee registration for a work order line</DeveloperDocumentation>
+	<Label>@DNR10188</Label>
+	<DataManagementEnabled>Yes</DataManagementEnabled>
+	<DataManagementStagingTable>DNRWorkOrderFeeRegistrationStaging</DataManagementStagingTable>
+	<EntityCategory>Transaction</EntityCategory>
+	<IsPublic>Yes</IsPublic>
+	<PrimaryKey>EntityKey</PrimaryKey>
+	<PublicCollectionName>DNRWorkOrderLineFeeRegistrations</PublicCollectionName>
+	<PublicEntityName>DNRWorkOrderLineFeeRegistrations</PublicEntityName>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>ActivityNumber</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>ActivityNumber</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>ResourceName</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>Name</DataField>
+			<DataSource>ResourceView</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>ResourceCompanyId</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>ResourceCompanyId</DataField>
+			<DataSource>ResourceView</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>ResourceCategoryId</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>ResourceCategory</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>Description</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>Txt</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>LineProperty</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>LinePropertyId</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>ProjId</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>ProjId</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>PostJournal</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>Posted</DataField>
+			<DataSource>ProjJournalTable</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>TransDate</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<DataField>TransDate</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>WorkOrderId</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>WorkOrderId</DataField>
+			<DataSource>WPPWorkOrderLine</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>WorkOrderTaskId</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>TaskId</DataField>
+			<DataSource>WPPWorkOrderLine</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>LineNum</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<Mandatory>Yes</Mandatory>
+			<DataField>LineNum</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>JournalId</Name>
+			<DataField>JournalId</DataField>
+			<DataSource>ProjJournalTable</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>CurrencyId</Name>
+			<DataField>CurrencyId</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+			<Name>SalesPrice</Name>
+			<DataField>SalesPrice</DataField>
+			<DataSource>ProjJournalTrans</DataSource>
+		</AxDataEntityViewField>
+	</Fields>
+	<Keys>
+		<AxDataEntityViewKey>
+			<Name>EntityKey</Name>
+			<Fields>
+				<AxDataEntityViewKeyField>
+					<DataField>WorkOrderId</DataField>
+				</AxDataEntityViewKeyField>
+				<AxDataEntityViewKeyField>
+					<DataField>WorkOrderTaskId</DataField>
+				</AxDataEntityViewKeyField>
+				<AxDataEntityViewKeyField>
+					<DataField>TransDate</DataField>
+				</AxDataEntityViewKeyField>
+				<AxDataEntityViewKeyField>
+					<DataField>ResourceName</DataField>
+				</AxDataEntityViewKeyField>
+				<AxDataEntityViewKeyField>
+					<DataField>SalesPrice</DataField>
+				</AxDataEntityViewKeyField>
+			</Fields>
+		</AxDataEntityViewKey>
+	</Keys>
+	<Mappings />
+	<Ranges />
+	<Relations>
+		<AxDataEntityViewRelation>
+			<Name>DNRWorkOrderLineEntity</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedDataEntity>DNRWorkOrderLineEntity</RelatedDataEntity>
+			<RelatedDataEntityCardinality>ZeroOne</RelatedDataEntityCardinality>
+			<RelatedDataEntityRole>WorkOrderLine</RelatedDataEntityRole>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxDataEntityViewRelationConstraint i:type="AxDataEntityViewRelationConstraintField">
+					<Name>RelationConstraintField1</Name>
+					<Field>WorkOrderId</Field>
+					<RelatedField>WorkOrderId</RelatedField>
+				</AxDataEntityViewRelationConstraint>
+				<AxDataEntityViewRelationConstraint i:type="AxDataEntityViewRelationConstraintField">
+					<Name>RelationConstraintField2</Name>
+					<Field>WorkOrderTaskId</Field>
+					<RelatedField>TaskId</RelatedField>
+				</AxDataEntityViewRelationConstraint>
+			</Constraints>
+		</AxDataEntityViewRelation>
+	</Relations>
+	<StateMachines />
+	<ViewMetadata>
+		<Name>Metadata</Name>
+		<SourceCode>
+			<Methods>
+				<Method>
+					<Name>classDeclaration</Name>
+					<Source>
+[Query]
+public class Metadata extends QueryRun
+{
+}
+</Source>
+				</Method>
+			</Methods>
+		</SourceCode>
+		<DataSources>
+			<AxQuerySimpleRootDataSource>
+				<Name>WPPWorkOrderLine</Name>
+				<DynamicFields>Yes</DynamicFields>
+				<IsReadOnly>Yes</IsReadOnly>
+				<Table>WPPWorkOrderLine</Table>
+				<DataSources>
+					<AxQuerySimpleEmbeddedDataSource>
+						<Name>ProjJournalTable</Name>
+						<DynamicFields>Yes</DynamicFields>
+						<Table>ProjJournalTable</Table>
+						<DataSources>
+							<AxQuerySimpleEmbeddedDataSource>
+								<Name>ProjJournalTrans</Name>
+								<DynamicFields>Yes</DynamicFields>
+								<Table>ProjJournalTrans</Table>
+								<DataSources>
+									<AxQuerySimpleEmbeddedDataSource>
+										<Name>ResourceView</Name>
+										<DynamicFields>Yes</DynamicFields>
+										<Table>ResourceView</Table>
+										<DataSources />
+										<DerivedDataSources />
+										<Fields />
+										<Ranges />
+										<Relations>
+											<AxQuerySimpleDataSourceRelation>
+												<Name>QueryDataSourceRelation1</Name>
+												<Field>Resource</Field>
+												<JoinDataSource>ProjJournalTrans</JoinDataSource>
+												<RelatedField>RecId</RelatedField>
+											</AxQuerySimpleDataSourceRelation>
+										</Relations>
+									</AxQuerySimpleEmbeddedDataSource>
+								</DataSources>
+								<DerivedDataSources />
+								<Fields />
+								<Ranges />
+								<FetchMode>OneToN</FetchMode>
+								<Relations>
+									<AxQuerySimpleDataSourceRelation>
+										<Name>QueryDataSourceRelation1</Name>
+										<JoinDataSource>ProjJournalTable</JoinDataSource>
+										<JoinRelationName>ProjJournalTable_1</JoinRelationName>
+										<RelatedField>JournalId</RelatedField>
+									</AxQuerySimpleDataSourceRelation>
+								</Relations>
+							</AxQuerySimpleEmbeddedDataSource>
+						</DataSources>
+						<DerivedDataSources />
+						<Fields />
+						<Ranges>
+							<AxQuerySimpleDataSourceRange>
+								<Name>JournalNameId</Name>
+								<Field>JournalNameId</Field>
+								<Value>Fee</Value>
+							</AxQuerySimpleDataSourceRange>
+						</Ranges>
+						<FetchMode>OneToN</FetchMode>
+						<Relations>
+							<AxQuerySimpleDataSourceRelation>
+								<Name>QueryDataSourceRelation1</Name>
+								<Field>ProjId</Field>
+								<JoinDataSource>WPPWorkOrderLine</JoinDataSource>
+								<RelatedField>ProjId</RelatedField>
+							</AxQuerySimpleDataSourceRelation>
+						</Relations>
+					</AxQuerySimpleEmbeddedDataSource>
+				</DataSources>
+				<DerivedDataSources />
+				<Fields />
+				<Ranges>
+					<AxQuerySimpleDataSourceRange>
+						<Name>ProjId</Name>
+						<Field>ProjId</Field>
+						<Value>!=""</Value>
+					</AxQuerySimpleDataSourceRange>
+				</Ranges>
+				<GroupBy />
+				<Having />
+				<OrderBy />
+			</AxQuerySimpleRootDataSource>
+		</DataSources>
+	</ViewMetadata>
+</AxDataEntityView>

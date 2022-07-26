@@ -1,0 +1,408 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBCountingJournalEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBCountingJournalEngine
+{
+    BOBParameters       parameters;
+
+    InventJournalTable  inventJournalTable;
+    InventJournalTable  inventJournalTableConversion;
+
+    Set                 setInventJournalTransCounting;
+    RecordInsertList    rilInventJournalTransConversion;
+
+    TransDate           callerTransDate;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>addTrans</Name>
+				<Source><![CDATA[
+    public void addTrans(RefRecId _inventJournalTransCounting)
+    {
+        setInventJournalTransCounting.add(_inventJournalTransCounting);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createBulkProposal</Name>
+				<Source><![CDATA[
+    private void createBulkProposal(InventJournalTrans _inventJournalTransCounting, TransDate _transDate)
+    {
+        InventJournalTrans      inventJournalTransConversion;
+        AssetTable              assetTableParent, assetTableChild;
+        AssetBook               assetBook;
+        AssetBookTable          assetBookTable;
+        AssetGroupBookSetup     assetGroupBookSetup;
+        AssetQuantity           qtyRemaining, qtyTotal;
+        AssetUnitOfMeasure      unitOfMeasure;
+        AssetParameters         assetParameters;
+        AssetBookId             bookId;
+        BOBObjectTable          objectTable;
+        BOBObjectAssetLog       objectAssetLog;
+        EcoResProduct           ecoResProduct;
+        InventTable             inventTable;
+        InventJournalTableData  journalTableData;
+        InventJournalTransData  journalTransData;
+        RecordInsertList        insertList;
+        Counter                 cnt;
+        ;
+    
+        qtyRemaining    = _inventJournalTransCounting.Qty;
+        assetParameters = AssetParameters::find();
+        insertList      = new RecordInsertList(tableNum(InventJournalTrans));
+    
+        // get the relevant value model -- check the default one on the parameters first
+        // in case it's not populated there, use the bulk parent fixed asset's asset group's first value model in the 'current' layer
+        // in case it's not populated there either, use the bulk parent fixed asset's first value model in the 'current' layer
+        select firstOnly UnitOfMeasure, BOBIsBulkParent from assetTableParent
+        where assetTableParent.AssetId == _inventJournalTransCounting.AssetId
+            outer join TableId from assetGroupBookSetup
+            where assetGroupBookSetup.AssetGroup == assetTableParent.AssetGroup
+                outer join BookId from assetBookTable
+                where assetBookTable.BookId == assetGroupBookSetup.BookId
+                &&    assetBookTable.CurrentOperationsTax == CurrentOperationsTax::Current;
+    
+        if(!assetTableParent.BOBIsBulkParent)
+        {
+            throw error("@DNR8133");
+        }
+    
+        unitOfMeasure = assetTableParent.UnitOfMeasure;
+        bookId = (assetParameters.BookIdDefault ? assetParameters.BookIdDefault : assetBookTable.BookId);
+    
+        if(!bookId)
+        {
+            select firstOnly BookId from assetBook
+            where assetBook.AssetId == _inventJournalTransCounting.AssetId
+                exists join assetBookTable
+                where assetBookTable.BookId == assetBook.BookId
+                && assetBookTable.CurrentOperationsTax == CurrentOperationsTax::Current;
+    
+            bookId = assetBook.BookId;
+        }
+    
+        if(!bookId)
+        {
+            throw error("@SYS100036");
+        }
+    
+        // iterate the bulk child fixed assets whose relevant value model has the correct status
+        while select TableId from objectTable
+            join TableId from objectAssetLog
+            where objectAssetLog.ObjectId == objectTable.ObjectId
+            &&    objectAssetLog.AssetId == _inventJournalTransCounting.AssetId
+                join AssetId, Quantity from assetTableChild
+                where assetTableChild.DataAreaId == objectAssetLog.AssetCompanyId
+                &&    assetTableChild.MainAssetId == objectAssetLog.AssetId
+                &&    assetTableChild.Quantity > 0
+                    join  TableId from assetBook
+                    where assetBook.AssetId == assetTableChild.AssetId
+                    &&    assetBook.BookId == bookId
+                    &&    assetBook.Status == AssetStatus::Open
+                        join TableId from ecoResProduct
+                        where ecoResProduct.BOBRentalTypeId == objectTable.RentalTypeId
+                        &&    ecoResProduct.DisplayProductNumber == ecoResProduct.BOBRentalTypeId
+                            join ItemId from inventTable
+                            where inventTable.Product == ecoResProduct.RecId
+        {
+            inventJournalTransConversion.clear();
+            inventJournalTransConversion.initFromInventJournalTrans(_inventJournalTransCounting);
+            inventJournalTransConversion.initFromInventTable(_inventJournalTransCounting.inventTable());
+            inventJournalTransConversion.TransDate         = _transDate;
+            inventJournalTransConversion.JournalId         = inventJournalTable.JournalId;
+            inventJournalTransConversion.AssetTransType    = AssetTransTypeJournal::DisposalScrap;
+            inventJournalTransConversion.AssetBookId       = bookId;
+            inventJournalTransConversion.AssetId           = assetTableChild.AssetId;
+            inventJournalTransConversion.ItemId            = inventTable.ItemId;
+            inventJournalTransConversion.InventDimId       = _inventJournalTransCounting.InventDimId;
+            inventJournalTransConversion.Qty               = _inventJournalTransCounting.Qty;
+            inventJournalTransConversion.CostPrice         = _inventJournalTransCounting.CostPrice;
+            inventJournalTransConversion.CostAmount        = _inventJournalTransCounting.CostAmount;
+    
+            journalTableData = new InventJournalTableData(inventJournalTransConversion.inventJournalTable());
+            journalTransData = new InventJournalTransData(inventJournalTransConversion, journalTableData);
+            journalTransData.initFromJournalTable();
+    
+            if(journalTableData.journalVoucherNum() && journalTableData.journalTable().VoucherDraw == JournalVoucherDraw::Entering)
+            {
+                journalTransData.initVoucher(inventJournalTransConversion.Voucher, true);
+            }
+    
+            insertList.add(inventJournalTransConversion);
+    
+            qtyRemaining -= inventJournalTransConversion.Qty;
+            qtyTotal += inventJournalTransConversion.Qty;
+    
+            if(qtyRemaining == 0)
+            {
+                break;
+            }
+        }
+    
+        cnt = insertList.insertDatabase();
+        info(strFmt("@DNR8135", cnt, qtyTotal, unitOfMeasure));
+    
+        if(qtyTotal != -_inventJournalTransCounting.Qty)
+        {
+            warning(strFmt("@DNR8136", -_inventJournalTransCounting.Qty, unitOfMeasure, qtyTotal));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createConversionJournal</Name>
+				<Source><![CDATA[
+    public void createConversionJournal()
+    {
+        ttsBegin;
+    
+        this.createJournalTable();
+        this.createJournalTrans();
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalTable</Name>
+				<Source><![CDATA[
+    private void createJournalTable()
+    {
+        InventJournalName   journalName;
+        ;
+    
+        if (!inventJournalTableConversion)
+        {
+            journalName = InventJournalName::find(parameters.InventJournalNameId);
+    
+            if(journalName)
+            {
+                inventJournalTableConversion.JournalNameId = journalName.JournalNameId;
+                inventJournalTableConversion.initFromInventJournalName(journalName);
+                inventJournalTableConversion.BOBInventJournalType = BOBInventJournalType::AssetToInvent;
+                inventJournalTableConversion.insert();
+            }
+            else
+            {
+                throw error(strFmt("@DFM120", journalName.JournalNameId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalTrans</Name>
+				<Source><![CDATA[
+    private void createJournalTrans()
+    {
+        BOBRentalType           rentalType;
+        TransDate               transDate;
+        InventJournalTrans      inventJournalTransCounting;
+        SetEnumerator           seTrans;
+        RefRecId                recIdTrans;
+        ;
+    
+        seTrans = setInventJournalTransCounting.getEnumerator();
+    
+        while (seTrans.moveNext())
+        {
+            recIdTrans = seTrans.current();
+    
+            select firstOnly inventJournalTransCounting
+            where inventJournalTransCounting.RecId == recIdTrans;
+    
+            callerTransDate = (callerTransDate ? callerTransDate : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+            transDate = (inventJournalTransCounting.TransDate ? inventJournalTransCounting.TransDate : callerTransDate);
+    
+            select firstOnly Classification, RecId from rentalType
+            where rentalType.RentalTypeId == inventJournalTransCounting.BOBRentalTypeId;
+    
+            Debug::assert(rentalType.RecId != 0);
+    
+            switch(rentalType.Classification)
+            {
+                case BOBRentalTypeClassification::Serialized:
+                    this.createSingleProposal(inventJournalTransCounting, transDate);
+                    break;
+    
+                case BOBRentalTypeClassification::Bulk:
+                    this.createBulkProposal(inventJournalTransCounting, transDate);
+                    break;
+    
+                default:
+                    throw error(strFmt("@DNR5945", inventJournalTransCounting.ItemId));
+            }
+        }
+    
+        if (rilInventJournalTransConversion)
+        {
+            rilInventJournalTransConversion.insertDatabase();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSingleProposal</Name>
+				<Source><![CDATA[
+    private void createSingleProposal(InventJournalTrans _inventJournalTransCounting, TransDate _transDate)
+    {
+        InventJournalTableData  journalTableData;
+        InventJournalTransData  journalTransData;
+        InventJournalTrans      inventJournalTransConversion;
+    
+        journalTableData = new InventJournalTableData(inventJournalTableConversion);
+        journalTransData = new InventJournalTransData(inventJournalTransConversion, journalTableData);
+        journalTransData.initFromJournalTable();
+    
+        if(journalTableData.journalVoucherNum() && journalTableData.journalTable().VoucherDraw == JournalVoucherDraw::Entering)
+        {
+            journalTransData.initVoucher(inventJournalTransConversion.Voucher, true);
+        }
+    
+        inventJournalTransConversion.initFromInventJournalTrans(_inventJournalTransCounting);
+        inventJournalTransConversion.initFromInventTable(_inventJournalTransCounting.inventTable());
+        inventJournalTransConversion.TransDate         = _transDate;
+        inventJournalTransConversion.LineNum           = 1;
+        inventJournalTransConversion.AssetTransType    = AssetTransTypeJournal::DisposalScrap;
+        inventJournalTransConversion.InventDimId       = _inventJournalTransCounting.InventDimId;
+    
+        if (!rilInventJournalTransConversion)
+        {
+            rilInventJournalTransConversion = new RecordInsertList(tableNum(InventJournalTrans));
+        }
+    
+        rilInventJournalTransConversion.add(inventJournalTransConversion);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasLines</Name>
+				<Source><![CDATA[
+    public boolean hasLines()
+    {
+        return (!setInventJournalTransCounting.empty());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromInventJournalTable</Name>
+				<Source><![CDATA[
+    private void initFromInventJournalTable(InventJournalTable _inventJournalTable)
+    {
+        inventJournalTable = _inventJournalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromInventJournalTrans</Name>
+				<Source><![CDATA[
+    private void initFromInventJournalTrans(InventJournalTrans _inventJournalTrans)
+    {
+        inventJournalTable = _inventJournalTrans.inventJournalTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        parameters = BOBParameters::find();
+        setInventJournalTransCounting = new Set(Types::Int64);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerTransDate</Name>
+				<Source><![CDATA[
+    public TransDate parmCallerTransDate(TransDate _callerTransDate = callerTransDate)
+    {
+        callerTransDate = _callerTransDate;
+    
+        return callerTransDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postConversionJournal</Name>
+				<Source><![CDATA[
+    public void postConversionJournal()
+    {
+        JournalCheckPost checkPost = InventJournalCheckPost::newJournalCheckPost(JournalCheckPostType::Post, inventJournalTableConversion);
+        checkPost.runOperation();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    private boolean validate(InventJournalTrans _inventJournalTransCounting)
+    {
+        boolean             ret = true;
+    
+        if (!_inventJournalTransCounting)
+        {
+            ret = false;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createFromInventJournalTable</Name>
+				<Source><![CDATA[
+    public static BOBCountingJournalEngine createFromInventJournalTable(InventJournalTable _inventJournalTableCounting, TransDate _transDate = dateNull())
+    {
+        BOBCountingJournalEngine engine;
+        ;
+    
+        engine = new BOBCountingJournalEngine();
+        engine.initFromInventJournalTable(_inventJournalTableCounting);
+        engine.parmCallerTransDate(_transDate);
+    
+        return engine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createFromInventJournalTrans</Name>
+				<Source><![CDATA[
+    public static void createFromInventJournalTrans(InventJournalTrans _inventJournalTransCounting, TransDate _transDate = dateNull())
+    {
+        BOBCountingJournalEngine engine;
+        ;
+    
+        engine = new BOBCountingJournalEngine();
+        engine.initFromInventJournalTrans(_inventJournalTransCounting);
+        engine.parmCallerTransDate(_transDate);
+        engine.addTrans(_inventJournalTransCounting.RecId);
+    
+        engine.createJournalTable();
+        engine.createJournalTrans();
+    
+        //engine.Validate, engine.Post
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

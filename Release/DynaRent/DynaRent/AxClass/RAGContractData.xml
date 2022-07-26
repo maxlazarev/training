@@ -1,0 +1,1061 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RAGContractData</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RAGContractData implements SysPackable
+{
+    // packed variables
+    RAGContractDataParm     dataParm;
+    Map                     contractLineMap;        // { [ RAGContractLevel, RAGRentalTypeRelation ], RAGTmpContractLine }
+    Map                     contractTierMap;        // { [ RAGContractLevel, RAGRentalTypeRelation, RAGAgreementType, RORNumOfPeriods, RAGPriceTierPeriod ], RAGTmpContractLineTier }
+    
+    // helper collections
+    Map                     rentalTypeNameMap;      // { BOBRentalTypeId, Name }
+    Map                     rentalTypeGroupNameMap; // { RAGRentalTypeGroupId, Name }
+    Map                     rentalTypeGroupMap;     // { BOBRentalTypeId, RAGRentalTypeGroupId }
+    Map                     rentalGroupTypeMap;    // {RAGRentalTypeGroupId, set{BOBRentalTypeId}}
+
+    RAGTmpContractLineTier  lastCalculatedContractTier; //no need to be packed
+
+    boolean                 contractLineTierPopulatedFromCache;
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getContractLineTmpRecord</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// returns contract line record buffer
+    /// assumes that the contract lines have been populated from a rental line
+    /// </summary>
+    /// <returns>uncommitted contract line record buffer</returns>
+    public RAGTmpContractLine getContractLineTmpRecord()
+    {
+        RAGTmpContractLine ret;
+    
+        if(contractLineMap.elements() == 1)
+        {
+            MapEnumerator enumerator = contractLineMap.getEnumerator();
+            enumerator.moveNext(); // first record
+            ret.data(enumerator.currentValue());
+        }
+        // If there is no rental agreement found it is fine. Prices will be 0 in that case.
+        // Throw an error if there is more than 1 matching agreement in the map
+        else if (!contractLineMap.empty())
+        {
+            throw error("@DNR6586");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContractLineTmpTable</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// returns the contract lines in a tempDb table
+    /// assumes that the contract lines have already been populated
+    /// </summary>
+    /// <returns>pointer to tempDb table holding the contract lines</returns>
+    public RAGTmpContractLine getContractLineTmpTable()
+    {
+        RAGTmpContractLine ret;
+        RecordInsertList insertList = new RecordInsertList(tableNum(RAGTmpContractLine), false, false, false, false, false, ret);
+        MapEnumerator enumerator = contractLineMap.getEnumerator();
+    
+        while(enumerator.moveNext())
+        {
+            ret.data(enumerator.currentValue());
+            insertList.add(ret);
+        }
+    
+        insertList.insertDatabase();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContractTierTmpTable</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// returns the contract tiers in a tempDb table
+    /// assumes that the contract tiers have already been populated
+    /// </summary>
+    /// <returns>pointer to tempDb table holding the contract tiers</returns>
+    public RAGTmpContractLineTier getContractTierTmpTable()
+    {
+        RAGTmpContractLineTier ret;
+        RecordInsertList insertList = new RecordInsertList(tableNum(RAGTmpContractLineTier), false, false, false, false, false, ret);
+        MapEnumerator enumerator = contractTierMap.getEnumerator();
+    
+        while(enumerator.moveNext())
+        {
+            ret.data(enumerator.currentValue());
+            insertList.add(ret);
+        }
+    
+        insertList.insertDatabase();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTierMultiplier</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// shortcut for retrieving the relevant tier multiplier, given a set of parameters
+    /// assumes that the contract tiers have already been populated
+    /// </summary>
+    /// <returns>relevant tier mulitplier</returns>
+    public RAGTierMultiplier getTierMultiplier(BOBRentalTypeId _rentalTypeId, RAGAgreementType _agmtType, RORNumOfPeriods _numOfPeriods, RAGPriceTierPeriod _priceTierPeriod)
+    {
+        #TimeConstants
+        RAGTierMultiplier       ret = 1.0;
+
+        if (contractTierMap.empty())
+        {
+            return ret;
+        }
+
+        MapEnumerator           enumerator = contractTierMap.getEnumerator();
+        RAGTmpContractLineTier  tmpTier;
+        RAGPriceTierPeriod      highestPriceTierPeriod;
+        RORNumOfPeriods         highestNumOfTierPeriods;
+
+        while(enumerator.moveNext())
+        {
+            tmpTier.data(enumerator.currentValue());
+    
+            if(tmpTier.RentalTypeRelation == _rentalTypeId
+            && tmpTier.AgreementType == _agmtType
+            && tmpTier.Activate == NoYes::Yes
+            && ((_priceTierPeriod == RAGPriceTierPeriod::ChargeableHours && tmpTier.TierPeriod == RAGPriceTierPeriod::ChargeableHours && tmpTier.NumOfTierPeriods <= _numOfPeriods) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::ChargeableDays  && tmpTier.TierPeriod == RAGPriceTierPeriod::ChargeableDays  && tmpTier.NumOfTierPeriods <= _numOfPeriods) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::Days            && tmpTier.TierPeriod == RAGPriceTierPeriod::Days            && tmpTier.NumOfTierPeriods <= _numOfPeriods) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::Days            && tmpTier.TierPeriod == RAGPriceTierPeriod::Hours           && tmpTier.NumOfTierPeriods <= _numOfPeriods * #hoursPerDay) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::Hours           && tmpTier.TierPeriod == RAGPriceTierPeriod::Days            && tmpTier.NumOfTierPeriods <= _numOfPeriods / #hoursPerDay) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::Hours           && tmpTier.TierPeriod == RAGPriceTierPeriod::Hours           && tmpTier.NumOfTierPeriods <= _numOfPeriods)))
+            {
+                if (tmpTier.TierPeriod > highestPriceTierPeriod || (tmpTier.TierPeriod == highestPriceTierPeriod && tmpTier.NumOfTierPeriods > highestNumOfTierPeriods))
+                {
+                    highestPriceTierPeriod = tmpTier.TierPeriod;
+                    highestNumOfTierPeriods = tmpTier.NumOfTierPeriods;
+                    ret = tmpTier.Multiplier;
+
+                    lastCalculatedContractTier.data(tmpTier);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getHighestTierMultiplier</Name>
+				<Source><![CDATA[
+    public RORNumOfPeriods getHighestTierMultiplier(BOBRentalTypeId _rentalTypeId, RAGAgreementType _agmtType, RAGPriceTierPeriod _priceTierPeriod)
+    {
+        #TimeConstants
+    
+        MapEnumerator           enumerator = contractTierMap.getEnumerator();
+        RAGTmpContractLineTier  tmpTier;
+        RORNumOfPeriods         highestNumOfTierPeriods;
+        RORNumOfPeriods         ret = 0;
+    
+        while(enumerator.moveNext())
+        {
+            tmpTier.data(enumerator.currentValue());
+    
+            if(tmpTier.RentalTypeRelation == _rentalTypeId
+            && tmpTier.AgreementType == _agmtType
+            && tmpTier.Activate == NoYes::Yes
+            && ((_priceTierPeriod == RAGPriceTierPeriod::ChargeableHours && tmpTier.TierPeriod == RAGPriceTierPeriod::ChargeableHours) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::ChargeableDays  && tmpTier.TierPeriod == RAGPriceTierPeriod::ChargeableDays) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::Days            && tmpTier.TierPeriod == RAGPriceTierPeriod::Days) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::Days            && tmpTier.TierPeriod == RAGPriceTierPeriod::Hours) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::Hours           && tmpTier.TierPeriod == RAGPriceTierPeriod::Days) ||
+                (_priceTierPeriod == RAGPriceTierPeriod::Hours           && tmpTier.TierPeriod == RAGPriceTierPeriod::Hours)))
+            {
+                if (tmpTier.NumOfTierPeriods > highestNumOfTierPeriods)
+                {
+                    highestNumOfTierPeriods = tmpTier.NumOfTierPeriods;
+                    ret = highestNumOfTierPeriods;
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRangeTiersMap</Name>
+				<Source><![CDATA[
+    public Map getRangeTiersMap(BOBRentalTypeId _rentalTypeId, RAGAgreementType _agmtType)
+    {
+        Map                     rangeTiersMap = new Map(Types::Integer, Types::Real);
+        MapEnumerator           enumerator = contractTierMap.getEnumerator();
+        RAGTmpContractLineTier  tmpTier;        
+    
+        while (enumerator.moveNext())
+        {
+            tmpTier.data(enumerator.currentValue());
+    
+            if (tmpTier.RentalTypeRelation == _rentalTypeId
+            && tmpTier.AgreementType == _agmtType
+            && tmpTier.Activate == NoYes::Yes
+            && tmpTier.TierPeriod == RAGPriceTierPeriod::AfterDays)
+            {
+                rangeTiersMap.insert(tmpTier.NumOfTierPeriods, tmpTier.Multiplier);
+            }
+        }
+    
+        return rangeTiersMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initNameMaps</Name>
+				<Source><![CDATA[
+    protected void initNameMaps()
+    {
+        BOBRentalType               rentalType;
+        RAGRentalTypeGroup          rentalTypeGroup;
+        RAGRentalTypeGroupSorting   sorting;
+    
+        rentalTypeNameMap       = new Map(Types::String, Types::String);
+        rentalTypeGroupNameMap  = new Map(Types::String, Types::String);
+    
+        while select RentalTypeId, Description from rentalType
+            exists join sorting
+            where sorting.TypeRelation == rentalType.RentalTypeId
+            &&    sorting.TypeGroup == RAGTypeGroup::Type
+            &&   (!dataParm.BOBRentalTypeId || sorting.TypeRelation == dataParm.BOBRentalTypeId)
+        {
+            rentalTypeNameMap.insert(rentalType.RentalTypeId, rentalType.Description);
+        }
+    
+        if(!dataParm.BOBRentalTypeId)
+        {
+            while select RentalTypeGroupId, Name from rentalTypeGroup
+            exists join sorting
+            where sorting.TypeRelation == rentalTypeGroup.RentalTypeGroupId
+            &&    sorting.TypeGroup == RAGTypeGroup::Group
+            {
+                rentalTypeGroupNameMap.insert(rentalTypeGroup.RentalTypeGroupId, rentalTypeGroup.Name);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initRentalTypeGroupMap</Name>
+				<Source><![CDATA[
+    protected void initRentalTypeGroupMap()
+    {
+        BOBRentalType rentalType;
+        rentalTypeGroupMap = new Map(Types::String, Types::String);
+        rentalGroupTypeMap = new Map(Types::String, Types::Class);
+        Set rentalTypeSet;
+        RAGRentalTypeGroupSorting   sorting;
+    
+        while select RentalTypeId, RAGRentalTypeGroupId from rentalType
+        where (!dataParm.BOBRentalTypeId || rentalType.RentalTypeId == dataParm.BOBRentalTypeId)
+            exists join sorting
+            where sorting.TypeGroup == RAGTypeGroup::Type
+            &&    sorting.TypeRelation == rentalType.RentalTypeId
+        {
+            rentalTypeGroupMap.insert(rentalType.RentalTypeId, rentalType.RAGRentalTypeGroupId);
+            
+            if (rentalType.RAGRentalTypeGroupId)
+            {
+                rentalTypeSet = rentalGroupTypeMap.exists(rentalType.RAGRentalTypeGroupId) ? 
+                                rentalGroupTypeMap.lookup(rentalType.RAGRentalTypeGroupId) : new Set(Types::String);
+                rentalTypeSet.add(rentalType.RentalTypeId);
+                rentalGroupTypeMap.insert(rentalType.RAGRentalTypeGroupId, rentalTypeSet);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        contractLineMap = new Map(Types::Container, Types::Record);
+        contractTierMap = new Map(Types::Container, Types::Record);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [ buf2Con(dataParm), contractLineMap.pack(), contractTierMap.pack() ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDataParm</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// get or set the contract parameters
+    /// </summary>
+    /// <param name = "_parm">record buffer holding initialized contract parameters</param>
+    /// <returns>contract parameters record buffer that was used to populate the contract data</returns>
+    public RAGContractDataParm parmDataParm(RAGContractDataParm _parm = dataParm)
+    {
+        dataParm = _parm;
+        return dataParm;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateContractLines</Name>
+				<Source><![CDATA[
+    public void populateContractLines()
+    {
+        //This configuration key condition is temporary to limit the usage of this functionality until it is thoroughly tested. 
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRCEIntegration)))
+        {
+            RAGContractLineCache contractLineCache = this.findContractLineCache();
+            if (contractLineCache)
+            {
+                this.populateContractDataFromCache(contractLineCache);
+            }
+            else
+            {
+                this.doPopulateContractLines();
+
+                if (dataParm.RefRecId && dataParm.RefTableId)
+                {
+                    this.populateCacheFromContractData();
+                }
+            }
+        }
+        else
+        {
+            this.doPopulateContractLines();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findContractLineCache</Name>
+				<Source><![CDATA[
+    protected RAGContractLineCache findContractLineCache()
+    {
+        RAGContractLineCache contractLineCache;
+
+        if (dataParm.RefRecId && dataParm.RefTableId)
+        {
+            select firstonly contractLineCache
+            where contractLineCache.RefRecId   == dataParm.RefRecId
+            &&    contractLineCache.RefTableId == dataParm.RefTableId;
+        }
+
+        return contractLineCache;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>doPopulateContractLines</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// populates the contract lines only -- no tiers
+    /// </summary>
+    public void doPopulateContractLines()
+    {
+        container                   keyCon;
+        MapEnumerator               enumerator;
+        Description                 contractDescription;
+        RAGTmpContractLine          tmpContractLine;
+        RAGContractLine             contractLine;
+        RAGRentalTypeGroupSorting   sorting;
+        Query                       query;
+        QueryRun                    queryRun;
+    
+        if(!dataParm.CanPopulate)
+        {
+            return;
+        }
+        
+        contractDescription = RAGContractTable::find(dataParm.ContractId).Description;
+        this.initRentalTypeGroupMap();
+
+        if(dataParm.MustPopulateNames)
+        {
+            this.initNameMaps();
+        }
+    
+        // prepare Map entries for rental types and rental type groups
+        while select sorting
+        order by TypeGroup desc, LineNum asc
+        where (!dataParm.BOBRentalTypeId || sorting.TypeRelation == dataParm.BOBRentalTypeId)
+        &&    (!dataParm.BOBRentalTypeId || sorting.TypeGroup == RAGTypeGroup::Type)
+        {
+            tmpContractLine.clear();
+            tmpContractLine.ContractId          = dataParm.ContractId;
+            tmpContractLine.ContractName        = contractDescription;
+            tmpContractLine.RentalTypeRelation  = sorting.TypeRelation;
+            tmpContractLine.LineNum             = sorting.LineNum;
+    
+            if(sorting.TypeGroup == RAGTypeGroup::Type)
+            {
+                tmpContractLine.ContractLevel = RAGContractLevel::RentalType;
+    
+                if(dataParm.MustPopulateNames && rentalTypeNameMap.exists(tmpContractLine.RentalTypeRelation))
+                {
+                    tmpContractLine.RentalTypeRelationName = rentalTypeNameMap.lookup(tmpContractLine.RentalTypeRelation);
+                }
+            }
+            else
+            {
+                tmpContractLine.ContractLevel = RAGContractLevel::Group;
+    
+                if(dataParm.MustPopulateNames && rentalTypeGroupNameMap.exists(tmpContractLine.RentalTypeRelation))
+                {
+                    tmpContractLine.RentalTypeRelationName = rentalTypeGroupNameMap.lookup(tmpContractLine.RentalTypeRelation);
+                }
+            }
+    
+            keyCon = [ tmpContractLine.ContractLevel, tmpContractLine.RentalTypeRelation ];
+            contractLineMap.insert(keyCon, tmpContractLine);
+        }
+    
+        // prepare a Map entry for the contract itself
+        if(!dataParm.BOBRentalTypeId)
+        {
+            tmpContractLine.clear();
+            tmpContractLine.ContractId      = dataParm.ContractId;
+            tmpContractLine.ContractName    = contractDescription;
+            tmpContractLine.ContractLevel   = RAGContractLevel::Contract;
+    
+            keyCon = [ tmpContractLine.ContractLevel, '' ];
+            contractLineMap.insert(keyCon, tmpContractLine);
+        }
+    
+        // retrieve and apply all relevant contract lines from the database
+        query = RAGContractLine::buildQuery(dataParm.contractHierarchyRange(),
+                                            SortOrder::Descending,
+                                            false,
+                                            RAGContractLineQueryType::Agmts,
+                                            dataParm.BOBRentalTypeId);
+        queryRun = new QueryRun(query);
+
+        if (!rentalTypeGroupMap)
+        {
+            this.initRentalTypeGroupMap();
+        }
+    
+        while(queryRun.next())
+        {
+            contractLine = queryRun.get(tableNum(RAGContractLine));
+            keyCon = [ contractLine.ContractLevel, contractLine.RentalTypeRelation ];
+    
+            if(contractLineMap.exists(keyCon))
+            {
+                tmpContractLine = contractLineMap.lookup(keyCon);
+                tmpContractLine.setValues(contractLine);
+                contractLineMap.insert(keyCon, tmpContractLine); // overwrite previous record buffer
+            }
+    
+            // cascade group-level information onto lower level record buffers 
+            if (contractLine.ContractLevel == RAGContractLevel::Group 
+            &&  !rentalGroupTypeMap.empty()
+            &&  rentalGroupTypeMap.exists(contractLine.RentalTypeRelation)
+            &&  RAGAgreementTypeSetup::find(contractLine.AgreementType).IsActiveForRentalType)
+            {
+                Set rentalTypeSet =  rentalGroupTypeMap.lookup(contractLine.RentalTypeRelation);
+                SetEnumerator setEnumerator = rentalTypeSet.getEnumerator();
+                while (setEnumerator.moveNext())
+                {
+                    keyCon = [RAGContractLevel::RentalType, setEnumerator.current()];
+    
+                    if (contractLineMap.exists(keyCon))
+                    {
+                        tmpContractLine = contractLineMap.lookup(keyCon);
+                        tmpContractLine.setValues(contractLine);
+                        contractLineMap.insert(keyCon, tmpContractLine); // overwrite previous record buffer
+                    }
+                }
+            }
+    
+            // cascade contract-level information onto lower level record buffers
+            if(contractLine.ContractLevel == RAGContractLevel::Contract)
+            {
+                enumerator = contractLineMap.getEnumerator();
+    
+                while(enumerator.moveNext())
+                {
+                    keyCon = enumerator.currentKey();
+                    tmpContractLine = enumerator.currentValue();
+    
+                    if((tmpContractLine.ContractLevel == RAGContractLevel::Group && RAGAgreementTypeSetup::find(contractLine.AgreementType).IsActiveForGroup)
+                    || (tmpContractLine.ContractLevel == RAGContractLevel::RentalType && RAGAgreementTypeSetup::find(contractLine.AgreementType).IsActiveForRentalType))
+                    {
+                        tmpContractLine.setValues(contractLine);
+                        contractLineMap.insert(keyCon, tmpContractLine); // overwrite previous record buffer
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateContractTiers</Name>
+				<Source><![CDATA[
+    public void populateContractTiers()
+    {
+        //This configuration key condition is temporary to limit the usage of this functionality until it is thoroughly tested.
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRCEIntegration)))
+        {
+            if (!contractLineTierPopulatedFromCache)
+            {
+                RAGContractLineCache contractLineCache = this.findContractLineTierCache();
+
+                if (contractLineCache)
+                {
+                    this.populateContractDataFromCache(contractLineCache);
+                }
+                else
+                {
+                    this.doPopulateContractTiers();
+
+                    if (dataParm.RefRecId && dataParm.RefTableId)
+                    {
+                        this.populateCacheFromContractData();
+                    }
+                }
+            }
+        }
+        else
+        {
+            this.doPopulateContractTiers();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findContractLineTierCache</Name>
+				<Source><![CDATA[
+    protected RAGContractLineCache findContractLineTierCache()
+    {
+        RAGContractLineTierCache    contractLineTierCache;
+        RAGContractLineCache        contractLineCache;
+
+        //First fetch contract data from cached records
+        if (dataParm.RefRecId && dataParm.RefTableId)
+        {
+            select firstonly contractLineCache
+            where contractLineCache.RefRecId   == dataParm.RefRecId
+            &&    contractLineCache.RefTableId == dataParm.RefTableId
+                exists join contractLineTierCache
+                where contractLineTierCache.ContractLineCacheRecId == contractLineCache.RecId;
+        }
+
+        return contractLineCache;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>doPopulateContractTiers</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// populates the contract tiers only
+    /// assumes that the contract tiers have already been populated
+    /// </summary>
+    public void doPopulateContractTiers()
+    {
+        #TimeConstants
+    
+        RAGContractLine         contractTier;
+        RAGContractLevel        contractLevel;
+        RAGRentalTypeRelation   rentalTypeRelation;
+        RAGTmpContractLineTier  tmpContractTier;
+        RAGContractLine         contractLine;
+        MapEnumerator           enumerator;
+        container               keyCon;
+        Query                   query;
+        QueryRun                queryRun;
+        FINRentalInvoiceProfile     invoiceProfile;
+    
+        if(!dataParm.CanPopulate || !dataParm.contractHierarchyMap().exists(RAGContractType::Default))
+        {
+            return;
+        }
+        
+        if(contractLineMap.empty())
+        {
+            throw error("@DNR6586");
+        }
+    
+        // prepare default tiers for all contract lines
+        while select contractTier
+        where contractTier.ContractId == dataParm.contractHierarchyMap().lookup(RAGContractType::Default)
+        &&    contractTier.ContractLevel == RAGContractLevel::Contract
+        &&   (contractTier.AgreementType == RAGAgreementType::PriceTier || contractTier.AgreementType == RAGAgreementType::TransportTier)
+            outer join MultiplierPeriods from invoiceProfile
+            where invoiceProfile.InvoiceProfileId == dataParm.INVInvoiceProfileId
+        {
+            // only process the tiers that have the relevant period type
+            if(dataParm.MustPopulateAllTierTypes || !dataParm.INVInvoiceProfileId || RAGUtil::priceTierPeriod2multiplierPeriod(contractTier.TierPeriod) == invoiceProfile.MultiplierPeriods)
+            {
+                enumerator = contractLineMap.getEnumerator();
+    
+                while(enumerator.moveNext())
+                {
+                    [ contractLevel, rentalTypeRelation ] = enumerator.currentKey();
+    
+                    tmpContractTier.clear();
+                    tmpContractTier.ContractId          = dataParm.ContractId;
+                    tmpContractTier.ContractLevel       = contractLevel;
+                    tmpContractTier.RentalTypeRelation  = rentalTypeRelation;
+                    tmpContractTier.AgreementType       = contractTier.AgreementType;
+                    tmpContractTier.NumOfTierPeriods    = contractTier.NumOfTierPeriods;
+                    tmpContractTier.TierPeriod          = contractTier.TierPeriod;
+                    tmpContractTier.Multiplier          = conPeek(contractTier.Value, 1);
+                    tmpContractTier.Activate            = conPeek(contractTier.Value, 2);
+                    
+                    switch(tmpContractTier.TierPeriod)
+                    {
+                        case RAGPriceTierPeriod::Hours:
+                            tmpContractTier.Minutes = tmpContractTier.NumOfTierPeriods * #minutesPerHour;
+                            break;
+    
+                        case RAGPriceTierPeriod::Days:
+                            tmpContractTier.Minutes = tmpContractTier.NumOfTierPeriods * #minutesPerDay;
+                            break;
+    
+                        default:
+                            // there's no conversion between chargeable periods, so do nothing here
+                            break;
+                    }
+    
+                    keyCon = [ contractLevel, rentalTypeRelation, contractTier.AgreementType, contractTier.NumOfTierPeriods, contractTier.TierPeriod ];
+                    contractTierMap.insert(keyCon, tmpContractTier);
+                }
+            }
+        }
+    
+        // retrieve and apply all relevant contract tiers from the database
+        query = RAGContractLine::buildQuery(dataParm.contractHierarchyRange(),
+                                            SortOrder::Descending,
+                                            false,
+                                            RAGContractLineQueryType::Tiers,
+                                            dataParm.BOBRentalTypeId);
+        queryRun = new QueryRun(query);
+
+        if (!rentalTypeGroupMap)
+        {
+            this.initRentalTypeGroupMap();
+        }
+    
+        while (queryRun.next())
+        {
+            contractLine = queryRun.get(tableNum(RAGContractLine));
+            keyCon = [ contractLine.ContractLevel, contractLine.RentalTypeRelation, contractLine.AgreementType, contractLine.NumOfTierPeriods, contractLine.TierPeriod ];
+    
+            if (contractTierMap.exists(keyCon))
+            {
+                tmpContractTier = contractTierMap.lookup(keyCon);
+                tmpContractTier.setValues(contractLine, dataParm.ContractId);
+                contractTierMap.insert(keyCon, tmpContractTier); // overwrite previous record buffer
+            }
+
+            // cascade group-level information onto lower level record buffers 
+            if (contractLine.ContractLevel == RAGContractLevel::Group 
+            &&  !rentalGroupTypeMap.empty() 
+            &&  rentalGroupTypeMap.exists(contractLine.RentalTypeRelation) 
+            &&  RAGAgreementTypeSetup::find(contractLine.AgreementType).IsActiveForRentalType)
+            {
+                Set rentalTypeSet = rentalGroupTypeMap.lookup(contractLine.RentalTypeRelation);
+                SetEnumerator setEnumerator = rentalTypeSet.getEnumerator();
+                while (setEnumerator.moveNext())
+                {
+                    keyCon = [RAGContractLevel::RentalType, setEnumerator.current(), contractLine.AgreementType, contractLine.NumOfTierPeriods, contractLine.TierPeriod];
+                    if (contractTierMap.exists(keyCon))
+                    {
+                        tmpContractTier = contractTierMap.lookup(keyCon);
+                        tmpContractTier.setValues(contractLine, dataParm.ContractId);
+                        contractTierMap.insert(keyCon, tmpContractTier); // overwrite previous record buffer
+                    }
+                }
+            }
+
+            //cascade contract-level information onto lower level record buffers
+            if (contractLine.ContractLevel == RAGContractLevel::Contract)
+            {
+                enumerator = contractLineMap.getEnumerator();
+
+                while (enumerator.moveNext())
+                {
+                    [ contractLevel, rentalTypeRelation ] = enumerator.currentKey();
+                    keyCon = [contractLevel, rentalTypeRelation, contractLine.AgreementType, contractLine.NumOfTierPeriods, contractLine.TierPeriod];
+
+                    if (contractTierMap.exists(keyCon))
+                    {
+                        tmpContractTier = contractTierMap.lookup(keyCon);
+
+                        if  ((tmpContractTier.ContractLevel == RAGContractLevel::Group && RAGAgreementTypeSetup::find(contractLine.AgreementType).IsActiveForGroup) ||
+                            (tmpContractTier.ContractLevel == RAGContractLevel::RentalType && RAGAgreementTypeSetup::find(contractLine.AgreementType).IsActiveForRentalType))
+                        {
+                            tmpContractTier.setValues(contractLine, dataParm.ContractId);
+                            contractTierMap.insert(keyCon, tmpContractTier); // overwrite previous record buffer
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContractTierQuery</Name>
+				<Source><![CDATA[
+    private Query getContractTierQuery(RAGAgreementType _agreementType, RAGRentalTypeRelation _rentalTypeGroupId, RAGRentalTypeRelation _rentalType)
+    {
+        Query query = RAGContractLine::buildQuery(dataParm.contractHierarchyRange(),
+                                                  SortOrder::Descending,
+                                                  false,
+                                                  RAGContractLineQueryType::Tiers);
+
+        QueryBuildDataSource qbdsContractLine = query.dataSourceTable(tableNum(RAGContractLine));
+        
+        SysQuery::findOrCreateRange(qbdsContractLine, fieldNum(RAGContractLine, AgreementType)).value(SysQuery::value(_agreementType));
+        SysQuery::findOrCreateRange(qbdsContractLine, fieldNum(RAGContractLine, DataAreaId)).value(
+                                    strFmt('((%1 == %2) || ((%1 == %3) && (%4 == "%5")) || ((%1 == %6) && (%4 == "%7")))',
+                                    fieldStr(RAGContractLine, ContractLevel),
+                                    any2int(RAGContractLevel::Contract),
+                                    any2int(RAGContractLevel::Group),
+                                    fieldStr(RAGContractLine, RentalTypeRelation),
+                                    _rentalTypeGroupId,
+                                    any2int(RAGContractLevel::RentalType),
+                                    _rentalType));
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContractTiers</Name>
+				<Source><![CDATA[
+    public RAGTmpContractLineTier getContractTiers(RAGContractId          _contractId, 
+                                                   RAGContractLevel       _contractLevel, 
+                                                   RAGRentalTypeRelation  _rentalTypeRelation,
+                                                   RAGAgreementType       _agreementType, 
+                                                   RAGTmpContractLineTier _tmpContractTier)
+    {
+        #TimeConstants
+        
+        RAGTmpContractLineTier  tmpContractTier;
+        RAGRentalTypeRelation   rentalTypeGroupId;
+        RAGRentalTypeRelation   rentalType;
+        
+ 
+        if (_agreementType != RAGAgreementType::TransportTier && _agreementType != RAGAgreementType::PriceTier)
+        {
+            throw Error(Error::wrongUseOfFunction(funcName()));
+        }
+        
+        tmpContractTier.linkPhysicalTableInstance(_tmpContractTier);
+        delete_from tmpContractTier;
+        
+        if (_contractLevel == RAGContractLevel::RentalType)
+        {
+            rentalType = _rentalTypeRelation;
+            rentalTypeGroupId = BOBRentalType::find(rentalType).RAGRentalTypeGroupId;
+        }
+        else if (_contractLevel == RAGContractLevel::Group)
+        {
+            rentalTypeGroupId =   _rentalTypeRelation;
+        }
+
+        container             keyCon;
+        RAGContractLine       contractTier;
+        Map                   contractTierMapLoc = new Map(Types::Container, Types::Record);
+        QueryRun              queryRun = new QueryRun(this.getContractTierQuery(_agreementType, rentalTypeGroupId, rentalType));
+        RAGAgreementTypeSetup agreementTypeSetup = RAGAgreementTypeSetup::find(_agreementType);
+
+        
+        while(queryRun.next())
+        {
+            contractTier = queryRun.get(tableNum(RAGContractLine));
+            keyCon = [contractTier.NumOfTierPeriods, contractTier.TierPeriod];
+            
+            if (!contractTierMapLoc.exists(keyCon))
+            {
+                if ((contractTier.ContractLevel == RAGContractLevel::Contract && agreementTypeSetup.IsActiveForContract)
+                ||  (contractTier.ContractLevel == RAGContractLevel::Group && agreementTypeSetup.IsActiveForGroup)
+                ||  (contractTier.ContractLevel == RAGContractLevel::RentalType && agreementTypeSetup.IsActiveForRentalType))
+                {
+                    tmpContractTier.clear();
+                    tmpContractTier.ContractId          = _contractId;
+                    tmpContractTier.ContractLevel       = _contractLevel;
+                    tmpContractTier.RentalTypeRelation  = _rentalTypeRelation;
+                    tmpContractTier.AgreementType       = contractTier.AgreementType;
+                    tmpContractTier.NumOfTierPeriods    = contractTier.NumOfTierPeriods;
+                    tmpContractTier.TierPeriod          = contractTier.TierPeriod;
+                    tmpContractTier.setValues(contractTier, _contractId);
+                    
+                    switch(tmpContractTier.TierPeriod)
+                    {
+                        case RAGPriceTierPeriod::Hours:
+                            tmpContractTier.Minutes = tmpContractTier.NumOfTierPeriods * #minutesPerHour;
+                            break;
+    
+                        case RAGPriceTierPeriod::Days:
+                            tmpContractTier.Minutes = tmpContractTier.NumOfTierPeriods * #minutesPerDay;
+                            break;
+    
+                        default:
+                            // there's no conversion between chargeable periods, so do nothing here
+                            break;
+                    }
+                    
+                    contractTierMapLoc.insert(keyCon, tmpContractTier);
+                }
+            }
+
+        }
+
+        RecordInsertList insertList = new RecordInsertList(tableNum(RAGTmpContractLineTier), false, false, false, false, false, tmpContractTier);
+        MapEnumerator    mapEnumerator = contractTierMapLoc.getEnumerator();
+        
+        while (mapEnumerator.moveNext())
+        {
+            tmpContractTier =  mapEnumerator.currentValue();
+            insertList.add(tmpContractTier);
+        }
+
+        insertList.insertDatabase();
+
+        return tmpContractTier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateData</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// populates both the contract lines and contract tiers
+    /// </summary>
+    public void populateData()
+    {                                 
+        this.populateContractLines();
+        this.populateContractTiers();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateCacheFromContractData</Name>
+				<Source><![CDATA[
+    protected void populateCacheFromContractData()
+    {
+        if (!dataParm.RefRecId || !dataParm.RefTableId || contractLineMap.empty())
+        {
+            return;
+        }
+
+        RAGContractLineCache     contractLineCache;
+        MapEnumerator            contractLineMapEnum = contractLineMap.getEnumerator();
+
+        //Only taking the first record as the caching will be for targeted caller records only
+        contractLineMapEnum.moveNext();
+        RAGTmpContractLine contractLineRecord = contractLineMapEnum.currentValue();
+
+        if (contractLineRecord.ContractId)
+        {
+            boolean lineCacheRecordFound = false;
+
+            ttsbegin;
+            select firstonly forupdate contractLineCache 
+            where contractLineCache.RefRecId == dataParm.RefRecId && contractLineCache.RefTableId == dataParm.RefTableId;
+
+            if (contractLineCache.RecId)
+            {
+                lineCacheRecordFound = true;
+            }
+            
+            if (lineCacheRecordFound)
+            {
+                contractLineCache.selectForUpdate(true); //sometimes the select for update flag is set to false
+                contractLineCache.initFromContractLineTmp(contractLineRecord);
+                contractLineCache.update();
+            }
+            else
+            {
+                contractLineCache.clear();
+                contractLineCache.initValue();
+                contractLineCache.initFromContractLineTmp(contractLineRecord);
+                contractLineCache.RefRecId   = dataParm.RefRecId;
+                contractLineCache.RefTableId = dataParm.RefTableId;
+                contractLineCache.insert();
+            }
+
+            //Populate tier cache records
+            //Only fill cache lines if the contract line is successfully created
+            if (contractLineCache)
+            {
+                MapEnumerator            contractLineTierMapEnum = contractTierMap.getEnumerator();
+                RAGTmpContractLineTier   tmpContractLineTier;
+                RAGContractLineTierCache contractLineTierCache;
+
+                if (lineCacheRecordFound)
+                {
+                    delete_from contractLineTierCache 
+                    where contractLineTierCache.ContractLineCacheRecId == contractLineCache.RecId;
+                }
+
+                //When the populateData is called for a specific record, there will be one contract found 
+                //hence all tier records are for that contract line and should be stored in cache
+                while (contractLineTierMapEnum.moveNext())
+                {
+                    tmpContractLineTier = contractLineTierMapEnum.currentValue();
+                    contractLineTierCache.clear();
+                    contractLineTierCache.initValue();
+                    contractLineTierCache.initFromContractLineTierTmp(tmpContractLineTier);
+                    contractLineTierCache.ContractLineCacheRecId = contractLineCache.RecId;
+                    contractLineTierCache.insert();
+                }
+            }
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateContractDataFromCache</Name>
+				<Source><![CDATA[
+    protected void populateContractDataFromCache(RAGContractLineCache _contractLineCache)
+    {
+        //Step1. read and populate the contract line data
+        RAGTmpContractLine tmpContractLineBuffer;
+        tmpContractLineBuffer.clear();
+        tmpContractLineBuffer.initValue();
+        tmpContractLineBuffer.initFromContractLineCache(_contractLineCache);
+        tmpContractLineBuffer.insert();
+
+        container keyConContractLine = [ _contractLineCache.ContractLevel, _contractLineCache.RentalTypeRelation ];
+        contractLineMap.insert(keyConContractLine, tmpContractLineBuffer);
+        
+        //Step2. read and populate the contract line tier data, this data might not be available for a contract line based on setup
+        RAGContractLineTierCache  contractLineTierCache;
+        RAGTmpContractLineTier    contractLineTierBuffer;
+
+        while select contractLineTierCache
+        where contractLineTierCache.ContractLineCacheRecId == _contractLineCache.RecId
+        {
+            contractLineTierBuffer.clear();
+            contractLineTierBuffer.initValue();
+            contractLineTierBuffer.initFromContractLineTierCache(contractLineTierCache);
+            contractLineTierBuffer.insert();
+
+            container keyConContractLineTier = [ _contractLineCache.ContractLevel, _contractLineCache.RentalTypeRelation, contractLineTierBuffer.AgreementType, contractLineTierBuffer.NumOfTierPeriods, contractLineTierBuffer.TierPeriod ];
+            contractTierMap.insert(keyConContractLineTier, contractLineTierBuffer);
+
+            contractLineTierPopulatedFromCache = true;
+        }
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedData)
+    {
+        container dataParmPacked, contractLineMapPacked, contractTierMapPacked;
+        [ dataParmPacked, contractLineMapPacked, contractTierMapPacked ] = _packedData;
+        dataParm = con2Buf(dataParmPacked);
+        contractLineMap = Map::create(contractLineMapPacked);
+        contractTierMap = Map::create(contractTierMapPacked);
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpContractLineFromRentalLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// shortcut for getting the contract line record buffer from a rental line
+    /// </summary>
+    /// <param name = "_rentalLine">holds a record buffer from which the contract line is populated</param>
+    /// <returns>uncommitted record buffer holding contract line data</returns>
+    public static RAGTmpContractLine getTmpContractLineFromRentalLine(RORRentalLine _rentalLine)
+    {
+        RAGContractDataParm parm;
+        parm.initFromRentalLine(_rentalLine);
+    
+        RAGContractData contractData = new RAGContractData();
+        contractData.parmDataParm(parm);
+        contractData.populateContractLines();
+    
+        return contractData.getContractLineTmpRecord();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLastCaclulatedContractTier</Name>
+				<Source><![CDATA[
+    public RAGTmpContractLineTier getLastCaclulatedContractTier()
+    {
+        return lastCalculatedContractTier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearContractCacheData</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Clearup contract cache data, if any
+    /// </summary>
+    public static void clearContractCacheData(TableId _tableId, RecId _recId)
+    {
+        RAGContractLineCache contractLineCache;
+        
+        //Deletion from RAGContractLineTierCache will be handled by delete action of type cascade
+        delete_from contractLineCache
+        where contractLineCache.RefRecId   == _recId
+        &&    contractLineCache.RefTableId == _tableId;
+
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

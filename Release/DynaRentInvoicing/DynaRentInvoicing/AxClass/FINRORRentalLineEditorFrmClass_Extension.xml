@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINRORRentalLineEditorFrmClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(RORRentalLineEditorForm))]
+public final class FINRORRentalLineEditorFrmClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>clearInvoicePeriod</Name>
+				<Source><![CDATA[
+    public void clearInvoicePeriod(Common _callerRentalLine)
+    {
+        next clearInvoicePeriod(_callerRentalLine);
+
+        ParmId parmId = this.parmId();
+        RORRentalLine rentalLine = _callerRentalLine;
+        RORRentalEditorLine rentalEditorLine;
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+        
+        ttsbegin;
+        delete_from invoicePeriodQtyPhysical
+            exists join rentalEditorLine
+            where rentalEditorLine.ParmId == parmId
+            && rentalEditorLine.HeaderId == rentalLine.HeaderId
+            && rentalEditorLine.MainKitReference == rentalLine.RecId
+            && rentalEditorLine.TableId == invoicePeriodQtyPhysical.RefTableId
+            && rentalEditorLine.RecId == invoicePeriodQtyPhysical.RefRecId;
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSupplementaryItemsLines</Name>
+				<Source><![CDATA[
+    public static void createSupplementaryItemsLines(RORRentalLine _rentalLine, boolean _keepCallerOrigPrices)
+    {
+        boolean keepCallerOrigPrices = RORRentalLineEditorForm::FinCheckMustKeepCallerOrigPrices(_rentalLine, _keepCallerOrigPrices);
+
+        next createSupplementaryItemsLines(_rentalLine, keepCallerOrigPrices);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getChangesMap</Name>
+				<Source><![CDATA[
+    public Map getChangesMap(INVInvoicePeriodHost _invoicePeriodHost, INVInvoicePeriodHost _origBuffer)
+    {
+        Map changesMap = next getChangesMap(_invoicePeriodHost, _origBuffer);
+
+        boolean isKit = _invoicePeriodHost.KitComponentType == RORKitComponentType::Kit || _invoicePeriodHost.KitComponentType == RORKitComponentType::KitComponent;
+        boolean canChangePrice = !isKit || _invoicePeriodHost.IsPriceFixed;
+
+        if (changesMap.empty() ||
+         (  (_invoicePeriodHost.Price           != _origBuffer.Price && canChangePrice)
+        ||  (_invoicePeriodHost.LinePercent     != _origBuffer.LinePercent && canChangePrice)
+        ||  _invoicePeriodHost.RentalModeId     != _origBuffer.RentalModeId
+        ||  _invoicePeriodHost.CalendarId       != _origBuffer.CalendarId))
+        {
+            TransDateTime               effectiveDateTimeFrom       = mainKitHeader.EffectiveDateTimeFrom;
+            TransDateTime               effectiveDateTimeTo         = mainKitHeader.EffectiveDateTimeTo;
+            FINInvoicePeriodAmendment   invoicePeriodAmendment;
+
+            if (effectiveDateTimeFrom == DateTimeUtil::minValue() || effectiveDateTimeTo == DateTimeUtil::minValue())
+            {
+                RORRentalDateTimes rentalDateTimes = RORRentalDateTimes::findReference(_invoicePeriodHost.TableId, _invoicePeriodHost.RecId);
+                if (rentalDateTimes)
+                {
+                    FieldId onRentFieldId, expectedOffRentFieldId, offRentFieldId;
+
+                    [onRentFieldId, offRentFieldId, expectedOffRentFieldId] = RORRentalDateTimes::getPeriodFieldIds();
+
+                    effectiveDateTimeFrom   = (effectiveDateTimeFrom == DateTimeUtil::minValue() ? rentalDateTimes.(onRentFieldId) : effectiveDateTimeFrom);
+                    effectiveDateTimeTo     = (effectiveDateTimeTo == DateTimeUtil::minValue() ? (rentalDateTimes.(offRentFieldId) ? rentalDateTimes.(offRentFieldId) : DateTimeUtil::maxValue()) : effectiveDateTimeTo);
+                }
+            }
+
+            while select invoicePeriodAmendment
+            where invoicePeriodAmendment.RefTableId     == _invoicePeriodHost.TableId
+            &&    invoicePeriodAmendment.RefRecId       == _invoicePeriodHost.RecId
+            &&    invoicePeriodAmendment.FromDateTime   <  effectiveDateTimeTo
+            &&    invoicePeriodAmendment.ToDateTime     >  effectiveDateTimeFrom
+            &&    (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed)
+            &&  (   ((changesMap.empty() || _invoicePeriodHost.Price           != _origBuffer.Price)        && invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::RentalPrice)
+                ||  ((changesMap.empty() || _invoicePeriodHost.LinePercent     != _origBuffer.LinePercent)  && invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::LinePercent)
+                ||  ((changesMap.empty() || _invoicePeriodHost.RentalModeId    != _origBuffer.RentalModeId) && invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::RentalModeId)
+                ||  ((changesMap.empty() || _invoicePeriodHost.CalendarId      != _origBuffer.CalendarId)   && invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId))
+            {
+                if (invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::RentalPrice)
+                {
+                    if (_invoicePeriodHost.PriceTimeUnit != _origBuffer.PriceTimeUnit)
+                    {
+                        RORAmendmentReasonText reasonText = strFmt("@DNR:ChangedValueFromTo",
+                                                                   "@DNR44",
+                                                                   UnitOfMeasure::find(_origBuffer.PriceTimeUnit).Symbol,
+                                                                   UnitOfMeasure::find(_invoicePeriodHost.PriceTimeUnit).Symbol);
+                        changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'RentalPrice'], [_invoicePeriodHost.Price, _origBuffer.Price, reasonText]);
+                    }
+                    else
+                    {
+                        changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'RentalPrice'], [_invoicePeriodHost.Price, _origBuffer.Price, '']);
+                    }
+                }
+
+                if (invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::LinePercent)
+                {
+                    changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'LinePercent'], [_invoicePeriodHost.LinePercent, _origBuffer.LinePercent, '']);
+                }
+
+                if (invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::RentalModeId)
+                {
+                    changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'RentalModeId'], [_invoicePeriodHost.RentalModeId, _origBuffer.RentalModeId, '']);
+                }
+
+                if (invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId)
+                {
+                    changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'CalendarId'], [_invoicePeriodHost.CalendarId, _origBuffer.CalendarId, '']);
+                }
+            }
+        }
+
+        return changesMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FinCheckMustKeepCallerOrigPrices</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    private static boolean FinCheckMustKeepCallerOrigPrices(RORRentalLine _rentalLine, boolean _keepCallerOrigPrices)
+    {
+        boolean keepCallerOrigPrices = _keepCallerOrigPrices;
+
+        if (!keepCallerOrigPrices)
+        {
+            // For lines calculating price multiplier on creation we don't want to overwrite calculated price
+            if (FINRentalInvoiceProfile::find(_rentalLine.INVInvoiceProfileId).PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating)
+            {
+                keepCallerOrigPrices = true;
+            }
+        }
+
+        return keepCallerOrigPrices;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

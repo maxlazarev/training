@@ -1,0 +1,395 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCreditCalcEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINCreditCalcEngine implements FINIInvoiceCalculatorGenericEngine
+{
+    FINInvoiceCalculatorParm        invoiceCalculatorParm;
+    Common                          parmLine;
+    RORRentalLine                   rentalLine;
+    FINCreditJournalizer            journalizedData;
+    FINInvoicingOptions             invoicingOptions;
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustBeActive</Name>
+				<Source><![CDATA[
+    public boolean mustBeActive()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINCreditCalcEngine construct(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        FINCreditCalcEngine calcEngine = new FINCreditCalcEngine();
+        calcEngine.initParameters(_invoiceCalculatorParm);
+        return calcEngine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParameters</Name>
+				<Source><![CDATA[
+    public void initParameters(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        invoiceCalculatorParm = _invoiceCalculatorParm;
+        parmLine = invoiceCalculatorParm.parmLine();
+        rentalLine = invoiceCalculatorParm.rentalLine();
+        invoicingOptions = invoiceCalculatorParm.getInvoicingOptions();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustRunEngine</Name>
+				<Source><![CDATA[
+    protected boolean mustRunEngine()
+    {
+        boolean ret;
+
+        if (invoicingOptions.includeCredited
+        && UnitOfMeasure::find(rentalLine.PriceTimeUnit).FINInvoiceRentalEngine)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    public void process()
+    {
+        if (this.mustRunEngine())
+        {
+            // Add result to a list storing a result of all engines.
+            List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            journalizedData = new FINCreditJournalizer();
+
+            Set pendingCreditSet = this.getPendingCreditSet();
+            SetEnumerator pendingCreditSetEnumerator = pendingCreditSet.getEnumerator();
+
+            while (pendingCreditSetEnumerator.moveNext())
+            {
+                RefTableId journalizedTransRefTableId;
+                RefRecId journalizedTransRefRecId;
+                container creditInvoiceCalcResultListPacked;
+
+                [journalizedTransRefTableId, journalizedTransRefRecId, creditInvoiceCalcResultListPacked] = pendingCreditSetEnumerator.current();
+            
+                FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+                select firstonly RecId, PeriodEndDateTime from journalizedInvoicePeriod
+                    order by PeriodEndDateTime desc
+                where journalizedInvoicePeriod.RefTableId == journalizedTransRefTableId
+                &&    journalizedInvoicePeriod.RefRecId == journalizedTransRefRecId
+                &&    journalizedInvoicePeriod.PeriodEndDateTime > invoicingOptions.calculationDateTime;
+
+                if (journalizedInvoicePeriod.RecId)
+                {
+                    warning(strFmt("@DNR:WarningPendingCreditEndDateLaterThanCalculationDate",
+                        rentalLine.InventTransId,
+                        rentalLine.RORGetHeader().HeaderId,
+                        journalizedInvoicePeriod.PeriodEndDateTime));
+                    continue;
+                }
+
+                if (!creditInvoiceCalcResultListPacked)
+                {
+                    continue;
+                }
+
+                List creditResultList = List::create(creditInvoiceCalcResultListPacked);
+                ListEnumerator enumerator = creditResultList.getEnumerator();
+
+                while(enumerator.moveNext())
+                {
+                    FINInvoiceCalcResult creditCalcResult = enumerator.current();
+        
+                    if (!creditCalcResult.isReversal)
+                    {
+                        creditCalcResult.amountCur = - creditCalcResult.amountCur;
+                        creditCalcResult.isReversal = NoYes::Yes;
+
+                        MarkupTrans markupTrans;
+                        FINMarkupAccountType markupAccountType = markupTrans::FINRentalToMarkupAccountType(creditCalcResult.accountType);
+
+                        select firstonly RecId from markupTrans
+                        where markupTrans.TransRecId == journalizedTransRefRecId
+                        &&    markupTrans.TransTableId == journalizedTransRefTableId
+                        &&    markupTrans.FINMarkupAccountType == markupAccountType;
+
+                        if (markupTrans.RecId)
+                        {
+                            creditCalcResult.markupTransRecId = markupTrans.RecId;
+                        }
+
+                        resultList.addEnd(creditCalcResult);
+                        journalizedData.addResult([journalizedTransRefTableId, journalizedTransRefRecId]);
+
+                        if (creditCalcResult.accountType == FINRentalAccountType::DeliveryTransport || creditCalcResult.accountType == FINRentalAccountType::ReturnTransport)
+                        {
+                            this.createCreditTransportation(journalizedTransRefTableId, journalizedTransRefRecId);
+                        }
+
+                        if (creditCalcResult.accountType == FINRentalAccountType::CostPrice)
+                        {
+                            this.createCreditCostPrice(journalizedTransRefTableId, journalizedTransRefRecId);
+                        }
+                    }
+
+                    if (creditCalcResult.amountCur)
+                    {
+                        invoiceCalculatorParm.MustBeInvoiced = true;
+                    }
+                }
+            }
+
+            invoiceCalculatorParm.WasAnyEngineExecuted = NoYes::Yes;
+            invoiceCalculatorParm.InvoiceCalcResultListPacked = resultList.pack();
+            invoiceCalculatorParm.CreditCalcPacked = journalizedData.pack();
+        }
+        else
+        {
+            // Clear any pre-calculated data that is copied from previous calculations.
+            invoiceCalculatorParm.CreditCalcPacked = conNull();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createCreditTransportation</Name>
+				<Source><![CDATA[
+    protected void createCreditTransportation(RefTableId _journalizedTransRefTableId, RefRecId _journalizedTransRefRecId)
+    {
+        container transportCalcPacked = conPeek(this.getCreditCalcPacked(_journalizedTransRefTableId, _journalizedTransRefRecId), 1);
+
+        if (transportCalcPacked && conLen(transportCalcPacked) > 0)
+        {
+            FINTransportPriceJournalizer transportPriceJournalizerCredit = new FINTransportPriceJournalizer();
+            FINTransportPriceJournalizer transportPriceJournalizerOrig   = new FINTransportPriceJournalizer();
+
+            transportPriceJournalizerOrig.unpack(transportCalcPacked);
+            
+            if (transportPriceJournalizerOrig.getDeliveryAmount() != 0)
+            {
+                transportPriceJournalizerCredit.addResult([FINRentalAccountType::DeliveryTransport, [transportPriceJournalizerOrig.getDeliveryBaseAmount(),
+                                                                                                     transportPriceJournalizerOrig.getDeliveryDiscountAmount(),
+                                                                                                     transportPriceJournalizerOrig.getDeliveryTierMultiplier(),
+                                                                                                    -transportPriceJournalizerOrig.getDeliveryAmount()]]);
+            }
+
+            if (transportPriceJournalizerOrig.getReturnAmount() != 0)
+            {
+                transportPriceJournalizerCredit.addResult([FINRentalAccountType::ReturnTransport, [transportPriceJournalizerOrig.getReturnBaseAmount(),
+                                                                                                   transportPriceJournalizerOrig.getReturnDiscountAmount(),
+                                                                                                   transportPriceJournalizerOrig.getReturnTierMultiplier(),
+                                                                                                  -transportPriceJournalizerOrig.getReturnAmount()]]);
+            }
+
+            invoiceCalculatorParm.TransportCalcPacked = transportPriceJournalizerCredit.pack();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCreditCalcPacked</Name>
+				<Source><![CDATA[
+    protected container getCreditCalcPacked(RefTableId _journalizedTransRefTableId, RefRecId _journalizedTransRefRecId)
+    {
+        container transportCalcPacked, costPriceCalcPacked;
+
+        switch (_journalizedTransRefTableId)
+        {
+            case tableNum(CustInvoiceTrans):
+                FINCustInvoiceTrans finCustInvoiceTrans;
+
+                select firstonly TransportCalcPacked, CostPriceCalcPacked from finCustInvoiceTrans
+                where finCustInvoiceTrans.CustInvoiceTransRecId == _journalizedTransRefRecId;
+
+                return [finCustInvoiceTrans.TransportCalcPacked, finCustInvoiceTrans.CostPriceCalcPacked];
+
+                break;
+
+            case tableNum(VendInvoiceTrans):
+                FINVendInvoiceTrans finVendInvoiceTrans;
+
+                select firstonly TransportCalcPacked, CostPriceCalcPacked from finVendInvoiceTrans
+                where finVendInvoiceTrans.VendInvoiceTransRecId == _journalizedTransRefRecId;
+
+                return [finVendInvoiceTrans.TransportCalcPacked, finVendInvoiceTrans.CostPriceCalcPacked];
+
+                break;
+
+            case tableNum(ProjInvoiceItem):
+                FINProjInvoiceItem finProjInvoiceItem;
+
+                select firstonly TransportCalcPacked, CostPriceCalcPacked from finProjInvoiceItem
+                where finProjInvoiceItem.ProjInvoiceItemRecId == _journalizedTransRefRecId;
+
+                return [finProjInvoiceItem.TransportCalcPacked, finProjInvoiceItem.CostPriceCalcPacked];
+
+                break;
+
+            case tableNum(ProjJournalTrans):
+                FINProjJournalTrans finProjJournalTrans;
+
+                select firstonly TransportCalcPacked, CostPriceCalcPacked from finProjJournalTrans
+                where finProjJournalTrans.ProjJournalTransRecId == _journalizedTransRefRecId;
+
+                return [finProjJournalTrans.TransportCalcPacked, finProjJournalTrans.CostPriceCalcPacked];
+
+                break;
+        }
+
+        return [transportCalcPacked, costPriceCalcPacked];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createCreditCostPrice</Name>
+				<Source><![CDATA[
+    protected void createCreditCostPrice(RefTableId _journalizedTransRefTableId, RefRecId _journalizedTransRefRecId)
+    {
+        container costPriceCalcPacked = conPeek(this.getCreditCalcPacked(_journalizedTransRefTableId, _journalizedTransRefRecId), 2);
+
+        if (costPriceCalcPacked && conLen(costPriceCalcPacked) > 0)
+        {
+            FINCostPriceJournalizer costPriceJournalizer = new FINCostPriceJournalizer();
+            FINCostPriceJournalizer costPriceJournalizerCredit = new FINCostPriceJournalizer();
+
+            costPriceJournalizer.unpack(costPriceCalcPacked);
+            costPriceJournalizerCredit.unpack(invoiceCalculatorParm.CostPriceCalcPacked);
+
+            if (costPriceJournalizerCredit.getCostAmount() <= 0)
+            {
+                costPriceJournalizerCredit.addResult([costPriceJournalizer.getObjectId(),
+                                                      costPriceJournalizer.getItemId(),
+                                                      costPriceJournalizer.getCalculationDate(),
+                                                      costPriceJournalizer.getPriceTimeUnit(),
+                                                      costPriceJournalizer.getCostPrice(),
+                                                      costPriceJournalizer.getNumOfChargeablePeriods() + costPriceJournalizerCredit.getNumOfChargeablePeriods(),
+                                                      costPriceJournalizerCredit.getCostAmount() - costPriceJournalizer.getCostAmount()]);
+
+                invoiceCalculatorParm.CostPriceCalcPacked = costPriceJournalizerCredit.pack();
+            }
+        }
+        
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPendingCreditSet</Name>
+				<Source><![CDATA[
+    protected Set getPendingCreditSet()
+    {
+        Set pendingCreditSet = new Set(Types::Container);
+
+        if (invoiceCalculatorParm.CreditJourRefRecId)
+        {
+            switch (rentalLine.TableId)
+            {
+                case tableNum(SalesLine):
+                    pendingCreditSet = FINCustInvoiceTrans::getPendingCreditSetForCredit(rentalLine, invoicingOptions.calculationDateTime, invoicingOptions.isCreditPreview, invoiceCalculatorParm.CreditJourRefRecId);
+                    break;
+                case tableNum(PurchLine):
+                    pendingCreditSet = FINVendInvoiceTrans::getPendingCreditSet(rentalLine, invoicingOptions.calculationDateTime, invoicingOptions.isCreditPreview);
+                    break;
+            }
+        }
+        else
+        {
+            switch (rentalLine.TableId)
+            {
+                case tableNum(SalesLine):
+                    pendingCreditSet = FINCustInvoiceTrans::getPendingCreditSet(rentalLine, invoicingOptions.calculationDateTime, invoicingOptions.isCreditPreview);
+
+                    if (pendingCreditSet.empty())
+                    {
+                        RORParameters   rentalParameters    = RORParameters::find();
+                        SalesTable      salesTable          = SalesTable::find(rentalLine.HeaderId);
+
+                        if (rentalParameters.RentalProjectInvoicing &&
+                            salesTable.WPPIsRentalProject == NoYes::Yes &&
+                            salesTable.ProjId)
+                        {
+                            pendingCreditSet = FINProjJournalTrans::getPendingCreditSet(rentalLine, invoicingOptions.calculationDateTime);
+                        }
+                        else
+                        {
+                            pendingCreditSet = FINProjInvoiceItem::getPendingCreditSet(rentalLine, invoicingOptions.calculationDateTime);
+                        }
+
+                    }
+                    break;
+                case tableNum(PurchLine):
+                    pendingCreditSet = FINVendInvoiceTrans::getPendingCreditSet(rentalLine, invoicingOptions.calculationDateTime, invoicingOptions.isCreditPreview);
+
+                    break;
+            }
+        }
+
+        return pendingCreditSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>engineId</Name>
+				<Source><![CDATA[
+    public  Num engineId()
+    {
+        return 'Credit';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public Description description()
+    {
+        return '@DNR:CreditEngineDescr';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>publisher</Name>
+				<Source><![CDATA[
+    public Name publisher()
+    {
+        return '@DNR:HiGHPublisher';
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

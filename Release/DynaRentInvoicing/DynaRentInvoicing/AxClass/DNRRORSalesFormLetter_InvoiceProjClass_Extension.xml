@@ -1,0 +1,672 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRRORSalesFormLetter_InvoiceProjClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(RORSalesFormLetter_InvoiceProj))]
+public final class DNRRORSalesFormLetter_InvoiceProjClass_Extension
+{
+    private Map voucherDate2ProjVoucherMap;  // key = voucher date, value = voucher.
+
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>RORSkipSalesLine</Name>
+				<Source><![CDATA[
+    protected boolean RORSkipSalesLine(SalesLine _salesline)
+    {
+        boolean ret = next RORSkipSalesLine(_salesline);
+
+        if (_salesline.RORTradeType == RORTradeType::SalesPurch
+        && _salesline.isStocked())
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORSetProjJournalTable</Name>
+				<Source><![CDATA[
+    protected void RORSetProjJournalTable(ProjJournalTable _projJournalTable)
+    {
+        next RORSetProjJournalTable(_projJournalTable);
+
+        _projJournalTable.FINIsTransferToProject = NoYes::Yes;
+            
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCostPrice</Name>
+				<Source><![CDATA[
+    public void setCostPrice(projJournalTrans _projJournalTrans, SalesLine _salesLine, SalesParmLine _salesParmLine)
+    {
+        next setCostPrice(_projJournalTrans, _salesLine, _salesParmLine);
+
+        RORParameters rorParameters = RORParameters::find();
+        CostPrice costPrice;
+
+        if (rorParameters.CostPriceRental != RORCostPriceRental::RentalRevenue)
+        {
+            if (_salesLine.RORTradeType == RORTradeType::SalesPurch)
+            {
+                costPrice = _salesLine.CostPrice;
+            }
+            else
+            {
+                // Cost from cost engine
+                FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+                select firstonly CostPriceCalcPacked from invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmLineTableId == _salesParmLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId == _salesParmLine.RecId
+                &&    invoiceCalculatorParm.ParmId == _salesParmLine.ParmId;
+
+                if (invoiceCalculatorParm.CostPriceCalcPacked)
+                {
+                    FINCostPriceJournalizer costJournalizer = new FINCostPriceJournalizer();
+                    costJournalizer.unpack(invoiceCalculatorParm.CostPriceCalcPacked);
+                    costPrice = costJournalizer.getCostAmount();
+                }
+            }
+
+            _projJournalTrans.CostPrice = costPrice;
+        }
+
+        if (rorParameters.CostPriceRental == RORCostPriceRental::RentalRevenue
+        || (rorParameters.CostPriceRental == RORCostPriceRental::CostPriceOrRevenue && !costPrice))
+        {
+            _projJournalTrans.CostPrice = _salesParmLine.FINLineAmount;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSalesPrice</Name>
+				<Source><![CDATA[
+    public void setSalesPrice(projJournalTrans _projJournalTrans, SalesLine _salesLine, SalesParmLine _salesParmLine)
+    {
+        next setSalesPrice(_projJournalTrans, _salesLine, _salesParmLine);
+
+        _projJournalTrans.SalesPrice = _salesParmLine.FINLineAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInvoicePeriod</Name>
+				<Source><![CDATA[
+    public void updateInvoicePeriod(salesParmLine _salesParmLine, SalesLine _salesLine, InvoiceId _invoiceId)
+    {
+        next updateInvoicePeriod(_salesParmLine, _salesLine, _invoiceId);
+
+        if (!this.proforma())
+        {
+            Map salesLine2ProjJournalLineLocal = this.getSalesLine2ProjJournalLine();
+            FINInvoiceCalculatorParm invoiceCalculatorParm;
+            ProjJournalTrans projJournalTrans; //salesRecId - projJournalTransTransId
+
+            if (salesLine2ProjJournalLineLocal && salesLine2ProjJournalLineLocal.exists(_salesLine.RecId))
+            {
+                RefRecId projJournalTransRecId = salesLine2ProjJournalLineLocal.lookup(_salesLine.RecId);
+
+                select firstonly projJournalTrans
+                where projJournalTrans.RecId == projJournalTransRecId;
+
+                select firstonly invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmId          == _salesParmLine.ParmId
+                &&    invoiceCalculatorParm.ParmLineTableId == _salesParmLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId   == _salesParmLine.RecId;
+            }
+
+            if (invoiceCalculatorParm && projJournalTrans)
+            {
+                FINInvoicePeriodManager_Invoice invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::Invoice, _salesLine);
+                invoicePeriodManager.setInvoiceCalculatorParm(invoiceCalculatorParm);
+                invoicePeriodManager.setInvoiceId(_invoiceId);
+                invoicePeriodManager.setInvoiceTransReference(projJournalTrans.TableId, projJournalTrans.RecId);
+                invoicePeriodManager.run();
+
+                FINOrderLineComponentInvoiceLog::setOrderLineComponentInvoiced(_salesLine, _invoiceId, invoiceCalculatorParm);
+                this.FINJournalizeLine(projJournalTrans, invoiceCalculatorParm);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createProjectJournalLine</Name>
+				<Source><![CDATA[
+    public void createProjectJournalLine(ProjTable _projTable, ProjJournalTable _hourJournalTable, SalesLine _salesLine, SalesParmLine _salesParmLine, InventTable _inventTable)
+    {
+        next createProjectJournalLine(_projTable, _hourJournalTable, _salesLine, _salesParmLine, _inventTable);
+        
+        if (!this.proforma())
+        {
+            FINInvoiceCalculatorParm    invoiceCalculatorParm;
+            ProjJournalTrans            projJournalTransParent;
+            AmountCur                   transportInsuranceCreditAmount;
+
+            Map             salesLine2ProjJournalLineLocal  = this.getSalesLine2ProjJournalLine();
+            SalesLine       salesLine                       = _salesLine;
+            SalesParmLine   salesParmLine                   = _salesParmLine;
+            RAGParameters   ragParameters                   = RAGParameters::find();
+
+            if (salesLine2ProjJournalLineLocal && salesLine2ProjJournalLineLocal.exists(salesLine.RecId))
+            {
+                RefRecId projJournalTransParentRecId = salesLine2ProjJournalLineLocal.lookup(salesLine.RecId);
+
+                select firstonly projJournalTransParent
+                where projJournalTransParent.RecId == projJournalTransParentRecId;
+
+                select firstonly invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmId          == salesParmLine.ParmId
+                &&    invoiceCalculatorParm.ParmLineTableId == salesParmLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId   == salesParmLine.RecId;
+            }
+
+            if (projJournalTransParent && invoiceCalculatorParm)
+            {
+
+                if (invoiceCalculatorParm.TransportCalcPacked)
+                {
+                    // Create hour journal transactions for 'Delivery' and 'Return'.
+                    FINTransportPriceJournalizer transportJournalizer = new FINTransportPriceJournalizer();
+
+                    transportJournalizer.unpack(invoiceCalculatorParm.TransportCalcPacked);
+
+                    AmountCur deliveryAmount = transportJournalizer.getDeliveryAmount();
+
+                    transportInsuranceCreditAmount += deliveryAmount;
+
+                    if (deliveryAmount)
+                    {
+                        RORSalesFormLetter_InvoiceProj::RORCreateJournalLineForExtraItem(salesLine, projJournalTransParent, ragParameters.ItemIdTransport, deliveryAmount);
+                    }
+                    
+                    AmountCur returnAmount = transportJournalizer.getReturnAmount();
+
+                    transportInsuranceCreditAmount += returnAmount;
+
+                    if (returnAmount)
+                    {
+                        RORSalesFormLetter_InvoiceProj::RORCreateJournalLineForExtraItem(salesLine, projJournalTransParent, ragParameters.ItemIdReturnTransport, returnAmount);
+                    }
+                }
+
+                if (invoiceCalculatorParm.RentalCalcPacked)
+                {
+                    // Create hour journal transaction for 'Insurance'.
+                    FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+
+                    rentalJournalizer.unpack(invoiceCalculatorParm.RentalCalcPacked);
+
+                    AmountCur insuranceAmount = rentalJournalizer.getInsuranceAmount();
+
+                    transportInsuranceCreditAmount += insuranceAmount;
+
+                    if (insuranceAmount)
+                    {
+                        RORSalesFormLetter_InvoiceProj::RORCreateJournalLineForExtraItem(salesLine, projJournalTransParent, ragParameters.ItemIdInsurance, insuranceAmount);
+                    }
+                }
+
+                if (invoiceCalculatorParm.CreditCalcPacked)
+                {
+                    // Create hour journal transactions for credits.
+
+                    AmountCur       salesPriceRentalCredit,
+                                    salesPriceDeliveryTransportCredit,
+                                    salesPriceReturnTransportCredit,
+                                    salesPriceInsuranceCredit,
+                                    salesPriceTotalCredit,
+                                    costPriceCredit;
+                    ProjTransDate   projTransDate;
+
+                    [salesPriceRentalCredit,
+                     salesPriceDeliveryTransportCredit,
+                     salesPriceReturnTransportCredit,
+                     salesPriceInsuranceCredit,
+                     salesPriceTotalCredit,
+                     costPriceCredit] = this.calculateSalesPriceCostPriceCredit(invoiceCalculatorParm.CreditCalcPacked);
+
+                    projTransDate = this.getProjTransDateForCredit(projJournalTransParent, invoiceCalculatorParm.CreditCalcPacked);
+
+                    // Create hour journal transaction for credit for 'Price' + 'Discount' + 'Manual'.
+                    if (salesPriceRentalCredit)
+                    {
+                        this.RORCreateJournalLineForCredit(_hourJournalTable, salesLine, projJournalTransParent, salesLine.ItemId, salesPriceRentalCredit, projTransDate, false, costPriceCredit);
+                    }
+
+                    // Create hour journal transaction for credit for 'Delivery'
+                    if (salesPriceDeliveryTransportCredit)
+                    {
+                        this.RORCreateJournalLineForCredit(_hourJournalTable, salesLine, projJournalTransParent, ragParameters.ItemIdTransport, salesPriceDeliveryTransportCredit, projTransDate);
+                    }
+
+                    // Create hour journal transaction for credit for 'Return'.
+                    if (salesPriceReturnTransportCredit)
+                    {
+                        this.RORCreateJournalLineForCredit(_hourJournalTable, salesLine, projJournalTransParent, ragParameters.ItemIdReturnTransport, salesPriceReturnTransportCredit, projTransDate);
+                    }
+
+                    // Create hour journal transaction for credit for 'Insurance'.
+                    if (salesPriceInsuranceCredit)
+                    {
+                        this.RORCreateJournalLineForCredit(_hourJournalTable, salesLine, projJournalTransParent, ragParameters.ItemIdInsurance, salesPriceInsuranceCredit, projTransDate);
+                    }
+
+                    transportInsuranceCreditAmount += salesPriceTotalCredit;
+                }
+
+            }
+
+            if (transportInsuranceCreditAmount && projJournalTransParent.SalesPrice)
+            {
+                projJournalTransParent.selectForUpdate(true);
+
+                if (projJournalTransParent.SalesPrice == projJournalTransParent.CostPrice)
+                {
+                    projJournalTransParent.CostPrice -= transportInsuranceCreditAmount;
+                }
+
+                projJournalTransParent.SalesPrice -= transportInsuranceCreditAmount;
+
+                projJournalTransParent.update();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINJournalizeLine</Name>
+				<Source><![CDATA[
+    protected FINProjJournalTrans FINJournalizeLine(ProjJournalTrans _projJournalTrans, FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        FINProjJournalTrans finProjInvoiceTrans;
+
+        finProjInvoiceTrans.initFromInvoiceCalculatorParm(_invoiceCalculatorParm);
+        finProjInvoiceTrans.ProjJournalTransRecId = _projJournalTrans.RecId;
+        finProjInvoiceTrans.insert();
+
+        FINInvoiceCalculatorParm  invoiceCalculatorParmDel;
+        delete_from invoiceCalculatorParmDel where invoiceCalculatorParmDel.RecId == _invoiceCalculatorParm.RecId;
+
+        return finProjInvoiceTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setStartEndDateTime</Name>
+				<Source><![CDATA[
+    public container setStartEndDateTime(projJournalTrans _projJournalTrans, SalesLine _salesLine, SalesParmLine _salesParmLine)
+    {
+        TransDateTime               startDateTime, endDateTime;
+        FINInvoiceCalculatorParm    invoiceCalculatorParm;
+
+        [startDateTime, endDateTime] = next setStartEndDateTime(_projJournalTrans, _salesLine, _salesParmLine);
+
+        select firstonly invoiceCalculatorParm
+        where invoiceCalculatorParm.ParmId          == _salesParmLine.ParmId
+        &&    invoiceCalculatorParm.ParmLineTableId == _salesParmLine.TableId
+        &&    invoiceCalculatorParm.ParmLineRecId   == _salesParmLine.RecId;
+    
+        if (invoiceCalculatorParm)
+        {
+            // Map( [InvoicePeriodQtyRecId, qtyInvoiced], Map([ FromDateTime, ToDateTime ] , List(FINPeriodSpecification)))
+            Map specificationMap = Map::create(invoiceCalculatorParm.PeriodSpecificationPacked);
+
+            if (!specificationMap.empty())
+            {
+                Map             periodDefinitionMap;
+                MapEnumerator   periodDefinitionMapEnumerator;
+                TransDateTime   startDateTimeFromMap, endDateTimeFromMap;
+
+                MapEnumerator specificationMapEnumerator = specificationMap.getEnumerator();
+
+                while (specificationMapEnumerator.moveNext())
+                {
+                    periodDefinitionMap             = specificationMapEnumerator.currentValue();
+                    periodDefinitionMapEnumerator   = periodDefinitionMap.getEnumerator();
+
+                    while (periodDefinitionMapEnumerator.moveNext())
+                    {
+                        [startDateTimeFromMap, endDateTimeFromMap] = periodDefinitionMapEnumerator.currentKey();
+
+                        startDateTime   = startDateTime ? min(startDateTime, startDateTimeFromMap)  : startDateTimeFromMap;
+                        endDateTime     = endDateTime   ? max(endDateTime, endDateTimeFromMap)      : endDateTimeFromMap;
+                    }
+                }
+            }
+            // If there are no (debit) periods to invoice, but there are credits, then get the start date time and end date time based on the credits.
+            else if (invoiceCalculatorParm.CreditCalcPacked)
+            {
+                RefRecId                    recIdRef;
+                RefTableId                  tableIdRef;
+                FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+                FINProjJournalTrans         finProjJournalTrans;
+                TransDateTime               startDateTimeSelect, endDateTimeSelect;
+
+                FINCreditJournalizer creditJournalizer = new FINCreditJournalizer();
+
+                creditJournalizer.unpack(invoiceCalculatorParm.CreditCalcPacked);
+
+                Set             creditJournalTransRefIdSet  = creditJournalizer.getSetOfCreditedJournalTransRef();
+                SetEnumerator   enumerator                  = creditJournalTransRefIdSet.getEnumerator();
+
+                while (enumerator.moveNext())
+                {
+                    [tableIdRef, recIdRef] = enumerator.current();
+
+                    select firstonly PeriodStartDateTime, PeriodEndDateTime from journalizedInvoicePeriod
+                    where journalizedInvoicePeriod.RefTableId   == tableIdRef
+                    &&    journalizedInvoicePeriod.RefRecId     == recIdRef
+                        join TimeZone from finProjJournalTrans
+                        where  finProjJournalTrans.ProjJournalTransRecId    == recIdRef
+                        &&     finProjJournalTrans.PeriodStatus             == FINInvoiceTransPeriodStatus::PendingCredit;
+
+                    startDateTimeSelect = DateTimeUtil::applyTimeZoneOffset(journalizedInvoicePeriod.PeriodStartDateTime, finProjJournalTrans.Timezone);
+                    endDateTimeSelect   = DateTimeUtil::applyTimeZoneOffset(journalizedInvoicePeriod.PeriodEndDateTime, finProjJournalTrans.Timezone);
+
+                    startDateTime   = startDateTime ? min(startDateTime, startDateTimeSelect)   : startDateTimeSelect;
+                    endDateTime     = endDateTime   ? max(startDateTime, endDateTimeSelect)     : endDateTimeSelect;
+                }
+            }
+        }
+
+        return [startDateTime, endDateTime];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCreateJournalLineForCredit</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    private void RORCreateJournalLineForCredit(ProjJournalTable _hourJournalTable,
+                                               SalesLine        _salesLine,
+                                               ProjJournalTrans _parentJournalTrans,
+                                               ItemId           _itemId,
+                                               SalesPrice       _salesPrice,
+                                               ProjTransDate    _projTransDate,
+                                               boolean          _isExtraItem    = true,
+                                               CostPrice        _costPrice      = 0)
+    {
+        ProjJournalTrans projJournalTrans;
+
+        InventTable inventTable = InventTable::find(_itemId);
+
+        projJournalTrans.data(_parentJournalTrans);
+
+        projJournalTrans.FINParentRefRecId  = _parentJournalTrans.RecId;
+        projJournalTrans.TransId            = '';
+        projJournalTrans.LineNum            = 0;
+
+        if (_isExtraItem)
+        {
+            projJournalTrans.Txt = strFmt("Credit - Order line - %1, item - %2", _salesLine.LineNum, _itemId);
+        }
+        else
+        {
+            projJournalTrans.Txt = strFmt("%1 - %2", "@SYS7084", projJournalTrans.Txt);
+        }
+
+        projJournalTrans.CategoryId     = (_salesLine.RORTradeType == RORTradeType::SubRental) ? inventTable.RORProjCategoryIdSubRental : inventTable.RORProjCategoryIdRental;
+        projJournalTrans.SalesPrice     = _salesPrice;
+
+        if (_isExtraItem)
+        {
+            projJournalTrans.CostPrice = inventTable.costPcsPrice(_salesLine.InventDimId, InventDim::find(_salesLine.InventDimId)) * -1;  // the cost price for credit must be negative
+        }
+        else
+        {
+            projJournalTrans.CostPrice = _costPrice;
+        }
+
+        projJournalTrans.ProjTransDate  = _projTransDate;
+        // Set the voucher date accordingly.
+        projJournalTrans.TransDate      = projJournalTrans.ProjTransDate;
+
+        // If the voucher date for this hour journal transaction is different from the voucher date of the 'parent' hour journal transaction (which
+        // can be the case if the parameter 'Use original date for credit notes' is enabled), then the hour journal transaction must be linked to a
+        // different voucher. This only applies to hour journal transactions for credits.
+        if (projJournalTrans.TransDate != _parentJournalTrans.TransDate)
+        {
+            // If there already exists a voucher for the voucher date, then use that voucher. Otherwise, create a new voucher.
+            if (voucherDate2ProjVoucherMap.exists(projJournalTrans.TransDate))
+            {
+                projJournalTrans.Voucher = voucherDate2ProjVoucherMap.lookup(projJournalTrans.TransDate);
+            }
+            else
+            {
+                projJournalTrans.Voucher = NumberSeq::newGetVoucherFromCode(_hourJournalTable.getNumberSequenceTable().NumberSequence).voucher();
+
+                voucherDate2ProjVoucherMap.insert(projJournalTrans.TransDate, projJournalTrans.Voucher);
+            }
+        }
+
+        projJournalTrans.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCreateJournalLineForExtraItem</Name>
+				<Source><![CDATA[
+    protected static void RORCreateJournalLineForExtraItem(SalesLine _salesLine, ProjJournalTrans _parentJournalTrans, ItemId _itemId, SalesPrice _salesPrice)
+    {
+        ProjJournalTrans projJournalTrans;
+
+        InventTable inventTable = InventTable::find(_itemId);
+
+        projJournalTrans.data(_parentJournalTrans);
+
+        projJournalTrans.FINParentRefRecId = _parentJournalTrans.RecId;
+        projJournalTrans.TransId            = '';
+        projJournalTrans.LineNum            = 0;
+        projJournalTrans.Txt                = strFmt("Order line - %1, item - %2.", _salesLine.LineNum, _itemId);
+        projJournalTrans.CategoryId         = (_salesLine.RORTradeType == RORTradeType::SubRental) ? inventTable.RORProjCategoryIdSubRental : inventTable.RORProjCategoryIdRental;
+        projJournalTrans.SalesPrice         = _salesPrice;
+        projJournalTrans.CostPrice          = inventTable.costPcsPrice(_salesLine.InventDimId, InventDim::find(_salesLine.InventDimId));
+        projJournalTrans.FINExtraItemId     = _itemId;
+
+        projJournalTrans.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateSalesPriceCostPriceCredit</Name>
+				<Source><![CDATA[
+    // Note: This method is based on the method 'calculateCreditEngine()' in the class 'FINRentalInvoiceDetailHelper'.
+    private container calculateSalesPriceCostPriceCredit(container _creditCalcPacked)
+    {
+        FINRentalAccountType    accountType, creditAccountType, testAccountType;
+        AmountCur               amount;
+        Description             description;
+        boolean                 isCredit;
+
+        AmountCur               salesPriceRentalCredit,
+                                salesPriceDeliveryTransportCredit,
+                                salesPriceReturnTransportCredit,
+                                salesPriceInsuranceCredit,
+                                salesPriceTotalCredit,
+                                costPriceCredit;
+
+        FINCreditJournalizer creditJournalizer = new FINCreditJournalizer();
+
+        creditJournalizer.unpack(_creditCalcPacked);
+
+        Set             creditSet           = creditJournalizer.getChargedValues();
+        SetEnumerator   creditSetEnumerator = creditSet.getEnumerator();
+
+        while (creditSetEnumerator.moveNext())
+        {
+            [accountType, amount, description, isCredit, creditAccountType] = creditSetEnumerator.current();
+
+            if (isCredit || !strScan(description, 'Credited - Credited', 0, strLen(description)))
+            {
+                testAccountType = (isCredit ? creditAccountType : accountType);
+
+                switch (testAccountType)
+                {
+                    case FINRentalAccountType::Price :
+                    case FINRentalAccountType::Discount :
+                    case FINRentalAccountType::Manual :
+                        salesPriceRentalCredit  += amount;
+                        salesPriceTotalCredit   += amount;
+
+                        break;
+
+                    case FINRentalAccountType::Insurance :
+                        salesPriceInsuranceCredit   += amount;
+                        salesPriceTotalCredit       += amount;
+
+                        break;
+
+                    case FINRentalAccountType::DeliveryTransport :
+                        salesPriceDeliveryTransportCredit   += amount;
+                        salesPriceTotalCredit               += amount;
+
+                        break;
+
+                    case FINRentalAccountType::ReturnTransport :
+                        salesPriceReturnTransportCredit += amount;
+                        salesPriceTotalCredit           += amount;
+
+                        break;
+
+                    case FINRentalAccountType::CostPrice :
+                        costPriceCredit += amount;
+
+                        break;
+
+                    default :
+                        // Do nothing.
+                }
+            }
+        }
+
+        return [salesPriceRentalCredit,
+                salesPriceDeliveryTransportCredit,
+                salesPriceReturnTransportCredit,
+                salesPriceInsuranceCredit,
+                salesPriceTotalCredit,
+                costPriceCredit];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjTransDateForCredit</Name>
+				<Source><![CDATA[
+    private ProjTransDate getProjTransDateForCredit(ProjJournalTrans _projJournalTransParent, container _creditCalcPacked)
+    {
+        RefRecId            recIdRef;
+        RefTableId          tableIdRef;
+        ProjJournalTrans    projJournalTransLocal;
+        FINProjJournalTrans finProjJournalTrans;
+        ProjTransDate       newProjTransDate;
+
+        RORParameters rentalParameters = RORParameters::find();
+
+        if (rentalParameters.RentalProjectUseOrigDateForCreditNotes == NoYes::No)
+        {
+            return _projJournalTransParent.ProjTransDate;
+        }
+
+        FINCreditJournalizer creditJournalizer = new FINCreditJournalizer();
+
+        creditJournalizer.unpack(_creditCalcPacked);
+
+        Set             creditedJournalTransRefIdSet    = creditJournalizer.getSetOfCreditedJournalTransRef();
+        SetEnumerator   enumerator                      = creditedJournalTransRefIdSet.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            [tableIdRef, recIdRef] = enumerator.current();
+
+            select firstonly ProjTransDate from projJournalTransLocal
+            where projJournalTransLocal.TableId == tableIdRef
+            &&    projJournalTransLocal.RecId   == recIdRef
+                exists join finProjJournalTrans
+                where finProjJournalTrans.ProjJournalTransRecId == projJournalTransLocal.RecId
+                &&    finProjJournalTrans.PeriodStatus          == FINInvoiceTransPeriodStatus::PendingCredit;
+
+            newProjTransDate = (newProjTransDate ? min(newProjTransDate, projJournalTransLocal.ProjTransDate) : projJournalTransLocal.ProjTransDate);
+        }
+
+        // The new date on the project journal line may fall in a closed period, so a number of checks have to be performed.
+        if (newProjTransDate)
+        {
+            FiscalCalendar              fiscalCalendar;
+            FiscalCalendarPeriod        fiscalCalendarPeriod;
+            LedgerFiscalCalendarPeriod  ledgerFiscalCalendarPeriod;
+
+            Ledger ledger = Ledger::findByLegalEntity(CompanyInfo::find().RecId);
+
+            select firstonly TableId from fiscalCalendar
+            where fiscalCalendar.RecId == ledger.FiscalCalendar
+                join RecId from fiscalCalendarPeriod
+                where fiscalCalendarPeriod.FiscalCalendar   == fiscalCalendar.RecId
+                &&    fiscalCalendarPeriod.Type             == FiscalPeriodType::Operating
+                &&    fiscalCalendarPeriod.StartDate        <= newProjTransDate
+                &&    fiscalCalendarPeriod.EndDate          >= newProjTransDate
+                    join Status from ledgerFiscalCalendarPeriod
+                    where ledgerFiscalCalendarPeriod.FiscalCalendarPeriod == fiscalCalendarPeriod.RecId;
+
+            if (!fiscalCalendarPeriod.RecId ||
+                ledgerFiscalCalendarPeriod.Status == FiscalPeriodStatus::OnHold ||
+                ledgerFiscalCalendarPeriod.Status == FiscalPeriodStatus::Closed)
+            {
+                newProjTransDate = rentalParameters.FINFirstOpenPostingDate;
+            }
+        }
+
+        return newProjTransDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transferToProjectInvoicing</Name>
+				<Source><![CDATA[
+    public void transferToProjectInvoicing()
+    {
+        voucherDate2ProjVoucherMap = new Map(Types::Date, Types::String);
+
+        next transferToProjectInvoicing();
+
+        MapEnumerator       enumerator;
+        ProjJournalTable    projJournalTable;
+            
+        enumerator = line2ProjJournalId.getEnumerator();
+        while (enumerator.moveNext())
+        {
+            projJournalTable = ProjJournalTable::find(enumerator.currentValue());
+
+            if (projJournalTable && projJournalTable.Posted == NoYes::Yes)
+            {
+                FINRentalPeriodJournalizer::construct(projJournalTable, null).journalize();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

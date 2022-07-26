@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPInvoiceStatusUpdate_JournalLine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPInvoiceStatusUpdate_JournalLine extends WPPInvoiceStatusUpdate
+{
+    JournalTransList    journalTransList;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    void new()
+    {
+        //journalTransList = _args.object();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmJournalTransList</Name>
+				<Source><![CDATA[
+    public JournalTransList parmJournalTransList(JournalTransList _journalTransList = journalTransList)
+    {
+        journalTransList = _journalTransList;
+    
+        return journalTransList;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        WPPProjInventJournalTrans   projInventJournalTrans;
+        Common                      common;
+        ProjInvoiceTable            projInvoiceTable;
+        ProjTable                   projTable;
+    
+        while (journalTransList.next())
+        {
+            common = journalTransList.journalTransData().journalTrans();
+            projInventJournalTrans = common;
+    
+            select firstonly RecId, projInvoiceProjId, WPPInvoiceStatus from projInvoiceTable
+                exists join projTable
+                where projTable.ProjId            == projInventJournalTrans.ProjId
+                &&    projTable.ProjInvoiceProjId == projInvoiceTable.ProjInvoiceProjId;
+    
+            projInvoiceProjId = projInvoiceTable.ProjInvoiceProjId;
+    
+            if (projInvoiceTable.RecId
+            &&  projInvoiceTable.WPPInvoiceStatus < WPPInvoiceStatus::PartlyCharged)
+            {
+                if (projInvoiceTable.WPPInvoiceStatus != WPPInvoiceStatus::Chargeable
+                && (this.existChargeable_Hour()
+                  ||  this.existChargeable_Expense()
+                  ||  this.existChargeable_Item()
+                  ||  this.existChargeable_Fee()
+                  ||  this.existChargeable_OnAccount()))
+                {
+                    this.setInvoiceStatus(WPPInvoiceStatus::Chargeable, projInvoiceTable.projInvoiceProjId);
+                }
+                else if (projInvoiceTable.WPPInvoiceStatus != WPPInvoiceStatus::Internal)
+                {
+                    this.setInvoiceStatus(WPPInvoiceStatus::Internal, projInvoiceTable.projInvoiceProjId);
+                }
+            }
+            else
+            if (projInvoiceTable.RecId
+            &&  projInvoiceTable.WPPInvoiceStatus == WPPInvoiceStatus::FullyCharged)
+            {
+                if (ProjLineProperty::Find(projInventJournalTrans.ProjLinePropertyId).ToBeInvoiced)
+                {
+                    this.setInvoiceStatus(WPPInvoiceStatus::PartlyCharged, projInvoiceTable.ProjInvoiceProjId);
+                }
+            }
+
+            ProjJournalTrans projJournalTrans = common as ProjJournalTrans;
+            
+            if(projJournalTrans.INVRefRecId && projJournalTrans.INVRefTableId && !RORParameters::find().RentalProjectInvoicing)
+            {
+                this.RORUpdateRentalTransStatus(common);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateRentalTransStatus</Name>
+				<Source><![CDATA[
+    private void RORUpdateRentalTransStatus(ProjJournalTrans _projJournalTrans)
+    {
+        SalesLine           salesLine;
+        InventTransOrigin   inventTransOrigin;
+        BOBRentalTrans      rentalTrans;
+        ProjLineProperty    projLineProperty;
+
+        select firstonly forupdate salesLine
+        where salesLine.RecId == _projJournalTrans.INVRefRecId
+        &&    salesLine.TableId == _projJournalTrans.INVRefTableId
+            join TableId from inventTransOrigin
+            where inventTransOrigin.InventTransId == salesLine.InventTransId
+                join SubStatus from rentalTrans
+                where rentalTrans.InventTransOrigin == inventTransOrigin.RecId
+                    join ToBeInvoiced from projLineProperty
+                    where _projJournalTrans.LinePropertyId == projLineProperty.LinePropertyId;
+            
+        if(salesLine)
+        {
+            if(rentalTrans.SubStatus == BOBRentalSubStatus::Invoiced && projLineProperty.ToBeInvoiced)
+            {
+                ttsbegin;
+                this.BOBSynchronizeRentalTrans(salesLine, BOBRentalSubStatus::Returned);
+                salesLine.SalesStatus = SalesStatus::Delivered;
+                salesLine.update();
+                ttscommit;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBSynchronizeRentalTrans</Name>
+				<Source><![CDATA[
+    private void BOBSynchronizeRentalTrans(SalesLine _salesLine, BOBRentalSubStatus _newSubStatus)
+    {
+        InventTrans                     inventTrans;
+        InventTransOriginSalesLine      originSalesLine;
+    
+        ttsBegin;
+    
+        while select TableId from originSalesLine
+        where originSalesLine.SalesLineDataAreaId == _salesLine.dataAreaId
+        &&    originSalesLine.SalesLineInventTransId == _salesLine.InventTransId
+            join  inventTrans
+            where inventTrans.InventTransOrigin == originSalesLine.InventTransOrigin
+            &&    !inventTrans.BOBIsCompensatingTrans
+        {
+            InventMovement inventMovement = InventMovement::construct(_salesLine);
+            BOBRentalTransManager transManager = BOBRentalTransManager::newInventMovement(inventMovement, inventTrans);
+            transManager.parmDoUpdateBuffer(true);
+            transManager.setSubStatus(_newSubStatus);
+            transManager.synchronize();
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,1649 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPreInvoiceCheck</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+///     Performs invoice checks before or after running an invoice
+/// </summary>
+class DNRPreInvoiceCheck extends RunBaseBatch
+{
+    DialogRunbase           dialog;
+    QueryRun                queryRun;
+    INVCalculationDateTime  calculationDateTime;
+    DNRPrePostInvoiceCheck  invoiceCheck;
+    DialogField             dfCalculationDateTime;
+    DialogField             dfInvoiceCheck;
+    SalesTable              salesTable;
+    SalesLine               salesLine;
+    RORRentalDateTimes      rentalDateTimes;
+    BOBRentalTrans          rentalTrans;
+    boolean                 isRentalLine;
+    List                    errorsList;
+    RecordInsertList        insertList;
+
+    SalesParmTable          parmTable;
+    ParmId                  parmId;
+    Set                     recIdSet;
+    RORParameters           rentalParameters;
+    boolean                 salesTableContainsRentalStop;
+    
+    FINBatchInvoiceAuditTrail   auditTrail;
+    FINInvoiceCheckCategory     invoiceCheckCategory;
+
+    Map orderErrors = new Map(Types::String, Types::Class);
+    Map lineErrors = new Map(Types::String, Types::Class);
+    //Key FINInvoiceCheckCategory enum, value: [DNRPrePostInvoiceCheck, HeadingLine, enabled]
+    Map invoiceCheckSelectionMap;
+    Map invoiceCheckSelectionDialogFieldMap;
+
+    #DEFINE.VersionOne(1)
+    #LOCALMACRO.CurrentList
+        calculationDateTime,
+        invoiceCheck
+    #ENDMACRO
+
+    #DEFINE.CurrentVersion(2)
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>addToErrors</Name>
+				<Source><![CDATA[
+    protected boolean addToErrors(str _errorText, FINPreInvoiceCheckErrorType _errorType)
+    {
+        List errorList;
+
+        if (_errorType == FINPreInvoiceCheckErrorType::Order)
+        {
+            errorList = orderErrors.exists(salesTable.SalesId) ?
+                        orderErrors.lookup(salesTable.SalesId) :
+                        new List(Types::String);
+
+            errorList.addEnd(_errorText);
+            orderErrors.insert(salesTable.SalesId, errorList);
+        }
+        else if (_errorType == FINPreInvoiceCheckErrorType::Line)
+        {
+            Map lineErrorsMap = lineErrors.exists(salesLine.SalesId) ?
+                                lineErrors.lookup(salesLine.SalesId) :
+                                new Map(Types::Real, Types::Class);
+
+            errorList = lineErrorsMap.exists(salesLine.LineNum) ?
+                        lineErrorsMap.lookup(salesLine.LineNum) :
+                        new List(Types::String);
+            
+            errorList.addEnd(_errorText);
+            lineErrorsMap.insert(salesLine.LineNum, errorList);
+            lineErrors.insert(salesLine.SalesId, lineErrorsMap);
+        }
+
+        if (auditTrail.RecId)
+        {
+            this.logInvoiceCheck(_errorText);
+        }
+
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addToInfo</Name>
+				<Source><![CDATA[
+    private void addToInfo()
+    {
+        SysInfoAction_Formrun sysInfoAction = SysInfoAction_Formrun::newFormname(formStr(RORSalesTable));
+        MapEnumerator orderErrorsEnumerator = orderErrors.getEnumerator();
+        List errorList;
+        ListEnumerator errorListEnumerator;
+
+        while (orderErrorsEnumerator.moveNext())
+        {
+            setPrefix(strFmt("@DNR:OrderXIsNotValid", orderErrorsEnumerator.currentKey()));
+
+            errorList = orderErrorsEnumerator.currentValue();
+            errorListEnumerator = errorList.getEnumerator();
+
+            while (errorListEnumerator.moveNext())
+            {
+                warning(errorListEnumerator.current());
+            }
+        }
+
+        MapEnumerator lineErrorsEnumerator = lineErrors.getEnumerator();
+
+        while (lineErrorsEnumerator.moveNext())
+        {
+            Map lineErrorsMap = lineErrorsEnumerator.currentValue();
+            MapEnumerator lineErrorsMapEnumerator = lineErrorsMap.getEnumerator();
+
+            while (lineErrorsMapEnumerator.moveNext())
+            {
+                setPrefix(strFmt("@DNR8119", lineErrorsEnumerator.currentKey(), any2Str(lineErrorsMapEnumerator.currentKey())));
+
+                errorList = lineErrorsMapEnumerator.currentValue();
+                errorListEnumerator = errorList.getEnumerator();
+
+                while (errorListEnumerator.moveNext())
+                {
+                    warning(errorListEnumerator.current());
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addToErrorsList</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Adds an error to the list, to be displayed once the invoice checks have completed
+    /// </summary>
+    /// <param name = "_errorText"> The text to be added to the list </param>
+    /// <returns> A boolean that indicates the specific check has failed </returns>
+    [SysObsolete("ConfigKey: DNRDeletedObjects01_2021. Method has been made obsolete. Please use the addToErrors method instead.", false)]
+    protected boolean addToErrorsList(str _errorText)
+    {
+        if (!errorsList)
+        {
+            errorsList = new List(Types::String);
+        }
+    
+        errorsList.addEnd(_errorText);
+
+        if (auditTrail.RecId)
+        {
+            this.logInvoiceCheck(_errorText);
+        }
+    
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkTotalAmount</Name>
+				<Source><![CDATA[
+    private boolean checkTotalAmount()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::HeaderAmount);
+
+        if (this.mustCheckTotalAmount()
+        &&  parmTable
+        &&  parmTable.numberOfLines() > 0)
+        {
+            AmountCur totalAmount;
+            SalesParmLine salesParmLine;
+            SalesLine salesLineLoc;
+
+            while select salesParmLine
+            where salesParmLine.ParmId == parmTable.parmId
+                join RORTradeType, LineAmount from salesLineLoc
+                where salesLineLoc.InventTransId == salesParmLine.InventTransId
+            {
+                AmountCur invoiceLineAmount;
+                
+                if (salesLineLoc.RORTradeType == RORTradeType::SalesPurch)
+                {
+                    invoiceLineAmount = salesLineLoc.LineAmount;
+                }
+                else
+                {
+                    FINRentalInvoiceDetailHelper helper = new FINRentalInvoiceDetailHelper();
+                    helper.initParameters(salesParmLine, false);
+                    helper.calculate();
+                    invoiceLineAmount = helper.totalChargedAmount;
+                }
+
+                totalAmount += invoiceLineAmount;
+            }
+
+            if (!totalAmount)
+            {
+                ret = this.addToErrors("@DNR:InvalidInvoiceAmount", FINPreInvoiceCheckErrorType::Order);
+            }
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkExchangeTime</Name>
+				<Source><![CDATA[
+    private boolean checkExchangeTime()
+    {
+        boolean ret = true;
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Exchange);
+
+        if (this.mustCheckExchangeTime()
+        &&  isRentalLine
+        &&  salesLine.RORRecIdExchanged)
+        {
+            ROROffRentDateTime offRentDateTime = rentalDateTimes.getOffRentDateTime(false, false);
+
+            if (DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(offRentDateTime, salesLine.RORRentalLine::FINTimeZoneOrder())))
+            {
+                ret = this.addToErrors("@DNR:InvalidExchangeTime", FINPreInvoiceCheckErrorType::Line);
+            }
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkPendingCredits</Name>
+				<Source><![CDATA[
+    private boolean checkPendingCredits()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Credits);
+
+        if (this.mustCheckPendingCredits()
+        &&  isRentalLine)
+        {
+            Set pendingCreditSet = new Set(Types::Container);
+
+            FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+            select firstonly RecId, CreditJourRefRecId from invoiceCalculatorParm
+            where invoiceCalculatorParm.MustBeInvoiced
+            &&    invoiceCalculatorParm.ParmId           == parmId
+            &&    invoiceCalculatorParm.OrderLineTableId == salesLine.TableId
+            &&    invoiceCalculatorParm.OrderLineRecId   == salesLine.RecId;
+
+            if (invoiceCalculatorParm.RecId)
+            {
+                if (invoiceCalculatorParm.CreditJourRefRecId)
+                {
+                    pendingCreditSet = FINCustInvoiceTrans::getPendingCreditSetForCredit(salesLine, calculationDateTime, true, invoiceCalculatorParm.CreditJourRefRecId);
+                }
+                else
+                {
+                    pendingCreditSet = FINCustInvoiceTrans::getPendingCreditSet(salesLine, calculationDateTime, true);
+                    
+                    if (pendingCreditSet.empty())
+                    {
+                        pendingCreditSet = FINProjInvoiceItem::getPendingCreditSet(salesLine, calculationDateTime);
+                    }
+                }
+
+                if (!pendingCreditSet.empty())
+                {
+                    ret = this.addToErrors("@DNR:PendingCreditExists", FINPreInvoiceCheckErrorType::Line);
+                }
+            }
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkVATNum</Name>
+				<Source><![CDATA[
+    private boolean checkVATNum()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::VAT);
+
+        if (this.mustCheckVATNum() && !salesTable.VATNum)
+        {
+            ret = this.addToErrors("@DNR:MissingVATNum", FINPreInvoiceCheckErrorType::Order);
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkTimeZoneOrder</Name>
+				<Source><![CDATA[
+    private boolean checkTimeZoneOrder()
+    {
+        boolean ret = true;
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::TimeZone);
+
+        if (this.mustCheckTimeZoneOrder() 
+        &&  salesTable.SalesType == SalesType::RORRental 
+        &&  salesTable.FINTimeZoneOrder
+        &&  salesTable.FINTimeZoneOrder != DateTimeUtil::getCompanyTimeZone())
+        {
+            ret = this.addToErrors("@DNR:TimeZoneOnOrderHeaderIsDifferentFromCompanyTimeZone", FINPreInvoiceCheckErrorType::Order);
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkRentalStopApplied</Name>
+				<Source><![CDATA[
+    private boolean checkRentalStopApplied()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::RentalStop);
+
+        if (this.mustCheckRentalStopApplied()
+        &&  isRentalLine)
+        {
+            boolean rentalStopAmendmentFound;
+
+            if (salesTableContainsRentalStop)
+            {
+                FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+                select firstonly invoiceCalculatorParm
+                where invoiceCalculatorParm.MustBeInvoiced
+                &&    invoiceCalculatorParm.ParmId           == parmId
+                &&    invoiceCalculatorParm.OrderLineTableId == salesLine.TableId
+                &&    invoiceCalculatorParm.OrderLineRecId   == salesLine.RecId;
+
+                if (invoiceCalculatorParm)
+                {
+                    FINPeriodSpecificationManager periodSpecificationManager = FINPeriodSpecificationManager::construct();
+                    FINInvoicingOptions blankInvoicingOptions = FINInvoicingOptions::construct();
+                    blankInvoicingOptions.calculationDateTime = calculationDateTime;
+
+                    periodSpecificationManager.populate(invoiceCalculatorParm, salesLine, blankInvoicingOptions);
+                    MapEnumerator periodEnumerator = periodSpecificationManager.getSpecificationMap().getEnumerator();
+
+                    while (periodEnumerator.moveNext())
+                    {
+                        Map periodDefinitionMap = periodEnumerator.currentValue();
+                        MapEnumerator enumerator = periodDefinitionMap.getEnumerator();
+            
+                        while (enumerator.moveNext())
+                        {
+                            TransDateTime periodStartDateTime, periodEndDateTime;
+
+                            [periodStartDateTime, periodEndDateTime] = enumerator.currentKey();
+
+                            FINInvoicePeriodAmendment rentalStopAmendment;
+
+                            select firstonly RecId from rentalStopAmendment
+                            where rentalStopAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+                            &&    rentalStopAmendment.StrValue == rentalParameters.RentalStopCalendar
+                            &&    rentalStopAmendment.FromDateTime >= periodStartDateTime
+                            &&    rentalStopAmendment.ToDateTime <= periodEndDateTime
+                            &&    rentalStopAmendment.RefTableId == salesLine.TableId
+                            &&    rentalStopAmendment.RefRecId == salesLine.RecId
+                            &&    (rentalStopAmendment.DocumentState == FINAmendmentDocumentState::None || rentalStopAmendment.DocumentState == FINAmendmentDocumentState::Confirmed);
+
+                            if (rentalStopAmendment && !this.onRentDateMatchesOffRentDate())
+                            {
+                                ret = this.addToErrors("@DNR:InvoicePeriodContainsRentalStop", FINPreInvoiceCheckErrorType::Line);
+
+                                rentalStopAmendmentFound = true;
+                                break;
+                            }
+                        }
+
+                        if (rentalStopAmendmentFound)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!rentalStopAmendmentFound && this.onRentDateMatchesOffRentDate())
+            {
+                ret = this.addToErrors("@DNR:MissingRentalStop", FINPreInvoiceCheckErrorType::Line);
+            }
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onRentDateMatchesOffRentDate</Name>
+				<Source><![CDATA[
+    private boolean onRentDateMatchesOffRentDate()
+    {
+        Timezone timeZoneOrder = salesLine.RORRentalLine::FINTimeZoneOrder();
+
+        return (DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(rentalDateTimes.getOnRentDateTime(), timeZoneOrder)) == DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(rentalDateTimes.getOffRentDateTime(false, false), timeZoneOrder)));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkLineAmount</Name>
+				<Source><![CDATA[
+    private boolean checkLineAmount()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::LineAmount);
+
+        if (this.mustCheckLineAmount()
+        &&  !isRentalLine
+        &&  !salesLine.SalesPrice)
+        {
+            ret = this.addToErrors("@DNR:InvalidUnitPrice", FINPreInvoiceCheckErrorType::Line);
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMinimumLineQty</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that defines the minimum line quantity of main (i.e. non-supplementary) lines
+    /// </summary>
+    /// <returns> A real value that defines the minimum line quantity of main (i.e. non-supplementary) lines </returns>
+    protected SalesOrderedQty getMinimumLineQty()
+    {
+        return 1;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkLineQty</Name>
+				<Source><![CDATA[
+    private boolean checkLineQty()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Qty);
+        SalesOrderedQty minQty = this.getMinimumLineQty();
+
+        if (this.mustCheckLineQty()
+        &&  !salesLine.RORParentLineRecId
+        &&  salesLine.SalesQty > minQty)
+        {
+            ret = this.addToErrors(strFmt("@DNR:InvalidLineQty", minQty), FINPreInvoiceCheckErrorType::Line);
+        }
+    
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkRentalDates</Name>
+				<Source><![CDATA[
+    private boolean checkRentalDates()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::RentalDate);
+
+        if (this.mustCheckRentalDates() 
+        &&  isRentalLine)
+        {
+            ROROffRentDateTime offRentDateTime = rentalDateTimes.getOffRentDateTime(false, false);
+
+            if (offRentDateTime
+            &&  rentalTrans
+            &&  rentalTrans.SubStatus != BOBRentalSubStatus::Inbound
+            &&  rentalTrans.SubStatus != BOBRentalSubStatus::Returned
+            &&  rentalTrans.SubStatus != BOBRentalSubStatus::Invoiced)
+            {
+                ret = this.addToErrors(strFmt("@DNR:InvalidLineStatusOffRentDateTimeFilled", enum2Str(BOBRentalSubStatus::Inbound), enum2Str(BOBRentalSubStatus::Returned), enum2Str(BOBRentalSubStatus::Invoiced)), FINPreInvoiceCheckErrorType::Line);
+            }
+            else if (rentalTrans && rentalTrans.SubStatus == BOBRentalSubStatus::Returned && !offRentDateTime)
+            {
+                ret = this.addToErrors(strFmt("@DNR:BlankOffRentDateTimeOnLineStatusX", enum2Str(BOBRentalSubStatus::Returned)), FINPreInvoiceCheckErrorType::Line);
+            }
+        }
+    
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkCalendar</Name>
+				<Source><![CDATA[
+    private boolean checkCalendar()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Calendar);
+
+        if (this.mustCheckCalendar()
+        &&  isRentalLine 
+        &&  salesTable.DNRCalendarId != salesLine.DNRCalendarId)
+        {
+            ret = this.addToErrors("@DNR8120", FINPreInvoiceCheckErrorType::Line);
+        }
+    
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkDeliveryStatus</Name>
+				<Source><![CDATA[
+    private boolean checkDeliveryStatus()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::DeliveryStatus);
+
+        if (this.mustCheckDeliveryStatus())
+        {
+            if (rentalTrans && rentalTrans.SubStatus < BOBRentalSubStatus::Delivered)
+            {
+                ret = false;
+            }
+    
+            if (ret)
+            {
+                InventTrans inventTrans;
+                InventTransOriginSalesLine inventTransOriginSalesLine;
+
+                select minOf(StatusIssue), RecId from inventTrans
+                where !inventTrans.BOBIsCompensatingTrans
+                    exists join inventTransOriginSalesLine
+                    where inventTransOriginSalesLine.InventTransOrigin == inventTrans.InventTransOrigin
+                    && inventTransOriginSalesLine.SalesLineDataAreaId == salesLine.dataAreaId
+                    && inventTransOriginSalesLine.SalesLineInventTransId == salesLine.InventTransId;
+    
+                if (inventTrans.RecId && inventTrans.StatusIssue < StatusIssue::Deducted)
+                {
+                    ret = false;
+                }
+            }
+    
+            if (!ret)
+            {
+                ret = this.addToErrors("@DNR8122", FINPreInvoiceCheckErrorType::Line);
+
+            }
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkInvoiceProfile</Name>
+				<Source><![CDATA[
+    private boolean checkInvoiceProfile()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::InvoiceProfile);
+
+        if (this.mustCheckInvoiceProfile()
+        &&  isRentalLine 
+        &&  salesTable.INVInvoiceProfileId != salesLine.INVInvoiceProfileId)
+        {
+            ret = this.addToErrors("@DNR8123", FINPreInvoiceCheckErrorType::Line);
+
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkInvoiceStatus</Name>
+				<Source><![CDATA[
+    private boolean checkInvoiceStatus()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::InvoiceStatus);
+    
+        if (this.mustCheckInvoiceStatus() 
+        &&  !isRentalLine 
+        &&  salesLine.SalesStatus != SalesStatus::Invoiced)
+        {
+            ret = this.addToErrors("@DNR8124", FINPreInvoiceCheckErrorType::Line);
+
+        }
+    
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkNetAmount</Name>
+				<Source><![CDATA[
+    private boolean checkNetAmount()
+    {
+        boolean ret = true;
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::LineAmount);
+    
+        if (this.mustCheckNetAmount())
+        {
+            ret = this.addToErrors("@DNR8125", FINPreInvoiceCheckErrorType::Line);
+        }
+
+        this.parmInvoiceCheckCategory(FINInvoiceCheckCategory::Misc);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckTotalAmount</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkTotalAmount pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkTotalAmount pre-invoice check must be run </returns>
+    protected boolean mustCheckTotalAmount()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::HeaderAmount);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckExchangeTime</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkExchangeTime pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkExchangeTime pre-invoice check must be run </returns>
+    protected boolean mustCheckExchangeTime()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::Exchange);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckPendingCredits</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkPendingCredits pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkPendingCredits pre-invoice check must be run </returns>
+    protected boolean mustCheckPendingCredits()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::Credits);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckVATNum</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkVATNum pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkVATNum pre-invoice check must be run </returns>
+    protected boolean mustCheckVATNum()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::VAT);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckTimeZoneOrder</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkTimeZoneOrder pre-invoice check must be run.
+    /// </summary>
+    /// <returns>True if the checkTimeZoneOrder pre-invoice check must be run; otherwise, false.</returns>
+    protected boolean mustCheckTimeZoneOrder()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::TimeZone);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckRentalStopApplied</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkRentalStopApplied pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkRentalStopApplied pre-invoice check must be run </returns>
+    protected boolean mustCheckRentalStopApplied()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::RentalStop);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckLineAmount</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkLineAmount pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkLineAmount pre-invoice check must be run </returns>
+    protected boolean mustCheckLineAmount()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::LineAmount);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckLineQty</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkLineQty pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkLineQty pre-invoice check must be run </returns>
+    protected boolean mustCheckLineQty()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::Qty);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckRentalDates</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkRentalDates pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkRentalDates pre-invoice check must be run </returns>
+    protected boolean mustCheckRentalDates()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::RentalDate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckCalendar</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkCalendar pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkCalendar pre-invoice check must be run </returns>
+    protected boolean mustCheckCalendar()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::Calendar);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckDeliveryStatus</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkDeliveryStatus pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkDeliveryStatus pre-invoice check must be run </returns>
+    protected boolean mustCheckDeliveryStatus()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::DeliveryStatus);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckInvoiceProfile</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkInvoiceProfile pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkInvoiceProfile pre-invoice check must be run </returns>
+    protected boolean mustCheckInvoiceProfile()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::InvoiceProfile);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckInvoiceStatus</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkInvoiceStatus pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkInvoiceStatus pre-invoice check must be run </returns>
+    protected boolean mustCheckInvoiceStatus()
+    {
+        return this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::InvoiceStatus);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckNetAmount</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point that indicates whether the checkNetAmount pre-invoice check must be run
+    /// </summary>
+    /// <returns> A boolean that indicates whether the checkNetAmount pre-invoice check must be run </returns>
+    protected boolean mustCheckNetAmount()
+    {
+        return (this.isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory::LineAmount) && isRentalLine && salesLine.ROREditLineNetAmount(false, 0) == 0);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        dialog = super();
+
+        invoiceCheckSelectionDialogFieldMap = new Map(Types::Enum, Types::Class);
+    
+        dialog.addGroup("@SYS35893");
+        dfCalculationDateTime = dialog.addFieldValue(extendedTypeStr(INVCalculationDateTime), calculationDateTime);
+        dfInvoiceCheck = dialog.addFieldValue(enumStr(DNRPrePostInvoiceCheck), invoiceCheck);
+
+        DialogGroup preCheckHeaderGroup, postCheckHeaderGroup, preCheckLineGroup, postCheckLineGroup;
+        MapEnumerator mapEnumerator = invoiceCheckSelectionMap.getEnumerator();
+
+        //data structure could be subject to refacoring in case perfomance is affected
+        preCheckHeaderGroup = dialog.addGroup("@DNR:PreInvoiceHeaderChecks");
+        this.fillFieldGroup(mapEnumerator, DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Heading);
+
+        postCheckHeaderGroup = dialog.addGroup("@DNR:PostInvoiceHeaderChecks");
+        this.fillFieldGroup(mapEnumerator, DNRPrePostInvoiceCheck::PostInvoice, HeadingLine::Heading);
+
+        preCheckLineGroup = dialog.addGroup("@DNR:PreInvoiceLineChecks");
+        this.fillFieldGroup(mapEnumerator, DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line);
+
+        postCheckLineGroup = dialog.addGroup("@DNR:PostInvoiceLineChecks");
+        this.fillFieldGroup(mapEnumerator, DNRPrePostInvoiceCheck::PostInvoice, HeadingLine::Line);
+
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fillFieldGroup</Name>
+				<Source><![CDATA[
+    private void fillFieldGroup(MapEnumerator _mapEnumerator, DNRPrePostInvoiceCheck _prePostInvoiceCheck, HeadingLine _headerLine)
+    {
+        DNRPrePostInvoiceCheck prePostInvoiceCheck;
+        HeadingLine headerLine;
+        boolean enabled;
+        FINInvoiceCheckCategory invoiceCheckCategoryLocal;
+        DialogField dialogField;
+        SysDictEnum dictEnum = new SysDictEnum(enumnum(FINInvoiceCheckCategory));
+
+        _mapEnumerator.reset();
+
+        while (_mapEnumerator.moveNext())
+        {
+            invoiceCheckCategoryLocal = _mapEnumerator.currentKey();
+
+            [prePostInvoiceCheck, headerLine, enabled] = _mapEnumerator.currentValue();
+
+            if (prePostInvoiceCheck == _prePostInvoiceCheck && headerLine == _headerLine)
+            {
+                dialogField = dialog.addFieldValue(enumStr(NoYes), enabled, dictEnum.value2Label(invoiceCheckCategoryLocal), DNRPreInvoiceCheck::getCheckHelpText(invoiceCheckCategoryLocal));
+                invoiceCheckSelectionDialogFieldMap.add(invoiceCheckCategoryLocal, dialogField);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCheckHelpText</Name>
+				<Source><![CDATA[
+    public static FieldHelp getCheckHelpText(FINInvoiceCheckCategory _invoiceCheckCategory)
+    {
+        FieldHelp helpText;
+
+        switch (_invoiceCheckCategory)
+        {
+            case FINInvoiceCheckCategory::Calendar:
+                helpText = "@DNR8120";
+                break;
+
+            case FINInvoiceCheckCategory::Credits:
+                helpText = "@DNR:PendingCreditExists";
+                break;
+
+            case FINInvoiceCheckCategory::DeliveryStatus:
+                helpText = "@DNR8122";
+                break;
+
+            case FINInvoiceCheckCategory::Exchange:
+                helpText = "@DNR:InvalidExchangeTime";
+                break;
+
+            case FINInvoiceCheckCategory::HeaderAmount:
+                helpText = "@DNR:InvalidInvoiceAmount";
+                break;
+
+            case FINInvoiceCheckCategory::InvoiceProfile:
+                helpText = "@DNR8123";
+                break;
+
+            case FINInvoiceCheckCategory::InvoiceStatus:
+                helpText = "@DNR8124";
+                break;
+
+            case FINInvoiceCheckCategory::LineAmount:
+                helpText = strFmt("@SYS26868", "@DNR:InvalidUnitPrice", "@DNR8125");
+                break;
+
+            case FINInvoiceCheckCategory::Misc:
+                helpText = "@DNR8124";
+                break;
+
+            case FINInvoiceCheckCategory::Qty:
+                helpText = "@DNR:InvalidLineQty";
+                break;
+
+            case FINInvoiceCheckCategory::RentalDate:
+                helpText = "@DNR:BlankOffRentDateTimeOnLineStatusX";
+                break;
+
+            case FINInvoiceCheckCategory::RentalStop:
+                helpText = "@DNR:InvoicePeriodContainsRentalStop";
+                break;
+
+            case FINInvoiceCheckCategory::TimeZone:
+                helpText = "@DNR:TimeZoneOnOrderHeaderIsDifferentFromCompanyTimeZone";
+                break;
+
+            case FINInvoiceCheckCategory::VAT:
+                helpText = "@DNR:MissingVATNum";
+                break;
+        }
+
+        return helpText;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        boolean ret;
+    
+        ret = super();
+    
+        calculationDateTime = DateTimeUtil::removeTimeZoneOffset(dfCalculationDateTime.value(), DateTimeUtil::getUserPreferredTimeZone());
+        invoiceCheck = dfInvoiceCheck.value();
+
+        this.getInvoiceCheckSelectionMapFromDialog();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInvoiceCheckSelectionMapFromDialog</Name>
+				<Source><![CDATA[
+    private void getInvoiceCheckSelectionMapFromDialog()
+    {
+        MapEnumerator mapEnumerator = invoiceCheckSelectionDialogFieldMap.getEnumerator();
+        
+        DNRPrePostInvoiceCheck prePostInvoiceCheck;
+        HeadingLine headerLine;
+        boolean enabled;
+        DialogField dialogField;
+        FINInvoiceCheckCategory invoiceCheckCategoryLocal;
+
+        while (mapEnumerator.moveNext())
+        {
+            invoiceCheckCategoryLocal = mapEnumerator.currentKey();
+
+            dialogField = mapEnumerator.currentValue();
+
+            if (invoiceCheckSelectionMap.exists(invoiceCheckCategoryLocal))
+            {
+                [prePostInvoiceCheck, headerLine, enabled] = invoiceCheckSelectionMap.lookup(invoiceCheckCategoryLocal);
+
+                invoiceCheckSelectionMap.add(invoiceCheckCategoryLocal, [prePostInvoiceCheck, headerLine, dialogField.value()]);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isInvoiceCheckCategoryEnabled</Name>
+				<Source><![CDATA[
+    private boolean isInvoiceCheckCategoryEnabled(FINInvoiceCheckCategory _invoiceCheckCategory)
+    {
+        if (invoiceCheckSelectionMap.exists(_invoiceCheckCategory))
+        {
+            DNRPrePostInvoiceCheck prePostInvoiceCheck;
+            HeadingLine headerLine;
+            boolean enabled;
+
+            [prePostInvoiceCheck, headerLine, enabled] = invoiceCheckSelectionMap.lookup(_invoiceCheckCategory);
+
+            return enabled;
+        }
+
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParmDefault</Name>
+				<Source><![CDATA[
+    public void initParmDefault()
+    {
+        Query                   query;
+        QueryBuildDataSource    headerQBDS, lineQBDS, inventDimQBDS;
+        QueryBuildRange         salesTypeRange;
+    
+        super();
+    
+        query = new Query();
+        headerQBDS = query.addDataSource(tableNum(SalesTable));
+    
+        lineQBDS = headerQBDS.addDataSource(tableNum(SalesLine));
+        lineQBDS.relations(true);
+        lineQBDS.joinMode(JoinMode::InnerJoin);
+    
+        lineQBDS.addRange(fieldNum(SalesLine, INVInvoiceProfileId));
+    
+        inventDimQBDS = lineQBDS.addDataSource(tableNum(InventDim));
+        inventDimQBDS.relations(true);
+        inventDimQBDS.joinMode(JoinMode::InnerJoin);
+    
+        salesTypeRange = headerQBDS.addRange(fieldNum(SalesTable, SalesType));
+        salesTypeRange.value(SysQuery::value(SalesType::RORRental));
+        salesTypeRange.status(RangeStatus::Locked);
+    
+        queryRun = new QueryRun(query);
+
+        invoiceCheckSelectionMap = DNRPreInvoiceCheck::getDefaultInvoiceCheckSelectionMap();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDefaultInvoiceCheckSelectionMap</Name>
+				<Source><![CDATA[
+    public static Map getDefaultInvoiceCheckSelectionMap()
+    {
+        Map invoiceCheckSelectionMapLocal = new Map(Types::Enum, Types::Container);
+
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::HeaderAmount, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Heading, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::VAT, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Heading, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::TimeZone, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Heading, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::LineAmount, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::DeliveryStatus, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::InvoiceProfile, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::Calendar, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::RentalDate, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::Qty, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::LineAmount, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::RentalStop, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::Credits, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::Exchange, [DNRPrePostInvoiceCheck::PreInvoice, HeadingLine::Line, true]);
+        invoiceCheckSelectionMapLocal.add(FINInvoiceCheckCategory::InvoiceStatus, [DNRPrePostInvoiceCheck::PostInvoice, HeadingLine::Line, true]);
+
+        return invoiceCheckSelectionMapLocal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [#CurrentVersion, #CurrentList, queryRun.pack(), invoiceCheckSelectionMap.pack()];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryRun</Name>
+				<Source><![CDATA[
+    public QueryRun queryRun()
+    {
+        return queryRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        setPrefix("@DNR8128");
+        rentalParameters = RORParameters::find();
+
+        while (queryRun.next())
+        {
+            try
+            {
+                if (queryRun.changed(tableNum(SalesTable)))
+                {
+                    ttsbegin;
+                    salesTable = queryRun.get(tableNum(SalesTable));
+                    this.onSalesTableChanged();
+
+                    Query querySalesLine = new Query(queryRun.query());
+                    SysQuery::findOrCreateRange(querySalesLine.dataSourceTable(tableNum(SalesTable)), fieldNum(SalesTable, SalesId)).value(salesTable.SalesId);
+                    QueryRun queryRunSalesLine = new QueryRun(querySalesLine);
+
+                    while (queryRunSalesLine.next())
+                    {
+                        if (queryRunSalesLine.changed(tableNum(SalesLine)))
+                        {
+                            salesLine = queryRunSalesLine.get(tableNum(SalesLine));
+                            rentalDateTimes = salesLine.RORRentalDateTimes();
+                            isRentalLine = (salesLine.RORTradeType != RORTradeType::SalesPurch);
+
+                            this.onSalesLineChanged();
+                        }
+                    }
+
+                    this.cleanupPrecalculatedData();
+                    ttscommit;
+                }
+            }
+            catch (Exception::Error)
+            {
+                this.addToErrors(infolog.text(infologLine()), FINPreInvoiceCheckErrorType::Order);
+            }
+            finally
+            {
+                salesLine = null;
+            }
+        }
+        
+        this.onInvoiceCheckEnded();
+        this.addToInfo();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onInvoiceCheckEnded</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Performs actions after the entire invoice check has ended
+    /// </summary>
+    protected void onInvoiceCheckEnded()
+    {
+        if (insertList && insertList.usageCount())
+        {
+            insertList.insertDatabase();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onSalesTableChanged</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Performs invoice checks once the sales table has been changed
+    /// </summary>
+    protected void onSalesTableChanged()
+    {
+        this.prepareInvoiceData();
+
+        salesTableContainsRentalStop = this.salesTableContainsRentalStop();
+
+        if (calculationDateTime && calculationDateTime < salesTable.RORRentalDateTimesHost::rentalDateTimes().getOnRentDateTime())
+        {
+            return;
+        }
+
+        boolean headerInvoiceCheckSucceeded = true;
+
+        if (invoiceCheck == DNRPrePostInvoiceCheck::PreInvoice)
+        {
+            headerInvoiceCheckSucceeded = this.performHeaderPreInvoiceChecks();
+        }
+        else
+        {
+            headerInvoiceCheckSucceeded = this.performHeaderPostInvoiceChecks();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>salesTableContainsRentalStop</Name>
+				<Source><![CDATA[
+    private boolean salesTableContainsRentalStop()
+    {
+        FINInvoicePeriodAmendment rentalStopAmendment;
+        salesLine salesLineLoc;
+
+        select firstonly RecId from rentalStopAmendment
+        where rentalStopAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+        &&    rentalStopAmendment.StrValue == rentalParameters.RentalStopCalendar
+        &&    (rentalStopAmendment.DocumentState == FINAmendmentDocumentState::None || rentalStopAmendment.DocumentState == FINAmendmentDocumentState::Confirmed)
+            exists join salesLineLoc
+            where salesLineLoc.TableId == rentalStopAmendment.RefTableId
+            &&    salesLineLoc.RecId == rentalStopAmendment.RefRecId
+            &&    salesLineLoc.SalesId == salesTable.SalesId;
+
+        return (rentalStopAmendment.RecId ? true : false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareInvoiceData</Name>
+				<Source><![CDATA[
+    private void prepareInvoiceData()
+    {
+        SalesFormLetter salesFormLetter; 
+
+        using (SalesFormLetterConstructContext context = SalesFormLetterConstructContext::construct())
+        {
+            // Do not load from SysLastValue as we may select on the wrong criteria.
+            context.parmLoadFromSysLastValue(UnknownNoYes::No);
+            salesFormLetter = SalesFormLetter::construct(DocumentStatus::Invoice);
+        }
+
+        FINBatchInvoiceConfiguration invoiceConfiguration;
+
+        if (auditTrail)
+        {
+            invoiceConfiguration = FINBatchInvoiceConfiguration::find(auditTrail.ConfigurationId);
+        }
+
+        FINInvoicingOptions invoicingOptions = FINInvoicingOptions::construct();
+        invoicingOptions.includeUninvoiced = invoiceConfiguration ? invoiceConfiguration.INVIncludeUninvoiced : NoYes::Yes;
+        invoicingOptions.includeCredited = invoiceConfiguration ? invoiceConfiguration.INVIncludeCredits : NoYes::Yes;
+        invoicingOptions.calculationDateTime = calculationDateTime;
+        invoicingOptions.skipSetCalculationDateTime = NoYes::Yes;
+
+        salesFormLetter.salesTable(salesTable);
+        salesFormLetter.getContract().parmCallerTable(salesTable);
+        salesFormLetter.transDate(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+        salesFormLetter.specQty(invoiceConfiguration ? invoiceConfiguration.SpecQty : SalesUpdate::All);
+        salesFormLetter.FINSetInvoicingOption(invoicingOptions);
+        salesFormLetter.RORparmRentalSubStatus(BOBRentalSubStatus::Invoiced);
+        
+        salesFormLetter.initLinesQuery();
+
+        FINMarkupTransGenerator::createMarkupWorkTrans(salesFormLetter.parmId());
+
+        select firstonly parmTable where parmTable.parmId == salesFormLetter.parmId();
+
+        parmId = parmTable.ParmId;
+        recIdSet = FINMarkupTransGenerator::createMarkupTransForParmId(parmId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanupPrecalculatedData</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void cleanupPrecalculatedData()
+    {
+        ttsbegin;
+
+        if (parmTable)
+        {
+            parmTable.selectForUpdate(true);
+            parmTable.delete();
+        }
+
+        if (parmId)
+        {
+            FINMarkupWorkTrans  markupWorkTrans;
+
+            delete_from markupWorkTrans
+            where markupWorkTrans.ParmId == parmId;
+
+            FINInvoiceCalculatorParm invoiceCalcParm;
+
+            delete_from invoiceCalcParm
+            where invoiceCalcParm.ParmId == parmId;
+
+            FINCustInvoiceRun custInvoiceRun;
+            
+            delete_from custInvoiceRun
+            where custInvoiceRun.ParmId == parmId;
+        }
+
+        if (recIdSet && !recIdSet.empty())
+        {
+            SetEnumerator enumerator = recIdSet.getEnumerator();
+            
+            while (enumerator.moveNext())
+            {
+                RecId deletedRecId = enumerator.current();
+                MarkupTrans markupTrans;
+
+                delete_from markupTrans
+                where markupTrans.RecId == deletedRecId;
+            }
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onSalesLineChanged</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Performs invoice checks once the sales line has been changed
+    /// </summary>
+    protected void onSalesLineChanged()
+    {
+        if (calculationDateTime && calculationDateTime < rentalDateTimes.getOnRentDateTime())
+        {
+            return;
+        }
+
+        boolean lineInvoiceCheckSucceeded = true;
+
+        InventTransOriginSalesLine  inventTransOriginSalesLine;
+    
+        select minOf(SubStatus), RecId from rentalTrans
+        where rentalTrans.TransType != BOBRentalTransType::InventCounting
+            exists join inventTransOriginSalesLine
+            where inventTransOriginSalesLine.InventTransOrigin == rentalTrans.InventTransOrigin
+            &&    inventTransOriginSalesLine.SalesLineDataAreaId == salesLine.dataAreaId
+            &&    inventTransOriginSalesLine.SalesLineInventTransId == salesLine.InventTransId;
+
+        lineInvoiceCheckSucceeded = (invoiceCheck == DNRPrePostInvoiceCheck::PreInvoice ? this.performLinePreInvoiceChecks() : this.performLinePostInvoiceChecks());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performHeaderPreInvoiceChecks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point for adding header-level pre-invoice checks 
+    /// </summary>
+    /// <returns> A boolean indicating whether the pre-invoice checks succeeded </returns>
+    protected boolean performHeaderPreInvoiceChecks()
+    {
+        boolean ret;
+
+        ret = this.checkTotalAmount();
+        ret = this.checkVATNum() && ret;
+        ret = this.checkTimeZoneOrder() && ret;
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performHeaderPostInvoiceChecks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point for adding header-level post-invoice checks
+    /// </summary>
+    /// <returns> A boolean indicating whether the post-invoice checks succeeded </returns>
+    protected boolean performHeaderPostInvoiceChecks()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performLinePreInvoiceChecks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point for adding line-level pre-invoice checks
+    /// </summary>
+    /// <returns> A boolean indicating whether the pre-invoice checks succeeded </returns>
+    protected boolean performLinePreInvoiceChecks()
+    {
+        boolean ret;
+
+        ret = this.checkNetAmount();
+        ret = this.checkDeliveryStatus() && ret;
+        ret = this.checkInvoiceProfile() && ret;
+        ret = this.checkCalendar() && ret;
+        ret = this.checkRentalDates() && ret;
+        ret = this.checkLineQty() && ret;
+        ret = this.checkLineAmount() && ret;
+        ret = this.checkRentalStopApplied() && ret;
+        ret = this.checkPendingCredits() && ret;
+        ret = this.checkExchangeTime() && ret;
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performLinePostInvoiceChecks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Extension point for adding line-level post-invoice checks
+    /// </summary>
+    /// <returns> A boolean indicating whether the post-invoice checks succeeded </returns>
+    protected boolean performLinePostInvoiceChecks()
+    {
+        boolean ret;
+
+        ret = this.checkInvoiceStatus();
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showQueryValues</Name>
+				<Source><![CDATA[
+    public boolean showQueryValues()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version     version = RunBase::getVersion(_packedClass);
+        container   packedQuery, invoiceCheckSelectionMapPacked;
+    
+        switch (version)
+        {
+            case #VersionOne :
+                [version, #CurrentList, packedQuery] = _packedClass;
+    
+                if (packedQuery)
+                {
+                    queryRun = new QueryRun(packedQuery);
+                }
+    
+                break;
+
+            case #CurrentVersion :
+                [version, #CurrentList, packedQuery, invoiceCheckSelectionMapPacked] = _packedClass;
+    
+                if (packedQuery)
+                {
+                    queryRun = new QueryRun(packedQuery);
+                }
+
+                if (invoiceCheckSelectionMapPacked)
+                {
+                    invoiceCheckSelectionMap = Map::create(invoiceCheckSelectionMapPacked);
+                }
+    
+                break;
+    
+            default :
+                return false;
+        }
+    
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    client server static ClassDescription description()
+    {
+        return "@DNR8128";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    static void main(Args _args)
+    {
+        DNRPreInvoiceCheck  preInvoiceCheck = new DNRPreInvoiceCheck();
+    
+        if (preInvoiceCheck.prompt())
+        {
+            preInvoiceCheck.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCalculationDateTime</Name>
+				<Source><![CDATA[
+    public INVCalculationDateTime parmCalculationDateTime(INVCalculationDateTime _calculationDateTime = calculationDateTime)
+    {
+        calculationDateTime = _calculationDateTime;
+        return calculationDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmPrePostInvoiceCheck</Name>
+				<Source><![CDATA[
+    public DNRPrePostInvoiceCheck parmPrePostInvoiceCheck(DNRPrePostInvoiceCheck _invoiceCheck = invoiceCheck)
+    {
+        invoiceCheck = _invoiceCheck;
+        return invoiceCheck;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmInvoiceCheckSelectionMap</Name>
+				<Source><![CDATA[
+    public Map parmInvoiceCheckSelectionMap(Map _invoiceCheckSelectionMap = invoiceCheckSelectionMap)
+    {
+        invoiceCheckSelectionMap = _invoiceCheckSelectionMap;
+        return invoiceCheckSelectionMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmInvoiceCheckCategory</Name>
+				<Source><![CDATA[
+    public FINInvoiceCheckCategory parmInvoiceCheckCategory(FINInvoiceCheckCategory _invoiceCheckCategory = invoiceCheckCategory)
+    {
+        invoiceCheckCategory = _invoiceCheckCategory;
+        return invoiceCheckCategory;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanupInvoiceCheckLog</Name>
+				<Source><![CDATA[
+    private void cleanupInvoiceCheckLog()
+    {
+        FINBatchInvoiceCheckLog invoiceCheckLog;
+        delete_from invoiceCheckLog where invoiceCheckLog.AuditTrailRecId == auditTrail.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromAuditTrail</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Initializes the invoice parameters from the audit trail
+    /// </summary>
+    /// <param name = "_auditTrail"> The audit trail </param>
+    public void initFromAuditTrail(FINBatchInvoiceAuditTrail _auditTrail)
+    {
+        auditTrail = _auditTrail;
+        calculationDateTime = _auditTrail.CalculationDateTime;
+        queryRun = new QueryRun(_auditTrail.LateSelectionQuery);
+        insertList = new RecordInsertList(tableNum(FINBatchInvoiceCheckLog));
+        this.cleanupInvoiceCheckLog();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>logInvoiceCheck</Name>
+				<Source><![CDATA[
+    private void logInvoiceCheck(LogText _logText)
+    {
+        FINBatchInvoiceCheckLog     batchInvoiceCheckLog;
+        
+        batchInvoiceCheckLog.clear();
+        batchInvoiceCheckLog.initValue();
+        batchInvoiceCheckLog.invoiceCheckCategory = this.parmInvoiceCheckCategory();
+        batchInvoiceCheckLog.SalesId = salesTable.SalesId;
+        batchInvoiceCheckLog.InventTransId = salesLine.inventTransId;
+        batchInvoiceCheckLog.OrderLineNumber = salesLine.LineNum;
+        batchInvoiceCheckLog.LogText = _logText;
+        batchInvoiceCheckLog.AuditTrailRecId = auditTrail.RecId;
+
+        insertList.add(batchInvoiceCheckLog);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

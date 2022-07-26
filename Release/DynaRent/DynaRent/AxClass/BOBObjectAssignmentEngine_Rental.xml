@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBObjectAssignmentEngine_Rental</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBObjectAssignmentEngine_Rental extends BOBObjectAssignmentEngine
+{
+    SalesLine salesLine;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>assign</Name>
+				<Source><![CDATA[
+    protected void assign()
+    {
+        InventDim               inventDim, inventDimPurchLine;
+        RORSubRentalReference   reference;
+        PurchLine               purchLine;
+        InventLocationId        subRentalWarehouse;
+        BOBObjectTable          objectTable = BOBObjectTable::findInventSerialId(newSerialNum);
+
+        if (objectTable)
+        {
+            // Make sure the Serial Number is already created in the current company
+            InventSerial inventSerial = InventSerial::BOBFindOrCreateSerialNumber(objectTable.RentalTypeId, newSerialNum);
+    
+            inventDim = salesLine.inventDim();
+            inventDim.inventSerialId = inventSerial.InventSerialId;
+    
+            if(objectTable.Category == BOBObjectCategory::SubRental)
+            {
+                // no intercompany processing for now
+                select firstOnly DNRBack2Back, PurchId, InventTransId from purchLine
+                where purchLine.RORTradeType == RORTradeType::SubRental
+                &&    purchLine.BOBRentalTypeId
+                    exists join inventDimPurchLine
+                    where inventDimPurchLine.inventDimId == purchLine.InventDimId
+                    &&    inventDimPurchLine.inventSerialId
+                    &&    inventDimPurchLine.inventSerialId == objectTable.InventSerialId;
+    
+                if(purchLine)
+                {
+                    reference.SalesId               = salesLine.SalesId;
+                    reference.SalesInventTransId    = salesLine.InventTransId;
+                    reference.PurchId               = purchLine.PurchId;
+                    reference.PurchInventTransId    = purchLine.InventTransId;
+                    reference.insert();
+                    /*
+                    purchLine.ItemRefType           = InventRefType::Sales;
+                    purchLine.InventRefId           = salesLine.SalesId;
+                    purchLine.InventRefTransId      = salesLine.InventTransId;
+                    purchLine.update();
+                    */
+                    salesLine.InventRefType         = InventRefType::Purch;
+                    salesLine.InventRefId           = purchLine.PurchId;
+                    salesLine.InventRefTransId      = purchLine.InventTransId;
+                }
+    
+                salesLine.RORTradeType  = RORTradeType::SubRental;
+
+                if (purchLine.DNRBack2Back == NoYes::No)
+                {
+                    subRentalWarehouse      = RORParameters::find().SubRentalWarehouse;
+    
+                    if(subRentalWarehouse)
+                    {
+                        inventDim.InventLocationId  = subRentalWarehouse;
+                        inventDim.InventSiteId      = InventLocation::find(subRentalWarehouse).InventSiteId;
+                    }
+                }
+            }
+    
+            salesLine.InventDimId               = InventDim::findOrCreate(inventDim).InventDimId;
+            salesLine.BOBRentalTypeIdAssigned   = objectTable.RentalTypeId;
+            salesLine.BOBItemIdRequested        = salesLine.ItemId;
+            salesLine.ItemId                    = inventSerial.ItemId;
+    
+            // record will be updated to database outside of this class, in intercompanyMirror
+            if (!forceSkipValidation)
+            {
+                if (!salesLine.RecId) // record is being created
+                {
+                    salesLine.insert();
+                }
+                else
+                {
+    
+                    if(salesLine.ItemId == salesLine.BOBItemIdRequested)
+                    {
+                        salesLine.selectForUpdate(true);
+                        salesLine.update();
+                    }
+                    else // if a different item is assigned, first we need to drop the inventory, then manually recreate it
+                    {
+                        // SalesLine selected for update, in this case the _dropInvent variable is set to true
+                        // which causes the salesLine not to be selected for update
+                        salesLine.selectForUpdate(true);
+                        salesLine.update(true);
+                        this.updateInventory();
+                    }
+                }
+            }
+    
+            SalesLine::WPPupdateWorkOrder(objectTable, salesLine, '', calledFromAssignmentService);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setRentalLine</Name>
+				<Source><![CDATA[
+    protected void setRentalLine(RORRentalLine _rentalLine)
+    {
+        salesLine = _rentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unassign</Name>
+				<Source><![CDATA[
+    protected void unassign()
+    {
+        InventDim                       inventDim;
+        RORSubRentalReference           subRentalReference;
+        InterCompanyPurchSalesReference interCompanyPurchSalesReference;
+        BOBObjectTable                  objectTable;
+        boolean                         mustDropInvent;
+        SalesTable                      salesTable;
+        ;
+    
+        salesLine.selectForUpdate(true);
+    
+        mustDropInvent = (salesLine.ItemId != salesLine.BOBItemIdRequested);
+    
+        select firstonly InventLocationId, InventSiteId from salesTable
+        where salesTable.SalesId == salesLine.SalesId
+            join  inventDim
+            where inventDim.inventDimId == salesLine.InventDimId
+                join Category from objectTable
+                where objectTable.InventSerialId == currentSerialNum;
+    
+        inventDim.inventSerialId = '';
+    
+        if(objectTable.Category == BOBObjectCategory::SubRental)
+        {
+            delete_from subRentalReference
+            where subRentalReference.SalesInventTransId == salesLine.InventTransId
+            &&    subRentalReference.PurchInventTransId == salesLine.InventRefTransId;
+    
+            delete_from interCompanyPurchSalesReference
+            where interCompanyPurchSalesReference.PurchId == salesLine.InventRefId
+            &&    interCompanyPurchSalesReference.SalesId == salesLine.SalesId;
+    
+            salesLine.RORTradeType          = RORTradeType::Rental;
+            salesLine.InventRefType         = InventRefType::None;
+            salesLine.InventRefId           = '';
+            salesLine.InventRefTransId      = '';
+            salesLine.SourcingOrigin        = SalesSourcingOrigin::Inventory;
+    
+            if(salesTable.InventLocationId)
+            {
+                inventDim.InventLocationId  = salesTable.InventLocationId;
+                inventDim.InventSiteId      = salesTable.InventSiteId;
+            }
+        }
+    
+        salesLine.InventDimId               = InventDim::findOrCreate(inventDim).InventDimId;
+        salesLine.BOBRentalTypeIdAssigned   = '';
+        salesLine.ItemId                    = salesLine.BOBItemIdRequested ? salesLine.BOBItemIdRequested : salesLine.ItemId;
+        salesLine.BOBItemIdRequested        = '';
+    
+        // if a different item was assigned, first we need to drop the inventory, then manually recreate it
+        if(mustDropInvent)
+        {
+            salesLine.update(true);
+            this.updateInventory();
+        }
+        else
+        {
+            salesLine.update();
+        }
+    
+        SalesLine::WPPupdateWorkOrder(null, salesLine, '', calledFromAssignmentService);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean         ret;
+        BOBRentalType   rentalType;
+        ;
+    
+        ret = true;
+        rentalType = BOBRentalType::find(salesLine.BOBRentalTypeId());
+    
+        if(!rentalType)
+        {
+            ret = checkFailed(strFmt("@DNR6076", salesLine.ItemId));
+        }
+    
+        if(rentalType.Classification != BOBRentalTypeClassification::Serialized)
+        {
+            ret = checkFailed(strFmt("@DNR1762", rentalType.Classification));
+        }
+    
+        if(currentSerialNum) // validate unassign
+        {
+            if(salesLine.BOBRentalSubStatus > BOBRentalSubStatus::Confirmed)
+            {
+                ret = checkFailed(strFmt("@DNR4985", BOBRentalSubStatus::Confirmed));
+            }
+    
+            if (!WPPWorkOrderLine::validateWorkOrderLineParentStatus(salesLine))
+            {
+                ret = checkFailed(strFmt("@DNR7310", WPPWorkOrderLineStatus::Planned));
+            }
+        }
+    
+        ret = ret && super(_calledFrom);
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

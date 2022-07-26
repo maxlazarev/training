@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINPeriodDistributionType_CustInvoiceTransCredit</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[FINPeriodDistributionTypeAttribute(FINPeriodDistributionEngineType::CustInvoiceTransCredit)]
+class FINPeriodDistributionType_CustInvoiceTransCredit extends FINPeriodDistributionType_Markup
+{
+    CustInvoiceTrans    custInvoiceTrans;
+    MarkupTrans         markupTrans;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>runInit</Name>
+				<Source><![CDATA[
+    protected void runInit()
+    {
+        markupTrans = ledgerRefBuffer;
+        custInvoiceTrans = CustInvoiceTrans::findRecId(markupTrans.TransRecId);
+
+        invoiceId = custInvoiceTrans.InvoiceId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkHasProjPeriods</Name>
+				<Source><![CDATA[
+    protected boolean checkHasProjPeriods()
+    {
+        FINCustInvoiceTransCredit custInvoiceTransCredit;
+
+        select firstonly RecId from custInvoiceTransCredit
+        where custInvoiceTransCredit.CustInvoiceTransRecId == custInvoiceTrans.RecId;
+
+        return custInvoiceTransCredit.RecId != 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDaysChargeablePeriods</Name>
+				<Source><![CDATA[
+    protected container getDaysChargeablePeriods()
+    {
+        FINCustInvoiceTransCredit   custInvoiceTransCredit;
+        FINCustInvoiceTransPeriod   custInvoiceTransPeriodCredited;
+        CustInvoiceTrans            custInvoiceTransOrig;
+        container                   ret;
+        Periods                     chargeablePeriods;
+        TransDateTime               lastPeriodEndDateTime;
+        Counter                     rentalCount = 0;
+        date                        startDate, endDate;
+
+        while select custInvoiceTransPeriodCredited
+        order by PeriodEndDateTime
+            exists join custInvoiceTransOrig
+            where custInvoiceTransOrig.RecId == custInvoiceTransPeriodCredited.CustInvoiceTransRecId
+                join custInvoiceTransCredit
+                where custInvoiceTransOrig.RecId == custInvoiceTransCredit.CustInvoiceTransCreditedRecId
+                && custInvoiceTransCredit.CustInvoiceTransRecId == custInvoiceTrans.RecId
+        {
+            lastPeriodEndDateTime = custInvoiceTransPeriodCredited.PeriodEndDateTime;
+
+            chargeablePeriods += custInvoiceTransPeriodCredited.NumOfChargeablePeriods;
+
+            rentalCount += this.calcNumOfPeriods(DateTimeUtil::date(custInvoiceTransPeriodCredited.PeriodStartDateTime), DateTimeUtil::date(custInvoiceTransPeriodCredited.PeriodEndDateTime));
+
+            if (isMonthlyDistribution)
+            {
+                if (!startDate)
+                {
+                    startDate = DateTimeUtil::date(custInvoiceTransPeriodCredited.PeriodStartDateTime);
+                }
+                endDate = max(endDate, DateTimeUtil::date(custInvoiceTransPeriodCredited.PeriodEndDateTime));
+            }
+        }
+
+        switch (parameters.FINDistributionType)
+        {
+            case FINDistributionType::DistributionByDay:
+                ret = [0, chargeablePeriods, lastPeriodEndDateTime, documentSourceBuffer];
+                break;
+
+            case FINDistributionType::DistributionByRentalPeriod:
+                ret = [rentalCount, chargeablePeriods, lastPeriodEndDateTime, documentSourceBuffer];
+
+                if (!forceDistribution
+                && isMonthlyDistribution
+                && dateEndMth(startDate) == dateEndMth(endDate)
+                && dateEndMth(startDate) == dateEndMth(invoiceDate))
+                {
+                    // no need to distribute
+                    nothingToDistribute = true;
+                    return  [0,0];
+                }
+    
+                if(chargeablePeriods <= 0 && amount)
+                {
+                    throw error("@DNR3422");
+                }
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareCache</Name>
+				<Source><![CDATA[
+    protected void prepareCache(Counter         _rentalPeriodCount,
+                                Periods         _chargeablePeriods,
+                                TransDateTime   _lastPeriodEndDateTime,
+                                Common          _common)
+    {
+        FINCustInvoiceTransCredit   custInvoiceTransCredit;
+        FINCustInvoiceTransPeriod   custInvoiceTransPeriodCredited;
+        CustInvoiceTrans            custInvoiceTransOrig;
+
+        rentalPeriodCount = _rentalPeriodCount;
+
+        while select custInvoiceTransPeriodCredited
+        order by PeriodEndDateTime
+            exists join custInvoiceTransOrig
+            where custInvoiceTransOrig.RecId == custInvoiceTransPeriodCredited.CustInvoiceTransRecId
+                join custInvoiceTransCredit
+                where custInvoiceTransOrig.RecId == custInvoiceTransCredit.CustInvoiceTransCreditedRecId
+                && custInvoiceTransCredit.CustInvoiceTransRecId == custInvoiceTrans.RecId
+        {
+            this.prepareCacheForRentalPeriod(custInvoiceTransPeriodCredited.PeriodStartDateTime,
+                custInvoiceTransPeriodCredited.PeriodEndDateTime,
+                custInvoiceTransPeriodCredited.NumOfChargeablePeriods,
+                custInvoiceTransPeriodCredited.RecId,
+                _chargeablePeriods,
+                _lastPeriodEndDateTime);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcNumOfPeriods</Name>
+				<Source><![CDATA[
+    private Periods calcNumOfPeriods(date _invPeriodStartDate, date _invPeriodEndDate)
+    {
+        ProjPeriodLine projPeriods;
+
+        select count(RecId) from projPeriods
+        where projPeriods.PeriodId == parameters.FINPeriodId
+        &&    projPeriods.PeriodFrom <= _invPeriodEndDate
+        &&    projPeriods.PeriodTo >= _invPeriodStartDate;
+
+        return projPeriods.RecId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

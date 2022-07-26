@@ -1,0 +1,411 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINWorkCalendar</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINWorkCalendar implements SysPackable
+{
+    #define.maxDepthLevel(3)
+    #define.fullPercent(100)
+
+    // packed variables
+    Map datesMap; // { CalendarId, Map(TransDate, IsOpen) }
+    Map timesMap; // { CalendarId, Map([ TransDate, FromTime ], ToTime) }
+
+    // temporary tables
+    DNRTmpIdValue calendarTmpTable;
+    FINTmpCalendarDate dateTmpTable;
+
+    // passed-in parameters
+    Map calendarMap; // { CalendarId, MustPopulateMinutes }
+    FromDate processFromDate;
+    ToDate processToDate;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>resetMaps</Name>
+				<Source><![CDATA[
+    private void resetMaps()
+    {
+        datesMap = new Map(Types::String, Types::Class);
+        timesMap = new Map(Types::String, Types::Class);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populate</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Populates the internal memory structures that hold the calendar date information.
+    /// </summary>
+    /// <param name = "_calendarMap">Map { CalendarId, NoYes }. Each entry indicates a calendar to process and whether or not to include time information.</param>
+    /// <param name = "_fromDate">First date of interval for which to populate.</param>
+    /// <param name = "_toDate">Last date of interval for which to populate.</param>
+    public void populate(Map _calendarMap, FromDate _fromDate, ToDate _toDate)
+    {
+        if(_calendarMap && _fromDate && _toDate && _toDate >= _fromDate)
+        {
+            calendarMap     = _calendarMap;
+            processFromDate = _fromDate;
+            processToDate   = _toDate;
+
+            this.resetMaps();
+            this.populateCalendarTmpTable();
+            this.populateDateTmpTable();
+            this.populateDatesMap();
+            this.populateTimesMap();
+            this.clearTmpTables();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateCalendarTmpTable</Name>
+				<Source><![CDATA[
+    private void populateCalendarTmpTable()
+    {
+        RecordInsertList insertList = new RecordInsertList(tableNum(DNRTmpIdValue), false, false, false, false, false, calendarTmpTable);
+        MapEnumerator enumerator = calendarMap.getEnumerator();
+
+        while(enumerator.moveNext())
+        {
+            boolean mustPopulateTimes = enumerator.currentValue();
+            calendarTmpTable.BooleanValue = (mustPopulateTimes ? NoYes::Yes : NoYes::No);
+
+            calendarTmpTable.Num = enumerator.currentKey();
+            insertList.add(calendarTmpTable);
+        }
+
+        insertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateDateTmpTable</Name>
+				<Source><![CDATA[
+    private void populateDateTmpTable()
+    {
+        DNRCalendarDate    calendarDate;
+        DNRCalendarTable   calendarTable;
+
+        insert_recordset dateTmpTable (CalendarId, TransDate, OpenClosedBase)
+            select CalendarId, TransDate, WorkTimeControl from calendarDate
+            order by CalendarId asc, TransDate asc
+            where calendarDate.TransDate >= processFromDate
+            &&    calendarDate.TransDate <= processToDate
+                exists join calendarTmpTable
+                where calendarTmpTable.Num == calendarDate.CalendarId;
+
+        // set base calendar IDs where necessary
+        update_recordset dateTmpTable
+        setting BaseCalendarId = calendarTable.BasicCalendarId
+        where dateTmpTable.OpenClosedBase == WorkTimeControl::UseBasic
+            join BasicCalendarId from calendarTable
+            where calendarTable.CalendarId == dateTmpTable.CalendarId;
+
+        // adjust date transactions that point to their base calendar
+        int currentDepthLevel = 0;
+        int64 updateCount = 0;
+
+        do
+        {
+            update_recordset dateTmpTable
+            setting OpenClosedBase = calendarDate.WorkTimeControl, BaseCalendarId = calendarTable.BasicCalendarId
+            where dateTmpTable.OpenClosedBase == WorkTimeControl::UseBasic
+                join WorkTimeControl from calendarDate
+                where calendarDate.CalendarId == dateTmpTable.BaseCalendarId
+                &&    calendarDate.TransDate == dateTmpTable.TransDate
+                    join BasicCalendarId from calendarTable
+                    where calendarTable.CalendarId == dateTmpTable.BaseCalendarId;
+
+            updateCount = dateTmpTable.RowCount(); // number of records that were updated
+            currentDepthLevel ++;
+        }
+        while(updateCount && currentDepthLevel <= #maxDepthLevel);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateDatesMap</Name>
+				<Source><![CDATA[
+    private void populateDatesMap()
+    {
+        CalendarId  prevCalendarId;
+        Map         detailMap = new Map(Types::Date, Types::Enum); //  { TransDate, IsOpen }
+
+        while select dateTmpTable
+        order by CalendarId asc, TransDate asc
+            exists join calendarTmpTable
+            where calendarTmpTable.Num == dateTmpTable.CalendarId
+        {
+            if(prevCalendarId && prevCalendarId != dateTmpTable.CalendarId)
+            {
+                datesMap.insert(prevCalendarId, detailMap);
+                detailMap = new Map(Types::Date, Types::Enum); // clear map
+            }
+
+            detailMap.insert(dateTmpTable.TransDate, dateTmpTable.isOpen());
+            prevCalendarId = dateTmpTable.CalendarId;
+        }
+
+        // don't forget the last one (if any)
+        if(!detailMap.empty())
+        {
+            datesMap.insert(prevCalendarId, detailMap);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTimesMap</Name>
+				<Source><![CDATA[
+    private void populateTimesMap()
+    {
+        DNRCalendarDateLine    calendarDateLine;
+        CalendarId              prevCalendarId;
+        Map                     detailMap = new Map(Types::Container, Types::Integer);
+        PropertyId              excludePropertyId = RORParameters::find().FINNonChargeablePropertyId;
+        container               keyCon;
+
+        while select calendarDateLine
+        order by CalendarId asc, TransDate asc, FromTime asc
+        where calendarDateLine.Effectivity == #fullPercent
+        &&  (!excludePropertyId || calendarDateLine.PropertyId != excludePropertyId)
+            exists join calendarTmpTable
+            where calendarTmpTable.Num == calendarDateLine.CalendarId
+            &&    calendarTmpTable.BooleanValue == NoYes::Yes
+        {
+            if(prevCalendarId && prevCalendarId != calendarDateLine.CalendarId)
+            {
+                timesMap.insert(prevCalendarId, detailMap);
+                detailMap = new Map(Types::Container, Types::Integer); // clear map
+            }
+
+            keyCon = [ calendarDateLine.TransDate, calendarDateLine.FromTime ];
+            detailMap.insert(keyCon, calendarDateLine.ToTime);
+            prevCalendarId = calendarDateLine.CalendarId;
+        }
+
+        // don't forget the last one (if any)
+        if(!detailMap.empty())
+        {
+            timesMap.insert(prevCalendarId, detailMap);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearTmpTables</Name>
+				<Source><![CDATA[
+    private void clearTmpTables()
+    {
+        delete_from calendarTmpTable;
+        delete_from dateTmpTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDatesMap</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns a Map { TransDate, NoYes }.
+    /// Each entry holds a TransDate and whether or not that day is open in the specified calendar.
+    /// </summary>
+    public Map getDatesMap(CalendarId _calendarId, FromDate _fromDate, ToDate _toDate)
+    {
+        Map ret = new Map(Types::Date, Types::Enum); // { TransDate, IsOpen }
+
+        if(datesMap.exists(_calendarId))
+        {
+            Map detailMap = datesMap.lookup(_calendarId);
+            MapEnumerator enumerator = detailMap.getEnumerator();
+
+            while(enumerator.moveNext())
+            {
+                TransDate currentTransDate = enumerator.currentKey();
+
+                if(currentTransDate >= _fromDate)
+                {
+                    boolean isOpen = enumerator.currentValue();
+                    ret.insert(currentTransDate, isOpen);
+
+                    if(currentTransDate >= _toDate)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        else
+        {
+            throw error(strFmt("@DNR:NoDataForCalendar", classStr(FINWorkCalendar), _calendarId));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isDateOpen</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns a boolean value indicating whether the specified date is opened in the specified calendar.
+    /// </summary>
+    public boolean isDateOpen(CalendarId _calendarId, TransDate _transDate)
+    {
+        if(datesMap.exists(_calendarId))
+        {
+            Map detailMap = datesMap.lookup(_calendarId);
+
+            if(detailMap.exists(_transDate))
+            {
+                return detailMap.lookup(_transDate);
+            }
+            else
+            {
+                throw error(strFmt("@DNR:NoDataForCalendarDate", classStr(FINWorkCalendar), _calendarId, _transDate));
+            }
+        }
+        else
+        {
+            throw error(strFmt("@DNR:NoDataForCalendar", classStr(FINWorkCalendar), _calendarId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getWorkingMinutes</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns the number of open work minutes between _fromDateTime and _toDateTime within the specified Calendar.
+    /// This method expects both _fromDateTime and _toDateTime to be timezone-neutral.
+    /// </summary>
+    public Minutes getWorkingMinutes(CalendarId _calendarId, utcDateTime _fromDateTime, utcDateTime _toDateTime)
+    {
+        #TimeConstants
+        real totalSec;
+        ;
+
+        if(timesMap.exists(_calendarId))
+        {
+            TransDate       currentTransDate;
+            FromTime        currentFromTime;
+            ToTime          currentToTime;
+            
+            FromDate        parmFromDate    = DateTimeUtil::date(_fromDateTime);
+            FromTime        parmFromTime    = DateTimeUtil::time(_fromDateTime);
+            ToDate          parmToDate      = DateTimeUtil::date(_toDateTime);
+            ToTime          parmToTime      = DateTimeUtil::time(_toDateTime);
+            Map             detailMap       = timesMap.lookup(_calendarId);
+            MapEnumerator   enumerator      = detailMap.getEnumerator();
+
+            while(enumerator.moveNext())
+            {
+                [ currentTransDate, currentFromTime ] = enumerator.currentKey();
+
+                if(currentTransDate >= parmFromDate && currentTransDate <= parmToDate)
+                {
+                    if (currentTransDate == parmToDate && !parmToTime)
+                    {
+                        continue;
+                    }
+                    currentToTime = enumerator.currentValue();
+                    totalSec += ((parmToTime ? min(currentToTime, parmToTime) : currentToTime) - max(currentFromTime, parmFromTime)) / #secondsPerMinute;
+                }
+
+                if(currentTransDate > parmToDate)
+                {
+                    break;
+                }
+            }
+        }
+        else
+        {
+            throw error(strFmt("@DNR:NoDataForCalendar", classStr(FINWorkCalendar), _calendarId));
+        }
+        return real2int(abs(totalSec));
+     
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return (datesMap && timesMap) ? [ datesMap.pack(), timesMap.pack() ] : conNull();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        boolean ret = false;
+        container datesCon, timesCon;
+        
+        datesMap = null;
+        timesMap = null;
+        
+        [ datesCon, timesCon ] = _packedClass;
+        
+        if(datesCon)
+        {
+            datesMap = Map::create(datesCon);
+            timesMap = Map::create(timesCon);
+        }
+
+        if(datesMap)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOpenDays</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns the number of open calendar days between _fromDate and _toDate within the specified Calendar.
+    /// Used for monthly invoicing scenarios.
+    /// </summary>
+    public NumberOfDays getOpenDays(CalendarId _calendarId, FromDate _fromDate, ToDate _toDate)
+    {
+        NumberOfDays ret = 0;
+       
+        if(_calendarId && _fromDate && _toDate && _toDate >= _fromDate)
+        {
+            for(TransDate checkDate = _fromDate; checkDate <= _toDate; checkDate ++)
+            {
+                if(this.isDateOpen(_calendarId, checkDate))
+                {
+                    ret ++;
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

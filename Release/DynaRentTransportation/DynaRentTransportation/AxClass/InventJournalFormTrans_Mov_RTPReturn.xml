@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>InventJournalFormTrans_Mov_RTPReturn</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class InventJournalFormTrans_Mov_RTPReturn extends InventJournalFormTrans_Movement
+{
+    InventQtyJournal                            damagedPrevQty;
+    InventQtyJournal                            lostPrevQty;
+    InventQtyJournal                            scrapPrevQty;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>datasourceValidateWritePost</Name>
+				<Source><![CDATA[
+    public boolean datasourceValidateWritePost(boolean _ret)
+    {
+        boolean ret = super(_ret);
+
+        if (ret)
+        {
+            if (inventJournalTrans.RTPDisplayReturnQtyDifference() < 0)
+            {
+                ret = checkFailed(strFmt("@DNR10207", "@SYS53728"));
+            }
+            
+            InventJournalTrans inventJournalTransDuplicate;
+            
+            if (ret && inventJournalTrans.inventTable().BOBIsSerializedRentalItem())
+            {
+                if(inventJournalTrans.RORSurplusQty > 1
+                || inventJournalTrans.RORDamagedQty > 1
+                || inventJournalTrans.RORGoodQty > 1
+                || inventJournalTrans.RORLostQty > 1
+                || inventJournalTrans.RORScrappedQty > 1)
+                {
+                    ret = checkFailed(strFmt("@DNR10208"));
+                }
+
+                InventDim   inventDimLoc;
+                
+                if (ret)
+                {
+                    if (inventDim.inventSerialId)
+                    {
+                        select firstonly RecId from inventJournalTransDuplicate
+                        where inventJournalTransDuplicate.ItemId    == inventJournalTrans.ItemId
+                        &&    inventJournalTransDuplicate.JournalId == inventJournalTrans.JournalId
+                        &&    inventJournalTransDuplicate.RecId     != inventJournalTrans.RecId
+                            exists join inventDimLoc
+                            where inventDimLoc.InventDimId == inventJournalTransDuplicate.InventDimId
+                            &&    inventDimLoc.inventSerialId == inventDim.inventSerialId;
+                    
+                        if (inventJournalTransDuplicate)
+                        {
+                            ret = checkFailed(strFmt("@DNR:SerializedItemLineExists", inventJournalTrans.ItemId, inventDim.inventSerialId));
+                        }
+                    }
+                    else
+                    {
+                        ret = checkFailed("@DNR156");
+                    }
+                }
+            }
+
+            else if (ret && inventJournalTrans.inventTable().BOBIsBulkRentalItem())
+            {
+                select firstonly RecId from inventJournalTransDuplicate
+                where inventJournalTransDuplicate.ItemId    == inventJournalTrans.ItemId
+                &&    inventJournalTransDuplicate.JournalId == inventJournalTrans.JournalId
+                &&    inventJournalTransDuplicate.RecId     != inventJournalTrans.RecId;
+
+                if(inventJournalTransDuplicate)
+                {
+                    ret = checkFailed(strFmt("@DNR:BOBCountingJournalBulkItemLineExists", inventJournalTrans.ItemId));
+                }
+            }
+
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>enableFieldsActive</Name>
+				<Source><![CDATA[
+    public void enableFieldsActive()
+    {
+        super();
+        this.disableSurplusQtyIfSerialized();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fieldModifiedItemIdPost</Name>
+				<Source><![CDATA[
+    public void fieldModifiedItemIdPost()
+    {
+        super();
+
+        inventJournaltrans.RORSurplusQty = 0;
+        this.disableSurplusQtyIfSerialized();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>disableSurplusQtyIfSerialized</Name>
+				<Source><![CDATA[
+    private void disableSurplusQtyIfSerialized()
+    {
+        if (inventJournaltrans.inventTable().BOBIsSerializedRentalItem())
+        {
+            journalTrans_ds.object(fieldNum(InventJournalTrans, RORSurplusQty)).allowEdit(false);
+        }
+        else
+        {
+            journalTrans_ds.object(fieldNum(InventJournalTrans, RORSurplusQty)).allowEdit(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>datasourceInitPost</Name>
+				<Source><![CDATA[
+    public void datasourceInitPost(JournalTransMap _journalTrans)
+    {
+        super(_journalTrans);
+
+        journalTrans_ds.object(fieldNum(InventJournalTrans, RORGoodQty)).OnModified += eventhandler(this.RentalReturnQtyModified);
+        journalTrans_ds.object(fieldNum(InventJournalTrans, RORScrappedQty)).OnModified += eventhandler(this.RentalReturnQtyModified);
+        journalTrans_ds.object(fieldNum(InventJournalTrans, RORLostQty)).OnModified += eventhandler(this.RentalReturnQtyModified);
+        journalTrans_ds.object(fieldNum(InventJournalTrans, RORDamagedQty)).OnModified += eventhandler(this.RentalReturnQtyModified);
+
+        journalTrans_ds.object(fieldNum(InventJournalTrans, Qty)).visible(false);
+        journalTrans_ds.object(fieldNum(InventJournalTrans, LedgerDimension)).visible(false);
+        journalTrans_ds.object(fieldNum(InventJournalTrans, CostAmount)).visible(false);
+        journalTrans_ds.object(fieldNum(InventJournalTrans, PdsCWQty)).visible(false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RentalReturnQtyModified</Name>
+				<Source><![CDATA[
+    private void RentalReturnQtyModified(FormDataObject _sender, FormDataFieldEventArgs _eventArgs)
+    {
+        switch(fieldExt2Id (_sender.fieldId()))
+        {
+            case fieldNum(InventJournalTrans, RORGoodQty) :
+                this.RORGoodQtyModified();
+                break;
+
+            case fieldNum(InventJournalTrans, RORLostQty) :
+                this.RORLostQtyModified();
+                break;
+
+            case fieldNum(InventJournalTrans, RORScrappedQty) :
+                this.RORScrappedQtyModified();
+                break;
+
+            case fieldNum(InventJournalTrans, RORDamagedQty) :
+                this.RORDamagedQtyModified();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>datasourceActivePost</Name>
+				<Source><![CDATA[
+    public void datasourceActivePost()
+    {
+        super();
+
+        damagedPrevQty  = 0;
+        lostPrevQty     = 0;
+        scrapPrevQty    = 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateReturnQty</Name>
+				<Source><![CDATA[
+    private void updateReturnQty()
+    {
+        inventJournalTrans.Qty = (inventJournalTrans.RORGoodQty + inventJournalTrans.RORDamagedQty + inventJournalTrans.RORScrappedQty + inventJournalTrans.RORLostQty);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORScrappedQtyModified</Name>
+				<Source><![CDATA[
+    private void RORScrappedQtyModified()
+    {
+        inventJournalTrans.RORGoodQty = InventJournalTrans.RORGoodQty + (scrapPrevQty - inventJournalTrans.RORScrappedQty);
+        scrapPrevQty = inventJournalTrans.RORScrappedQty;
+        this.updateReturnQty();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORDamagedQtyModified</Name>
+				<Source><![CDATA[
+    private void RORDamagedQtyModified()
+    {
+        inventJournalTrans.RORGoodQty += (damagedPrevQty - inventJournalTrans.RORDamagedQty);
+        damagedPrevQty = inventJournalTrans.RORDamagedQty;
+        this.updateReturnQty();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORGoodQtyModified</Name>
+				<Source><![CDATA[
+    private void RORGoodQtyModified()
+    {
+        this.updateReturnQty();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORLostQtyModified</Name>
+				<Source><![CDATA[
+    private void RORLostQtyModified()
+    {
+        inventJournalTrans.RORGoodQty += (lostPrevQty - inventJournalTrans.RORLostQty);
+        lostPrevQty = inventJournalTrans.RORLostQty;
+        this.updateReturnQty();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

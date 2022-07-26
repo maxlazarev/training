@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINRentalCalcEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINRentalCalcEngine implements FINIInvoiceCalculatorGenericEngine
+{
+    FINInvoiceCalculatorParm        invoiceCalculatorParm;
+    Common                          parmLine;
+    RORRentalLine                   rentalLine;
+    FINRentalJournalizer            journalizedData;
+    FINInvoicingOptions             invoicingOptions;
+    RAGTmpContractLine              tmpContractLine;
+    FINPeriodSpecificationManager   periodSpecificationManager;
+    #define.engineId('Rental')
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>mustBeActive</Name>
+				<Source><![CDATA[
+    public boolean mustBeActive()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINRentalCalcEngine construct(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        FINRentalCalcEngine calcEngine = new FINRentalCalcEngine();
+        calcEngine.initParameters(_invoiceCalculatorParm);
+        return calcEngine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParameters</Name>
+				<Source><![CDATA[
+    public void initParameters(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        invoiceCalculatorParm = _invoiceCalculatorParm;
+        parmLine = invoiceCalculatorParm.parmLine();
+        rentalLine = invoiceCalculatorParm.rentalLine();
+        invoicingOptions = invoiceCalculatorParm.getInvoicingOptions();
+      
+        if (invoiceCalculatorParm.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(invoiceCalculatorParm.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustRunEngine</Name>
+				<Source><![CDATA[
+    protected boolean mustRunEngine()
+    {
+        boolean ret;
+
+        if (invoicingOptions.includeUninvoiced
+        && UnitOfMeasure::find(rentalLine.PriceTimeUnit).FINInvoiceRentalEngine)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkRentalHoursRegistered</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is no longer used. Rental hour registration functionality does not exists anymore.", false)]
+    protected boolean checkRentalHoursRegistered(RORRentalLine _orderLineParent)
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateInsuranceAmount</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2021. Insurance amout is calculated per invoice period instead of per invoice', false)]
+    protected AmountCur calculateInsuranceAmount(AmountCur _baseAmount)
+    {
+        return 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInsuranceCalcBasis</Name>
+				<Source><![CDATA[
+    private RORInsuranceCalcBasis getInsuranceCalcBasis()
+    {
+        RORInsuranceCalcBasis insuranceCalcBasis;
+
+        switch (rentalLine.TableId)
+        {
+            case tableNum(SalesLine):
+                SalesLine salesLine = rentalLine as SalesLine;
+                insuranceCalcBasis = salesLine.RORInsuranceCalcBasis;
+                break;
+
+            case tableNum(SalesQuotationLine):
+                SalesQuotationLine salesQuotationLine = rentalLine as SalesQuotationLine;
+                insuranceCalcBasis = salesQuotationLine.RORInsuranceCalcBasis;
+                break;
+
+            case tableNum(PurchLine):
+                PurchLine purchLine = rentalLine as PurchLine;
+                insuranceCalcBasis = purchLine.RORInsuranceCalcBasis;
+                break;
+        }
+
+        return insuranceCalcBasis;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInsurancePctFromAmendments</Name>
+				<Source><![CDATA[
+    protected container getInsurancePctFromAmendments(RORRentalLine _rentalLine, FINPeriodSpecificationManager _periodSpecificationManager)
+    {
+        FINInvoicePeriodAmendment   invoicePeriodAmendment;
+        TransDateTime               firstPeriodStartDateTime = DateTimeUtil::maxValue();
+        TransDateTime               lastPeriodEndDateTime = DateTimeUtil::minValue();
+
+        // Map( [InvoicePeriodQtyRecId, invoiceQty], Map([ FromDateTime, ToDateTime ] , List(FINPeriodSpecification)))
+        Map specificationMap = _periodSpecificationManager.getSpecificationMap();
+
+        if (!specificationMap.empty())
+        {
+            MapEnumerator enumerator = specificationMap.getEnumerator();
+
+            while (enumerator.moveNext())
+            {
+                Map periodDefinitionMap = enumerator.currentValue();
+                MapEnumerator specificationEnumerator = periodDefinitionMap.getEnumerator();
+                
+                while (specificationEnumerator.moveNext())
+                {
+                    TransDateTime fromDateTime, toDateTime;
+                    [fromDateTime, toDateTime] = specificationEnumerator.currentKey();
+
+                    firstPeriodStartDateTime = min(fromDateTime, firstPeriodStartDateTime);
+                    lastPeriodEndDateTime = max(toDateTime, lastPeriodEndDateTime);
+                }
+            }
+        }
+
+        select firstOnly RecId, RealValue from invoicePeriodAmendment
+        order by CreatedDateTime desc
+        where invoicePeriodAmendment.RefRecId       == _rentalLine.RecId
+        &&    invoicePeriodAmendment.RefTableId     == _rentalLine.TableId
+        &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::Insurance
+        &&    invoicePeriodAmendment.FromDateTime   <= lastPeriodEndDateTime
+        &&    invoicePeriodAmendment.ToDateTime     >= firstPeriodStartDateTime;
+        
+        return (invoicePeriodAmendment.RecId) ? [true, invoicePeriodAmendment.RealValue] : [false, 0];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    public void process()
+    {
+        if (this.mustRunEngine())
+        {
+            // Add result to a list storing a result of all engines.
+            List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            journalizedData = new FINRentalJournalizer();
+
+            periodSpecificationManager = FINPeriodSpecificationManager::construct();
+            periodSpecificationManager.populate(invoiceCalculatorParm, rentalLine, invoicingOptions);
+
+            AmountCur rentalAmount, rentalDiscount, insuranceAmount;
+             
+            if (periodSpecificationManager.mustBeInvoiced())
+            {
+                [rentalAmount, rentalDiscount, insuranceAmount] = periodSpecificationManager.getTotalAmounts();
+            }
+
+            if (rentalAmount)
+            {
+                resultList.addEnd(FINInvoiceCalcResult::construct(FINRentalAccountType::Price, rentalAmount));
+            }
+
+            if (rentalDiscount)
+            {
+                resultList.addEnd(FINInvoiceCalcResult::construct(FINRentalAccountType::Discount, rentalDiscount));
+            }
+
+            if (insuranceAmount && (rentalAmount + rentalDiscount) > 0)
+            {
+                resultList.addEnd(FINInvoiceCalcResult::construct(FINRentalAccountType::Insurance, insuranceAmount));
+            }
+
+            if (periodSpecificationManager.mustBeInvoiced())
+            {
+                invoiceCalculatorParm.MustBeInvoiced = true;
+            }
+            
+            Map periodSpecificationMap = periodSpecificationManager.getSpecificationMap();
+            invoiceCalculatorParm.PeriodSpecificationPacked = periodSpecificationMap.pack();
+            invoiceCalculatorParm.IsPeriodSpecificationCalculated = NoYes::Yes;
+            invoiceCalculatorParm.ChargedPeriods = periodSpecificationManager.getTotalChargeablePeriods();
+            invoiceCalculatorParm.InvoiceCalcResultListPacked = resultList.pack();
+            invoiceCalculatorParm.WasAnyEngineExecuted = NoYes::Yes;
+
+            journalizedData.addResult([periodSpecificationManager.getTotalInvoicedQty(), rentalAmount, rentalDiscount, insuranceAmount, periodSpecificationManager.getTotalChargeablePeriods()]);
+            invoiceCalculatorParm.RentalCalcPacked = journalizedData.pack();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>engineId</Name>
+				<Source><![CDATA[
+    public Num engineId()
+    {
+        return #engineId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public Description description()
+    {
+        return "@DNR:RentalEngineDescr";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>publisher</Name>
+				<Source><![CDATA[
+    public Name publisher()
+    {
+        return "@DNR:ToIncreasePublisher";
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

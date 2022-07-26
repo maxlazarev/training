@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesQuotationTransferToProjectClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesQuotationTransferToProject))]
+public final class DNRSalesQuotationTransferToProjectClass_Extension
+{
+    private static SalesLine rorSalesLine;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createProjectItemReqFromItem</Name>
+				<Source><![CDATA[
+    static SalesLine createProjectItemReqFromItem(SalesQuotationLine _salesQuotationLine, smmActivityNumber _activityNumber)
+    {
+        rorSalesLine = next createProjectItemReqFromItem(_salesQuotationLine, _activityNumber);
+        return rorSalesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createNonProjectItemReqFromItem</Name>
+				<Source><![CDATA[
+    static SalesLine createNonProjectItemReqFromItem(SalesQuotationLine _salesQuotationLine)
+    {
+        rorSalesLine = next createNonProjectItemReqFromItem(_salesQuotationLine);
+        return rorSalesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transferItemsToItemReq</Name>
+				<Source><![CDATA[
+    public static void transferItemsToItemReq(SalesQuotationTable _salesQuotationTable, SalesQuotationTransferToProject _sqtr)
+    {
+        next transferItemsToItemReq(_salesQuotationTable, _sqtr);
+        
+        if(rorSalesLine.SalesId)
+        {
+            SalesTable salesTable = SalesTable::find(rorSalesLine.SalesId);
+            new RORPopulateRentalLineParent(_salesQuotationTable, salesTable).run();
+            new RORRentalDateTimesJournalizer(_salesQuotationTable, salesTable).run();
+            SalesQuotationTransferToProject::RORsynchronizeRentalTrans(_salesQuotationTable);
+            rorSalesLine = null;
+        }
+
+        if (_salesQuotationTable.TransferredToItemReq && _salesQuotationTable.QuotationType == QuotationType::RORProjRental)
+        {
+            SalesId rentalSalesId;
+            using (DNRPrimitiveDisposableContext salesQuotationLineContext = new DNRPrimitiveDisposableContext())
+            {
+                salesQuotationLineContext.DNRparmBoolean(true);
+                rentalSalesId = _salesQuotationTable.salesTable_ItemReq().SalesId;
+            }
+
+            if (rentalSalesId && rentalSalesId != _salesQuotationTable.DNRRentalSalesIdRef)
+            {
+                _salesQuotationTable.selectForUpdate(true);
+                _salesQuotationTable.DNRRentalSalesIdRef = rentalSalesId;
+                _salesQuotationTable.doUpdate();
+            }
+
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORsynchronizeRentalTrans</Name>
+				<Source><![CDATA[
+    // Extension methods
+    private static void RORsynchronizeRentalTrans(SalesQuotationTable _salesQuotationTable)
+    {
+        if (_salesQuotationTable.QuotationType == QuotationType::RORProjRental
+        &&  _salesQuotationTable.TransferredToItemReq == NoYes::Yes)
+        {
+            SalesQuotationLine salesQuotationLine;
+            InventTrans inventTrans;
+            InventTransOriginSalesQuotationLine originSalesQuotationLine;
+    
+            while select salesQuotationLine
+            where salesQuotationLine.QuotationId == _salesQuotationTable.QuotationId
+            &&    salesQuotationLine.Transferred2ItemReq == NoYes::Yes
+                join TableId from originSalesQuotationLine
+                where originSalesQuotationLine.SalesQuotationLineInventTransId == salesQuotationLine.InventTransId
+                &&    originSalesQuotationLine.SalesQuotationLineDataAreaId == salesQuotationLine.dataAreaId
+                    join  inventTrans
+                    where inventTrans.InventTransOrigin == originSalesQuotationLine.InventTransOrigin
+            {
+                InventMovement inventMovement = InventMovement::construct(salesQuotationLine);
+                BOBRentalTransManager::newInventMovement(inventMovement, inventTrans).synchronize();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

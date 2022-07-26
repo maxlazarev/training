@@ -1,0 +1,1811 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPServicePlanboardForm</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPServicePlanboardForm
+{
+    // context menu options
+    
+    #HiGHPlanBoard
+
+    Object                  spbFormRun;
+    WPPWorkOrderLineRecId   callerWorkOrderLineRecId;
+    Timezone                userPrefTimeZone;
+    Map                     warningCacheMap;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>assignTask</Name>
+				<Source><![CDATA[
+    public void assignTask(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        if (_refRecId)
+        {
+            WPPServicePlanboardSettings settings = spbFormRun.getSettings();
+
+            Args args = new Args();
+            args.name(formStr(WPPAssignTaskDialog));
+            args.caller(spbFormRun);
+
+            if (_refTableId == tableNum(WPPWorkOrderLine))
+            {
+                args.record(WPPWorkOrderLine::findRecId(_refRecId));
+            }
+            else
+            if (_refTableId == tableNum(WPPWorkOrderLineResource))
+            {
+                args.record(WPPWorkOrderLineResource::findRecId(_refRecId));
+            }
+
+            args.parmEnumType(enumNum(WrkCtrGroupWrkCtr));
+            args.parmEnum(enum2int(settings.PlanBy));
+            args.parm(settings.LayoutMgrCodePlanned);
+
+            FormRun formRun = ClassFactory::formRunClassOnClient(args);
+            formRun.setServicePlanboardSettings(settings);
+            formRun.init();
+            formRun.run();
+            formRun.wait();
+
+            if (formRun.closedOk())
+            {
+                spbFormRun.refreshApply(true, true);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearWarningIconCache</Name>
+				<Source><![CDATA[
+    public void clearWarningIconCache()
+    {
+        warningCacheMap = new Map(Types::Int64, Types::Container);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRentalOrder</Name>
+				<Source><![CDATA[
+    private void createRentalOrder(BOBObjectId _objectId, FromDateTime _fromDateTime, ToDateTime _toDateTime, boolean _skipDialog = false)
+    {
+        SalesTable                              salesTable;
+        SalesLine                               salesLine;
+        InventTable                             inventTable;
+        RORRentalDateTimes                      rentalDateTimes;
+        SalesTableForm                          salesTableForm;
+        WPPCreateAddRentalOrderQuotationEngine  createAddRentalOrderQuotationEngine;
+        BOBObjectTable                          objectTable;
+        BOBObjectAssignmentEngine               objectAssignmentEngine;
+        Args                                    args;
+        MenuFunction                            menuFunction;
+
+        if (_objectId)
+        {
+            objectTable = BOBObjectTable::findObjectId(_objectId);
+            inventTable = objectTable.inventTable();
+        }
+
+        if (inventTable && objectTable)
+        {
+            createAddRentalOrderQuotationEngine = new WPPCreateAddRentalOrderQuotationEngine();
+            createAddRentalOrderQuotationEngine.parmObjectTable(objectTable);
+            createAddRentalOrderQuotationEngine.parmInventTable(inventTable);
+            createAddRentalOrderQuotationEngine.parmStartDateTime(_fromDateTime);
+            createAddRentalOrderQuotationEngine.parmEndDateTime(_toDateTime);
+            createAddRentalOrderQuotationEngine.parmInventTransType(InventTransType::Sales);
+
+            if (_skipDialog || createAddRentalOrderQuotationEngine.prompt())
+            {
+                _fromDateTime = createAddRentalOrderQuotationEngine.parmStartDateTime();
+                _toDateTime = createAddRentalOrderQuotationEngine.parmEndDateTime();
+
+                if (createAddRentalOrderQuotationEngine.parmSalesId())
+                {
+                    salesTable = SalesTable::find(createAddRentalOrderQuotationEngine.parmSalesId());
+                }
+                else
+                {
+                    //Open create rental order form
+                    salesTableForm = SalesTableForm::construct(SalesTableFormId::RORRentalOrder, null);
+                    salesTableForm.RORParmSelectionFromDateTime(_fromDateTime);
+                    salesTableForm.RORParmSelectionToDateTime(_toDateTime);
+                    salesTableForm.RORParmCalledFromServicePlanBoard(true);
+                    salesTableForm.create();
+
+                    salesTable = salesTableForm.salesTable();
+                }
+
+                if (salesTable)
+                {
+                    SalesId salesIdToDelete;
+                    try
+                    {
+                        ttsBegin;
+                        salesLine.initValue(salesTable.SalesType);
+                        salesLine.initFromSalesTable(salesTable);
+                        salesLine.RORTradeType = RORTradeType::Rental;
+                        salesLine.ItemId       = createAddRentalOrderQuotationEngine.parmItemId() ?
+                                                 createAddRentalOrderQuotationEngine.parmItemId() :
+                                                 inventTable.ItemId;
+                        
+                        salesLine.itemIdChanged();
+
+                        if (createAddRentalOrderQuotationEngine.parmWorkOrderTemplateId())
+                        {
+                            salesLine.WPPWorkOrderTemplateId   = createAddRentalOrderQuotationEngine.parmWorkOrderTemplateId();
+                        }
+
+                        salesLine.SalesQty     = 1;
+                        salesLine.SalesUnit    = inventTable.salesUnitId();
+                        salesLine.SalesPrice   = inventTable.salesPcsPrice();
+                        salesLine.setPriceDisc(salesLine.inventDim());
+                        salesLine.createLine();
+
+                        if (createAddRentalOrderQuotationEngine.parmSalesId())
+                        {
+                            rentalDateTimes = salesLine.RORRentalDateTimes(true);
+
+                            if (rentalDateTimes)
+                            {
+                                rentalDateTimes.SynchronizeFromParent = false;
+                                rentalDateTimes.OnRentDateTime = DateTimeUtil::removeTimeZoneOffset(_fromDateTime, userPrefTimeZone);
+                                rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+                                rentalDateTimes.OffRentDateTime = DateTimeUtil::removeTimeZoneOffset(_toDateTime, userPrefTimeZone);
+                                rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OffRentDateTime));
+                                rentalDateTimes.update();
+                            }
+                        }
+
+                        this.createSupplementaryItemsOnCreateRentalOrder(salesLine);
+
+                        //Assign serial number
+                        if (salesLine && objectTable.InventSerialId)
+                        {
+                            objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, objectTable.InventSerialId);
+                            objectAssignmentEngine.runOperation();
+                        }
+                        ttsCommit;
+
+                        args = new args();
+                        args.record(salesTable);
+
+                        menuFunction = new MenuFunction(menuitemDisplayStr(RORSalesTableMainTable), MenuItemType::Display);
+                        menuFunction.run(args);
+                    }
+                    catch
+                    {
+                        if(!createAddRentalOrderQuotationEngine.parmSalesId())
+                        {
+                            // if the sales order header was created in this method, we also want to try and delete it
+                            salesIdToDelete = salesTable.SalesId;
+                        }
+                    }
+                    finally
+                    {
+                        if(salesIdToDelete)
+                        {
+                            this.deleteSalesOrQuotationTable(salesIdToDelete, tableNum(SalesTable));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSupplementaryItemsOnCreateRentalOrder</Name>
+				<Source><![CDATA[
+    protected void createSupplementaryItemsOnCreateRentalOrder(SalesLine _salesLine)
+    {
+        RORRentalLineEditorForm::createSupplementaryItemsLines(_salesLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRentalQuotation</Name>
+				<Source><![CDATA[
+    private void createRentalQuotation(BOBObjectId _objectId, FromDateTime _fromDateTime, ToDateTime _toDateTime, boolean _skipDialog = false)
+    {
+        InventTable                             inventTable;
+        SalesQuotationTable                     salesQuotationTable;
+        SalesQuotationLine                      salesQuotationLine;
+        SalesQuotationTableForm                 salesQuotationTableForm;
+        BOBObjectTable                          objectTable;
+        RORRentalDateTimes                      rentalDateTimes;
+        BOBObjectAssignmentEngine               objectAssignmentEngine;
+        WPPCreateAddRentalOrderQuotationEngine  createAddRentalOrderQuotationEngine;
+        Args                                    args;
+        MenuFunction                            menuFunction;
+
+        if (_objectId)
+        {
+            objectTable = BOBObjectTable::findObjectId(_objectId);
+            inventTable = objectTable.inventTable();
+        }
+
+        if (inventTable && objectTable)
+        {
+            createAddRentalOrderQuotationEngine = new WPPCreateAddRentalOrderQuotationEngine();
+            createAddRentalOrderQuotationEngine.parmObjectTable(objectTable);
+            createAddRentalOrderQuotationEngine.parmInventTable(inventTable);
+            createAddRentalOrderQuotationEngine.parmStartDateTime(_fromDateTime);
+            createAddRentalOrderQuotationEngine.parmEndDateTime(_toDateTime);
+            createAddRentalOrderQuotationEngine.parmInventTransType(InventTransType::SalesQuotation);
+
+            if (_skipDialog || createAddRentalOrderQuotationEngine.prompt())
+            {
+                _fromDateTime = createAddRentalOrderQuotationEngine.parmStartDateTime();
+                _toDateTime = createAddRentalOrderQuotationEngine.parmEndDateTime();
+
+                if (createAddRentalOrderQuotationEngine.parmSalesQuotationId())
+                {
+                    salesQuotationTable = SalesQuotationTable::find(createAddRentalOrderQuotationEngine.parmSalesQuotationId());
+                }
+                else
+                {
+                    //Open create rental quotation form
+                    salesQuotationTableForm = SalesQuotationTableForm::construct(QuotationType::RORRental, null);
+                    salesQuotationTableForm.RORParmSelectionFromDateTime(_fromDateTime);
+                    salesQuotationTableForm.RORParmSelectionToDateTime(_toDateTime);
+
+                    if (salesQuotationTableForm.create())
+                    {
+                        salesQuotationTable = salesQuotationTableForm.salesQuotationTable();
+                    }
+                }
+
+                if (salesQuotationTable)
+                {
+                    QuotationId quotationIdToDelete;
+                    try
+                    {
+                        ttsBegin;
+                        salesQuotationLine.initValue();
+                        salesQuotationLine.initFromSalesQuotationTable(salesQuotationTable);
+
+                        if (salesQuotationLine.QuotationType == QuotationType::RORProjRental)
+                        {
+                            salesQuotationLine.ProjTransType    = QuotationProjTransType::Item;
+                            salesQuotationLine.RORProjTransType = RORProjTransType::Rental;
+                        }
+
+                        salesQuotationLine.RORTradeType = RORTradeType::Rental;
+                        salesQuotationLine.ItemId       = createAddRentalOrderQuotationEngine.parmItemId() ?
+                                                          createAddRentalOrderQuotationEngine.parmItemId() :
+                                                          inventTable.ItemId;
+                        salesQuotationLine.itemIdChanged();
+
+                        if (createAddRentalOrderQuotationEngine.parmWorkOrderTemplateId())
+                        {
+                            salesQuotationLine.WPPWorkOrderTemplateId = createAddRentalOrderQuotationEngine.parmWorkOrderTemplateId();
+                        }
+
+                        salesQuotationLine.SalesQty     = 1;
+                        salesQuotationLine.SalesUnit    = inventTable.salesUnitId();
+                        salesQuotationLine.SalesPrice   = inventTable.salesPcsPrice();
+                        salesQuotationLine.setPriceDisc(salesQuotationLine.inventDim());
+                        salesQuotationLine.createLine();
+
+                        if (createAddRentalOrderQuotationEngine.parmSalesQuotationId())
+                        {
+                            rentalDateTimes = salesQuotationLine.RORRentalDateTimes(true);
+
+                            if (rentalDateTimes)
+                            {
+                                rentalDateTimes.SynchronizeFromParent = false;
+                                rentalDateTimes.OnRentDateTime = DateTimeUtil::removeTimeZoneOffset(_fromDateTime, userPrefTimeZone);
+                                rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+                                rentalDateTimes.OffRentDateTime = DateTimeUtil::removeTimeZoneOffset(_toDateTime, userPrefTimeZone);
+                                rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OffRentDateTime));
+                                rentalDateTimes.update();
+                            }
+                        }
+
+                        RORRentalLineEditorForm::createSupplementaryItemsLines(salesQuotationLine);
+
+                        //Assign serial number
+                        if (salesQuotationLine && objectTable.InventSerialId)
+                        {
+                            objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesQuotationLine, objectTable.InventSerialId);
+                            objectAssignmentEngine.runOperation();
+                        }
+                        ttsCommit;
+
+                        args = new args();
+                        args.lookupValue(salesQuotationTable.QuotationId);
+                        //args.record(salesQuotationTable);
+
+                        menuFunction = new MenuFunction(menuitemDisplayStr(SalesQuotationJumpRef), MenuItemType::Display);
+                        menuFunction.run(args);
+                    }
+                    catch
+                    {
+                        if(!createAddRentalOrderQuotationEngine.parmSalesQuotationId())
+                        {
+                            // if the quotation was created in this method, we also want to try and delete it
+                            quotationIdToDelete = salesQuotationTable.QuotationId;
+                        }
+                    }
+                    finally
+                    {
+                        if(quotationIdToDelete)
+                        {
+                            this.deleteSalesOrQuotationTable(quotationIdToDelete, tableNum(SalesQuotationTable));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteSalesOrQuotationTable</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void deleteSalesOrQuotationTable(Num _orderId, TableId _tableId)
+    {
+        #OCCRetryCount
+        str orderType;
+
+        if(_orderId && (_tableId == tableNum(SalesTable) || _tableId == tableNum(SalesQuotationTable)))
+        {
+            try
+            {
+                switch(_tableId)
+                {
+                    case tableNum(SalesTable):
+                        orderType = "@DNR10";
+                        SalesTable salesTable;
+
+                        delete_from salesTable
+                            where salesTable.SalesId == _orderId;
+                        break;
+
+                    case tableNum(SalesQuotationTable):
+                        orderType = "@DNR5855";
+                        SalesQuotationTable salesQuotationTable;
+
+                        delete_from salesQuotationTable
+                            where salesQuotationTable.QuotationId == _orderId;
+                        break;
+                }
+            }
+            catch (Exception::Deadlock)
+            {
+                retry;
+            }
+            catch (Exception::UpdateConflict)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    warning(strFmt("%1 %2 was not deleted", orderType, _orderId));
+                }
+                else
+                {
+                    retry;
+                }
+            }
+        }
+        else
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createWorkOrder</Name>
+				<Source><![CDATA[
+    private void createWorkOrder(BOBObjectId _objectId)
+    {
+        Args            args;
+        MenuFunction    mfCreateWorkOrder;
+        BOBObjectView   objectView;
+
+        if (_objectId)
+        {
+            select firstOnly objectView
+            where objectView.ObjectId == _objectId;
+
+            args = new Args();
+            args.record(objectView);
+            args.caller(spbFormRun);
+
+            mfCreateWorkOrder = new MenuFunction(menuitemActionStr(WPPWorkOrderCreateFromBusinessObject), MenuItemType::Action);
+            mfCreateWorkOrder.run(args);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>duplicateWorkOrderLine</Name>
+				<Source><![CDATA[
+    private void duplicateWorkOrderLine(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        Args                        args;
+        FormRun                     formRun;
+        WPPWorkOrderLineResource    plannedTask;
+        WPPWorkOrderLine            workOrderLine;
+        boolean                     doUnplanned, doPlanned;
+
+        if (_refTableId == tableNum(WPPWorkOrderLineResource))
+        {
+            select firstonly workOrderLine
+                exists join plannedTask
+                where plannedTask.RecId == _refRecId
+                &&    plannedTask.WorkOrderLineRecId == workOrderLine.RecId;
+
+            doPlanned = true;
+        }
+        else
+        {
+            workOrderLine = WPPWorkOrderLine::findRecId(_refRecId);
+            doUnplanned = true;
+        }
+
+        args = new Args();
+        args.name(formStr(WPPDuplicateWorkOrderLine));
+        args.caller(spbFormRun);
+        args.record(workOrderLine);
+
+        formRun = ClassFactory::formRunClassOnClient(args);
+        formRun.init();
+        formRun.run();
+        formRun.wait();
+
+        if (formRun.closedOk())
+        {
+            spbFormRun.refreshApply(doUnplanned, doPlanned);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onMenuItemClicked</Name>
+				<Source><![CDATA[
+    public void onMenuItemClicked(Object _sender, int _optionIdx, str _optionValue)
+    {
+        RefTableId                  refTableId;
+        RefRecId                    refRecId;
+        WPPResourceTable            rowItem;
+        DNRTmpIdList                tmpRecIds;
+        FromDateTime                selectionFromDateTime;
+        ToDateTime                  selectionToDateTime;
+        Object                      baseArgs = this.getContextMenuBaseArgs(_sender);
+        BOBObjectId                 objectId;
+        WPPWorkOrderTable           workOrderTable;
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderLineResource    resourcePlanning;
+
+        switch (classIdGet(baseArgs))
+        {
+            case classNum(HiGHPlanBoardRowItemBaseArgs):
+                HiGHPlanBoardRowItemBaseArgs rowItemBaseArgs = baseArgs as HiGHPlanBoardRowItemBaseArgs;
+                                
+                refTableId  = rowItemBaseArgs.parmRefTableId();
+                refRecId    = rowItemBaseArgs.parmRefRecId();
+                
+                if (refTableId == tableNum(WPPResourceTable))
+                {
+                    rowItem = WPPResourceTable::findByRecId(refRecId);
+                }
+                break;
+
+            case classNum(HiGHPlanBoardOnContextRowItemEventArgs):
+                // Do nothing
+                break;
+
+            case classNum(HiGHPlanBoardOnContextPeriodEventArgs):
+                HiGHPlanBoardOnContextPeriodEventArgs periodEventArgs = baseArgs as HiGHPlanBoardOnContextPeriodEventArgs;
+                
+                refTableId  = periodEventArgs.parmRowItemRefTableId();
+                refRecId    = periodEventArgs.parmRowItemRefRecId();
+
+                if (refTableId == tableNum(WPPResourceTable))
+                {
+                    rowItem = WPPResourceTable::findByRecId(refRecId);
+                }
+
+                selectionFromDateTime   = periodEventArgs.parmStartDateTime();
+                selectionToDateTime     = periodEventArgs.parmEndDateTime();
+                break;
+
+            case classNum(HiGHPlanBoardPlannedEventBaseArgs):
+                HiGHPlanBoardPlannedEventBaseArgs plannedEventBaseArgs = baseArgs as HiGHPlanBoardPlannedEventBaseArgs;
+
+                refTableId  = plannedEventBaseArgs.parmRefTableId();
+                refRecId    = plannedEventBaseArgs.parmRefRecId();
+
+                // add single RecId to tmp table
+                tmpRecIds.RefRecId = refRecId;
+                tmpRecIds.insert();
+
+                workOrderTable = this.refTableIdRefRecId2WorkOrderTable(refTableId, refRecId);
+                break;
+
+            case classNum(HiGHPlanBoardOnContextPlannedEventEventArgs):
+                tmpRecIds.linkPhysicalTableInstance(this.getTmpIdList(baseArgs));
+                break;
+
+            case classNum(HiGHContextHandleMenuItemClickedEventArgs):
+                HiGHContextHandleMenuItemClickedEventArgs handleEventArgs = baseArgs as HiGHContextHandleMenuItemClickedEventArgs;
+
+                refTableId  = tableNum(WPPWorkOrderLine);
+                refRecId    = str2Int64(handleEventArgs.parmDataValue());
+
+                workOrderTable = this.refTableIdRefRecId2WorkOrderTable(refTableId, refRecId);
+                break;
+
+            default:
+                // Do nothing
+                break;
+        }
+
+        if (rowItem.RecId)
+        {
+            BOBObjectTable objectTableLocal;
+
+            if (rowItem.ResourceCategory == WPPResourceCategory::BusinessObject)
+            {
+                objectId = rowItem.RelationAccount;
+            }
+            else
+            {
+                select firstonly ObjectId from objectTableLocal
+                where objectTableLocal.WPPResourceGroupRecId == rowItem.RecId;
+
+                objectId = objectTableLocal.ObjectId;
+            }            
+        }
+
+        switch(_optionIdx)
+        {
+            case #UnassignTask:
+                select firstonly TableId from resourcePlanning
+                where resourcePlanning.RecId == refRecId
+                    join workOrderLine
+                    where workOrderLine.RecId == resourcePlanning.WorkOrderLineRecId;
+
+                this.unassignTask(workOrderLine, refRecId);
+                break;
+
+            case #UpdateStatusPlanned:
+                this.updateWorkOrderLineStatus(tmpRecIds, WPPWorkOrderLineStatus::Planned);
+                break;
+
+            case #UpdateStatusReleased:
+                this.updateWorkOrderLineStatus(tmpRecIds, WPPWorkOrderLineStatus::Released);
+                break;
+
+            case #UpdateStatusInProgress:
+                this.updateWorkOrderLineStatus(tmpRecIds, WPPWorkOrderLineStatus::InProgress);
+                break;
+
+            case #UpdateStatusCompleted:
+                this.updateWorkOrderLineStatus(tmpRecIds, WPPWorkOrderLineStatus::Completed);
+                break;
+
+            case #UpdateStatusCheckedWorkshop:
+                this.updateWorkOrderLineStatus(tmpRecIds, WPPWorkOrderLineStatus::CheckedWorkshop);
+                break;
+
+            case #UpdateStatusCheckedAdmin:
+                this.updateWorkOrderLineStatus(tmpRecIds, WPPWorkOrderLineStatus::CheckedAdmin);
+                break;
+
+            case #UpdateStatusInvoiced:
+                this.updateWorkOrderLineStatus(tmpRecIds, WPPWorkOrderLineStatus::Invoiced);
+                break;
+
+            case #UpdateStatusClosed:
+                this.updateWorkOrderLineStatus(tmpRecIds, WPPWorkOrderLineStatus::Closed);
+                break;
+
+            case #JumpRefWorkOrderId:
+                this.jumpRef(formStr(WPPWorkOrderTable), fieldNum(WPPWorkOrderTable, WorkOrderId), _optionValue);
+                break;
+
+            case #JumpRefProjId:
+                DNRUtilClass::crossCompanyJumpRef(workOrderTable.CompanyId, tableNum(ProjTable), _optionValue, spbFormRun);
+                break;
+
+            case #JumpRefExecutionGroupId:
+                this.jumpRef(formStr(WPPExecutionGroup), fieldNum(WPPExecutionGroup, ExecutionGroupId), _optionValue);
+                break;
+
+            case #JumpRefProjGroupId:
+                this.jumpRef(formStr(ProjGroup), fieldNum(ProjGroup, ProjGroupId), _optionValue);
+                break;
+
+            case #JumpRefProjInvoiceProjId:
+                this.jumpRef(formStr(ProjInvoiceTable), fieldNum(ProjInvoiceTable, ProjInvoiceProjId), _optionValue);
+                break;
+
+            case #JumpRefObjectId:
+                this.jumpRef(formStr(BOBObjectTable), fieldNum(BOBObjectTable, ObjectId), _optionValue);
+                break;
+
+            case #JumpRefInventSerialId:
+                this.jumpRef(formStr(InventSerial), fieldNum(InventSerial, InventSerialId), _optionValue);
+                break;
+
+            case #JumpRefAssetId:
+                this.jumpRef(formStr(AssetTable), fieldNum(AssetTable, AssetId), _optionValue);
+                break;
+
+            case #JumpRefItemId:
+                DNRUtilClass::crossCompanyJumpRef(workOrderTable.CompanyId, tableNum(InventTable), _optionValue, spbFormRun);
+                break;
+
+            case #JumpRefRentalTypeId:
+                this.jumpRef(formStr(BOBRentalType), fieldNum(BOBRentalType, RentalTypeId), _optionValue);
+                break;
+
+            case #JumpRefVenueCode:
+                this.jumpRef(formStr(RORVenueTable), fieldNum(RORVenueTable, VenueCode), _optionValue);
+                break;
+
+            case #JumpRefCustVendAccount:
+                this.jumpRefCustVend(refTableId, refRecId, workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefSalesContactPerson:
+                this.jumpRefPerson(refTableId, refRecId, tableNum(SalesTable), fieldNum(SalesTable, ContactPersonId), workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefAdditionalNotesHeader:
+                this.jumpRefAdditionalNotes(refTableId, refRecId, HeadingLine::Heading);
+                break;
+
+            case #JumpRefAdditionalNotesLine:
+                this.jumpRefAdditionalNotes(refTableId, refRecId, HeadingLine::Line);
+                break;
+
+            case #DuplicateWorkOrderLine:
+                this.duplicateWorkOrderLine(refTableId, refRecId);
+                break;
+
+            case #PrintWorkOrderConfirmation:
+                this.printWorkOrderConfirmation(refTableId, refRecId);
+                break;
+
+            case #PrintWorkOrderLineConfirmation:
+                this.printWorkOrderLineConfirmation(refTableId, refRecId);
+                break;
+
+            case #JumpRefWorkOrderLineRecId:
+                this.jumpRefWorkOrderLine(refTableId, refRecId);
+                break;
+
+            case #AssignTask:
+                if (refTableId == tableNum(WPPWorkOrderLine))
+                {
+                    Debug::assert(refTableId == tableNum(WPPWorkOrderLine) && refRecId);
+                }
+                else if (refTableId == tableNum(WPPWorkOrderLineResource))
+                {
+                    Debug::assert(refTableId == tableNum(WPPWorkOrderLineResource) && refRecId);
+                }
+
+                this.assignTask(refTableId, refRecId);
+                break;
+
+            case #JumpRefSalesPurchQuotationId:
+                this.jumpRefSalesPurchQuotationId(refTableId, refRecId, workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefSalesResponsible:
+                this.jumpRefPerson(refTableId, refRecId, tableNum(SalesTable), fieldNum(SalesTable, WorkerSalesResponsible), workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefSalesOperator:
+                this.jumpRefPerson(refTableId, refRecId, tableNum(SalesTable), fieldNum(SalesTable, RORContactPersonIdOperator), workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefPurchPlacer:
+                this.jumpRefPerson(refTableId, refRecId, tableNum(PurchTable), fieldNum(PurchTable, WorkerPurchPlacer), workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefTaskRequirements:
+                if (refTableId == tableNum(WPPWorkOrderLine))
+                {
+                    workOrderLine = WPPWorkOrderLine::findRecId(refRecId);
+                }
+                else if (refTableId == tableNum(WPPWorkOrderLineResource))
+                {
+                    select firstOnly workOrderLine
+                        exists join resourcePlanning
+                        where resourcePlanning.WorkOrderLineRecId == workOrderLine.RecId
+                        &&    resourcePlanning.RecId == refRecId;
+                }
+
+                this.jumpRef(formStr(WPPTaskRequirements), fieldNum(WPPTaskRequirements, TaskId), workOrderLine.TaskId, workOrderLine);
+                break;
+
+            case #JumpRefPurchNotConfirmed:
+                this.jumpRefWorkOrderPurchTable(refTableId, refRecId, workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefPurchNotReceived:
+                this.jumpRefWorkOrderPurchTable(refTableId, refRecId, workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefObjectNotAvailable:
+                this.jumpRefObjectTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefHasInternalNote:
+                this.jumpRefAdditionalNotes(refTableId, refRecId, HeadingLine::Line);
+                break;
+
+            case #JumpRefPassedRequestedDateTime:
+                this.jumpRefSalesPurchQuotationId(refTableId, refRecId);
+                break;
+
+            case #JumpRefRelatedToTechnicalExchange:
+                this.jumpRefSalesPurchQuotationId(refTableId, refRecId);
+                break;
+
+            case #JumpRefRelatedToCommercialExchange:
+                this.jumpRefSalesPurchQuotationId(refTableId, refRecId);
+                break;
+
+            case #JumpRefLastOnRentDateObjectFilled:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefHasBusinessObjectNote:
+                this.jumpRefAdditionalNotes(refTableId, refRecId, HeadingLine::Line);
+                break;
+
+            case #JumpRefHasRouteLocationNote:
+                this.jumpRefAdditionalNotes(refTableId, refRecId, HeadingLine::Line);
+                break;
+
+            case #JumpRefHasTerminationNote:
+                this.jumpRefAdditionalNotes(refTableId, refRecId, HeadingLine::Line);
+                break;
+
+            case #JumpRefObjectIsAssignedToCreatedDeliveryTask:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefObjectMaintenanceWithinXDays:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefObjectIsSubRental:
+                this.jumpRefObjectTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefObjectOnMaintenanceWorkOrder:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefObjectOnDamageWorkOrder:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefWorkOrderFullyInvoiced:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefAnotherNotCompletedWorkOrderLineExists:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefObjectWithinWarranty:
+                this.jumpRefObjectTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefObjectOutOfWarranty:
+                this.jumpRefObjectTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefOrderLineWithoutSerialNumberExists:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #FilterOnCapabilities:
+                if (refTableId == tableNum(WPPWorkOrderLine))
+                {
+                    callerWorkOrderLineRecId = refRecId;
+                }
+                else if (refTableId == tableNum(WPPWorkOrderLineResource))
+                {
+                    callerWorkOrderLineRecId = WPPWorkOrderLineResource::findRecId(refRecId).WorkOrderLineRecId;
+                }
+
+                spbFormRun.refreshApply(false, true);
+                break;
+
+            case #JumpRefOtherRelatedTasksNotScheduled:
+                this.jumpRefWorkOrderTable(refTableId, refRecId);
+                break;
+
+            case #JumpRefChildLinesWithoutSerialNumberExists:
+                this.jumpRefSalesPurchQuotationId(refTableId, refRecId);
+                break;
+
+            case #JumpRefQuotationContactPerson:
+                this.jumpRefPerson(refTableId, refRecId, tableNum(SalesQuotationTable), fieldNum(SalesQuotationTable, ContactPersonId), workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefQuotationResponsible:
+                this.jumpRefPerson(refTableId, refRecId, tableNum(SalesQuotationTable), fieldNum(SalesQuotationTable, WorkerSalesResponsible), workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefQuotationOperator:
+                this.jumpRefPerson(refTableId, refRecId, tableNum(SalesQuotationTable), fieldNum(SalesQuotationTable, RORContactPersonIdOperator), workOrderTable.CompanyId);
+                break;
+
+            case #JumpRefRentalTrans:
+                this.jumpRef(formStr(BOBRentalTrans), 0, '', BOBRentalTrans::findRecId(refRecId));
+                break;
+
+            case #QuickCreateRentalQuotation:
+                this.createRentalQuotation(objectId , selectionFromDateTime, selectionToDateTime, true);
+                break;
+
+            case #QuickCreateRentalOrder:
+                this.createRentalOrder(objectId , selectionFromDateTime, selectionToDateTime, true );
+                break;
+
+            case #CreateRentalQuotation:
+                this.createRentalQuotation(objectId, selectionFromDateTime, selectionToDateTime);
+                break;
+
+            case #CreateRentalOrder:
+                this.createRentalOrder(objectId, selectionFromDateTime, selectionToDateTime);
+                break;
+
+            case #CreateWorkOrder:
+                this.createWorkOrder(objectId);
+                break;
+
+            case #ViewResource:
+            case #ViewResourceGroup:
+                Args argsLoc = new Args(); 
+                argsLoc.record(rowItem);
+                WPPResourceTableMainTable::main(argsLoc);
+                break;
+
+            case #ViewDeviations:
+                this.jumpRef(formStr(WPPResourceDateCalendar), 0, '', rowItem);
+                break;
+
+            case #RefreshPlanned:
+                spbFormRun.refreshApply(false, true);
+                break;
+
+            case #RefreshEntity:
+                //spbFormRun.refreshEntity(_sender, _resource.WrkCtrId); TODO
+                break;
+
+            case #RefreshApply:
+                spbFormRun.refreshApply(true, true);
+                break;
+
+            case #JumpRefCMRReport:
+                this.jumpRefCMRReport(refTableId, refRecId);
+                break;
+
+            default:
+                // do nothing
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContextMenuBaseArgs</Name>
+				<Source><![CDATA[
+    protected Object getContextMenuBaseArgs(Object _sender)
+    {
+        Object baseArgs;
+
+        switch (classIdGet(_sender))
+        {
+            case classNum(HiGHPlanBoardOnContextRowItemEventArgs):
+                HiGHPlanBoardOnContextRowItemEventArgs contextRowItemEventArgs = _sender as HiGHPlanBoardOnContextRowItemEventArgs;
+                List rowItemEventsList = contextRowItemEventArgs.parmRowItems();
+
+                if (!rowItemEventsList.empty())
+                {
+                    ListEnumerator rowItemEventsEnum = rowItemEventsList.getEnumerator();
+
+                    if (rowItemEventsList.elements() == 1)
+                    {
+                        rowItemEventsEnum.moveNext();
+                        baseArgs = rowItemEventsEnum.current();
+                    }
+                }
+                break;
+
+            case classNum(HiGHPlanBoardOnContextPeriodEventArgs):
+                baseArgs = _sender;
+                break;
+
+            case classNum(HiGHPlanBoardOnContextPlannedEventEventArgs):
+                HiGHPlanBoardOnContextPlannedEventEventArgs contextPlannedEventEventArgs = _sender as HiGHPlanBoardOnContextPlannedEventEventArgs;
+                List plannedEventsList = contextPlannedEventEventArgs.parmPlannedEvents();
+
+                if (!plannedEventsList.empty())
+                {
+                    ListEnumerator plannedEventsEnum = plannedEventsList.getEnumerator();
+
+                    if (plannedEventsList.elements() == 1)
+                    {
+                        plannedEventsEnum.moveNext();
+                        baseArgs = plannedEventsEnum.current();
+                    }
+                    else
+                    {
+                        baseArgs = contextPlannedEventEventArgs;
+                    }
+                }
+                break;
+
+            case classNum(HiGHContextHandleEventArgs):
+                baseArgs = _sender;
+                break;
+
+            case classNum(HiGHContextHandleMenuItemClickedEventArgs):
+                baseArgs = _sender;
+                break;
+
+            default:
+                // Do nothing
+                break;
+        }
+
+        return baseArgs;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContextMenuContent</Name>
+				<Source><![CDATA[
+    public List getContextMenuContent(Object _sender)
+    {
+        Object baseArgs = this.getContextMenuBaseArgs(_sender);
+
+        try
+        {
+            HiGHPlanboardContextMenuBuilder contextMenuBuilder = HiGHPlanboardContextMenuBuilder::construct(spbFormRun, baseArgs);
+            contextMenuBuilder.populate();
+            return contextMenuBuilder.getMenuItemList();
+        }
+        catch(Exception::Error)
+        {
+            if(!baseArgs)
+            {
+                infolog.cut(infologLine());
+            }
+            List emptyList = new List(Types::Class);
+            return emptyList;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpIdList</Name>
+				<Source><![CDATA[
+    private DNRTmpIdList getTmpIdList(HiGHPlanBoardOnContextPlannedEventEventArgs _sender)
+    {
+        DNRTmpIdList                        tmpRecIds;
+        List                                plannedEvents = _sender.parmPlannedEvents();
+        ListEnumerator                      plannedEventsEnum = plannedEvents.getEnumerator();
+        HiGHPlanBoardPlannedEventBaseArgs   plannedEventBaseArgs;
+
+        while (plannedEventsEnum.moveNext())
+        {
+            plannedEventBaseArgs = plannedEventsEnum.current();
+
+            // load all selected item's RecIds into a temporary table so we can join them to the physical tables later
+            tmpRecIds.RefRecId = plannedEventBaseArgs.parmRefRecId();
+            tmpRecIds.insert();
+        }
+
+        return tmpRecIds;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getGridWarningIcons</Name>
+				<Source><![CDATA[
+    public container getGridWarningIcons(WPPTmpServicePlanboardData _tmpData)
+    {
+        WPPCellIcon cellIcon;
+        container   conWarnings;
+        ;
+
+        if (warningCacheMap.exists(_tmpData.WPPWorkOrderLineRecId))
+        {
+            conWarnings = warningCacheMap.lookup(_tmpData.WPPWorkOrderLineRecId);
+        }
+        else
+        {
+            WPPServicePlanboardSettings settings = spbFormRun.getSettings();
+
+            while select ResourceId, Criterion from cellIcon
+            where cellIcon.LayoutManagerCode == settings.LayoutMgrCodePlanned
+            &&    cellIcon.ShowInGrid
+            {
+                if (_tmpData.meetsCriterion(cellIcon.Criterion))
+                {
+                    conWarnings += [ cellIcon.ResourceId ];
+                }
+            }
+
+            warningCacheMap.insert(_tmpData.WPPWorkOrderLineRecId, conWarnings);
+        }
+
+        return conWarnings;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRef</Name>
+				<Source><![CDATA[
+    private void jumpRef(FormName _formName, FieldId _lookupField, str _lookupValue, Common _record = null)
+    {
+        Args args = new Args();
+        args.name(_formName);
+        args.lookupField(_lookupField);
+        args.lookupValue(_lookupValue);
+        args.caller(spbFormRun);
+
+        if (_record)
+        {
+            args.record(_record);
+        }
+
+        FormRun formRun = ClassFactory::formRunClassOnClient(args);
+        formRun.init();
+        formRun.run();
+
+        if (_formName == formStr(WPPWorkOrderLineDetails))
+        {
+            formRun.detach();
+        }
+        else
+        {
+            formRun.wait();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefAdditionalNotes</Name>
+				<Source><![CDATA[
+    private void jumpRefAdditionalNotes(RefTableId _refTableId, RefRecId _refRecId, HeadingLine _headingLine)
+    {
+        Common                      record;
+        DNRAdditionalNoteManager    additionalNoteMgr;
+        WPPWorkOrderTable           workOrderTable;
+        BOBRentalTrans              rentalTrans;
+        SalesQuotationLine          salesQuotationLine;
+        InventTransOrigin           inventTransOrigin;
+        SalesPurchLine              salesPurchLine;
+        ;
+
+        if (_refTableId == tableNum(BOBRentalTrans))
+        {
+            select firstOnly salesQuotationLine
+                exists join inventTransOrigin
+                where inventTransOrigin.InventTransId == salesQuotationLine.InventTransId
+                    join TableId from rentalTrans
+                    where rentalTrans.InventTransOrigin == inventTransOrigin.RecId
+                    &&    rentalTrans.RecId == _refRecId;
+
+            salesPurchLine = salesQuotationLine as SalesPurchLine;
+        }
+        else
+        {
+            workOrderTable = this.refTableIdRefRecId2WorkOrderTable(_refTableId, _refRecId);
+            salesPurchLine = workOrderTable.salesPurchLine();
+        }
+
+        record = (_headingLine == HeadingLine::Heading ? SalesPurchLine.salesPurchLineInterface().salesPurchTable() : SalesPurchLine);
+        additionalNoteMgr = DNRAdditionalNoteManager::construct(record);
+        
+        if(additionalNoteMgr.prompt())
+        {
+            additionalNoteMgr.run();
+
+            if(additionalNoteMgr.getWereNotesChanged())
+            {
+                spbFormRun.refreshApply(true, true);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefCustVend</Name>
+				<Source><![CDATA[
+    private void jumpRefCustVend(RefTableId _refTableId, RefRecId _refRecId, CompanyId _companyId)
+    {
+        WPPWorkOrderTable   workOrderTable;
+        SalesQuotationTable salesQuotationTable;
+        SalesQuotationLine  salesQuotationLine;
+        InventTransOrigin   inventTransOrigin;
+        BOBRentalTrans      rentalTrans;
+        CustTable           custTable;
+        VendTable           vendTable;
+        ;
+
+        changecompany(_companyId)
+        {
+            if (_refTableId == tableNum(BOBRentalTrans))
+            {
+                rentalTrans = BOBRentalTrans::findRecId(_refRecId);
+            }
+
+            if (rentalTrans && rentalTrans.TransType == BOBRentalTransType::RentalQuotation)
+            {
+                select firstOnly custTable
+                    exists join salesQuotationTable
+                    where salesQuotationTable.CustAccount == custTable.AccountNum
+                        join TableId from salesQuotationLine
+                        where salesQuotationLine.QuotationId == salesQuotationTable.QuotationId
+                            join TableId from inventTransOrigin
+                            where inventTransOrigin.InventTransId == salesQuotationLine.InventTransId
+                            &&    inventTransOrigin.RecId == rentalTrans.InventTransOrigin;
+
+                this.jumpRef(formStr(CustTable), fieldNum(CustTable, AccountNum), '', custTable);
+            }
+            else
+            {
+                workOrderTable = this.refTableIdRefRecId2WorkOrderTable(_refTableId, _refRecId);
+
+                if (workOrderTable.OrganizationParty)
+                {
+                    if (workOrderTable.CustVendAccountType == CustVendACType::Cust)
+                    {
+                        custTable = CustTable::findByPartyRecId(workOrderTable.OrganizationParty);
+                        this.jumpRef(formStr(CustTable), fieldNum(CustTable, AccountNum), '', custTable);
+                    }
+                    else
+                    {
+                        vendTable = VendTable::findByPartyRecId(workOrderTable.OrganizationParty);
+                        this.jumpRef(formStr(VendTable), fieldNum(VendTable, AccountNum), '', vendTable);
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefObjectTable</Name>
+				<Source><![CDATA[
+    private void jumpRefObjectTable(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        BOBObjectTable      objectTable;
+        BOBRentalTrans      rentalTrans;
+        WPPWorkOrderTable   workOrderTable;
+        WPPWorkOrderLine    workOrderLine;
+        ;
+
+        Debug::assert(_refTableId && _refRecId);
+
+        switch(_refTableId)
+        {
+            case tableNum(WPPWorkOrderLine) :
+                select firstOnly objectTable
+                    exists join workOrderTable
+                    where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        join TableId from workOrderLine
+                        where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                        &&    workOrderLine.RecId == _refRecId;
+                break;
+
+            case tableNum(BOBRentalTrans):
+                select firstOnly objectTable
+                    exists join rentalTrans
+                    where rentalTrans.ObjectId == objectTable.ObjectId
+                    &&    rentalTrans.RecId == _refRecId;
+                break;
+
+            default :
+                throw error(strFmt("@SYS31187", tableId2name(_refTableId)));
+        }
+
+        this.jumpRef(formStr(BOBObjectTable), fieldNum(BOBObjectTable, ObjectId), objectTable.ObjectId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefPerson</Name>
+				<Source><![CDATA[
+    private void jumpRefPerson(RefTableId _refTableId, RefRecId _refRecId, TableId _tableIdJumpRef, FieldId _fieldIdJumpRef, CompanyId _companyId)
+    {
+        WPPWorkOrderId              workOrderId;
+        WPPWorkOrderTable           workOrderTable;
+        SalesTable                  salesTable;
+        SalesLine                   salesLine;
+        PurchTable                  purchTable;
+        PurchLine                   purchLine;
+        SalesQuotationTable         salesQuotationTable;
+        SalesQuotationLine          salesQuotationLine;
+        InventTransOrigin           inventTransOrigin;
+        BOBRentalTrans              rentalTrans;
+        ContactPerson               operator, contactPerson;
+        ;
+
+        changecompany(_companyId)
+        {
+            if (_refTableId == tableNum(BOBRentalTrans))
+            {
+                rentalTrans = BOBRentalTrans::findRecId(_refRecId);
+            }
+
+            if (rentalTrans &&  rentalTrans.TransType == BOBRentalTransType::RentalQuotation)
+            {
+                select firstOnly TableId from inventTransOrigin
+                where inventTransOrigin.RecId == rentalTrans.InventTransOrigin
+                    join TableId from salesQuotationLine
+                    where salesQuotationLine.InventTransId == inventTransOrigin.InventTransId
+                        join WorkerSalesResponsible from salesQuotationTable
+                        where salesQuotationTable.QuotationId == salesQuotationLine.QuotationId
+                            outer join operator
+                            where operator.ContactPersonId == salesQuotationTable.RORContactPersonIdOperator
+                                outer join contactPerson
+                                where contactPerson.ContactPersonId == salesQuotationTable.ContactPersonId;
+            }
+            else
+            {
+                workOrderId = this.refTableIdRefRecId2WorkOrderTable(_refTableId, _refRecId).WorkOrderId;
+
+                select firstonly RecId from workOrderTable
+                where workOrderTable.WorkOrderId == workOrderId
+                    outer join TableId from salesLine
+                    where workOrderTable.OrderTableId == salesLine.TableId
+                    &&    workOrderTable.OrderRecId == salesLine.RecId
+                        outer join WorkerSalesResponsible from salesTable
+                        where salesTable.SalesId == salesLine.SalesId
+                            outer join operator
+                            where operator.ContactPersonId == salesTable.RORContactPersonIdOperator
+                                outer join contactPerson
+                                where contactPerson.ContactPersonId == salesTable.ContactPersonId
+                                    outer join TableId from purchLine
+                                    where workOrderTable.OrderTableId == purchLine.TableId
+                                    &&    workOrderTable.OrderRecId == purchLine.RecId
+                                        outer join WorkerPurchPlacer from purchTable
+                                        where purchTable.PurchId == purchLine.PurchId;
+            }
+
+            if (_tableIdJumpRef == tableNum(SalesTable) && _fieldIdJumpRef == fieldNum(SalesTable, WorkerSalesResponsible))
+            {
+                this.jumpRef(formStr(HcmWorker), fieldNum(HcmWorker, RecId), int642str(salesTable.WorkerSalesResponsible));
+            }
+            else if (_tableIdJumpRef == tableNum(SalesTable) && _fieldIdJumpRef == fieldNum(SalesTable, RORContactPersonIdOperator))
+            {
+                this.jumpRef(formStr(smmContactPerson), fieldNum(ContactPerson, ContactPersonId), '', operator);
+            }
+            else if (_tableIdJumpRef == tableNum(SalesTable) && _fieldIdJumpRef == fieldNum(SalesTable, ContactPersonId))
+            {
+                this.jumpRef(formStr(smmContactPerson), fieldNum(ContactPerson, ContactPersonId), '', contactPerson);
+            }
+            else if (_tableIdJumpRef == tableNum(PurchTable) && _fieldIdJumpRef == fieldNum(PurchTable, WorkerPurchPlacer))
+            {
+                this.jumpRef(formStr(HcmWorker), fieldNum(HcmWorker, RecId), int642str(purchTable.WorkerPurchPlacer));
+            }
+            else if (_tableIdJumpRef == tableNum(SalesQuotationTable) && _fieldIdJumpRef == fieldNum(SalesQuotationTable, WorkerSalesResponsible))
+            {
+                this.jumpRef(formStr(HcmWorker), fieldNum(HcmWorker, RecId), int642str(salesQuotationTable.WorkerSalesResponsible));
+            }
+            else if (_tableIdJumpRef == tableNum(SalesQuotationTable) && _fieldIdJumpRef == fieldNum(SalesQuotationTable, RORContactPersonIdOperator))
+            {
+                this.jumpRef(formStr(smmContactPerson), fieldNum(ContactPerson, ContactPersonId), '', operator);
+            }
+            else if (_tableIdJumpRef == tableNum(SalesQuotationTable) && _fieldIdJumpRef == fieldNum(SalesQuotationTable, ContactPersonId))
+            {
+                this.jumpRef(formStr(smmContactPerson), fieldNum(ContactPerson, ContactPersonId), '', contactPerson);
+            }
+            else
+            {
+                throw error(Error::wrongUseOfFunction(funcName()));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefSalesPurchQuotationId</Name>
+				<Source><![CDATA[
+    private void jumpRefSalesPurchQuotationId(RefTableId _refTableId, RefRecId _refRecId, CompanyId _companyId = curExt())
+    {
+        BOBRentalTrans      rentalTrans;
+        SalesQuotationTable salesQuotationTable;
+        SalesQuotationLine  salesQuotationLine;
+        InventTransOrigin   inventTransOrigin;
+        Common              buffer;
+
+        changecompany(_companyId)
+        {
+            if (_refTableId == tableNum(BOBRentalTrans))
+            {
+                rentalTrans = BOBRentalTrans::findRecId(_refRecId);
+            }
+
+            if (rentalTrans && rentalTrans.TransType == BOBRentalTransType::RentalQuotation)
+            {
+                select firstOnly salesQuotationTable
+                    exists join salesQuotationLine
+                    where salesQuotationLine.QuotationId == salesQuotationTable.QuotationId
+                        join TableId from inventTransOrigin
+                        where inventTransOrigin.InventTransId == salesQuotationLine.InventTransId
+                        &&    inventTransOrigin.RecId == rentalTrans.InventTransOrigin;
+
+                buffer = salesQuotationTable;
+            }
+            else
+            {
+                buffer = this.refTableIdRefRecId2WorkOrderTable(_refTableId, _refRecId);
+            }
+
+            Args args = new Args();
+            args.caller(spbFormRun);
+            args.record(buffer);
+
+            new MenuFunction(menuItemActionStr(WPPViewDetails), MenuItemType::Action).run(args);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefWorkOrderLine</Name>
+				<Source><![CDATA[
+    private void jumpRefWorkOrderLine(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        RecId workOrderLineRecId;
+
+        switch(_refTableId)
+        {
+            case tableNum(WPPWorkOrderLine):
+                // unplanned task
+                workOrderLineRecId = _refRecId;
+                break;
+
+            case tableNum(WPPWorkOrderLineResource):
+                // planned task
+                WPPWorkOrderLineResource resourcePlanning = WPPWorkOrderLineResource::findRecId(_refRecId);
+                workOrderLineRecId = resourcePlanning.WorkOrderLineRecId;
+                break;
+        }
+
+        this.jumpRef(formStr(WPPWorkOrderLineDetails), fieldNum(WPPWorkOrderLine, RecId), int642str(workOrderLineRecId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefWorkOrderPurchTable</Name>
+				<Source><![CDATA[
+    private void jumpRefWorkOrderPurchTable(RefTableId _refTableId, RefRecId _refRecId, CompanyId _companyId)
+    {
+        Debug::assert(_refTableId == tableNum(WPPWorkOrderLine) && _refRecId);
+        WPPWorkOrderLine workOrderLine = WPPWorkOrderLine::findRecId(_refRecId);
+
+        changecompany(_companyId)
+        {
+            this.jumpRef(formStr(PurchTable), fieldNum(PurchTable, PurchId), '', workOrderLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefWorkOrderTable</Name>
+				<Source><![CDATA[
+    private void jumpRefWorkOrderTable(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        WPPWorkOrderTable           workOrderTable;
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderLineResource    workOrderLineResource;
+        ;
+
+        Debug::assert(_refTableId && _refRecId);
+
+        switch(_refTableId)
+        {
+            case tableNum(WPPWorkOrderLine) :
+                select firstOnly workOrderTable
+                    exists join workOrderLine
+                    where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                    &&    workOrderLine.RecId == _refRecId;
+                break;
+
+            case tableNum(WPPWorkOrderLineResource) :
+                select firstOnly workOrderTable
+                    exists join workOrderLine
+                    where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                        join TableId from workOrderLineResource
+                        where workOrderLineResource.WorkOrderLineRecId == workOrderLine.RecId
+                    && workOrderLineResource.RecId == _refRecId;
+                break;
+
+            default :
+                throw error(strFmt("@SYS31187", tableId2name(_refTableId)));
+        }
+
+        this.jumpRef(formStr(WPPWorkOrderTable), fieldNum(WPPWorkOrderTable, WorkOrderId), workOrderTable.WorkOrderId, workOrderTable);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(FormRun _spbFormRun)
+    {
+        if (!_spbFormRun
+        ||  !_spbFormRun.form()
+        ||  _spbFormRun.form().name() != formStr(WPPServicePlanboard))
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+
+        spbFormRun = _spbFormRun;
+        warningCacheMap = new Map(Types::Int64, Types::Container);
+        userPrefTimeZone = DateTimeUtil::getUserPreferredTimeZone();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerWorkOrderLineRecId</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderLineRecId parmCallerWorkOrderLineRecId(WPPWorkOrderLineRecId _callerWorkOrderLineRecId = callerWorkOrderLineRecId)
+    {
+        callerWorkOrderLineRecId = _callerWorkOrderLineRecId;
+
+        return callerWorkOrderLineRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onGridEntryDragDrop</Name>
+				<Source><![CDATA[
+    public void onGridEntryDragDrop(HiGHPlanBoardExternalDropEventArgs _sender)
+    {
+        WPPServicePlanboardSettings settings            = spbFormRun.getSettings();
+        RefRecId                    refRecId            = str2Int64(_sender.parmDataValue());
+        WPPWorkOrderLine            workOrderLine       = WPPWorkOrderLine::findRecId(refRecId);
+        WPPResourceId               resourceId            = _sender.parmTargetRowItemId();
+
+        //Remove the timeZone offset as the WPPTaskAssignmentEngine expects UTC times. Since this event is being fired by a user looking at a GUI,
+        //he or she will drop the task on the timezone corrected time they want to schedule it.
+        
+        WPPPlannedFromDateTime      actualFromDateTime  = DateTimeUtil::applyTimeZoneOffset(workOrderLine.RequestedStartDateTime, userPrefTimeZone);
+        WPPPlannedToDateTime        actualToDateTime    = DateTimeUtil::applyTimeZoneOffset(workOrderLine.RequestedEndDateTime, userPrefTimeZone);
+        int64                       entryDuration       = DateTimeUtil::getDifference(actualToDateTime, actualFromDateTime);
+        WPPPlannedFromDateTime      plannedFromDateTime = _sender.parmTargetStartDateTime();
+        WPPPlannedToDateTime        plannedToDateTime   = DateTimeUtil::addSeconds(plannedFromDateTime, entryDuration);
+
+        WPPTaskAssignmentEngine_Service::construct().assignToSingleResource(workOrderLine, settings.PlanBy, resourceId, plannedFromDateTime, plannedToDateTime);
+
+        Set resourceIdSet = new Set(Types::String);
+        resourceIdSet.add(resourceId);
+
+        spbFormRun.refreshApplySpecific(resourceIdSet, workOrderLine.RecId, true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onPlanningEntryDateChange</Name>
+				<Source><![CDATA[
+    public void onPlanningEntryDateChange(HiGHPlanBoardOnChangePlannedEventEventArgs _sender)
+    {
+        WPPWorkOrderLineResource        resourcePlanning;
+        WPPResourceId                   newResourceId;
+        WPPPlannedFromDateTime          newFromDateTime;
+        WPPPlannedToDateTime            newToDateTime;
+        WPPTaskAssignmentEngine_Service assignmentEngine;
+        WPPServicePlanboardSettings     settings            = spbFormRun.getSettings();
+        //List                            plannedEventsList   = _sender.parmPlannedEvents();
+        //ListEnumerator                  plannedEventsEnum   = plannedEventsList.getEnumerator();
+
+        //while(plannedEventsEnum.moveNext())
+        //{
+            //HiGHPlanBoardPlannedEventBaseArgs baseArgs = plannedEventsEnum.current();
+            HiGHPlanBoardOnChangePlannedEventEventArgs baseArgs = _sender;
+
+            newFromDateTime = baseArgs.parmStartDateTime();
+            newFromDateTime = DateTimeUtil::removeTimeZoneOffset(newFromDateTime, userPrefTimeZone);
+            newToDateTime   = baseArgs.parmEndDateTime();
+            newToDateTime   = DateTimeUtil::removeTimeZoneOffset(newToDateTime, userPrefTimeZone);
+            newResourceId   = baseArgs.parmRowItemId();
+        
+            select firstonly resourcePlanning
+            where resourcePlanning.RecId == baseArgs.parmRefRecId();
+
+            WPPTaskAssignmentEngine_Service::construct().reassign(resourcePlanning, settings.PlanBy, newResourceId, newFromDateTime, newToDateTime);
+        //}
+
+        Set refreshResourcesSet = new Set(Types::String);
+        refreshResourcesSet.add(newResourceId);
+        refreshResourcesSet.add(resourcePlanning.ResourceId);
+
+        spbFormRun.refreshApplySpecific(refreshResourcesSet, 0, false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>printWorkOrderConfirmation</Name>
+				<Source><![CDATA[
+    private void printWorkOrderConfirmation(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        WPPWorkOrderLineResource    plannedTask;
+        WPPWorkOrderLine            workOrderLine;
+        ;
+
+        if (_refTableId == tableNum(WPPWorkOrderLineResource))
+        {
+            select firstonly workOrderLine
+                exists join plannedTask
+                where plannedTask.WorkOrderLineRecId == workOrderLine.RecId
+                &&    plannedTask.RecId == _refRecId;
+        }
+        else
+        {
+            workOrderLine = WPPWorkOrderLine::findRecId(_refRecId);
+        }
+
+        Args args = new Args();
+        args.caller(spbFormRun);
+        args.record(workOrderLine);
+
+        new MenuFunction(menuitemOutputStr(WPPWorkOrderConfirmation), MenuItemType::Output).run(args);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>printWorkOrderLineConfirmation</Name>
+				<Source><![CDATA[
+    private void printWorkOrderLineConfirmation(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        WPPWorkOrderLineResource    plannedTask;
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderTable           workOrderTable;
+        ;
+
+        if (_refTableId == tableNum(WPPWorkOrderLineResource))
+        {
+            select firstonly workOrderTable
+                exists join workOrderLine
+                where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                    join TableId from plannedTask
+                    where plannedTask.RecId == _refRecId
+                    &&    plannedTask.WorkOrderLineRecId == workOrderLine.RecId;
+        }
+        else
+        {
+            select firstonly workOrderTable
+                exists join workOrderLine
+                where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                &&    workOrderLine.RecId == _refRecId;
+        }
+
+        Args args = new Args();
+        args.caller(spbFormRun);
+        args.record(workOrderTable);
+
+        new MenuFunction(menuitemOutputStr(WPPWorkOrderConfirmation), MenuItemType::Output).run(args);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>refTableIdRefRecId2WorkOrderTable</Name>
+				<Source><![CDATA[
+    private WPPWorkOrderTable refTableIdRefRecId2WorkOrderTable(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        WPPWorkOrderLineResource    plannedTask;
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderTable           workOrderTable;
+        BOBRentalTrans              rentalTrans;
+        ;
+
+        switch(_refTableId)
+        {
+            case tableNum(WPPWorkOrderLine):
+                select firstOnly workOrderTable
+                    exists join workOrderLine
+                    where workOrderLine.RecId == _refRecId
+                    &&    workOrderLine.WorkOrderId == workOrderTable.WorkOrderId;
+                break;
+
+            case tableNum(WPPWorkOrderLineResource):
+                select firstOnly workOrderTable
+                    exists join workOrderLine
+                    where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                        join TableId from plannedTask
+                        where plannedTask.RecId == _refRecId
+                        &&    plannedTask.WorkOrderLineRecId == workOrderLine.RecId;
+                break;
+
+            case tableNum(BOBRentalTrans):
+                select firstOnly workOrderTable
+                    exists join workOrderLine
+                    where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                        join TableId from rentalTrans
+                        where rentalTrans.WPPWorkOrderLineRecId == workOrderLine.RecId
+                        &&    rentalTrans.RecId == _refRecId;
+                break;
+
+            default:
+                throw error(strFmt("@SYS31187", tableId2name(_refTableId)));
+        }
+
+        return workOrderTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unassignTask</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void unassignTask(WPPWorkOrderLine _workOrderLine, RefRecId _resourcePlanningRecId)
+    {
+        WPPWorkOrderLineResource    workOrderLineResource;
+        WPPServicePlanboardSettings settings;
+
+        // The internal task must not be unplanned, but the current resource must be removed
+        if (_workOrderLine.WorkOrderId == WPPParameters::find().InternalWorkOrderId)
+        {
+            delete_from workOrderLineResource
+            where workOrderLineResource.RecId == _resourcePlanningRecId;
+        }
+        else
+        {
+            settings = spbFormRun.getSettings();
+            workOrderLineResource = WPPWorkOrderLineResource::findRecId(_resourcePlanningRecId);
+            WPPTaskAssignmentEngine_Service::construct().unassign(workOrderLineResource, settings);
+        }
+
+        Set resourceIdSet = new Set(Types::String);
+        resourceIdSet.add(workOrderLineResource.ResourceId);
+
+        spbFormRun.refreshApplySpecific(resourceIdSet, 0, true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateWorkOrderLineStatus</Name>
+				<Source><![CDATA[
+    private void updateWorkOrderLineStatus(DNRTmpIdList _plannedTaskRecIds, WPPWorkOrderLineStatus _newStatus)
+    {
+        WPPWorkOrderLineResource    plannedTask;
+        WPPWorkOrderLine            workOrderLine;
+        boolean                     mustRefresh;
+
+        while select TableId from _plannedTaskRecIds
+            join TableId from plannedTask
+            where plannedTask.RecId == _plannedTaskRecIds.RefRecId
+                join workOrderLine
+                where workOrderLine.RecId == plannedTask.WorkOrderLineRecId
+        {
+            WPPWorkOrderStatusUpdate statusUpdate = WPPWorkOrderStatusUpdate::construct(workOrderLine, _newStatus);
+            statusUpdate.init();
+
+            if (statusUpdate.prompt())
+            {
+                statusUpdate.run();
+                mustRefresh = true;
+            }
+        }
+
+        if (mustRefresh)
+        {
+            spbFormRun.refreshApply(true, true);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>workOrderLineCriterion2Int</Name>
+				<Source><![CDATA[
+    public static int workOrderLineCriterion2Int(WPPWorkOrderLineCriterion _workOrderLineCriterion)
+    {
+        switch (_workOrderLineCriterion)
+        {
+            case WPPWorkOrderLineCriterion::PurchNotConfirmed:                          return #JumpRefPurchNotConfirmed;
+            case WPPWorkOrderLineCriterion::PurchNotReceived:                           return #JumpRefPurchNotReceived;
+            case WPPWorkOrderLineCriterion::ObjectNotAvailable:                         return #JumpRefObjectNotAvailable;
+            case WPPWorkOrderLineCriterion::HasInternalNote:                            return #JumpRefHasInternalNote;
+            case WPPWorkOrderLineCriterion::PassedRequestedDateTime:                    return #JumpRefPassedRequestedDateTime;
+            case WPPWorkOrderLineCriterion::RelatedToTechnicalExchange:                 return #JumpRefRelatedToTechnicalExchange;
+            case WPPWorkOrderLineCriterion::RelatedToCommercialExchange:                return #JumpRefRelatedToCommercialExchange;
+            case WPPWorkOrderLineCriterion::LastOnRentDateObjectFilled:                 return #JumpRefLastOnRentDateObjectFilled;
+            case WPPWorkOrderLineCriterion::HasBusinessObjectNote:                      return #JumpRefHasBusinessObjectNote;
+            case WPPWorkOrderLineCriterion::HasRouteLocationNote:                       return #JumpRefHasRouteLocationNote;
+            case WPPWorkOrderLineCriterion::HasTerminationNote:                         return #JumpRefHasTerminationNote;
+            case WPPWorkOrderLineCriterion::ObjectIsAssignedToCreatedDeliveryTask:      return #JumpRefObjectIsAssignedToCreatedDeliveryTask;
+            case WPPWorkOrderLineCriterion::ObjectMaintenanceWithinXDays:               return #JumpRefObjectMaintenanceWithinXDays;
+            case WPPWorkOrderLineCriterion::ObjectIsSubRental:                          return #JumpRefObjectIsSubRental;
+            case WPPWorkOrderLineCriterion::ObjectOnMaintenanceWorkOrder:               return #JumpRefObjectOnMaintenanceWorkOrder;
+            case WPPWorkOrderLineCriterion::ObjectOnDamageWorkOrder:                    return #JumpRefObjectOnDamageWorkOrder;
+            case WPPWorkOrderLineCriterion::WorkOrderFullyInvoiced:                     return #JumpRefWorkOrderFullyInvoiced;
+            case WPPWorkOrderLineCriterion::AnotherNotCompletedWorkOrderLineExists:     return #JumpRefAnotherNotCompletedWorkOrderLineExists;
+            case WPPWorkOrderLineCriterion::ObjectWithinWarranty:                       return #JumpRefObjectWithinWarranty;
+            case WPPWorkOrderLineCriterion::ObjectOutOfWarranty:                        return #JumpRefObjectOutOfWarranty;
+            case WPPWorkOrderLineCriterion::OrderLineWithoutSerialNumberExists:         return #JumpRefOrderLineWithoutSerialNumberExists;
+            case WPPWorkOrderLineCriterion::OtherRelatedTasksNotScheduled:              return #JumpRefOtherRelatedTasksNotScheduled;
+            case WPPWorkOrderLineCriterion::ChildLinesWithoutSerialNumberExists:        return #JumpRefChildLinesWithoutSerialNumberExists;
+
+            default :
+                throw error("@DNR8270");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefCMRReport</Name>
+				<Source><![CDATA[
+    private void jumpRefCMRReport(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        RecId workOrderLineRecId;
+
+        switch(_refTableId)
+        {
+            case tableNum(WPPWorkOrderLine):
+                // unplanned task
+                workOrderLineRecId = _refRecId;
+                break;
+
+            case tableNum(WPPWorkOrderLineResource):
+                // planned task
+                WPPWorkOrderLineResource resourcePlanning = WPPWorkOrderLineResource::findRecId(_refRecId);
+                workOrderLineRecId = resourcePlanning.WorkOrderLineRecId;
+                break;
+        }
+
+        WPPWorkOrderLine workOrderLine = WPPWorkOrderLine::findRecId(workOrderLineRecId);
+
+        Args args = new Args();
+        args.record(workOrderLine);
+        new MenuFunction(menuItemActionStr(WPPCMRTableForm), MenuItemType::Action).run(args);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

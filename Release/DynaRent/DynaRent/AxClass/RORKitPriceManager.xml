@@ -1,0 +1,1165 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORKitPriceManager</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RORKitPriceManager
+{
+    RecordViewCache         recordViewCache;
+    RORRentalLine           rentalLineSupplied;
+    RORRentalEditorLine     rentalEditorLineSupplied;
+    RORKitPriceUpdateType   kitPriceUpdateType;
+    RORKitPricingActionType kitPricingActionType;
+    boolean                 checkOnlyRentalLines;
+    boolean                 allowCreateExtraLine;
+    boolean                 allowDeleteExtraLine;
+
+    Map                     mapContractLines;
+
+    // Reference to the highest rental line not marked as manual or fixed, so that we can apply any rounding differences
+    // after distributing the kit amount across the lines
+    RORRentalLine       rentalLineRoundingDifference;
+
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>addComponentsToMap</Name>
+				<Source><![CDATA[
+    private void addComponentsToMap(Map _mapKitSums, RORRentalLine _rentalLineParent, RecId _lineIdToSkip = 0)
+    {
+        RORRentalLine       rentalLineComponent = _rentalLineParent.RORLineBuffer();
+        RORRentalEditorLine rentalEditorLineParent;
+        RORRentalEditorLine rentalEditorLine;
+        ;
+    
+        if (_rentalLineParent.TableId == tableNum(RORRentalEditorLine))
+        {
+            rentalEditorLineParent = _rentalLineParent;
+    
+            while select rentalEditorLine
+            where rentalEditorLine.ParmId            == rentalEditorLineParent.ParmId
+            &&    rentalEditorLine.HeaderId          == rentalEditorLineParent.HeaderId
+            &&    rentalEditorLine.ParentLineRecId   == rentalEditorLineParent.RecId
+            &&    rentalEditorLine.LineType          == RORLineType::Normal
+            &&    rentalEditorLine.Include
+            &&    (!_lineIdToSkip || rentalEditorLine.RecId != _lineIdToSkip)
+            {
+                this.addOneComponentToMap(_mapKitSums, rentalEditorLine);
+            }
+        }
+        else
+        {
+            // Add totals from all components linked to the same parent.  Then update the kit (that will update further parent-kits if required)
+            while select rentalLineComponent
+            where rentalLineComponent.HeaderId          == _rentalLineParent.HeaderId
+            &&    rentalLineComponent.ParentLineRecId   == _rentalLineParent.RecId
+            &&    rentalLineComponent.LineType          == RORLineType::Normal
+            &&    (!_lineIdToSkip || rentalLineComponent.RecId != _lineIdToSkip)
+            {
+                this.addOneComponentToMap(_mapKitSums, rentalLineComponent);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addOneComponentToMap</Name>
+				<Source><![CDATA[
+    private void addOneComponentToMap(Map _mapKitSums, RORRentalLine _rentalLine, boolean _include = true)
+    {
+        AmountCur               netAmountLine;
+        AmountCur               grossAmountLine;
+        RORRentalEditorLine     rentalEditorLine;
+        boolean                 calcExtraPrices;
+        ;
+    
+        if (_rentalLine.KitComponentType == RORKitComponentType::Component
+        || _rentalLine.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+        {
+            rentalEditorLine = RORRentalEditorLine::rentalLine2editorLine(_rentalLine);
+    
+            if (!rentalEditorLine || rentalEditorLine.Include)
+            {
+                grossAmountLine = _rentalLine.RentalGrossAmount;
+                netAmountLine   = RAGUtil::calcNetPrice(_rentalLine.RentalGrossAmount, _rentalLine.LinePercent, _rentalLine.CurrencyCode, true);
+            }
+    
+            calcExtraPrices = (rentalEditorLineSupplied.RecId == _rentalLine.RecId && kitPricingActionType == RORKitPricingActionType::DeleteLine) ? false : true;
+            this.addToParentMaps(_mapKitSums, _rentalLine, grossAmountLine, netAmountLine, calcExtraPrices);
+        }
+        // If this component is a sub-kit, then instead drill down and add data from these components.
+        else
+        {
+            this.addComponentsToMap(_mapKitSums, _rentalLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addToParentMaps</Name>
+				<Source><![CDATA[
+    private void addToParentMaps(Map _mapKitSums, RORRentalLine _rentalLineComponent, AmountCur _grossAmountLine, AmountCur _netAmountLine, boolean _calcExtraPrices)
+    {
+        RORRentalLine       rentalLineParent;
+        RecId               recIdParent;
+        RORTmpKitPriceData  tmpKitPriceData;
+        RORTmpKitPriceData  tmpKitPriceDataLine;
+        ;
+    
+        // Now add newly updated gross and net figures to sum maps for each parent to be later stamped on each parent line
+        recIdParent = _rentalLineComponent.ParentLineRecId;
+
+        if (_calcExtraPrices)
+        {
+            // Add insurance/transport totals for this component
+            tmpKitPriceDataLine = this.calculateAddExtraPrices(_rentalLineComponent, tmpKitPriceDataLine);
+        }
+    
+        while (recIdParent)
+        {
+            if (_mapKitSums.exists(recIdParent))
+            {
+                tmpKitPriceData = _mapKitSums.lookup(recIdParent);
+            }
+            else
+            {
+                rentalLineParent = this.findParent(_rentalLineComponent, recIdParent);
+                tmpKitPriceData.clear();
+    
+                if (rentalLineParent.KitComponentType == RORKitComponentType::KitComponent)
+                {
+                    tmpKitPriceData.ParentLineRecId =  rentalLineParent.ParentLineRecId;
+                }
+            }
+    
+            tmpKitPriceData.NetAmount    += _netAmountLine;
+            tmpKitPriceData.GrossAmount  += _grossAmountLine;
+    
+            // Update highest line number
+            LineNum componentLineNum = _rentalLineComponent.RORRentalLine::getLineNum();
+            if (componentLineNum && componentLineNum > tmpKitPriceData.LineNum)
+            {
+                tmpKitPriceData.LineNum = componentLineNum;
+            }
+    
+            if (_calcExtraPrices)
+            {    
+                tmpKitPriceData.InsuranceGross  += tmpKitPriceDataLine.InsuranceGross;
+                tmpKitPriceData.InsuranceNet    += tmpKitPriceDataLine.InsuranceNet;
+                tmpKitPriceData.Transport       += tmpKitPriceDataLine.Transport;
+                tmpKitPriceData.ReturnTransport += tmpKitPriceDataLine.ReturnTransport;
+                tmpKitPriceData.Warranty        += tmpKitPriceDataLine.Warranty;
+            }
+    
+            _mapKitSums.insert(recIdParent, tmpKitPriceData);
+    
+            recIdParent = tmpKitPriceData.ParentLineRecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>allocateLineAmountRoundingDifference</Name>
+				<Source><![CDATA[
+    private void allocateLineAmountRoundingDifference(Map _mapKitSums, LineAmount _lineAmountRounding)
+    {
+        RORRentalNetPrice   netPriceLinePrevious;
+        RORRentalNetPrice   netPriceLineNew;
+        LineAmount          lineAmount;
+        real                delta;
+        ;
+    
+        if (rentalLineRoundingDifference.HeaderId)
+        {
+            rentalLineRoundingDifference = this.getRentalLineRoundingDifference();
+    
+            if (rentalLineRoundingDifference)
+            {
+                lineAmount = (rentalLineRoundingDifference.LineAmount + _lineAmountRounding);
+                delta = rentalLineRoundingDifference.LineAmount ? lineAmount / rentalLineRoundingDifference.LineAmount : 0;
+    
+                netPriceLinePrevious = rentalLineRoundingDifference.RORRentalLine::editNetAmount(false, 0);
+                netPriceLineNew = rentalLineRoundingDifference.RORRentalLine::editNetAmount(true, netPriceLinePrevious * delta);
+    
+                rentalLineRoundingDifference.RORRentalLine::rentalPricesModified();
+    
+                rentalLineRoundingDifference.update();
+                // Item was allready added to the parent.
+                this.addToParentMaps(_mapKitSums, rentalLineRoundingDifference, 0, netPriceLineNew - netPriceLinePrevious, false);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateAddExtraPrices</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    protected RORTmpKitPriceData calculateAddExtraPrices(RORRentalLine _rentalLine, RORTmpKitPriceData  _tmpKitPriceData)
+    {
+        RORRentalEditorLine     rentalEditorLine;
+        RAGtmpContractLine      tmpContractLine;
+    
+        AmountCur               insuranceGross;
+        RORInsurancePercentage  insurancePercentage;
+        RORInsuranceCalcBasis   insuranceCalcBasis;
+        boolean                 addInsurance;
+    
+        rentalEditorLine = RORRentalEditorLine::rentalLine2editorLine(_rentalLine);
+        tmpContractLine = !rentalEditorLine ? this.getContractInfo(_rentalLine) : null;
+            
+        if (rentalEditorLine)
+        {
+            _tmpKitPriceData.Warranty           += rentalEditorLine.WarrantyPrice;
+        }
+        else
+        {               
+            if (tmpContractLine.Warranty_AddWarranty)
+            {
+                _tmpKitPriceData.Warranty += (tmpContractLine.Warranty_Price * _rentalLine.RentQty);
+            }
+        }
+    
+        return _tmpKitPriceData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateAddExtraPricesForStandAlone</Name>
+				<Source><![CDATA[
+    protected RORTmpKitPriceData calculateAddExtraPricesForStandAlone(RORTmpKitPriceData _tmpKitPriceData, RORRentalLine _rentalLineComponent)
+    {
+        RORTmpKitPriceData  tmpKitPriceDataLine;
+        ;
+
+        if (_rentalLineComponent.TableId == tableNum(RORRentalEditorLine))
+        {
+            RORRentalEditorLine rleLine = _rentalLineComponent;
+
+            if (!rleLine.Include)
+            {
+                return _tmpKitPriceData;
+            }
+        }
+    
+        // Add insurance/transport totals for this component
+        tmpKitPriceDataLine = this.calculateAddExtraPrices(_rentalLineComponent, tmpKitPriceDataLine);
+    
+        if(RORRentalEditorLine::rentalLine2editorLine(_rentalLineComponent).Include)
+        {
+            _tmpKitPriceData.InsuranceGross  += tmpKitPriceDataLine.InsuranceGross;
+            _tmpKitPriceData.InsuranceNet    += tmpKitPriceDataLine.InsuranceNet;
+            _tmpKitPriceData.Transport       += tmpKitPriceDataLine.Transport;
+            _tmpKitPriceData.ReturnTransport += tmpKitPriceDataLine.ReturnTransport;
+            _tmpKitPriceData.Warranty        += tmpKitPriceDataLine.Warranty;
+        }
+    
+        return _tmpKitPriceData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkUpdateComponent</Name>
+				<Source><![CDATA[
+    private container checkUpdateComponent(Map _mapKitSums, RORRentalLine _rentalLineComponent, SalesLinePercent _linePercentCalculated, AmountCur _netAmountEntered, AmountCur _netAmountLineTotal)
+    {
+        AmountCur   netAmountLine, grossAmountLine;
+        LineAmount  lineAmount;
+        ;
+    
+        // Calculate gross and nett prices for this line
+        // Use the calculated line discount for this calculation.  This is, in effect, the result of the line discount % that
+        // we are about to apply, but pre-calculating it gives us a chance to modify it before the update if
+        // necessary due to required rounding corrections.
+        grossAmountLine      = _rentalLineComponent.RentalGrossAmount;
+        netAmountLine        = RAGUtil::calcNetPrice(_rentalLineComponent.RentalGrossAmount, _linePercentCalculated, _rentalLineComponent.CurrencyCode);
+    
+        if (!_rentalLineComponent.isPriceFixed)
+        {
+            _rentalLineComponent.isPriceNet = rentalLineSupplied.isPriceNet;
+            // Recalculate the linePercentage
+            if (!_rentalLineComponent.RentalGrossAmount)
+            {
+                _rentalLineComponent.LinePercent = 0;
+                _rentalLineComponent.RentalGrossAmount = netAmountLine;
+            }
+            else
+            {
+                _rentalLineComponent.LinePercent = -1*((100 * netAmountLine/_rentalLineComponent.RentalGrossAmount)-100);
+            }
+    
+            _rentalLineComponent.RORRentalLine::rentalPricesModified();
+            _rentalLineComponent.update();
+        }
+    
+        // Actual resulting net line price irrespective of whether updated, and how - will be used for sums below.  This value is rounded to reflect
+        // what is actually shown on the line
+        netAmountLine = RAGUtil::calcNetPrice(_rentalLineComponent.RentalGrossAmount, _rentalLineComponent.LinePercent, _rentalLineComponent.CurrencyCode);
+    
+        lineAmount = _rentalLineComponent.LineAmount;
+    
+        // Add this amount to the stored map for the parent kit(s) to allow the kit(s) to be updated later
+        this.addToParentMaps(_mapKitSums, _rentalLineComponent, grossAmountLine, netAmountLine, true);
+    
+        return [netAmountLine, lineAmount];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkUpdateKit</Name>
+				<Source><![CDATA[
+    // update is performed in local method which is called from within the WHILE SELECT FORUPDATE loop
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent","Cannot be refactored without altering functionality of method")]
+    private container checkUpdateKit(Map _mapKitSums, RORRentalLine _parentRentalLineKit, SalesDiscPercent _linePercentCalculated, AmountCur _netAmountEntered, AmountCur _netAmountLineTotal = 0)
+    {
+        RORRentalLine       rentalLineComponent = _parentRentalLineKit.RORLineBuffer();
+        AmountCur           netAmountLineTotal = _netAmountLineTotal;
+        LineAmount          lineAmountTotal;
+        PriceCur            netPriceLineTmp;
+        LineAmount          lineAmountTmp;
+        RORRentalEditorLine rentalEditorLineParent;
+        RORRentalEditorLine rentalEditorLine;
+    
+    
+        void add2NetAmountLineTotal(RORRentalLine _rentalLineComponent)
+        {
+            boolean updateLine;
+    
+            if (_rentalLineComponent.KitComponentType == RORKitComponentType::Component
+            || _rentalLineComponent.RORRentalLine::pricingKitComponentType(checkOnlyRentalLines) == RORKitComponentType::Component
+            || (!checkOnlyRentalLines && _rentalLineComponent.KitComponentType == RORKitComponentType::Standalone))
+            {
+                [netPriceLineTmp, lineAmountTmp] = this.checkUpdateComponent(_mapKitSums, _rentalLineComponent, _linePercentCalculated, _netAmountEntered, netAmountLineTotal);
+    
+                netAmountLineTotal += netPriceLineTmp;
+                lineAmountTotal += lineAmountTmp;
+            }
+            else
+            {
+                // When LineAmount modified then also Sales/Purch lines need to be modified but if SubKit has no Rental children then it needs to be updated also as a Component
+                if (_rentalLineComponent.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+                {
+                    [netPriceLineTmp, lineAmountTmp] = this.checkUpdateComponent(_mapKitSums, _rentalLineComponent, _linePercentCalculated, _netAmountEntered, netAmountLineTotal);
+    
+                    netAmountLineTotal += netPriceLineTmp;
+                    lineAmountTotal += lineAmountTmp;
+    
+                    updateLine = true;
+                }
+    
+                [netPriceLineTmp, lineAmountTmp] = this.checkUpdateKit(_mapKitSums, _rentalLineComponent, _linePercentCalculated, _netAmountEntered, netAmountLineTotal);
+    
+                // although sales kits are updated it shouldn't affect net price on main kit itself
+                if (_rentalLineComponent.KitComponentType != RORKitComponentType::Kit)
+                {
+                    netAmountLineTotal += netPriceLineTmp;
+                }
+    
+                lineAmountTotal += lineAmountTmp;
+    
+                if (_rentalLineComponent.isPriceNet != rentalLineSupplied.isPriceNet)
+                {
+                    _rentalLineComponent.isPriceNet = rentalLineSupplied.isPriceNet;
+                    updateLine = true;
+                }
+    
+                if (updateLine)
+                {
+                    _rentalLineComponent.update();
+                }
+            }
+        }
+        ;
+    
+        if (_parentRentalLineKit.TableId == tableNum(RORRentalEditorLine))
+        {
+            rentalEditorLineParent = _parentRentalLineKit;
+    
+            while select forUpdate rentalEditorLine
+            where rentalEditorLine.ParmId            == rentalEditorLineParent.ParmId
+            &&  rentalEditorLine.HeaderId            == rentalEditorLineParent.HeaderId
+            &&  rentalEditorLine.Include
+            &&  (rentalEditorLine.KitComponentType   == RORKitComponentType::Component ||
+                rentalEditorLine.KitComponentType    == RORKitComponentType::KitComponent ||
+                // if lineAmount is changed directly then also sales kits should be updated
+                (!checkOnlyRentalLines && (rentalEditorLine.KitComponentType == RORKitComponentType::Kit ||
+                                            (rentalEditorLine.KitComponentType == RORKitComponentType::Standalone && rentalEditorLine.LineType == RORLineType::Normal))))
+            &&  rentalEditorLine.ParentLineRecId     == rentalEditorLineParent.RecId
+            {
+                add2NetAmountLineTotal(rentalEditorLine);
+            }
+        }
+        else
+        {
+            // Find sums
+            while select forUpdate rentalLineComponent
+            where rentalLineComponent.HeaderId          == _parentRentalLineKit.HeaderId
+            &&  (rentalLineComponent.KitComponentType   == RORKitComponentType::Component ||
+                rentalLineComponent.KitComponentType    == RORKitComponentType::KitComponent ||
+                // if lineAmount is changed directly then also sales kits should be updated
+                (!checkOnlyRentalLines && (rentalLineComponent.KitComponentType == RORKitComponentType::Kit ||
+                                            (rentalLineComponent.KitComponentType == RORKitComponentType::Standalone && rentalLineComponent.LineType == RORLineType::Normal))))
+            &&  rentalLineComponent.ParentLineRecId     == _parentRentalLineKit.RecId
+            {
+                add2NetAmountLineTotal(rentalLineComponent);
+            }
+        }
+    
+        return [netAmountLineTotal, lineAmountTotal];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkUpdateRoundingDifferenceLine</Name>
+				<Source><![CDATA[
+    private void checkUpdateRoundingDifferenceLine(RORRentalLine _rentalLineCurrent)
+    {
+        if (!rentalLineRoundingDifference.HeaderId)
+        {
+            rentalLineRoundingDifference = _rentalLineCurrent.RORLineBuffer();
+        }
+    
+        if (!_rentalLineCurrent.IsPriceFixed && (!rentalLineRoundingDifference.HeaderId || (_rentalLineCurrent.LineAmount > rentalLineRoundingDifference.LineAmount)))
+        {
+            rentalLineRoundingDifference.data(_rentalLineCurrent);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>collectComponentPriceData</Name>
+				<Source><![CDATA[
+    private RORTmpKitPriceData collectComponentPriceData(RORRentalLine _rentalLine, boolean _retrieveExtraLineData)
+    {
+        InventTable         inventTable;
+        RORTmpKitPriceData  tmpKitPriceData;
+        ;
+    
+        inventTable = _rentalLine.inventTable();
+    
+        // Calculate gross and nett prices for this line, without rounding due to currency (last flag in call)
+        if (_rentalLine.isPriceFixed)
+        {
+            tmpKitPriceData.NetAmountFixed      = RAGUtil::calcNetPrice(_rentalLine.RentalGrossAmount, _rentalLine.LinePercent, _rentalLine.CurrencyCode, true);
+            tmpKitPriceData.GrossAmountFixed    = _rentalLine.RentalGrossAmount;
+        }
+        else
+        {
+            tmpKitPriceData.NetAmount            = RAGUtil::calcNetPrice(_rentalLine.RentalGrossAmount, _rentalLine.LinePercent, _rentalLine.CurrencyCode, true);
+            tmpKitPriceData.GrossAmount          = _rentalLine.RentalGrossAmount;
+        }
+    
+    
+        // Add to insurance/transport totals if requested, otherwise will be returned as zero and no calls to contract will take place
+        if (_retrieveExtraLineData)
+        {
+            tmpKitPriceData = this.calculateAddExtraPrices(_rentalLine, tmpKitPriceData);
+        }
+    
+        // Update our line which will be used for rounding differences if necessary
+        this.checkUpdateRoundingDifferenceLine(_rentalLine);
+    
+        tmpKitPriceData.InsuranceCost = 0/*inventTable.RORInsuranceReplaceCost*/;
+        tmpKitPriceData.LineNum = _rentalLine.RORRentalLine::getLineNum();
+    
+        return tmpKitPriceData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>collectKitPriceData</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method"),
+     SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent","Cannot be refactored without altering functionality of method")]
+    // buffer is passed on to other methods, which perform the actual update
+    private RORTmpKitPriceData collectKitPriceData(RORRentalLine _parentRentalLineKit, boolean _excludeSeparatelyPrintable = false, boolean _retrieveExtraLineData = true)
+    {
+        RORRentalLine       rentalLineComponent = _parentRentalLineKit.RORLineBuffer();
+        RORTmpKitPriceData  tmpKitPriceData;
+        RORRentalEditorLine rentalEditorLine;
+        RORRentalEditorLine rentalEditorLineParent;
+        ;
+    
+        tmpKitPriceData = this.initKitPrices(_parentRentalLineKit, _retrieveExtraLineData);
+    
+        // Add up totals of all components, separating calculated from fixed/manual values
+        if (_parentRentalLineKit.TableId == tableNum(RORRentalEditorLine))
+        {
+            rentalEditorLineParent = _parentRentalLineKit;
+    
+            while select forUpdate rentalEditorLine
+            where rentalEditorLine.ParmId           == rentalEditorLineParent.ParmId
+            &&  rentalEditorLine.HeaderId           == _parentRentalLineKit.HeaderId // Enables it to use the record view cache
+            &&  rentalEditorLine.Include            == NoYes::Yes
+            &&  (rentalEditorLine.KitComponentType  == RORKitComponentType::Component ||
+                 rentalEditorLine.KitComponentType  == RORKitComponentType::KitComponent)
+            &&  rentalEditorLine.ParentLineRecId    == _parentRentalLineKit.RecId
+            {
+                tmpKitPriceData = this.processKit(rentalEditorLine, tmpKitPriceData, _excludeSeparatelyPrintable, _retrieveExtraLineData);
+            }
+        }
+        else
+        {
+            while select forUpdate rentalLineComponent
+            where rentalLineComponent.HeaderId          == _parentRentalLineKit.HeaderId // Enables it to use the record view cache
+            &&   (rentalLineComponent.KitComponentType  == RORKitComponentType::Component ||
+                  rentalLineComponent.KitComponentType  == RORKitComponentType::KitComponent)
+            &&    rentalLineComponent.ParentLineRecId   == _parentRentalLineKit.RecId
+            {
+                tmpKitPriceData = this.processKit(rentalLineComponent, tmpKitPriceData, _excludeSeparatelyPrintable, _retrieveExtraLineData);
+            }
+        }
+    
+        if (!checkOnlyRentalLines
+        && _parentRentalLineKit.KitComponentType == RORKitComponentType::KitComponent
+        && _parentRentalLineKit.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+        {
+            tmpKitPriceData = this.processKit(_parentRentalLineKit.orig(), tmpKitPriceData, _excludeSeparatelyPrintable, _retrieveExtraLineData);
+        }
+    
+        return tmpKitPriceData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findParent</Name>
+				<Source><![CDATA[
+    private RORRentalLine findParent(RORRentalLine _rentalLineComponent, RecId _recIdParent)
+    {
+        RORRentalLine       rentalLineParent = _rentalLineComponent.RORLineBuffer();
+        RORRentalEditorLine rentalEditorLineParent;
+        RORRentalEditorLine rentalEditorLine;
+        ;
+    
+        if (_rentalLineComponent.TableId == tableNum(RORRentalEditorLine))
+        {
+            rentalEditorLine = _rentalLineComponent;
+    
+            select firstonly rentalEditorLineParent
+            where rentalEditorLineParent.ParmId == rentalEditorLine.ParmId
+            && rentalEditorLineParent.RecId == _recIdParent;
+    
+            rentalLineParent = rentalEditorLineParent;
+        }
+        else
+        {
+            select firstonly rentalLineParent
+            where rentalLineParent.RecId == _recIdParent;
+        }
+    
+        return rentalLineParent;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContractInfo</Name>
+				<Source><![CDATA[
+    private RAGtmpContractLine getContractInfo(RORRentalLine _rentalLine)
+    {
+        RAGtmpContractLine tmpContractLine;
+        ;
+    
+        if (mapContractLines.exists(_rentalLine.RecId))
+        {
+            tmpContractLine = mapContractLines.lookup(_rentalLine.RecId);
+        }
+        else if (_rentalLine.TradeType != RORTradeType::SalesPurch)
+        {
+            tmpContractLine =  RAGContractData::getTmpContractLineFromRentalLine(_rentalLine);
+    
+            mapContractLines.insert(_rentalLine.RecId, tmpContractLine);
+        }
+    
+        return tmpContractLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRentalLineRoundingDifference</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent","Cannot be refactored without altering functionality of method")]
+    // buffer is returned to consuming methods, which perform the actual update
+    private RORRentalLine getRentalLineRoundingDifference()
+    {
+        RORRentalLine ret = rentalLineSupplied.RORLineBuffer();
+        RORRentalEditorLine rentalEditorLineDiff;
+        RORRentalEditorLine rentalEditorLine;
+        ;
+    
+        if (rentalLineRoundingDifference.HeaderId)
+        {
+            if (rentalLineRoundingDifference.TableId == tableNum(RORRentalEditorLine))
+            {
+                rentalEditorLineDiff = rentalLineRoundingDifference;
+    
+                // Selecting Rental Editor Line to update rounding difference
+                select firstonly forupdate rentalEditorLine
+                where rentalEditorLine.ParmId == rentalEditorLineDiff.ParmId
+                &&    rentalEditorLine.RecId == rentalEditorLineDiff.RecId; // Changes from InventTransId to RecId As no InventTransId created for newly included line
+
+                ret = rentalEditorLine as RORRentalLine;
+            }
+            else
+            {
+                select firstonly forupdate ret
+                where ret.InventTransId == rentalLineRoundingDifference.InventTransId;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCache</Name>
+				<Source><![CDATA[
+    private void initCache(boolean _forceReset = false)
+    {
+        RORRentalLine rentalLineCache = rentalLineSupplied.RORLineBuffer();
+    
+        // Can be passed in externally in which case we can use it without re-instatiating
+        if (!recordViewCache || _forceReset)
+        {
+            // Create cache for sales lines for this order to speed up processing and reduce effect of multiple selects
+            select nofetch rentalLineCache
+            where rentalLineCache.HeaderId == rentalLineSupplied.HeaderId;
+    
+            recordViewCache = new RecordViewCache(rentalLineCache);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initKitPrices</Name>
+				<Source><![CDATA[
+    private RORTmpKitPriceData initKitPrices(RORRentalLine _rentalLineKit, boolean _retrieveExtraLineData)
+    {
+        RORTmpKitPriceData  tmpKitPriceData;
+        ;
+    
+        // Calculate any extra costs specified at kit level and include in starting figures for kit calculations
+        if (_retrieveExtraLineData)
+        {
+            tmpKitPriceData = this.calculateAddExtraPrices(_rentalLineKit, tmpKitPriceData);
+        }
+    
+        return tmpKitPriceData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValues</Name>
+				<Source><![CDATA[
+    public void initValues(
+        Common                  _common,
+        RORKitPriceUpdateType   _kitPriceUpdateType,
+        RORKitPricingActionType _kitPricingActionType,
+        boolean                 _checkOnlyRentalLines = true,
+        boolean                 _parentUpdatedFromChild = false)
+    {
+        rentalLineSupplied = _common;
+        rentalEditorLineSupplied = _common as RORRentalEditorLine;
+    
+        kitPriceUpdateType      = _kitPriceUpdateType;
+        kitPricingActionType    = _kitPricingActionType;
+        checkOnlyRentalLines    = _checkOnlyRentalLines;
+    
+        if ((!rentalEditorLineSupplied
+        ||   rentalEditorLineSupplied.InsurancePercentage
+        ||   rentalEditorLineSupplied.TransportPrice
+        ||   rentalEditorLineSupplied.ReturnTransportPrice
+        ||   rentalEditorLineSupplied.WarrantyPrice)
+        &&  !_parentUpdatedFromChild)
+        {
+            allowDeleteExtraLine = true;
+        }
+        else
+        {
+            allowDeleteExtraLine = false;
+        }
+    
+        allowCreateExtraLine = kitPricingActionType != RORKitPricingActionType::DeleteLine;
+    
+        mapContractLines = new Map(Types::Int64, Types::Record);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCache</Name>
+				<Source><![CDATA[
+    public RecordViewCache parmCache(RecordViewCache _recordViewCache = recordViewCache)
+    {
+        recordViewCache = _recordViewCache;
+    
+        return recordViewCache;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processKit</Name>
+				<Source><![CDATA[
+    protected RORTmpKitPriceData processKit(RORRentalLine _rentalLine, RORTmpKitPriceData _previousValues, boolean _excludeSeparatelyPrintable, boolean _retrieveExtraLineData)
+    {
+        RORTmpKitPriceData  tmpKitPriceData;
+        RORTmpKitPriceData  tmpKitPriceDataTotal;
+
+        if (_rentalLine.TableId == tableNum(RORRentalEditorLine))
+        {
+            RORRentalEditorLine rleLine = _rentalLine;
+
+            if (!rleLine.Include)
+            {
+                return tmpKitPriceDataTotal;
+            }
+        }
+    
+        tmpKitPriceDataTotal = _previousValues;
+    
+        if (_rentalLine.KitComponentType == RORKitComponentType::Component
+        || _rentalLine.KitComponentType == RORKitComponentType::Standalone
+        || _rentalLine.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+        {
+            tmpKitPriceData = this.collectComponentPriceData(_rentalLine, _retrieveExtraLineData);
+        }
+        else
+        {
+            tmpKitPriceData = this.collectKitPriceData(_rentalLine, _excludeSeparatelyPrintable, _retrieveExtraLineData);
+        }
+    
+        // Update totals
+        tmpKitPriceDataTotal.addPrices(tmpKitPriceData);
+    
+        if (tmpKitPriceData.LineNum > tmpKitPriceDataTotal.LineNum)
+        {
+            tmpKitPriceDataTotal.LineNum = tmpKitPriceData.LineNum;
+        }
+    
+        return tmpKitPriceDataTotal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        ttsbegin;
+
+        switch (kitPriceUpdateType)
+        {
+            case RORKitPriceUpdateType::FromKit :
+                this.updateComponentsFromKit();
+                break;
+    
+            case RORKitPriceUpdateType::Standalone :
+                this.updateFromStandalone();
+                break;
+    
+            default :
+                this.updateKitFromComponents();
+                break;
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateComponentsFromKit</Name>
+				<Source><![CDATA[
+    private void updateComponentsFromKit()
+    {
+        Map                 mapKitSums = new Map(Types::Int64, Types::Record);
+    
+        RORTmpKitPriceData  tmpKitPriceData;
+        AmountCur           netAmountEntered;
+        AmountCur           netAmountEnteredCorrected;
+        AmountCur           salesLineCorrection;
+        AmountCur           netAmountComponents;
+        LineAmount          lineAmountComponents;
+        SalesLinePercent    linePercentCalculated;
+        // For parent kit if necessary
+        RORKitPriceManager  kitPriceManager;
+        RORRentalLine       childRentalLine = rentalLineSupplied.RORLineBuffer();
+        ;
+    
+        this.initCache();
+    
+        if (rentalLineSupplied.KitComponentType == RORKitComponentType::Standalone)
+        {
+            tmpKitPriceData = this.processKit(rentalLineSupplied, tmpKitPriceData, false, true);
+    
+            while select childRentalLine
+            where childRentalLine.ParentLineRecId == rentalLineSupplied.RecId
+            &&    childRentalLine.TradeType != RORTradeType::SalesPurch
+            &&    childRentalLine.LineType == RORLineType::Normal
+            {
+                tmpKitPriceData = this.calculateAddExtraPricesForStandAlone(tmpKitPriceData, childRentalLine);
+            }
+    
+            rentalLineSupplied.RORRentalLine::updateExtraLines(tmpKitPriceData.InsuranceGross, tmpKitPriceData.InsuranceNet, tmpKitPriceData.Transport, tmpKitPriceData.ReturnTransport, tmpKitPriceData.Warranty, tmpKitPriceData.LineNum, allowCreateExtraLine);
+        }
+        else
+        {
+            rentalLineRoundingDifference = null;
+    
+            // Collect data - get sums of amounts (both manual and automatic) - will use cache from above
+            // This is used in conjunction with the entered net value/discount to calculate the discount whcih should
+            // be applied to all the non-manual and non-fixed lines
+            tmpKitPriceData = this.collectKitPriceData(rentalLineSupplied, false, true);
+    
+            // Accurately calculate the entered (or calculated from percentage) net price on the kit line.  This will be used to calculate the effective discount percentage
+            // to be stamped on each non-manual line, as well as to check for a difference on the last line due to rounding issues.
+            netAmountEntered = RAGUtil::calcNetPrice(kitPricingActionType == RORKitPricingActionType::DeleteLine ? tmpKitPriceData.GrossAmount : rentalLineSupplied.RentalGrossAmount, rentalLineSupplied.LinePercent, rentalLineSupplied.CurrencyCode, true);
+            netAmountEnteredCorrected = netAmountEntered;
+    
+            if (!checkOnlyRentalLines && !(rentalLineSupplied.KitComponentType == RORKitComponentType::Kit && rentalLineSupplied.TradeType == RORTradeType::SalesPurch))
+            {
+                salesLineCorrection = rentalLineSupplied.RORRentalLine::getKitSalesLinesGrossAmount(rentalLineSupplied);
+                netAmountEnteredCorrected = RAGUtil::calcNetPrice(rentalLineSupplied.RentalGrossAmount + salesLineCorrection, rentalLineSupplied.LinePercent, rentalLineSupplied.CurrencyCode, true);
+            }
+    
+            // Calculate discount excluding manual components, to be stamped on each non-manual component
+            linePercentCalculated = RAGUtil::calcRentalDiscount(tmpKitPriceData.GrossAmount + salesLineCorrection, netAmountEnteredCorrected - tmpKitPriceData.NetAmountFixed);
+    
+            // Process kit, and call recursively for sub-kits.  This will update the components making up each kit where appropriate
+            [netAmountComponents, lineAmountComponents] = this.checkUpdateKit(mapKitSums, rentalLineSupplied, linePercentCalculated, netAmountEntered);
+    
+            if (lineAmountComponents != netAmountEnteredCorrected)
+            {
+                this.allocateLineAmountRoundingDifference(mapKitSums, netAmountEnteredCorrected - lineAmountComponents);
+            }
+    
+            // If this kit is a sub-kit, then also update parent(s)
+            if (rentalLineSupplied.RORRentalLine::pricingKitComponentType() == RORKitComponentType::KitComponent)
+            {
+                //update new from component
+                kitPriceManager = RORKitPriceManager::construct(rentalLineSupplied, RORKitPriceUpdateType::FromComponent, kitPricingActionType);
+                // Share already-populated cache
+                kitPriceManager.parmCache(this.parmCache());
+                kitPriceManager.run();
+            }
+            else
+            {
+                this.updateLinkedKits(mapKitSums);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateFromStandalone</Name>
+				<Source><![CDATA[
+    protected void updateFromStandalone()
+    {
+        RORTmpKitPriceData  tmpKitPriceData;
+        RORRentalLine       topKitLine = rentalLineSupplied.RORLineBuffer();
+        RecId               parentRecId;
+        RORRentalLine       childRentalLine = rentalLineSupplied.RORLineBuffer();
+    
+        // Collect pricing, including insuranble amounts, for this line
+        tmpKitPriceData = this.processKit(rentalLineSupplied, tmpKitPriceData, false, rentalLineSupplied.LineType == RORLineType::Normal);
+    
+        if (rentalLineSupplied.ParentLineRecId)// && rentalLineSupplied.TableId == tableNum(RORRentalEditorLine))
+        {
+            //Find the parent line and fill the pricing data for the parent line first
+            topKitLine.data(rentalLineSupplied.data());
+
+            while (topKitLine.ParentLineRecId)
+            {
+                parentRecId = topKitLine.ParentLineRecId;
+                select firstonly topKitLine
+                where topKitLine.RecId == parentRecId;
+            }
+
+            tmpKitPriceData = this.calculateAddExtraPrices(topKitLine, tmpKitPriceData);
+
+            //Find all the children lines of the parent and process their pricing data
+            while select topKitLine
+            where topKitLine.ParentLineRecId == rentalLineSupplied.ParentLineRecId
+            &&    topKitLine.RecId           != rentalLineSupplied.RecId
+            {
+                tmpKitPriceData = this.calculateAddExtraPricesForStandAlone(tmpKitPriceData, topKitLine);
+            }
+        }
+        else
+        {
+            //If the caller line is the parent line itself then calc insurance of all its children line
+            while select childRentalLine
+            where childRentalLine.ParentLineRecId == rentalLineSupplied.RecId
+            &&    childRentalLine.TradeType != RORTradeType::SalesPurch
+            &&    childRentalLine.LineType == RORLineType::Normal
+            {
+                tmpKitPriceData = this.calculateAddExtraPricesForStandAlone(tmpKitPriceData, childRentalLine);
+            }
+        }
+    
+        rentalLineSupplied.RORRentalLine::updateExtraLines(
+            tmpKitPriceData.InsuranceGross,
+            tmpKitPriceData.InsuranceNet,
+            tmpKitPriceData.Transport,
+            tmpKitPriceData.ReturnTransport,
+            tmpKitPriceData.Warranty,
+            tmpKitPriceData.LineNum,
+            allowCreateExtraLine,
+            allowDeleteExtraLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateKitFromComponents</Name>
+				<Source><![CDATA[
+    private void updateKitFromComponents()
+    {
+        RORRentalLine           rentalLineParent;
+        Map                     mapKitSums = new Map(Types::Int64, Types::Record);
+        // For parent kit if necessary
+        RORKitPriceManager      kitPriceManager;
+        ;
+    
+        this.initCache();
+    
+        // Add supplied line to sums map
+        this.addOneComponentToMap(mapKitSums, rentalLineSupplied, !rentalEditorLineSupplied || rentalEditorLineSupplied.Include);
+    
+        // Iterate all components at same level (and drill-down through sub-kits) and add to sum maps.  Exclude current
+        // (supplied) line - don't need to iterate it again as added to map above and can take time if contains subkits
+        rentalLineParent = rentalLineSupplied.RORGetParentLine();
+        if (rentalLineParent)
+        {
+            this.addComponentsToMap(mapKitSums, rentalLineParent, rentalLineSupplied.RecId);
+        }
+    
+        // Apply to kits
+        this.updateLinkedKits(mapKitSums);
+    
+        // Apply extra lines prices to stand-alone parent
+        this.updateStandaloneParent(mapKitSums, rentalLineParent);
+    
+        // If the immediate parent kit is a sub-kit, then also update parent(s)
+        if (rentalLineParent.RORRentalLine::pricingKitComponentType() == RORKitComponentType::KitComponent)
+        {
+            // update from component
+            kitPriceManager = RORKitPriceManager::construct(rentalLineParent, RORKitPriceUpdateType::FromComponent, kitPricingActionType);
+            // Share already-populated cache
+            kitPriceManager.parmCache(this.parmCache());
+            kitPriceManager.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateLinkedKits</Name>
+				<Source><![CDATA[
+    // buffer is passed on to other methods, which perform the actual update
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method"),
+     SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent","Cannot be refactored without altering functionality of method")]
+    private void updateLinkedKits(Map _mapKitSums)
+    {
+        RORRentalLine       rentalLineKitUpdate = rentalLineSupplied.RORLineBuffer();
+        RORRentalEditorLine rentalEditorLineKitUpdate;
+        RORRentalEditorLine rentalEditorLine;
+        RORRentalLine       rentalLineParent;
+        boolean             forceFixedPrice;
+        ;
+    
+        rentalLineParent = rentalLineSupplied.RORGetParentLine();
+        forceFixedPrice = (rentalLineSupplied.KitComponentType == RORKitComponentType::KitComponent && rentalLineSupplied.IsPriceFixed)
+            || (rentalLineParent && rentalLineParent.IsPriceFixed);
+    
+        if (rentalLineSupplied.TableId == tableNum(RORRentalEditorLine))
+        {
+            rentalEditorLine = rentalLineSupplied;
+    
+            while select forUpdate rentalEditorLineKitUpdate
+            where rentalEditorLineKitUpdate.ParmId          == rentalEditorLine.ParmId
+            && rentalEditorLineKitUpdate.HeaderId           == rentalEditorLine.HeaderId
+            && (rentalEditorLineKitUpdate.KitComponentType  == RORKitComponentType::Kit ||
+                rentalEditorLineKitUpdate.KitComponentType  == RORKitComponentType::KitComponent)
+            {
+                if (rentalEditorLineKitUpdate.RORRentalLine::pricingKitComponentType(checkOnlyRentalLines) != RORKitComponentType::Component)
+                {
+                    this.updateOneLinkedKit(_mapKitSums, rentalEditorLineKitUpdate, forceFixedPrice);
+                }
+            }
+        }
+        else
+        {
+            // Apply to kits
+            while select forUpdate rentalLineKitUpdate
+            where rentalLineKitUpdate.HeaderId          == rentalLineSupplied.HeaderId
+            && (rentalLineKitUpdate.KitComponentType  == RORKitComponentType::Kit ||
+                rentalLineKitUpdate.KitComponentType  == RORKitComponentType::KitComponent)
+            {
+                if (rentalLineKitUpdate.RORRentalLine::pricingKitComponentType(checkOnlyRentalLines) != RORKitComponentType::Component)
+                {
+                    this.updateOneLinkedKit(_mapKitSums, rentalLineKitUpdate, forceFixedPrice);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateOneLinkedKit</Name>
+				<Source><![CDATA[
+    private void updateOneLinkedKit(Map _mapKitSums, RORRentalLine _rentalLineKit, boolean _isFixedPrice = false)
+    {
+        RORTmpKitPriceData  tmpKitPriceData;
+        RORTmpKitPriceData  tmpKitPriceDataKit;
+        AmountCur           netAmount;
+        ;
+    
+        // When called with a sub-kit, then not all kits can be/need to be updated.
+        if (_mapKitSums.exists(_rentalLineKit.RecId))
+        {
+            tmpKitPriceData = _mapKitSums.lookup(_rentalLineKit.RecId);
+    
+            netAmount = (_rentalLineKit.IsPriceFixed || _isFixedPrice)? _rentalLineKit.RORRentalLine::editNetAmount(false, 0) : tmpKitPriceData.NetAmount;
+    
+            if (checkOnlyRentalLines)
+            {
+                // This is NOT triggered when LineAmount is modified on form
+                _rentalLineKit.RentalGrossAmount = tmpKitPriceData.GrossAmount;
+            }
+    
+            _rentalLineKit.LinePercent     = RAGUtil::calcRentalDiscount(tmpKitPriceData.GrossAmount, netAmount);
+            _rentalLineKit.RORRentalLine::rentalPricesModified();
+            _rentalLineKit.update();
+    
+            // check for kit-level transport etc which should be added to that from components
+            tmpKitPriceDataKit = this.calculateAddExtraPrices(_rentalLineKit, tmpKitPriceDataKit);
+    
+            // Update insurance line pricing.  Insurance can only exist at top kit level, not for sub-kits
+            if (_rentalLineKit.KitComponentType == RORKitComponentType::Kit
+            && _rentalLineKit.TradeType != RORTradeType::SalesPurch)
+            {
+                _rentalLineKit.RORRentalLine::updateExtraLines(
+                    tmpKitPriceData.InsuranceGross + tmpKitPriceDataKit.InsuranceGross,
+                    tmpKitPriceData.InsuranceNet + tmpKitPriceDataKit.InsuranceNet,
+                    tmpKitPriceData.Transport + tmpKitPriceDataKit.Transport,
+                    tmpKitPriceData.ReturnTransport + tmpKitPriceDataKit.ReturnTransport,
+                    tmpKitPriceData.Warranty + tmpKitPriceDataKit.Warranty,
+                    tmpKitPriceData.LineNum,
+                    allowCreateExtraLine);
+            }
+        }
+        /*else if (_rentalLineKit.TableId == tableNum(RORRentalEditorLine) && !_rentalLineKit.ParentLineRecId && _rentalLineKit.TradeType != RORTradeType::SalesPurch)
+        {
+            rentalEditorLine = _rentalLineKit;
+    
+            insuranceGross = (rentalEditorLine.RentalGrossAmount * rentalEditorLine.InsurancePercentage / 100);
+            if (rentalEditorLine.InsuranceCalcBasis == RORInsuranceCalcBasis::Gross)
+            {
+                insuranceNet = insuranceGross;
+            }
+            else
+            {
+                insuranceNet = (rentalEditorLine.RORRentalLine::editNetAmount(false, 0) * rentalEditorLine.InsurancePercentage / 100);
+            }
+            // update extra lines even if no normal children lines are included
+            _rentalLineKit.RORRentalLine::updateExtraLines(
+                    insuranceGross,
+                    insuranceNet,
+                    rentalEditorLine.TransportPrice,
+                    rentalEditorLine.WarrantyPrice,
+                    rentalEditorLine.LineNum,
+                    allowCreateExtraLine);
+        }*/
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateStandaloneParent</Name>
+				<Source><![CDATA[
+    private void updateStandaloneParent(Map _mapKitSums, RORRentalLine _parentRentalLine)
+    {
+        RORTmpKitPriceData  tmpKitPriceData;
+        RORTmpKitPriceData  tmpKitPriceDataKit;
+        ;
+    
+        if (_parentRentalLine
+        &&  _parentRentalLine.TradeType != RORTradeType::SalesPurch
+        && _parentRentalLine.KitComponentType == RORKitComponentType::Standalone)
+        {
+            tmpKitPriceData = _mapKitSums.lookup(_parentRentalLine.RecId);
+    
+            tmpKitPriceDataKit = this.calculateAddExtraPrices(_parentRentalLine, tmpKitPriceDataKit);
+    
+            // Update insurance line pricing.  Insurance can only exist at top level, not for components
+            _parentRentalLine.RORRentalLine::updateExtraLines(
+                tmpKitPriceData.InsuranceGross + tmpKitPriceDataKit.InsuranceGross,
+                tmpKitPriceData.InsuranceNet + tmpKitPriceDataKit.InsuranceNet,
+                tmpKitPriceData.Transport + tmpKitPriceDataKit.Transport,
+                tmpKitPriceData.ReturnTransport + tmpKitPriceDataKit.ReturnTransport,
+                tmpKitPriceData.Warranty + tmpKitPriceDataKit.Warranty,
+                tmpKitPriceData.LineNum,
+                allowCreateExtraLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static RORKitPriceManager construct(
+        Common                  _common,
+        RORKitPriceUpdateType   _kitPriceUpdateType,
+        RORKitPricingActionType _kitPricingActionType,
+        boolean                 _checkOnlyRentalLines = true,
+        boolean                 _parentUpdatedFromChild = false)
+    {
+        RORKitPriceManager  kitPriceManager;
+        ;
+    
+        switch (_common.TableId)
+        {
+            case tableNum(SalesLine),
+                tableNum(SalesQuotationLine),
+                tableNum(PurchLine),
+                tableNum(RORRentalEditorLine):
+                kitPriceManager = new RORKitPriceManager();
+                break;
+    
+            default:
+                throw error(strFmt("@SYS31187", tableId2Name(_common.TableId)));
+        }
+    
+        kitPriceManager.initValues(_common, _kitPriceUpdateType, _kitPricingActionType, _checkOnlyRentalLines, _parentUpdatedFromChild);
+    
+        return kitPriceManager;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

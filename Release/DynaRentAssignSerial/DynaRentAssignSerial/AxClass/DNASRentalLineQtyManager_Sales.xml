@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNASRentalLineQtyManager_Sales</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class DNASRentalLineQtyManager_Sales extends DNASRentalLineQtyManager
+{
+    SalesLine salesLine;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setActiveRentalLine</Name>
+				<Source><![CDATA[
+    protected void setActiveRentalLine(RORRentalLine _rentalLine)
+    {
+        salesLine = _rentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateParentLineQty</Name>
+				<Source><![CDATA[
+    protected void validateParentLineQty()
+    {
+        if (salesLine.RORParentLineRecId)
+        {
+            SalesLine parentLine;
+            
+            select firstonly ItemId, SalesQty from parentLine
+            where parentLine.SalesId == salesLine.SalesId
+            &&    parentLine.RecId == salesLine.RORParentLineRecId;
+
+            if (parentLine && (real2int(salesLine.SalesQty) mod real2int(parentLine.SalesQty) != 0))
+            {
+                throw error(strFmt("@DNR:AssignSerialChildLineQtyUpdateInvalid", salesLine.ItemId, parentLine.ItemId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateChildLinesQty</Name>
+				<Source><![CDATA[
+    protected void updateChildLinesQty()
+    {
+        SalesQty parentSalesQty = salesLine.SalesQty;
+        SalesLine parentSalesLineOrig = salesLine.orig();
+        SalesQty parentSalesQtyBeforeUpdate  = parentSalesLineOrig.SalesQty;
+
+        ttsbegin;
+
+        SalesLine childLine;
+
+        while select forupdate childLine
+        where childLine.SalesId == salesLine.SalesId
+        &&    childLine.RORParentLineRecId == salesLine.RecId
+        {
+            if (real2int(childLine.SalesQty) mod real2int(parentSalesQtyBeforeUpdate) != 0)
+            {
+                salesLine.SalesQty = parentSalesQtyBeforeUpdate;  // reset the sales quantity!
+                throw error(strFmt("@DNR:AssignSerialParentLineQtyUpdateInvalid", salesLine.ItemId, childLine.ItemId, parentSalesQtyBeforeUpdate));
+            }
+
+            if (parentSalesQty > parentSalesQtyBeforeUpdate)
+            {
+                childLine.SalesQty = childLine.SalesQty + ((childLine.SalesQty / parentSalesQtyBeforeUpdate) * (parentSalesQty - parentSalesQtyBeforeUpdate));
+            }
+            else
+            {
+                childLine.SalesQty = childLine.SalesQty - ((childLine.SalesQty / parentSalesQtyBeforeUpdate) * (parentSalesQtyBeforeUpdate - parentSalesQty));
+            }
+
+            childLine.DNRASSalesQtyModified();
+
+            using(DNRASUpdateRelatedLinesOnQtyChangeDisposableContext context =
+                  DNRASUpdateRelatedLinesOnQtyChangeDisposableContext::current() ?
+                  DNRASUpdateRelatedLinesOnQtyChangeDisposableContext::current() :
+                  new DNRASUpdateRelatedLinesOnQtyChangeDisposableContext())
+            {
+                context.parmMustValidateParentLineQty(false);
+                childLine.update();
+            }
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

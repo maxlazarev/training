@@ -1,0 +1,391 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRInventMovementClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(InventMovement))]
+public final class DNRInventMovementClass_Extension
+{
+    private     BOBPostingPolicy    postingPolicy;
+    private     boolean             isPhysicalUpdateClosed;
+    private     boolean             allowInventTransUpdate = true;
+    private     Integer             BOBTransSign;
+    private     TransDate           BOBTransDate;
+    private     TimeOfDay           BOBTransTime;
+
+    private     boolean             isMovement_Orig;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkNotSubDelivery</Name>
+				<Source><![CDATA[
+    // chain-of-command wrapper methods
+
+    // RLAM - We want to immediately return from the method if our condition holds.
+    // This is solved without a MSFT request by hacking the value of _remainPhysicalNow to != 0
+    // We do not have to reset _remainPhysicalNow since we are dealing with a value type.
+    protected boolean checkNotSubDelivery(
+        InventQty       _physicalNow,
+        InventQty       _remainPhysicalNow,
+        boolean         _isPhysicalUpdate,
+        PdsCWInventQty  _pdsCWPhysicalNow,
+        PdsCWInventQty  _pdsCWRemainPhysicalNow)
+    {
+        InventQty remainPhysicalNowTmp = _remainPhysicalNow;
+
+        if (this.buffer().TableId == tableNum(InventTransferLine)
+            && (subType == InventMovSubType::BOBCompensatingTrans
+                || subType == InventMovSubType::BOBCompensatingTransTo))
+        {
+            remainPhysicalNowTmp = 1;
+        }
+
+        boolean ret = next checkNotSubDelivery(_physicalNow, remainPhysicalNowTmp, _isPhysicalUpdate, _pdsCWPhysicalNow, _pdsCWRemainPhysicalNow);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>constructInventUpdForUpdateAutoLossProfit</Name>
+				<Source><![CDATA[
+    protected InventUpd_Financial constructInventUpdForUpdateAutoLossProfit(InventMov_Virtuel _movement_Virtuel, InventUpd_Financial _financial)
+    {
+        InventUpd_Financial ret = next constructInventUpdForUpdateAutoLossProfit(_movement_Virtuel, _financial);
+
+        ret.BOBParmIsCompensatingTrans(_financial.BOBParmIsCompensatingTrans());
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>constructNoThrow</Name>
+				<Source><![CDATA[
+    public static InventMovement constructNoThrow(Common _buffer, InventMovSubType _subType, Common _childBuffer)
+    {
+        InventMovement ret = next  constructNoThrow(_buffer, _subType, _childBuffer);
+
+        switch (_buffer.TableId)
+        {
+            case tableNum(PurchLine):
+                ret = InventMov_Purch::BOBConstruct(_buffer as PurchLine, _subType);
+                break;
+
+            case tableNum(SalesLine):
+                ret = InventMov_Sales::BOBConstruct(_buffer as SalesLine, _subType);
+                break;
+
+            case tableNum(SalesQuotationLine):
+                ret = InventMov_SalesQuotation::BOBConstruct(_buffer as SalesQuotationLine, _subType);
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>doUpdateSerialNumIssue</Name>
+				<Source><![CDATA[
+    protected void doUpdateSerialNumIssue(InventTrans _inventTrans, InventTrans _inventTrans_orig, InventDim _inventDim)
+    {
+        next doUpdateSerialNumIssue(_inventTrans, _inventTrans_orig, _inventDim);
+
+        if (_inventDim.InventSerialId)
+        {
+            this.BOBUpdateSerialNumber(_inventDim);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>doUpdateSerialNumReceipt</Name>
+				<Source><![CDATA[
+    protected void doUpdateSerialNumReceipt(InventTrans _inventTrans, InventTrans _inventTrans_orig, InventDim _inventDim)
+    {
+        next doUpdateSerialNumReceipt(_inventTrans, _inventTrans_orig, _inventDim);
+
+        if (_inventDim.InventSerialId)
+        {
+            this.BOBUpdateSerialNumber(_inventDim);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustBeBookedFinancially</Name>
+				<Source><![CDATA[
+    public boolean  mustBeBookedFinancially()
+    {
+        boolean ret = next mustBeBookedFinancially();
+
+        if (ret && this is InventMov_Purch)
+        {
+            if (this.buffer() && this.buffer().TableId == tableNum(PurchLine))
+            {
+                PurchLine purchLine = this.buffer();
+
+                if (purchLine.RORTradeType != RORTradeType::SalesPurch)
+                {
+                    ret = false;
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCheckTransSign</Name>
+				<Source><![CDATA[
+    protected boolean mustCheckTransSign(InventUpd_Physical _updateNow)
+    {
+        boolean ret = next mustCheckTransSign(_updateNow);
+
+        // for compensating transactions the standard check causes issues because qty signs are not as expected
+        return ret && !_updateNow.BOBParmIsCompensatingTrans();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initInventTransPhysical</Name>
+				<Source><![CDATA[
+    public void initInventTransPhysical(InventTrans _inventTrans, TransDate _datePhysical, PackingSlipId _packingSlipId)
+    {
+        next initInventTransPhysical(_inventTrans, _datePhysical, _packingSlipId);
+
+        DNRInventMovementInitInventTransPhysicialDisposableContext initInventTransPhysicalContext = DNRInventMovementInitInventTransPhysicialDisposableContext::current();
+
+        if (initInventTransPhysicalContext)
+        {
+            InventUpd_Physical inventUpd_physical = initInventTransPhysicalContext.DNRParmInventUpd_Physical();
+
+            _inventTrans.BOBPckSlpUpdDateTime = inventUpd_physical.BOBParmFormLetterUpdDateTime();
+            
+            if (initInventTransPhysicalContext.DNRParmMustSetCompensatingTrans())
+            {
+                InventTrans inventTransLocal = initInventTransPhysicalContext.DNRParmInventTrans();
+                _inventTrans.BOBIsCompensatingTrans = inventTransLocal.BOBIsCompensatingTrans;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateLedgerAdjust</Name>
+				<Source><![CDATA[
+    // RLAM - We want to immediately return from the method if our condition holds.
+    // This is solved without a MSFT request by hacking the value of inventModelGroup().PostOnhandFinancial to NoYes::No.
+    // The mustBeBookedFinancially namely (indirectly) calls mustBeBookedOnhand which checks the value of PostOnhandFinancial
+    // If this is NoYes::No, !mustBeBookedFinancially is true, making the method return immediately
+    // Since this is not a perfect solution, there is also a request open: 3755
+    public void updateLedgerAdjust(LedgerVoucher        _ledgerVoucher,
+                                   InventUpd_Financial  _updateNow,
+                                   CostAmount           _costAmount,
+                                   ProjAdjustRefId      _projAdjustRefId,
+                                   ProjTransDate        _projTransDate)
+    {
+        NoYes       tmpPostOnhandFinancial  = this.inventModelGroup().PostOnhandFinancial;
+        SalesLine   salesLine               = buffer as SalesLine;
+
+        if (salesLine && salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            this.inventModelGroup().PostOnhandFinancial = NoYes::No;
+        }
+
+        next updateLedgerAdjust(_ledgerVoucher, _updateNow, _costAmount, _projAdjustRefId, _projTransDate);
+
+        this.inventModelGroup().PostOnhandFinancial = tmpPostOnhandFinancial;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustUpdateInventTransFields</Name>
+				<Source><![CDATA[
+    public boolean mustUpdateInventTransFields(InventMovement _movement_orig)
+    {
+        boolean ret = next mustUpdateInventTransFields(_movement_orig);
+
+        ret = ret || this.BOBParmTransTime() != _movement_orig.BOBParmTransTime();
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustUpdateInventTransOriginFields</Name>
+				<Source><![CDATA[
+    public boolean mustUpdateInventTransOriginFields(InventMovement _movement_orig)
+    {
+        boolean ret = next mustUpdateInventTransOriginFields(_movement_orig);
+
+        ret = ret || this.BOBMustUpdateItemIdOnInventTransOrigin(_movement_orig);
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBMustUpdateItemIdOnInventTransOrigin</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public boolean BOBMustUpdateItemIdOnInventTransOrigin(InventMovement _movement_orig)
+    {
+        boolean ret;
+        RORRentalLine rentalLine = _movement_orig.buffer() as RORRentalLine;
+        boolean isTableMapped = SysDictTable::isTableMapped(tableNum(RORRentalLine), _movement_orig.buffer().TableId);
+
+        if (isTableMapped && rentalLine && rentalLine.TradeType != RORTradeType::SalesPurch)
+        {            
+            InventTransOrigin inventTransOrigin = InventTransOrigin::find(_movement_orig.inventTransOriginId());
+
+            if (inventTransOrigin && rentalLine.ItemId != inventTransOrigin.ItemId)
+            {
+                ret = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDeducted</Name>
+				<Source><![CDATA[
+    public InventQty BOBDeducted()
+    {
+        return this.transIdSum().deducted();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBReceived</Name>
+				<Source><![CDATA[
+    public InventQty BOBReceived()
+    {
+        return this.transIdSum().received();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBRentalType</Name>
+				<Source><![CDATA[
+    public BOBRentalType BOBRentalType()
+    {
+        return BOBRentalType::findFromItemId(this.itemId());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRparmAllowInventTransUpdate</Name>
+				<Source><![CDATA[
+    public boolean DNRparmAllowInventTransUpdate(boolean _allowInventTransUpdate = allowInventTransUpdate)
+    {
+        allowInventTransUpdate = _allowInventTransUpdate;
+        return allowInventTransUpdate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmIsMovement_Orig</Name>
+				<Source><![CDATA[
+    [SysObsolete('The method is no longer used.', false)]
+    public boolean DNRParmIsMovement_Orig(boolean _isMovement_Orig = isMovement_Orig)
+    {
+        isMovement_Orig = _isMovement_Orig;
+        return isMovement_Orig;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBParmTransDate</Name>
+				<Source><![CDATA[
+    public TransDate BOBParmTransDate(TransDate _BOBTransDate = BOBTransDate)
+    {
+        BOBTransDate = _BOBTransDate;
+        return BOBTransDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBParmTransSign</Name>
+				<Source><![CDATA[
+    public Integer BOBParmTransSign(Integer _BOBTransSign = BOBTransSign)
+    {
+        BOBTransSign = _BOBTransSign;
+        return BOBTransSign;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBParmTransTime</Name>
+				<Source><![CDATA[
+    public TimeOfDay BOBParmTransTime(TimeOfDay _BOBTransTime = BOBTransTime)
+    {
+        BOBTransTime = _BOBTransTime;
+        return BOBTransTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORParmIsPhysicalUpdateClosed</Name>
+				<Source><![CDATA[
+    public boolean RORParmIsPhysicalUpdateClosed(boolean _isPhysicalUpdateClosed = isPhysicalUpdateClosed)
+    {
+        isPhysicalUpdateClosed = _isPhysicalUpdateClosed;
+        return isPhysicalUpdateClosed;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateSerialNumber</Name>
+				<Source><![CDATA[
+    // This method is called when picking or updating a serial number, and it ensures that
+    // the owning movement is also synchronised with the new serial number. In some situations
+    // the InventTrans table buffer has already been selected forUpdate, and field values may
+    // already have been modified -- updating the buffer would cause a conflict in such cases
+    public void BOBUpdateSerialNumber(InventDim _inventDim)
+    {
+        InventDim inventDimMovement = this.inventdim();
+        inventDimMovement.inventSerialId = _inventDim.InventSerialId;
+        this.setInventDimId(InventDim::findOrCreate(inventDimMovement).inventDimId);
+    
+        if (allowInventTransUpdate) // Set in /Classes/DNRInventUpd_PickedClass_Extension/Methods/updatePickInventTrans
+        {                           // or /Classes/DNRInventUpdateClass_Extension/Methods/writeInventTrans
+            this.updateBuffer();
+        }
+
+        allowInventTransUpdate = true;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINSalesPackingSlipJournalPostClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesPackingSlipJournalPost))]
+public final class FINSalesPackingSlipJournalPostClass_Extension
+{
+    private SalesQty projQtyLocal;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>updateJournalLine</Name>
+				<Source><![CDATA[
+    // chain-of-command wrapper methods
+    protected void updateJournalLine()
+    {                
+        next updateJournalLine();
+              
+        this.FINUpdateJournalLine();        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventory</Name>
+				<Source><![CDATA[
+    protected void updateInventory(InventMovement _inventMovement)
+    {
+        next updateInventory(_inventMovement);
+
+        this.FINUpdateInventoryFinancial(_inventMovement);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postNotStocked</Name>
+				<Source><![CDATA[
+    protected void postNotStocked()
+    {
+        next postNotStocked();
+
+        this.FINPostNotStocked();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLine</Name>
+				<Source><![CDATA[
+    protected void updateSourceLine()
+    {
+        next updateSourceLine();
+
+        if (this.FINIsRentalProjSalesItem() && !salesLine.isStocked()) 
+        {
+            salesLine.RemainSalesFinancial = salesLine.RemainSalesPhysical;
+            SalesLineType salesLineType = SalesLineType::construct(salesLine);
+            salesLineType.updateSalesLine(inventMovement ? inventMovement.transIdSum() : null);
+            salesLine.doUpdate();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINPostNotStocked</Name>
+				<Source><![CDATA[
+    // extension methods
+    private void FINPostNotStocked()
+    {
+        if (this.FINIsRentalProjSalesItem())
+        {
+            projQtyLocal = custPackingSlipTrans.Qty;
+
+            inventMovement = InventMovement::construct(salesLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateJournalLine</Name>
+				<Source><![CDATA[
+    private void FINUpdateJournalLine()
+    {
+        if (this.FINIsRentalProjSalesItem() && inventMovement)
+        {
+            projQtyLocal = custPackingSlipTrans.Qty;
+            this.FINWriteProjTrans(inventMovement);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINIsRentalProjSalesItem</Name>
+				<Source><![CDATA[
+    private boolean FINIsRentalProjSalesItem()
+    { 
+        boolean ret = false;
+        
+        if (salesLine.SalesType == SalesType::RORRental
+        &&  salesLine.RORTradeType == RORTradeType::SalesPurch
+        &&  salesTable.FINRentalProjectInvoicing())
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateInventoryFinancial</Name>
+				<Source><![CDATA[
+    private void FINUpdateInventoryFinancial(InventMovement _inventMovement)
+    {
+        if (this.FINIsRentalProjSalesItem() && _inventMovement)
+        {           
+            InventUpd_Financial inventUpd_Financial = InventUpd_Financial::newSalesPackingSlipProject(_inventMovement,
+                                                                                      ledgerVoucher,
+                                                                                      custPackingSlipJour.PackingSlipId,
+                                                                                      custPackingSlipTrans,
+                                                                                      salesParmLine.physicalReduction(this.parmReduceOnHand()));
+            inventUpd_Financial.updateNow();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCreateProjTransItem</Name>
+				<Source><![CDATA[
+    private ProjPost FINCreateProjTransItem(
+        Common          _buffer,
+        LedgerVoucher   _ledgerVoucher,
+        ProjAdjustRefId _projAdjustRefId    = '',
+        NoYes           _notReduceForecast  = false,
+        InventTransId   _inventTransId      = '',
+        SalesQty        _salesQty           = 0
+        )
+    {
+        return ProjPost::newCreateProjTransItem(_buffer, _ledgerVoucher, _projAdjustRefId, _notReduceForecast, _inventTransId, _salesQty);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINWriteProjTrans</Name>
+				<Source><![CDATA[
+    private void FINWriteProjTrans(InventMov_Sales _inventMovement)
+    {
+        ProjAdjustRefId projAdjustRefId;
+        NoYes           mustNotReduceForecast;
+
+        if (projQtyLocal)
+        {
+            if (salesLine.isStocked())
+            {
+                projAdjustRefId = _inventMovement.projAdjustRefId();
+                mustNotReduceForecast = _inventMovement.parmMustNotReduceForecast();
+            }
+            else
+            {
+                projAdjustRefId = NumberSeq::newGetNum(CompanyInfo::numRefParmId()).num();
+                mustNotReduceForecast = false;
+                this.FINUpdateRevenueBudget(_inventMovement, ledgerVoucher);
+            }
+
+            ProjPost projTransItem = this.FINCreateProjTransItem(custPackingSlipTrans, ledgerVoucher, projAdjustRefId, mustNotReduceForecast, '', projQtyLocal);
+            projTransItem.postTrans();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateRevenueBudget</Name>
+				<Source><![CDATA[
+    private void FINUpdateRevenueBudget(InventMov_Sales _inventMovement, LedgerVoucher   _ledgerVoucher)
+    {
+        if (!salesLine.isStocked())
+        {
+            if (_inventMovement.mustBeCostControlled() && _inventMovement.canCommittedCostBeReversed())
+            {
+                CostControlPostingItem costControlPostingItem = CostControlPosting::newCostControlPostingItem(_inventMovement);
+                costControlPostingItem.parmLedgerVoucher(_ledgerVoucher);
+                costControlPostingItem.parmSalesParmLine(salesParmLine);
+                costControlPostingItem.run(ProjCommittedCostUpdateAction::Post);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

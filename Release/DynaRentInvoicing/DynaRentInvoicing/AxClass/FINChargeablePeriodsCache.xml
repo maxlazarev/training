@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINChargeablePeriodsCache</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINChargeablePeriodsCache
+{
+    // Stores both previous periods and from current posting
+    Map     mapPeriodsNum;
+    Map     mapPeriodsNumPrevious; // From old invoices only
+    Set     processedDeliveries;
+    boolean ignorePreviouslyCharged;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>periodTypeToInt</Name>
+				<Source><![CDATA[
+    protected int periodTypeToInt(FINChargeableOpenPeriod _periodType)
+    {
+        int ret;
+
+        switch (_periodType)
+        {
+            case FINChargeableOpenPeriod::OpenCalendar :
+                ret = 0;
+                break;
+            case FINChargeableOpenPeriod::Calendar :
+                ret = 1;
+                break;
+            case FINChargeableOpenPeriod::Chargeable :
+                ret = 2;
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTotalNumOfPeriodsForType</Name>
+				<Source><![CDATA[
+    public int getTotalNumOfPeriodsForType(RORRentalLine _rentalLine, FINChargeableOpenPeriod _periodType)
+    {
+        // days or minutes/hours
+        int numOfPeriods;
+
+        if (mapPeriodsNum.exists(_rentalLine.InventTransId))
+        {
+            container numOfPeriodsCon;
+            numOfPeriodsCon = mapPeriodsNum.lookup(_rentalLine.InventTransId);
+            numOfPeriods = conPeek(numOfPeriodsCon, this.periodTypeToInt(_periodType));
+        }
+
+        return numOfPeriods;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTotalNumOfPeriods</Name>
+				<Source><![CDATA[
+    public container getTotalNumOfPeriods(RORRentalLine _rentalLine)
+    {
+        container numOfPeriodsCon;
+
+        if (mapPeriodsNum.exists(_rentalLine.InventTransId))
+        {
+            numOfPeriodsCon = mapPeriodsNum.lookup(_rentalLine.InventTransId);
+        }
+        else
+        {
+            numOfPeriodsCon = [0, 0, 0];
+        }
+
+        return numOfPeriodsCon;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPeriodsFromExchangedLine</Name>
+				<Source><![CDATA[
+    protected container getPeriodsFromExchangedLine(RORRentalLine _rentalLine)
+    {
+        int numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods;
+
+        if (mapPeriodsNumPrevious.exists(_rentalLine.InventTransId))
+        {
+            [numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods] = mapPeriodsNumPrevious.lookup(_rentalLine.InventTransId);
+        }
+
+        return [numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPeriodsFromCurrentLine</Name>
+				<Source><![CDATA[
+    protected container getPeriodsFromCurrentLine(RORRentalLine _rentalLine)
+    {
+        int numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods;
+
+        [numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods] = FINInvoicePeriodQtyFinancial::findChargedPeriodsForLine(_rentalLine.TableId, _rentalLine.RecId);
+
+        return [numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculatePreviousNumOfPeriods</Name>
+				<Source><![CDATA[
+    public void calculatePreviousNumOfPeriods(RORRentalLine _rentalLine, RecId _invPeriodQtyPhysicalRecId)
+    {
+        // InventTransId key is good enough because we either store it per delivery (in such case each delivery has its own instance of the class)
+        // or per chain of technical exchanges (in such scenario we allow only single delivery and a key is pointing to newest replacement rental line).
+        // We never do exchange for bulk items.
+        if (!processedDeliveries.in(_invPeriodQtyPhysicalRecId) && !mapPeriodsNumPrevious.exists(_rentalLine.InventTransId))
+        {
+            int numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods;
+            int numOfOpenCalendarPeriodsNew, numOfCalendarPeriodsNew, numOfChargeablePeriodsNew;
+
+            [numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods] = this.getPeriodsFromExchangedLine(_rentalLine);
+            [numOfOpenCalendarPeriodsNew, numOfCalendarPeriodsNew, numOfChargeablePeriodsNew] = this.getPeriodsFromCurrentLine(_rentalLine);
+
+            container numOfPeriodsCon = [numOfOpenCalendarPeriods + numOfOpenCalendarPeriodsNew, numOfCalendarPeriods + numOfCalendarPeriodsNew, numOfChargeablePeriods + numOfChargeablePeriodsNew];
+
+            mapPeriodsNumPrevious.insert(_rentalLine.InventTransId, numOfPeriodsCon);
+            this.addNumOfPeriods(_rentalLine, numOfPeriodsCon);
+        }
+
+        processedDeliveries.add(_invPeriodQtyPhysicalRecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addNumOfPeriods</Name>
+				<Source><![CDATA[
+    public void addNumOfPeriods(RORRentalLine _rentalLine, container _numOfPeriodsCon)
+    {
+        container   numOfPeriodsCon;
+        int numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods;
+        int numOfOpenCalendarPeriodsNew, numOfCalendarPeriodsNew, numOfChargeablePeriodsNew;
+
+        if (mapPeriodsNum.exists(_rentalLine.InventTransId))
+        {
+            [numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods] = mapPeriodsNum.lookup(_rentalLine.InventTransId);
+        }
+
+        [numOfOpenCalendarPeriodsNew, numOfCalendarPeriodsNew, numOfChargeablePeriodsNew] = _numOfPeriodsCon;
+
+        numOfOpenCalendarPeriods += numOfOpenCalendarPeriodsNew;
+        numOfCalendarPeriods += numOfCalendarPeriodsNew;
+        numOfChargeablePeriods += numOfChargeablePeriodsNew;
+
+        numOfPeriodsCon = [numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods];
+
+        mapPeriodsNum.insert(_rentalLine.InventTransId, numOfPeriodsCon);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParams</Name>
+				<Source><![CDATA[
+    protected void initParams()
+    {
+        mapPeriodsNum = new Map(Types::String, Types::Container);
+        mapPeriodsNumPrevious = new Map(Types::String, Types::Container);
+        processedDeliveries = new Set(Types::Int64);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmIgnorePreviouslyCharged</Name>
+				<Source><![CDATA[
+    public boolean parmIgnorePreviouslyCharged(boolean _ignorePreviouslyCharged = ignorePreviouslyCharged)
+    {
+        ignorePreviouslyCharged = _ignorePreviouslyCharged;
+        return ignorePreviouslyCharged;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public client server static FINChargeablePeriodsCache construct()
+    {
+        FINChargeablePeriodsCache periodsCache =  new FINChargeablePeriodsCache();
+        periodsCache.initParams();
+
+        return periodsCache;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

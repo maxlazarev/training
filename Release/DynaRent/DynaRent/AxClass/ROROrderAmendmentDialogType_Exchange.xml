@@ -1,0 +1,521 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>ROROrderAmendmentDialogType_Exchange</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class ROROrderAmendmentDialogType_Exchange extends ROROrderAmendmentDialogType
+{
+    SalesLine               salesLineNew;
+    WPPWorkOrderTemplateId  workOrderTemplateIdReturn;
+    WPPWorkOrderTemplateId  workOrderTemplateIdDelivery;
+    boolean                 canSetWorkOrderTemplate;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>canObjectAvailabilityBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean canObjectAvailabilityBeUpdated()
+    {
+        boolean         ret;
+        SalesLine       salesLine;
+        InventDim       inventDim;
+    
+        switch (common.TableId)
+        {
+            case tableNum(SalesLine):
+                salesLine = common as SalesLine;
+                inventDim = salesLine.inventDim();
+                break;
+    
+            default:
+                // Exchange only available for rental orders
+                break;
+        }
+    
+        if (inventDim.inventSerialId)
+        {
+            ret = (select firstOnly RecId from BOBObjectView
+                    where BOBObjectView.InventSerialId == inventDim.inventSerialId
+                    &&    BOBObjectView.IsAvailable).RecId;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createExchangeLine</Name>
+				<Source><![CDATA[
+    private void createExchangeLine()
+    {
+        InventDim           inventDimOrig, inventDimNew;
+        SalesLine           salesLine = common as SalesLine;
+        boolean             isCommercialExchange = (tmpOrderAmendmentDialogTable.ExchangeType == RORAmendmentExchangeType::Commercial);
+        BOBObjectTable      objectTable;
+        InventLocationId    headerWarehouse;
+        RORRentalDateTimes  rentalDateTimesUpdate;
+        RAGContractTable    contractTable;
+        boolean             updateLine;
+    
+        if (salesLine)
+        {
+            inventDimOrig = salesLine.inventDim();
+            objectTable   = BOBObjectTable::findInventSerialId(inventDimOrig.inventSerialId);
+    
+            if (objectTable.Category == BOBObjectCategory::SubRental)
+            {
+                headerWarehouse = salesLine.salesTable().InventLocationId;
+    
+                if (headerWarehouse)
+                {
+                    inventDimOrig.InventLocationId = headerWarehouse;
+                    inventDimOrig.InventSiteId     = InventLocation::find(headerWarehouse).InventSiteId;
+                }
+            }
+    
+            inventDimOrig.inventSerialId = '';
+            inventDimNew = InventDim::findOrCreate(inventDimOrig);
+    
+            salesLineNew.data(SalesLine::findRecId(salesLine.RecId));
+            salesLineNew.clearInventReference();
+    
+            salesLineNew.SalesId                 = salesLine.SalesId;
+    
+            if (salesLine.RORTradeType == RORTradeType::SubRental)
+            {
+                salesLineNew.RORTradeType = RORTradeType::Rental;
+            }
+    
+            if (!isCommercialExchange
+            &&   salesLineNew.RORTradeType != RORTradeType::SalesPurch
+            &&   salesLine.BOBItemIdRequested
+            &&   salesLineNew.ItemId != salesLine.BOBItemIdRequested)
+            {
+                salesLineNew.ItemId = salesLine.BOBItemIdRequested;
+                salesLineNew.itemIdChanged();
+
+                // Standard code is resetting some price elements when changing itemId.
+                // For technical exchange we want to keep prices exactly the same as they were on orig line
+                salesLineNew.LineDisc               = salesLine.LineDisc;
+                salesLineNew.LinePercent            = salesLine.LinePercent;
+                salesLineNew.LineAmount             = salesLine.LineAmount;
+                salesLineNew.SalesPrice             = salesLine.SalesPrice;
+                salesLineNew.RORRentalGrossAmount   = salesLine.RORRentalGrossAmount;
+            }
+            else if (isCommercialExchange
+            && tmpOrderAmendmentDialogTable.ItemIdRequested
+            && salesLineNew.ItemId != tmpOrderAmendmentDialogTable.ItemIdRequested)
+            {
+                salesLineNew.ItemId = tmpOrderAmendmentDialogTable.ItemIdRequested;
+                salesLineNew.itemIdChanged();
+            }
+    
+            // do not set template for main kit item
+            if (salesLine.RORParentLineRecId || salesLine.RORKitComponentType == RORKitComponentType::Standalone)
+            {
+                // during exchange we don't want default component type from item
+                if (salesLine.RORKitComponentType == RORKitComponentType::Component ||
+                salesLine.RORKitComponentType == RORKitComponentType::KitComponent)
+                {
+                    salesLineNew.RORKitComponentType = salesLine.RORKitComponentType;
+                }
+    
+                canSetWorkOrderTemplate = true;
+                this.setTemplateId(salesLineNew.ItemId);
+    
+                salesLineNew.WPPWorkOrderTemplateId  = workOrderTemplateIdDelivery;
+            }
+    
+            salesLineNew.RecId                   = 0;
+            salesLineNew.InventTransId           = '';
+            salesLineNew.LineNum                 = 0;
+            salesLineNew.LineCreationSequenceNumber = 0;
+            salesLineNew.RORRecIdExchanged       = 0;
+            salesLineNew.RORIsModified           = NoYes::Yes;
+            salesLineNew.InventDimId             = inventDimNew.inventDimId;
+            salesLineNew.BOBRentalTypeIdAssigned = '';
+            salesLineNew.RORRemainInventReturn   = 0;
+            salesLineNew.RORRemainSalesReturn    = 0;
+            salesLineNew.LineCreationSequenceNumber = 0;
+    
+            salesLineNew.LineCreationSequenceNumber = (select firstonly maxof(LineCreationSequenceNumber) from SalesLine where SalesLine.SalesId == salesLineNew.SalesId).LineCreationSequenceNumber + 1;
+
+            salesLineNew.DNRisTechnicalExchange = !isCommercialExchange;
+            salesLineNew.createLine(true, false, isCommercialExchange, true, true, isCommercialExchange, true, true, true, true, true, null, 0, '', '');
+            salesLineNew.DNRisTechnicalExchange = NoYes::No;
+    
+    
+            if (canSetWorkOrderTemplate)
+            {
+                // some values could be reset during creation of line.
+                if (salesLineNew.RORKitComponentType == RORKitComponentType::Standalone && salesLine.RORKitComponentType != salesLineNew.RORKitComponentType)
+                {
+                    salesLineNew.RORKitComponentType = salesLine.RORKitComponentType;
+                    updateLine = true;
+                }
+    
+                if (salesLineNew.WPPWorkOrderTemplateId != workOrderTemplateIdDelivery)
+                {
+                    salesLineNew.WPPWorkOrderTemplateId  = workOrderTemplateIdDelivery;
+                }
+    
+                if (updateLine)
+                {
+                    salesLineNew.update();
+                }
+                updateLine = false;
+            }
+    
+            if (!isCommercialExchange
+            &&   salesLineNew.RORTradeType != RORTradeType::SalesPurch)
+            {
+                select firstOnly RecId from contractTable
+                where contractTable.ContractType    == RAGContractType::RentalOrderLine
+                &&    contractTable.RelationAccount == salesLine.InventTransId
+                &&    contractTable.ReferenceModule == RAGContractRefModule::Sales
+                &&    contractTable.CurrencyCode    == salesLine.CurrencyCode;
+    
+                if (contractTable)
+                {
+                    // duplicate any contracts that are attached to the quotation line and attach them to the new order line
+                    RAGDuplicateContract::duplicateAll(RAGContractType::RentalOrderLine,
+                                                       salesLine.InventTransId,
+                                                       RAGContractRefModule::Sales,
+                                                       salesLine.CurrencyCode,
+                                                       salesLineNew.InventTransId,
+                                                       RAGContractRefModule::Sales);
+    
+                    PriceDiscPriceAgreementParameters parameters = PriceDiscPriceAgreementParameters::createInstance(salesLine);
+                    parameters.DNRparmForceRentalAgreement(true);
+
+                    salesLineNew.setPriceDisc(salesLineNew.inventDim(), true, parameters);
+    
+                    // restore some price elements from orig line
+                    salesLineNew.LineDisc               = salesLine.LineDisc;
+                    salesLineNew.LinePercent            = salesLine.LinePercent;
+                    salesLineNew.LineAmount             = salesLine.LineAmount;
+                    salesLineNew.SalesPrice             = salesLine.SalesPrice;
+                    salesLineNew.RORRentalGrossAmount   = salesLine.RORRentalGrossAmount;
+    
+                    updateLine = true;
+                }
+    
+                if (salesLineNew.DNRCalendarId != salesLine.DNRCalendarId)
+                {
+                    salesLineNew.DNRCalendarId = salesLine.DNRCalendarId;
+                    updateLine = true;
+                }
+    
+                if (updateLine)
+                {
+                    salesLineNew.update();
+                }
+            }               
+    
+            rentalDateTimesUpdate = salesLine.RORRentalDateTimes();
+    
+            // Update the new rental date times
+            this.updateRentalDateTimes(salesLineNew.TableId,
+                                       salesLineNew.RecId,
+                                       fieldNum(RORRentalDateTimes, OnRentDateTime),
+                                       tmpOrderAmendmentDialogTable.OffRentDateTime,
+                                       rentalDateTimesUpdate);
+
+            // Update the original rental date times
+            this.updateRentalDateTimes(salesLine.TableId,
+                                       salesLine.RecId,
+                                       fieldNum(RORRentalDateTimes, OffRentDateTime),
+                                       this.getInvoicedEndDateTime(salesLine, tmpOrderAmendmentDialogTable.OffRentDateTime));
+            
+            salesLineNew.reread();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSupplementaryItemsLines</Name>
+				<Source><![CDATA[
+    private void createSupplementaryItemsLines(SalesLine _salesLine)
+    {
+        RORRentalLineEditorForm::createSupplementaryItemsLines(_salesLine, (tmpOrderAmendmentDialogTable.ExchangeType != RORAmendmentExchangeType::Commercial));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInvoicedEndDateTime</Name>
+				<Source><![CDATA[
+    protected RORRentalDateTime getInvoicedEndDateTime(SalesLine _salesLine, RORRentalDateTime _exchangedDateTime)
+    {
+        RORRentalDateTime exchangeDateTime = _exchangedDateTime;
+        
+        return exchangeDateTime; // Actual value is returned from the CoC wrapper
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getWarningText</Name>
+				<Source><![CDATA[
+    public InfologText getWarningText()
+    {
+        return '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reasonType</Name>
+				<Source><![CDATA[
+    public DNRReasonType reasonType()
+    {
+        return DNRReasonType::ExchangeItem;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        DNRAdditionalNoteTable  additionalNoteTable;
+        BOBObjectId             objectId;
+        SalesLine               salesLine = common as SalesLine;
+    
+        ttsBegin;
+        expectedOffRentDateTime = salesLine.RORRentalDateTimes().(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+    
+        super();
+    
+        if (tmpOrderAmendmentDialogTable.TerminationNote)
+        {
+            select firstonly forUpdate additionalNoteTable
+            where additionalNoteTable.RefTableId == common.TableId
+            &&    additionalNoteTable.RefRecId == common.RecId;
+    
+            additionalNoteTable.initFromCommon(common);
+            additionalNoteTable.TerminationNote = tmpOrderAmendmentDialogTable.TerminationNote;
+            additionalNoteTable.write(); // insert or update
+        }
+    
+        this.createExchangeLine();
+        this.createSupplementaryItemsLines(salesLineNew);
+        this.updateSourceLine(salesLineNew);
+    
+        if (tmpOrderAmendmentDialogTable.MakeObjectUnavailable)
+        {
+            objectId = BOBObjectTable::findInventSerialId(salesLine.inventDim().inventSerialId).ObjectId;
+            BOBObjectManager::changeObjectAvailability(objectId, NoYes::No, tmpOrderAmendmentDialogTable.DNRReasonCode);
+        }
+        ttsCommit;
+    
+        if (confirmOrder)
+        {
+            this.confirmOrder();
+        }
+        else
+        {
+            this.WPPSynchronizeWorkOrder();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setTemplateId</Name>
+				<Source><![CDATA[
+    private void setTemplateId(ItemId _itemId)
+    {
+        WPPWorkOrderTemplateId workOrderTemplateId;
+        ;
+    
+        workOrderTemplateIdDelivery = tmpOrderAmendmentDialogTable.WPPWorkOrderTemplateIdDelivery;
+        workOrderTemplateIdReturn   = tmpOrderAmendmentDialogTable.WPPWorkOrderTemplateIdReturn;
+    
+        if (_itemId && !workOrderTemplateIdDelivery && !workOrderTemplateIdReturn)
+        {
+            workOrderTemplateId = RORInventItemSetup::getWorkOrderTemplateId(common, InventTable::find(_itemId));
+    
+            workOrderTemplateIdDelivery = workOrderTemplateId;
+            workOrderTemplateIdReturn   = workOrderTemplateId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showInfoMessage</Name>
+				<Source><![CDATA[
+    public void showInfoMessage()
+    {
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalDateTimes</Name>
+				<Source><![CDATA[
+    private void updateRentalDateTimes(RefTableId           _refTableId,
+                                       RefRecId             _refRecId,
+                                       FieldId              _fieldId2Update,
+                                       RORRentalDateTime    _rentalDateTime,
+                                       RORRentalDateTimes   _rentalDateTimesExchanged = null)
+    {
+        #DNRConstants
+        RORRentalDateTimes  rentalDateTimesUpdate;
+    
+        ttsBegin;
+        // No update_recordset because of the modifiedField method
+        select firstOnly forupdate rentalDateTimesUpdate
+        where rentalDateTimesUpdate.RefTableId == _refTableId
+        &&    rentalDateTimesUpdate.RefRecId   == _refRecId;
+    
+        if (rentalDateTimesUpdate)
+        {
+            rentalDateTimesUpdate.SynchronizeFromParent = false;
+            rentalDateTimesUpdate.(_fieldId2Update) = _rentalDateTime;
+            rentalDateTimesUpdate.modifiedField(_fieldId2Update);
+    
+            if (_rentalDateTimesExchanged)
+            {
+                // copy PostRentalDateTimes
+                rentalDateTimesUpdate.EventEndDateTime          = _rentalDateTimesExchanged.EventEndDateTime;
+                rentalDateTimesUpdate.StrikeDateTime            = _rentalDateTimesExchanged.StrikeDateTime;
+                rentalDateTimesUpdate.ExpectedOffRentDateTime   = _rentalDateTimesExchanged.ExpectedOffRentDateTime;
+                rentalDateTimesUpdate.OffRentDateTime           = _rentalDateTimesExchanged.OffRentDateTime;
+                rentalDateTimesUpdate.RequestedPickupDateTime   = _rentalDateTimesExchanged.RequestedPickupDateTime;
+                rentalDateTimesUpdate.InboundDateTime           = _rentalDateTimesExchanged.InboundDateTime;
+                rentalDateTimesUpdate.InspectionDateTime        = _rentalDateTimesExchanged.InspectionDateTime;
+            }
+    
+            if (_fieldId2Update == fieldNum(RORRentalDateTimes, OnRentDateTime)
+            && DateTimeUtil::year(rentalDateTimesUpdate.(fieldNum(RORRentalDateTimes, OffRentDateTime))) < #DNRNullYear
+            && rentalDateTimesUpdate.(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime)) < rentalDateTimesUpdate.(_fieldId2Update))
+            {
+                rentalDateTimesUpdate.(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime)) = rentalDateTimesUpdate.(_fieldId2Update);
+                rentalDateTimesUpdate.modifiedField(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+            }
+            else if (_fieldId2Update == fieldNum(RORRentalDateTimes, OnRentDateTime)
+            && rentalDateTimesUpdate.(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime)) < rentalDateTimesUpdate.(_fieldId2Update))
+            {
+                rentalDateTimesUpdate.(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime)) = rentalDateTimesUpdate.(fieldNum(RORRentalDateTimes, OffRentDateTime));
+                rentalDateTimesUpdate.modifiedField(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+            }
+    
+            rentalDateTimesUpdate.update(null, (rentalDateTimesUpdate.RefTableId == tableNum(SalesLine) || rentalDateTimesUpdate.RefTableId == tableNum(PurchLine)), true);
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLine</Name>
+				<Source><![CDATA[
+    protected void updateSourceLine(Common _salesLineNew)
+    {
+        // don't do anything when called from super class
+        if (common.RecId == _salesLineNew.RecId)
+        {
+            return;
+        }
+    
+        switch (common.TableId)
+        {
+            case tableNum(SalesLine):
+                SalesLine salesLine = SalesLine::findRecId(common.RecId, true);
+                salesLine.RORIsModified             = NoYes::Yes;
+                salesLine.RORRecIdExchanged         = _salesLineNew.RecId;
+    
+                if (canSetWorkOrderTemplate)
+                {
+                    if (workOrderTemplateIdReturn)
+                    {
+                        WPPWorkOrderTemplateOrderReference::createReference(salesLine, salesLine.WPPWorkOrderTemplateId, workOrderTemplateIdReturn);
+                    }
+                    
+                    salesLine.WPPWorkOrderTemplateId = workOrderTemplateIdReturn;
+                }                    
+    
+                if (tmpOrderAmendmentDialogTable.ExchangeType == RORAmendmentExchangeType::Technical)
+                {
+                    salesLine.RORAmendmentExchangeType = RORAmendmentExchangeType::Technical;
+    
+                    SalesLine newSalesLine = SalesLine::findRecId(_salesLineNew.RecId, true);
+
+                    if (tmpOrderAmendmentDialogTable.TransportDiscPct == 100)
+                    {
+                        // Set the Transport line to 0,-
+                        this.setDeliveryAmount(newSalesLine, true, 0, true, 0);
+                    }
+                    else
+                    {
+                        this.setDeliveryAmount(newSalesLine, false, 0, true, tmpOrderAmendmentDialogTable.TransportDiscPct);
+                    }
+    
+                    if(tmpOrderAmendmentDialogTable.ReturnTransportDiscPct == 100)
+                    {
+                        // set the transport line to 0
+                        this.setReturnAmount(newSalesLine, true, 0, true, 0);
+                    }
+                    else
+                    {
+                        this.setReturnAmount(newSalesLine, false, 0, true, tmpOrderAmendmentDialogTable.ReturnTransportDiscPct);
+                    }
+                    newSalesLine.update();
+                }
+                else
+                {
+                    salesLine.RORAmendmentExchangeType = RORAmendmentExchangeType::Commercial;
+                }
+    
+                salesLine.update();
+
+                break;
+    
+            default:
+                // Exchange is only available for rental orders
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDeliveryAmount</Name>
+				<Source><![CDATA[
+    public void setDeliveryAmount(RORRentalLine _orderLine, boolean _setAmount, AmountCur _amount, boolean _setLinePercent, SalesLinePercent _linePercent)
+    {
+        // Implemented in Dynarent model
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setReturnAmount</Name>
+				<Source><![CDATA[
+    public void setReturnAmount(RORRentalLine _orderLine, boolean _setAmount, AmountCur _amount, boolean _setLinePercent, SalesLinePercent _linePercent)
+    {
+        // Implemented in Dynarent model
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

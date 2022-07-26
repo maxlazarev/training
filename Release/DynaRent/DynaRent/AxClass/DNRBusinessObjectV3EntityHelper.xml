@@ -1,0 +1,513 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRBusinessObjectV3EntityHelper</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class DNRBusinessObjectV3EntityHelper
+{
+    String20                            objectId;
+    DNRBusinessObjectV3Entity           busObjImpEntity;
+    BOBObjectTable                      objectTable;
+    InventSerialId                      inventSerialId;
+    AssetId                             assetId;
+    ItemId                              itemId;
+    Description                         itemDescription;
+    InventSerialProdDate                prodDate;
+    Name                                assetLeaseCompany;
+    NoYes                               isAvailable, generateRentalStock;
+    DNRReasonCode                       reasonCode;
+    AddressStreet                       street;
+    LogisticsAddressStreetNumber        streetNum;
+    AddressCity                         city;
+    AddressCountryRegionId              countryRegionId;
+    AddressZipCodeId                    zip;
+    AddressStateId                      state;
+    AddressCountyId                     county;
+    CompanyId                           physicalOwner, financialOwner;
+    BOBFirstOnRentDate                  firstOnRentDate;
+    Price                               vendPrice;
+    BOBRentalTypeId                     rentalTypeId;
+    BOBExternalObjectId                 externalObjectId;
+    BOBObjectCategory                   objectCategory;
+    BOBWarrantyToDate                   warrantyToDate;
+    CompanyId                           importCompanyId;
+    DirOrganizationNumber               orgNumber;
+    DirPartyBaseEntity                  organization;
+    BOBFleetNumber                      fleetNumber;
+    EcoResProductDisplayProductNumber   acqProductNumber, productNumber;
+    BOBRentalType                       rentalType;
+    InventLocationId                    depot;
+    TransDate                           depotStartDate, assetFromDate, assetToDate;
+    String255                           errorMessage;
+    WPPResourceId                       resourceGroupId;
+    WPPResourceTable                    resourceGroup;
+    TransDateTime                       rentalStockStartDateTime, rentalStockEndDateTime;
+    Qty                                 rentalStockQty;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getErrorMessage</Name>
+				<Source><![CDATA[
+    public String255 getErrorMessage()
+    {
+        return errorMessage;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>importBusObj</Name>
+				<Source><![CDATA[
+    public static BOBObjectTable importBusObj(DNRBusinessObjectV3Entity _busObjImpEntity)
+    {
+        DNRBusinessObjectV3EntityHelper importHandler = new DNRBusinessObjectV3EntityHelper();
+
+        importHandler.parmObjImpEntity(_busObjImpEntity);
+        BOBObjectTable objectTable = importHandler.importLine();
+
+        return objectTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmObjImpEntity</Name>
+				<Source><![CDATA[
+    public DNRBusinessObjectV3Entity parmObjImpEntity(DNRBusinessObjectV3Entity _busObjImpEntity = busObjImpEntity)
+    {
+        busObjImpEntity = _busObjImpEntity;
+
+        return busObjImpEntity;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertUpdateRecord</Name>
+				<Source><![CDATA[
+    private boolean insertUpdateRecord(Common _common)
+    {
+        boolean ret = true;
+        ;
+
+        if (_common.validateWrite())
+        {
+            if (_common)
+            {
+                _common.update();
+            }
+            else
+            {
+                _common.insert();
+            }
+        }
+        
+        // when return false import for current fileLine record will be canceled
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventSerial</Name>
+				<Source><![CDATA[
+    private InventSerial createInventSerial()
+    {
+        InventSerial    inventSerial;
+        ;
+
+        if (!InventSerial::BOBFindByInventSerialId(inventSerialId))
+        {
+            inventSerial.InventSerialId = inventSerialId;
+            inventSerial.ItemId         = itemId;
+            inventSerial.Description    = itemDescription;
+            inventSerial.ProdDate       = prodDate;
+
+            this.insertUpdateRecord(inventSerial);
+        }
+
+        return inventSerial;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>importLine</Name>
+				<Source><![CDATA[
+    public BOBObjectTable importLine()
+    {
+        InventSerial        inventSerial;
+        AssetBook           assetBook;
+        AssetTable          assetTable;
+
+        this.initImportLineValues();
+        this.initItemId(); 
+
+        if (this.inventSerialId)
+        {
+            BOBObjectTable objTableSelect = BOBObjectTable::findInventSerialId(this.inventSerialId);
+
+            if (objTableSelect)
+            {
+                errorMessage = strFmt("@DNR:DataMgmt_BOExistsError", this.inventSerialId); //Business object with invent serial id %1 already exists
+                objectTable.clear();
+                return objectTable;
+            }
+        }
+
+        if (itemId)
+        {
+            if (inventSerialId)
+            {
+                inventSerial = this.createInventSerial(); //It will create pending category object
+                objectTable = this.updateBOBObjectTable(inventSerialId);
+            }
+            else
+            {
+                //Create bulk object
+                objectTable.clear();
+                objectTable.initFromRentalType(rentalType);
+                objectTable.ObjectId              = objectId ? objectId : BOBObjectTable::getNewObjectId();
+                objectTable.Name                  = itemDescription;
+                objectTable.Category              = objectCategory;
+                objectTable.AcqProductNumber      = acqProductNumber;
+                objectTable.RentalTypeId          = rentalType.RentalTypeId;
+                objectTable.WPPResourceGroupRecId = resourceGroup.RecId;
+                objectTable.insert();
+            }
+
+            if (objectTable.RecId)
+            {
+                if (reasonCode)   //Reason code is mandatory to trigger the availablity log record creation
+                {
+                    this.updateBOBAvailabilityLog(objectTable.ObjectId);
+                }
+
+                this.updateBOBObjectLocationLog(objectTable.ObjectId);
+                this.updateBOBObjectOwnerShipLog(objectTable.ObjectId);
+
+                if (objectCategory == BOBObjectCategory::Rental && assetId)
+                {
+                    BOBObjectAssetLog::createLink(objectTable.ObjectId, assetId, assetLeaseCompany, assetFromDate, assetToDate);
+                }
+            }
+
+            if (generateRentalStock && rentalStockStartDateTime && rentalStockQty)
+            {
+                this.createRentalStockTransRecord();
+            }
+
+            return objectTable;
+        }
+
+        objectTable.clear();
+        return objectTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initImportLineValues</Name>
+				<Source><![CDATA[
+    protected void initImportLineValues()
+    {
+        inventSerialId              = busObjImpEntity.InventSerialId;
+        assetId                     = busObjImpEntity.AssetId;
+        assetFromDate               = busObjImpEntity.AssetValidFrom;
+        assetToDate                 = busObjImpEntity.AssetValidTo;
+        itemDescription             = busObjImpEntity.Name;
+        prodDate                    = busObjImpEntity.ProductionDate; 
+        assetLeaseCompany           = busObjImpEntity.AssetCompanyId;                    
+        depot                       = busObjImpEntity.Depot;
+        depotStartDate              = busObjImpEntity.DepotStartDate;  
+        isAvailable                 = busObjImpEntity.IsAvailable;
+        reasonCode                  = busObjImpEntity.ReasonCode;                        
+        street                      = busObjImpEntity.Street;                            
+        streetNum                   = busObjImpEntity.StreetNumber;                      
+        city                        = busObjImpEntity.City;                              
+        countryRegionId             = busObjImpEntity.CountryRegionId;                   
+        zip                         = busObjImpEntity.ZipCode;                           
+        physicalOwner               = busObjImpEntity.PhysicalOwner;                     
+        firstOnRentDate             = busObjImpEntity.FirstOnRentDate;                   
+        rentalTypeId                = busObjImpEntity.RentalTypeId;                      
+        externalObjectId            = busObjImpEntity.ExternalObjectId;                  
+        objectCategory              = busObjImpEntity.Category;                          
+        warrantyToDate              = busObjImpEntity.WarrantyToDate;                    
+        orgNumber                   = busObjImpEntity.OrganizationNumber;
+        objectId                    = busObjImpEntity.ObjectId;
+        acqProductNumber            = busObjImpEntity.AcqProductNumber;
+        productNumber               = busObjImpEntity.ProductNumber;
+        fleetNumber                 = busObjImpEntity.FleetNumber;
+        financialOwner              = busObjImpEntity.FinancialOwner;
+        resourceGroupId             = busObjImpEntity.ResourceGroupId;
+
+        if (orgNumber || resourceGroupId)
+        {
+            select firstonly RecId from organization
+            where organization.OrganizationNumber == orgNumber
+                outer join RecId from resourceGroup
+                where resourceGroup.ResourceId == resourceGroupId
+                &&    !resourceGroup.IsIndividualResource;
+        }
+
+        generateRentalStock         = busObjImpEntity.GenerateRentalStockTransaction;
+        rentalStockStartDateTime    = busObjImpEntity.StockAvailabilityStartDateTime;
+        rentalStockEndDateTime      = busObjImpEntity.StockAvailabilityEndDateTime;
+        rentalStockQty              = busObjImpEntity.StockQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initItemId</Name>
+				<Source><![CDATA[
+    private void initItemId()
+    {
+        //Finding released product in current company based on provided product number and rental type id
+        EcoResProduct productMaster;
+        InventTable   inventTable;
+
+        select firstonly TableId from productMaster
+        where productMaster.DisplayProductNumber == productNumber
+        &&    productMaster.BOBRentalTypeId      == rentalTypeId
+            join inventTable
+            where inventTable.Product == productMaster.RecId
+                join rentalType
+                where rentalType.RentalTypeId == rentalTypeId;
+
+        itemId = inventTable.ItemId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBOBAvailabilityLog</Name>
+				<Source><![CDATA[
+    private void updateBOBAvailabilityLog(BOBObjectId _objectId)
+    {
+        BOBObjectAvailabilityLog::changeAvailability(_objectId, isAvailable, reasonCode);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBOBObjectLocationLog</Name>
+				<Source><![CDATA[
+    private void updateBOBObjectLocationLog(BOBObjectId _objectId)
+    {
+        LogisticsPostalAddress          postalAddress;
+        DirPartyPostalAddressView       addressView;
+        LogisticsPostalAddressEntity    postalAddressEntity;
+        LogisticsPostalAddressView      logisticsPostalAddressView;
+
+        if (street  && city)
+        {
+            addressView.Street          = street;
+            addressView.StreetNumber    = streetNum;
+            addressView.City            = city;
+            addressView.County          = county;
+            addressView.State           = state;
+            addressView.ZipCode         = zip;
+            addressView.CountryRegionId = countryRegionId;
+
+            postalAddressEntity = LogisticsPostalAddressEntity::construct();
+            logisticsPostalAddressView.initFromPartyPostalAddressView(addressView);
+            postalAddress = postalAddressEntity.createPostalAddress(logisticsPostalAddressView);
+
+            BOBObjectLocationLog::changeLocation(_objectId, postalAddress.RecId, DirUtility::getCurrentDateTime());
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBOBObjectOwnerShipLog</Name>
+				<Source><![CDATA[
+    private void updateBOBObjectOwnerShipLog(BOBObjectId _objectId)
+    {
+        BOBObjectOwnershipLog ownershipLog;
+
+        select firstOnly ownershipLog
+        where ownershipLog.ObjectId == _objectId;
+
+        if (financialOwner || physicalOwner || firstOnRentDate)
+        {
+            if (ownershipLog )
+            {
+                ownershipLog.FinancialOwnerFlag  = financialOwner  ? NoYes::Yes : NoYes::No;
+                ownershipLog.FinancialOwner      = financialOwner;
+                ownershipLog.PhysicalOwnerFlag   = physicalOwner   ? NoYes::Yes : NoYes::No;
+                ownershipLog.PhysicalOwner       = physicalOwner;
+                ownershipLog.FirstOnRentDateFlag = firstOnRentDate ? NoYes::Yes : NoYes::No;
+                ownershipLog.FirstOnRentDate     = firstOnRentDate;
+                ownershipLog.createNewLogEntry();
+            }
+            else
+            {
+                BOBObjectView objectView;
+                select firstonly objectView
+                where objectView.ObjectId == _objectId;
+
+                ownershipLog.clear();
+                ownershipLog.initValue();
+                ownershipLog.initFromObjectView(objectView);
+                ownershipLog.FinancialOwnerFlag  = financialOwner  ? NoYes::Yes : NoYes::No;
+                ownershipLog.FinancialOwner      = financialOwner;
+                ownershipLog.PhysicalOwnerFlag   = physicalOwner   ? NoYes::Yes : NoYes::No;
+                ownershipLog.PhysicalOwner       = physicalOwner;
+                ownershipLog.FirstOnRentDateFlag = firstOnRentDate ? NoYes::Yes : NoYes::No;
+                ownershipLog.FirstOnRentDate     = firstOnRentDate;
+                ownershipLog.createNewLogEntry();
+            }
+        }
+
+        if (depot)
+        {
+            BOBObjectView objectView;
+            select firstonly objectView
+            where objectView.ObjectId == _objectId;
+
+            ownershipLog.clear();
+            ownershipLog.initValue();
+            ownershipLog.initFromObjectView(objectView);
+            ownershipLog.DepotFlag          = NoYes::Yes;
+            ownershipLog.Depot              = depot;
+            ownershipLog.DepotStartDateFlag = NoYes::Yes;
+            ownershipLog.DepotStartDate     = depotStartDate;
+            ownershipLog.createNewLogEntry();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBOBObjectTable</Name>
+				<Source><![CDATA[
+    public BOBObjectTable updateBOBObjectTable(InventSerialId _inventSerialId = "")
+    {
+        objectTable = _inventSerialId
+                      ? BOBObjectTable::findInventSerialId(_inventSerialId, true)
+                      : BOBObjectTable::findObjectId(objectId);
+
+        if (objectTable)
+        {
+            objectTable.ObjectId            = objectId ? objectId : objectTable.ObjectId;
+            objectTable.Name                = itemDescription;
+            objectTable.RentalTypeId        = rentalTypeId;
+            objectTable.ExternalObjectId    = externalObjectId;
+            objectTable.Category            = objectCategory;
+            objectTable.WarrantyToDate      = warrantyToDate;
+            objectTable.AcqProductNumber    = acqProductNumber;
+            objectTable.FleetNumber         = fleetNumber;
+
+            if (organization)
+            {
+                objectTable.OrganizationParty = organization.RecId;
+            }
+
+            if (resourceGroup)
+            {
+                objectTable.WPPResourceGroupRecId = resourceGroup.RecId;
+            }
+        }
+
+        this.insertUpdateRecord(objectTable);
+
+        return objectTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkItem</Name>
+				<Source><![CDATA[
+    private boolean checkItem(itemId _itemId)
+    {
+        if (!InventTable::exist(_itemId))
+        {
+            errorMessage = strFmt("@DNR:DataMgmtProductNotFoundError", _itemId);
+            return false;
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateImportLine</Name>
+				<Source><![CDATA[
+    public boolean validateImportLine()
+    {
+        boolean                             ret = true;
+        EcoResTrackingDimensionGroupItem    trackingDimensionGroupItem;
+        EcoResTrackingDimensionGroup        trackingDimensionGroup;
+
+        ret = this.checkItem(itemId);
+
+        select firstOnly RecId from trackingDimensionGroupItem
+        where trackingDimensionGroupItem.ItemDataAreaId == curext()
+        &&    trackingDimensionGroupItem.ItemId         == itemId
+            exists join trackingDimensionGroup
+            where trackingDimensionGroup.RecId == trackingDimensionGroupItem.TrackingDimensionGroup
+            &&    !trackingDimensionGroup.IsSerialNumberControlEnabled;
+
+        if (ret && itemId && inventSerialId && trackingDimensionGroupItem.RecId)
+        {
+            ret = checkFailed(strFmt("@DNR:DataMgmtSrNumDisabledForItemError", itemId));
+        }
+
+        if (ret && inventSerialId && BOBObjectTable::existInventSerialId(inventSerialId))
+        {
+            ret = checkFailed(strFmt("@DNR:DataMgmtBOExistsError", inventSerialId));
+        }
+
+        if (ret && reasonCode && !DNRReasonTable::find(reasonCode))
+        {
+            ret = checkFailed(strFmt("@DNR:DataMgmtReasonCodeError", reasonCode));
+        }
+
+        if (ret && physicalOwner && !CompanyInfo::findDataArea(physicalOwner))
+        {
+            ret = checkFailed(strFmt("@DNR:DataMgmtLegalEntityNotFoundError", physicalOwner));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRentalStockTransRecord</Name>
+				<Source><![CDATA[
+    private void createRentalStockTransRecord()
+    {
+        BOBRentalTrans stockRentalTrans;
+
+        stockRentalTrans.clear();
+        stockRentalTrans.initValue();
+
+        stockRentalTrans.Active           = BOBRentalTransActive::Active;
+        stockRentalTrans.TransType        = BOBRentalTransType::Asset;
+        stockRentalTrans.ObjectId         = objectTable.ObjectId;
+        stockRentalTrans.RentalTypeId     = objectTable.RentalTypeId;
+        stockRentalTrans.AssetId          = assetId;
+        stockRentalTrans.Qty              = rentalStockQty;
+        stockRentalTrans.InventLocationId = depot;
+        stockRentalTrans.SubStatus        = BOBRentalSubStatus::Invoiced;
+        stockRentalTrans.CompanyId        = physicalOwner ? physicalOwner : curExt();
+        stockRentalTrans.CertaintyFrom    = BOBDateTimeCertainty::Fixed;
+        stockRentalTrans.CertaintyTo      = BOBDateTimeCertainty::Fixed;
+        stockRentalTrans.FromDateTime     = rentalStockStartDateTime;
+        stockRentalTrans.ToDateTime       = rentalStockEndDateTime > DateTimeUtil::minValue() 
+                                            ? rentalStockEndDateTime : DateTimeUtil::maxValue();
+        stockRentalTrans.insert();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

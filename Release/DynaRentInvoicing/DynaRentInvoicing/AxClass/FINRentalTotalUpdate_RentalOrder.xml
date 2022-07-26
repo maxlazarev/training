@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINRentalTotalUpdate_RentalOrder</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINRentalTotalUpdate_RentalOrder extends FINRentalTotalUpdate
+{
+    SalesTable  salesTable;
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(SalesTable _salesTable)
+    {
+        salesTable  = _salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotals</Name>
+				<Source><![CDATA[
+    protected void calculateTotals()
+    {
+        container   totals;
+        SalesLine   salesLine;
+        
+        try
+        {
+            if (this.parmCalculateAllLines())
+            {
+                while select salesLine
+                where salesLine.SalesId == salesTable.SalesId
+                {
+                    totals = this.calculateTotalsForRentalOrderLine(salesLine);
+                    this.createOrUpdateSalesOrderLineTotals(totals, salesLine);
+                }
+            }
+            else if (this.parmCalculateOnlyForSpecificLine())
+            {
+                salesLine = this.parmRentalLine() as SalesLine;
+                totals = this.calculateTotalsForRentalOrderLine(salesLine);
+                this.createOrUpdateSalesOrderLineTotals(totals, salesLine);
+            }
+            totals = this.calculateTotalsForRentalOrderHeader();
+            this.createOrUpdateSalesOrderTotals(totals);
+            salesTable.FINUpdateRecalculateRentalTotals(false);
+
+            info(strFmt("@DNR:RentalOrderTotalUpdateSuccessMsg",salesTable.SalesId));
+        }
+        catch
+        {
+            info(strFmt("@DNR:RentalOrderTotalsUpdateError",salesTable.SalesId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotalsForRentalOrderHeader</Name>
+				<Source><![CDATA[
+    public container calculateTotalsForRentalOrderHeader()
+    {
+        container       headerTotals;
+        container       displayFields;
+        FINSalesTotals  finSalesTotals = new FINSalesTotals();
+
+        finSalesTotals.parmCallerBuffer(salesTable);
+        finSalesTotals.prepareDataForTotals();
+
+        using (DNRTradeTotalsDisposableContext context = new DNRTradeTotalsDisposableContext())
+        {
+            Set selectedRecId = new Set(Types::Int64);
+            context.DNRParmCalledFromForm(true);
+            context.DNRParmSelectedRecId(selectedRecId);
+            displayFields = SalesTotals::displayFieldsServer(salesTable, SalesUpdate::All, salesTable.CurrencyCode);
+        }
+
+        headerTotals = [conPeek(displayFields, TradeTotals::posTotalAmount()),
+                        conPeek(displayFields, TradeTotals::posEndDisc()),
+                        conPeek(displayFields, TradeTotals::posMarkup()),
+                        conPeek(displayFields, TradeTotals::posTaxTotal())];
+
+        finSalesTotals.cleanupPrecalculatedData();
+
+        return headerTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createOrUpdateSalesOrderTotals</Name>
+				<Source><![CDATA[
+    public void createOrUpdateSalesOrderTotals(container _totals)
+    {
+        SalesOrderTotals orderTotals = SalesOrderTotals::find(salesTable.SalesId, true);
+
+        orderTotals.OrderTotalAmount            = conPeek(_totals, 1);
+        orderTotals.OrderTotalDiscountAmount    = conPeek(_totals, 2);
+        orderTotals.OrderTotalChargesAmount     = conPeek(_totals, 3);
+        orderTotals.OrderTotalTaxAmount         = conPeek(_totals, 4);
+        orderTotals.LastUpdatedDateTime         = DateTimeUtil::utcNow();
+        orderTotals.SalesId                     = salesTable.SalesId;
+        orderTotals.write();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotalsForRentalOrderLine</Name>
+				<Source><![CDATA[
+    public container calculateTotalsForRentalOrderLine(SalesLine _salesLine)
+    {
+        container       lineTotals;
+        Common          invoiceHelperCallerBuffer;
+        FINSalesTotals  finSalesTotals = new FINSalesTotals();
+
+        finSalesTotals.parmCallerBuffer(_salesLine);
+        finSalesTotals.prepareDataForTotals();
+
+        if (_salesLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            container displayFields;
+            using (DNRTradeTotalsDisposableContext context = new DNRTradeTotalsDisposableContext())
+            {
+                Set selectedRecId = new Set(Types::Int64);
+                selectedRecId.add(_salesLine.RecId);
+                context.DNRParmCalledFromForm(true);
+                context.DNRParmSelectedRecId(selectedRecId);
+                displayFields = SalesTotals::displayFieldsServer(salesTable, SalesUpdate::All, _salesLine.CurrencyCode);
+            }
+            lineTotals = [conPeek(displayFields, TradeTotals::posTotalAmount()),
+                          conPeek(displayFields, TradeTotals::posEndDisc()),
+                          conPeek(displayFields, TradeTotals::posTaxTotal())];
+        }
+        else
+        {
+            SalesParmTable salesParmTable = finSalesTotals.getParmTable();
+            psaTmpProjProposalTrans psaTmpProjProposalTrans = finSalesTotals.getPsaTmpProjProposalTrans();
+
+            if (psaTmpProjProposalTrans)
+            {
+                invoiceHelperCallerBuffer = psaTmpProjProposalTrans;
+            }
+            else
+            {
+                SalesParmLine salesParmLine;
+
+                select firstonly salesParmLine
+                where salesParmLine.SalesLineRecId == _salesLine.RecId
+                &&    salesParmLine.ParmId == salesParmTable.ParmId;
+
+                if (salesParmLine)
+                {
+                    invoiceHelperCallerBuffer = salesParmLine;
+                }
+                else
+                {
+                    invoiceHelperCallerBuffer = _salesLine;
+                }
+            }
+
+            FINRentalInvoiceDetailHelper helperClass = FINRentalInvoiceDetailHelper::getRentalInvoiceDetails(invoiceHelperCallerBuffer, true);
+            lineTotals = [helperClass.totalChargedAmount,
+                          helperClass.discountAmount, 0];
+        }
+        finSalesTotals.cleanupPrecalculatedData();
+
+        return lineTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createOrUpdateSalesOrderLineTotals</Name>
+				<Source><![CDATA[
+    public void createOrUpdateSalesOrderLineTotals(container _totals, SalesLine _salesLine)
+    {
+        SalesOrderLineTotals orderLineTotals = SalesOrderLineTotals::find(_salesLine.InventTransId, true);
+
+        orderLineTotals.TotalChargesAmount  = conPeek(_totals, 1);
+        orderLineTotals.TotalDiscountAmount = abs(conPeek(_totals, 2));
+        orderLineTotals.TotalTaxAmount      = conPeek(_totals, 3);
+        orderLineTotals.LastUpdatedDateTime = DateTimeUtil::utcNow();
+        orderLineTotals.SalesId             = _salesLine.SalesId;
+        orderLineTotals.InventTransId       = _salesLine.InventTransId;
+        orderLineTotals.write();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

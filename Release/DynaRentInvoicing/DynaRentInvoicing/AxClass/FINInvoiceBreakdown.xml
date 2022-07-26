@@ -1,0 +1,489 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoiceBreakdown</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+// Can be used for splitting rental invoice results into days
+class FINInvoiceBreakdown
+{
+    FINInvoiceCalculatorParm invoiceCalculatorParm;
+    FINRentalInvoiceProfile invoiceProfile;
+    RORRentalLine rentalLine;
+    Timezone timeZone;
+    TimeOfDay defaultDaysSplitPerDelivery;
+    // Map( [InvoicePeriodQtyRecId, qtyInvoiced], Map([ FromDateTime, ToDateTime ] , FINPeriodSpecification))
+    Map invoiceBreakdownMap = new Map(Types::Container, Types::Class);
+    Map periodSpecBreakdownMap;
+    FINWorkCalendar workCalendar;
+    boolean isDailyProcessing;
+    boolean isMonthlyProcessing;
+    boolean isHourlyProcessing;
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getInvoiceBreakdownMap</Name>
+				<Source><![CDATA[
+    public Map getInvoiceBreakdownMap()
+    {
+        return invoiceBreakdownMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>displayResult</Name>
+				<Source><![CDATA[
+    public void displayResult()
+    {
+        MapEnumerator enumerator = invoiceBreakdownMap.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            RecId invoicePeriodQtyRecId;
+            Qty qtyInvoiced;
+
+            [invoicePeriodQtyRecId, qtyInvoiced] = enumerator.currentKey();
+
+            Map periodsBreakdownMap = enumerator.currentValue();
+            MapEnumerator periodsEnumerator = periodsBreakdownMap.getEnumerator();
+
+            while (periodsEnumerator.moveNext())
+            {
+                TransDateTime fromDateTime, toDateTime;
+                FINPeriodSpecification periodSpecification;
+
+                [fromDateTime, toDateTime] = periodsEnumerator.currentKey();
+                periodSpecification = periodsEnumerator.currentValue();
+
+                info(strFmt("%1 - %2: charged: %3", fromDateTime, toDateTime, periodSpecification.numOfChargedPeriods));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInvoiceCalculatorParm</Name>
+				<Source><![CDATA[
+    public void setInvoiceCalculatorParm(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        invoiceCalculatorParm = _invoiceCalculatorParm;
+               
+        timeZone = invoiceCalculatorParm.Timezone;
+        rentalLine = invoiceCalculatorParm.rentalLine();
+        invoiceProfile = FINRentalInvoiceProfile::find(rentalLine.INVInvoiceProfileId);
+        BOBRentalType callerRentalType = BOBRentalType::find(rentalLine.BOBRentalTypeId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        // Map( [InvoicePeriodQtyRecId, qtyInvoiced], Map([ FromDateTime, ToDateTime ] , List(FINPeriodSpecification)))
+        Map specificationMap = Map::create(invoiceCalculatorParm.PeriodSpecificationPacked);
+        
+        if (!specificationMap.empty())
+        {
+            this.buildWorkCalendar();
+
+            if (invoiceProfile.isHourlyInvoicing())
+            {
+                isHourlyProcessing = true;
+            }
+            else if (invoiceProfile.isMonthlyInvoicing())
+            {
+
+                isMonthlyProcessing = true;
+            }
+            else
+            {
+                isDailyProcessing = true;
+            }
+                                       
+            this.runForSpecificationMap(specificationMap);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runForSpecificationMap</Name>
+				<Source><![CDATA[
+    protected void runForSpecificationMap(Map _specificationMap)
+    {
+        MapEnumerator enumerator = _specificationMap.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            RecId invoicePeriodQtyRecId;
+            Qty invoiceQty;
+            // qty is also stamped on periodSpec.lineQty so no need to pass the value here.
+            [invoicePeriodQtyRecId, invoiceQty, defaultDaysSplitPerDelivery] = enumerator.currentKey();
+
+            Map periodDefinitionMap = enumerator.currentValue();
+
+            this.processSingleDelivery(invoicePeriodQtyRecId, periodDefinitionMap);
+            invoiceBreakdownMap.insert([invoicePeriodQtyRecId, invoiceQty], periodSpecBreakdownMap);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSingleDelivery</Name>
+				<Source><![CDATA[
+    protected void processSingleDelivery(RecId _periodPhysicalRecId, Map  _periodDefinitionMap)
+    {
+        MapEnumerator specificationEnumerator = _periodDefinitionMap.getEnumerator();
+        FINInvoicePeriodQtyFinancial invoicedPeriodFinancial;
+        FINInvoicePeriodQtyPhysical invoicedPeriodPhysical;
+            
+        periodSpecBreakdownMap = new Map(Types::Container, Types::Class);
+        
+        while (specificationEnumerator.moveNext())
+        {
+            TransDateTime fromDateTimeInTimeZone;
+            TransDateTime toDateTimeInTimeZone;
+            TransDateTime fromDateTime;
+            TransDateTime toDateTime;
+            // DateTimes are in order line site specific timezone
+            [fromDateTimeInTimeZone, toDateTimeInTimeZone] = specificationEnumerator.currentKey();
+            fromDateTime = DateTimeUtil::removeTimeZoneOffset(fromDateTimeInTimeZone, invoiceCalculatorParm.Timezone);
+            toDateTime = DateTimeUtil::removeTimeZoneOffset(toDateTimeInTimeZone, invoiceCalculatorParm.Timezone);
+           
+            List specificationList = specificationEnumerator.currentValue();
+            
+            select firstonly invoicedPeriodFinancial
+            where invoicedPeriodFinancial.InvPeriodQtyPhysicalRecId == _periodPhysicalRecId
+            &&    invoicedPeriodFinancial.InvoiceId
+            &&    invoicedPeriodFinancial.PeriodStartDateTime < toDateTime
+            &&    invoicedPeriodFinancial.PeriodEndDateTime > fromDateTime
+                join invoicedPeriodPhysical
+                where invoicedPeriodPhysical.RecId == invoicedPeriodFinancial.InvPeriodQtyPhysicalRecId;
+            
+            if (invoicedPeriodFinancial)
+            {
+                this.processSinglePeriod(invoicedPeriodPhysical, invoicedPeriodFinancial, fromDateTimeInTimeZone, toDateTimeInTimeZone, specificationList);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSinglePeriod</Name>
+				<Source><![CDATA[
+    protected void processSinglePeriod(FINInvoicePeriodQtyPhysical _invoicedPeriodPhysical, FINInvoicePeriodQtyFinancial _invoicedPeriodFinancial, TransDateTime _fromDateTime, TransDateTime _toDateTime, List _specificationList)
+    {
+        ListEnumerator listEnumerator = _specificationList.getEnumerator();
+        DiscAmount discAmount;
+        LineAmount lineAmount;
+        int numOfCalendarPeriods;
+        int numOfChargeablePeriods;
+        int numOfOpenCalendarPeriods;
+        Qty qtyInvoiced;
+        container defaultPeriodSpecPacked;
+
+        while (listEnumerator.moveNext())
+        {
+            FINPeriodSpecification periodSpec = listEnumerator.current();
+            discAmount += periodSpec.periodDisc;
+            lineAmount += periodSpec.invoiceAmountCur;
+            numOfCalendarPeriods += periodSpec.numOfCalendarPeriods;
+            numOfChargeablePeriods += periodSpec.numOfChargedPeriods;
+            numOfOpenCalendarPeriods += periodSpec.numOfOpenCalendarPeriods;
+            qtyInvoiced += periodSpec.lineQty;
+        }
+
+        if (numOfChargeablePeriods)
+        {
+            TransDateTime periodStartDateTime = DateTimeUtil::applyTimeZoneOffset(_invoicedPeriodFinancial.PeriodStartDateTime, timeZone);
+            TransDateTime periodEndDateTime = DateTimeUtil::applyTimeZoneOffset(_invoicedPeriodFinancial.PeriodEndDateTime, timeZone);
+            // Adjust processing start/end points if boundaries of rental periods don't match required start/end points
+            TransDateTime startDateTimeProcessing = DNRDateTimeUtil::getLatestDateTime(periodStartDateTime, _fromDateTime);
+            TransDateTime endDateTimeProcessing = DNRDateTimeUtil::getEarliestDateTime(periodEndDateTime, _toDateTime);
+
+            boolean isFinalPeriod = (DateTimeUtil::applyTimeZoneOffset(_invoicedPeriodPhysical.ReturnDateTime, timeZone) == endDateTimeProcessing);
+            boolean isFirstPeriod = (DateTimeUtil::applyTimeZoneOffset(_invoicedPeriodPhysical.DeliveryDateTime, timeZone) == startDateTimeProcessing);
+
+            FINPeriodSpecification periodSpecTotal = FINPeriodSpecification::construct();
+            periodSpecTotal.periodDisc = discAmount;
+            periodSpecTotal.invoiceAmountCur = lineAmount;
+            periodSpecTotal.numOfCalendarPeriods = numOfCalendarPeriods;
+            periodSpecTotal.numOfChargedPeriods = numOfChargeablePeriods;
+            periodSpecTotal.numOfOpenCalendarPeriods = numOfOpenCalendarPeriods;
+            periodSpecTotal.lineQty = qtyInvoiced;
+
+            defaultPeriodSpecPacked = periodSpecTotal.pack();
+
+            if (isHourlyProcessing)
+            {
+                this.addHourly(_fromDateTime, endDateTimeProcessing, defaultPeriodSpecPacked);
+            }
+            else
+            {
+                this.addDailyMonthly(_fromDateTime, endDateTimeProcessing, isFirstPeriod, isFinalPeriod, defaultDaysSplitPerDelivery, defaultPeriodSpecPacked);
+            }
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addHourly</Name>
+				<Source><![CDATA[
+    protected void addHourly(TransDateTime   _startDateTimeCharging,
+        TransDateTime   _endDateTimeCharging,
+        container       _defaultPeriodSpecPacked)
+    {
+        #timeConstants;
+        int numOfCalendarPeriods;
+        int numOfChargeablePeriods;
+        int numOfOpenCalendarPeriods;
+
+        DNRCalendarId calendarId = this.getCalendarId(_startDateTimeCharging);
+        numOfChargeablePeriods = FINInvoiceServiceController::getWorkCalendar().getWorkingMinutes(calendarId, _startDateTimeCharging, _endDateTimeCharging);
+        numOfOpenCalendarPeriods = numOfChargeablePeriods;
+
+        FINPeriodSpecification periodSpec = FINPeriodSpecification::create(_defaultPeriodSpecPacked);
+        periodSpec.numOfCalendarPeriods = numOfCalendarPeriods;
+        periodSpec.numOfChargedPeriods = numOfChargeablePeriods;
+        periodSpec.numOfOpenCalendarPeriods = numOfOpenCalendarPeriods;
+            
+        periodSpecBreakdownMap.insert([_startDateTimeCharging, _endDateTimeCharging], periodSpec);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addDailyMonthly</Name>
+				<Source><![CDATA[
+    protected void addDailyMonthly(TransDateTime   _startDateTimeCharging,
+        TransDateTime   _endDateTimeCharging,
+        boolean         _isFinalPeriod,
+        boolean         _isFirstPeriod,
+        TimeOfDay       _defaultDaysSplitPerDelivery,
+        container       _defaultPeriodSpecPacked)
+    {
+        #timeConstants;
+        int numOfCalendarPeriods;
+        int numOfChargeablePeriods;
+        int numOfOpenCalendarPeriods;
+        TransDateTime testDateTime = _startDateTimeCharging;
+        TransDateTime endPeriodDateTime = _endDateTimeCharging;
+        FINPeriodSpecification periodSpec;
+        int testPeriodLength =  #hoursPerDay;
+        TransDate   testDate;
+        boolean isFirstExecution = true;
+
+        // For each date/time in period, get details about chargeability
+        while (testDateTime < endPeriodDateTime)
+        {
+            numOfCalendarPeriods = 0;
+            numOfChargeablePeriods = 0;
+            testDate = DateTimeUtil::date(testDateTime);
+
+            // For the first day we might need to adjust testDateTime according to defaultDaySplit.
+            // For another days we simply add 24hours.
+            if (isFirstExecution)
+            {
+                isFirstExecution = false;
+                testDateTime = DateTimeUtil::newDateTime(testDate, _defaultDaysSplitPerDelivery);
+
+                // In case split day time is different than 0:00 then it can happen that the same date is counted as 2 days.
+                if (testDateTime > _startDateTimeCharging)
+                {
+                    testDateTime = DateTimeUtil::addDays(testDateTime, -1);
+                }
+            }
+
+            // If it is a first or a last day then check a grace period. For 1 day rental we always want to charge.
+            boolean isWithinGracePeriod;
+            
+            if (_isFirstPeriod && !_isFinalPeriod && invoiceProfile.GracePeriodOnRent)
+            {
+                // Compare begining of charging with start of the first full day.
+                int64 firstDayTimeLength = DateTimeUtil::getDifference(DateTimeUtil::addHours(testDateTime, testPeriodLength), _startDateTimeCharging);
+
+                if (firstDayTimeLength <= (invoiceProfile.GracePeriodOnRent * #secondsPerMinute))
+                {
+                    isWithinGracePeriod = true;
+                }
+            }
+            else if (!_isFirstPeriod && _isFinalPeriod && invoiceProfile.GracePeriodOffRent)
+            {
+                int64 lastDayTimeLength = DateTimeUtil::getDifference(endPeriodDateTime, testDateTime);
+
+                if (lastDayTimeLength <= (invoiceProfile.GracePeriodOffRent * #secondsPerMinute))
+                {
+                    isWithinGracePeriod = true;
+                }
+            }
+            else if (_isFirstPeriod && _isFinalPeriod
+            && (invoiceProfile.GracePeriodOnRent || invoiceProfile.GracePeriodOffRent)
+            && DateTimeUtil::getDifference(_endDateTimeCharging, _startDateTimeCharging) >= #secondsPerDay)
+            {
+                int64 firstDayTimeLength2 = DateTimeUtil::getDifference(DateTimeUtil::addHours(testDateTime, testPeriodLength), _startDateTimeCharging);
+
+                if (firstDayTimeLength2 <= (invoiceProfile.GracePeriodOnRent * #secondsPerMinute))
+                {
+                    isWithinGracePeriod = true;
+                }
+
+                int64 lastDayTimeLength2 = DateTimeUtil::getDifference(endPeriodDateTime, testDateTime);
+
+                if (lastDayTimeLength2 <= (invoiceProfile.GracePeriodOffRent * #secondsPerMinute))
+                {
+                    isWithinGracePeriod = true;
+                }
+            }
+                
+            if (!isWithinGracePeriod)
+            {
+                numOfCalendarPeriods = 1;
+                TransDateTime priceComponentDateTime = ((_isFirstPeriod && testDateTime < _startDateTimeCharging) ? _startDateTimeCharging : testDateTime);
+
+                DNRCalendarId calendarId = this.getCalendarId(priceComponentDateTime);
+
+                if (workCalendar.isDateOpen(calendarId, testDate))
+                {
+                    numOfOpenCalendarPeriods = 1;
+                    numOfChargeablePeriods = 1;
+                }
+            }
+            
+            TransDateTime fromTestDateTime = testDateTime;
+            TransDateTime toTestDateTime = DateTimeUtil::addHours(testDateTime, testPeriodLength);
+            periodSpec = FINPeriodSpecification::create(_defaultPeriodSpecPacked);
+            periodSpec.numOfCalendarPeriods = numOfCalendarPeriods;
+            periodSpec.numOfChargedPeriods = numOfChargeablePeriods;
+            periodSpec.numOfOpenCalendarPeriods = numOfOpenCalendarPeriods;
+            
+            periodSpecBreakdownMap.insert([fromTestDateTime, toTestDateTime], periodSpec);
+
+            testDateTime = DateTimeUtil::addHours(testDateTime, testPeriodLength);
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCalendarId</Name>
+				<Source><![CDATA[
+    protected DNRCalendarId getCalendarId(TransDateTime _transDateTimeInTimeZone)
+    {
+        anytype ret;
+        FINInvoicePeriodAmendment priceTable;
+        TransDateTime transDateTime = DateTimeUtil::removeTimeZoneOffset(_transDateTimeInTimeZone, timeZone);
+        TransDateTime minTransDateTime = DateTimeUtil::minValue();
+
+        select firstonly RecId, StrValue, RealValue from priceTable
+        where priceTable.RefTableId == rentalLine.TableId
+        &&    priceTable.RefRecId == rentalLine.RecId
+        &&    priceTable.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+        &&    priceTable.FromDateTime <= transDateTime
+        &&    (priceTable.ToDateTime == minTransDateTime || priceTable.ToDateTime > transDateTime)
+        &&    (priceTable.DocumentState == FINAmendmentDocumentState::None || priceTable.DocumentState == FINAmendmentDocumentState::Confirmed);
+
+        ret = (priceTable.RecId ? priceTable.StrValue : rentalLine.CalendarId);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateInvoiceDateRange</Name>
+				<Source><![CDATA[
+    protected container calculateInvoiceDateRange()
+    {
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+         
+        select firstonly minof(DeliveryDateTime) from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId == rentalLine.TableId
+        &&    invoicePeriodQtyPhysical.RefRecId == rentalLine.RecId;
+ 
+        FromDate invoiceMinDate = DateTimeUtil::date(invoicePeriodQtyPhysical.DeliveryDateTime);
+        TransDateTime endDateTime;
+        
+        RORRentalDateTimes rentalDateTimes;
+        TransDateTime maxDateTime = DateTimeUtil::maxValue();
+
+        select maxof(ExpectedOffRentDateTime) from rentalDateTimes
+        where rentalDateTimes.OffRentDateTime == maxDateTime
+        &&    rentalDateTimes.RefTableId == rentalLine.TableId
+        &&    rentalDateTimes.RefRecId == rentalLine.RecId;
+
+        endDateTime = rentalDateTimes.ExpectedOffRentDateTime;
+
+        select maxof(OffRentDateTime) from rentalDateTimes
+        where rentalDateTimes.OffRentDateTime != maxDateTime
+        &&    rentalDateTimes.RefTableId == rentalLine.TableId
+        &&    rentalDateTimes.RefRecId == rentalLine.RecId;
+
+        endDateTime = max(endDateTime, rentalDateTimes.OffRentDateTime);
+        endDateTime = DateTimeUtil::newDateTime(endMth(DateTimeUtil::date(endDateTime)), 0);
+        
+        // For monthly invoice profile we may need to know all open days for a specific month even if it is beyond calculation point.
+        ToDate invoiceMaxDate = max(DateTimeUtil::date(endDateTime) + 1, endMth(DateTimeUtil::date(endDateTime)));
+        invoiceMinDate = str2DateDMY(strFmt("1-%1-%2", mthOfYr(invoiceMinDate), year(invoiceMinDate)));
+
+        return [ invoiceMinDate, invoiceMaxDate ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildWorkCalendar</Name>
+				<Source><![CDATA[
+    protected void buildWorkCalendar()
+    {
+        // build a map of all invoice profiles so we don't have to select them from the database during the next step
+        Map invoiceProfileMap = new Map(Types::String, Types::Enum);
+        
+        invoiceProfileMap.insert(invoiceProfile.InvoiceProfileId, invoiceProfile.isHourlyInvoicing());
+         
+        // build a map of all relevant calendars and whether or not they need hourly invoicing
+        FINInvoicePeriodAmendment invoicePeriodAmendment;
+        Map calendarMap = new Map(Types::String, Types::Enum);
+ 
+        calendarMap.insert(rentalLine.CalendarId, invoiceProfileMap.lookup(rentalLine.INVInvoiceProfileId));
+
+        while select StrValue from invoicePeriodAmendment
+        where invoicePeriodAmendment.RefTableId == rentalLine.TableId
+        &&    invoicePeriodAmendment.RefRecId == rentalLine.RecId
+        &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+        &&    invoicePeriodAmendment.StrValue
+        {
+            boolean mustPopulateTimes;
+ 
+            if (calendarMap.exists(invoicePeriodAmendment.StrValue))
+            {
+                mustPopulateTimes = calendarMap.lookup(invoicePeriodAmendment.StrValue);
+            }
+ 
+            calendarMap.insert(invoicePeriodAmendment.StrValue, mustPopulateTimes);
+        }
+ 
+        // build a work calendar cache with all the necessary working dates/times for this invoice run
+        FromDate invoiceFromDate;
+        ToDate invoiceToDate;
+        [ invoiceFromDate, invoiceToDate ] = this.calculateInvoiceDateRange();
+ 
+        workCalendar = new FINWorkCalendar();
+        workCalendar.populate(calendarMap, invoiceFromDate, invoiceToDate);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

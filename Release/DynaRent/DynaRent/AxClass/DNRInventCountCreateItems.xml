@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRInventCountCreateItems</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class DNRInventCountCreateItems extends InventCountCreateItems
+{
+    TransDateTime   countDateTime;
+    DialogField     dialogCountDateTime;
+    
+    #DEFINE.CurrentVersion(2)
+
+    #LOCALMACRO.CurrentList
+        countDateTime
+    #ENDMACRO
+
+    #LOCALMACRO.CurrentList1
+        inventLocationId,
+        inventSiteId,
+        countDate,
+        countDateTime,
+        journalId,
+        countGroupId,
+        maxLines,
+        notCountedSince
+    #ENDMACRO
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [ #CurrentVersion, #CurrentList ] + [super()];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        container   base;
+        boolean     ret;
+        container   packedQuery;
+
+        Integer version = RunBase::getVersion(_packedClass);
+
+        switch (version)
+        {
+            case #CurrentVersion:
+                [ version, #CurrentList, base ] = _packedClass;
+                
+                if (base)
+                {
+                    ret = super(base);
+                }
+
+                break;
+
+            case 1:
+                [ version, #CurrentList1, packedQuery ] = _packedClass;
+
+                if (packedQuery)
+                {
+                    queryRun = new QueryRun(packedQuery);
+                }
+
+                ret = true;
+
+                break;
+
+            default:
+                ret = false;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        super ();
+
+        dialogCountDateTime     = dialog.addField(extendedTypeStr(TransDateTime), "@DNR:CountingDateTime", "@DNR:DateTimeUsedForOnHandCalc");
+        dialogCountDateTime.value(DateTimeUtil::applyTimeZoneOffset(countDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+
+        dialogPhysicalUpdates.visible(false);
+        dialogInventOwnerId.visible(false);
+        dialogNotCountedSince.visible(false);
+        dialogCountDate.visible(false);
+        dialogInventSiteId.enabled(false);
+        fbs_ControlInventLocation.enabled(false);
+
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        super();
+
+        countDateTime   = DateTimeUtil::removeTimeZoneOffset(dialogCountDateTime.value(), DateTimeUtil::getUserPreferredTimeZone());
+        countDate       = DateTimeUtil::date(countDateTime);
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean ret = super(_calledFrom);
+
+        if (ret)
+        {
+            if (InventJournalTable::find(journalId).BOBInventJournalType != BOBInventJournalType::Count)
+            {
+                ret = checkFailed(strFmt("@DNR:InvalidRentalCountingJournal", journalId));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public static ClassDescription description()
+    {
+        return "@DNR:CreateRentalCountingJournal";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initQueryRun</Name>
+				<Source><![CDATA[
+    protected void initQueryRun()
+    {
+        queryRun = new QueryRun(queryStr(DNRInventTableCount));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        #OCCRetryCount
+        InventSum                       inventSum;
+        InventDim                       inventDim;
+
+        setPrefix(DNRInventCountCreateItems::description());
+
+        try
+        {
+            QueryBuildDataSource BOBRentalType_ds = queryRun.query().dataSourceName(queryDatasourceStr(DNRInventTableCount, BOBRentalType));
+            
+            if(BOBRentalType_ds.findRange(fieldNum(BOBRentalType, RentalTypeId)))
+            {
+                BOBRentalType_ds.relations(false);
+                BOBRentalType_ds.clearLinks();
+                BOBRentalType_ds.addLink(fieldNum(BOBRentalType, RentalTypeId), fieldNum(EcoResProduct, BOBRentalTypeId));
+            }
+
+            ttsbegin;
+
+            if (! this.validate())
+            {
+                throw error("@SYS18447");
+            }
+            this.progressInit(DNRInventCountCreateItems::description(), QueryRun::getQueryRowCount(queryRun.query(), maxInt()), #AviUpdate);
+
+            this.initJournalTableData();
+
+            this.addFilterToCountingGroup();
+
+            BOBRentalInventOnHand rentalInventOnHand = new BOBRentalInventOnHand();
+
+            while (queryRun.next())
+            {
+                InventTable     inventTable = queryRun.get(tableNum(InventTable)) as InventTable;
+                BOBRentalType   rentalType = queryRun.get(tableNum(BOBRentalType));
+
+                progress.setText(inventTable.ItemId, 1);
+                progress.incCount();
+
+                inventSum.ItemId = inventTable.ItemId;
+                inventDim.InventSiteId = inventSiteId;
+                inventDim.InventLocationId = inventLocationId;
+                inventDim.inventSerialId = '';
+
+                BOBRentalQtyAvailPhysical   onHandQty;
+
+                if (rentalType.Classification == BOBRentalTypeClassification::Bulk)
+                {
+                    // For Bulk items the Rental Type and Item Id must be same
+                    if (rentalType.RentalTypeId == inventTable.ItemId)
+                    {
+                        onHandQty = rentalInventOnHand.availPhysicalQty(rentalType.RentalTypeId,
+                                                                        inventLocationId,
+                                                                        countDateTime);
+
+                        if (onHandQty)
+                        {
+                            boolean doCounting;
+
+                            inventSum.AvailPhysical = onHandQty;
+                            inventSum.InventDimId = InventDim::findOrCreate(inventDim).inventDimId;
+
+                            //Create context and set the boolean indicator value as true so that the extension clss on doCounting() call can allow counting on rental types linked to service items as well
+                            using (DNRPrimitiveDisposableContext context = new DNRPrimitiveDisposableContext())
+                            {
+                                context.DNRparmBoolean(true);
+                                doCounting = this.doCounting(inventSum, inventDim);
+                            }
+
+                            if (doCounting)
+                            {
+                                this.createInventJournalTrans(inventSum, inventDim);
+                            }
+
+                            if (!this.allowMoreLines())
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                else if (rentalType.Classification == BOBRentalTypeClassification::Serialized)
+                {
+                    InventSerial    inventSerial;
+                    BOBObjectTable  objectTable;
+
+                    while select InventSerialId from inventSerial
+                    where inventSerial.ItemId == inventTable.ItemId
+                        join ObjectId from objectTable
+                        where objectTable.InventSerialId == inventSerial.InventSerialId
+                        &&  ( objectTable.Category  == BOBObjectCategory::Rental || objectTable.Category  == BOBObjectCategory::SubRental)
+                    {
+                        onHandQty = rentalInventOnHand.availPhysicalQtySerialized(objectTable.ObjectId,
+                                                                                  inventLocationId,
+                                                                                  countDateTime,
+                                                                                  true);
+                        if(onHandQty)
+                        {
+                            inventDim.inventSerialId = inventSerial.InventSerialId;
+                            inventSum.AvailPhysical = onHandQty;
+                            inventSum.InventDimId = InventDim::findOrCreate(inventDim).inventDimId;
+
+                            if(this.doCounting(inventSum, inventDim))
+                            {
+                                this.createInventJournalTrans(inventSum, inventDim);
+                            }
+
+                            if (!this.allowMoreLines())
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (journalTableData.journalTable().JournalId == journalId && this.isInBatch())
+            {
+                journalTableData.updateBlock(JournalBlockLevel::System,JournalBlockLevel::None,true);
+            }
+            else
+            {
+                journalTableData.journalTable().update();
+            }
+
+            ttscommit;
+        }
+        catch (Exception::Deadlock)
+        {
+            queryRun.reset();
+            retry;
+        }
+        catch (Exception::UpdateConflict)
+        {
+            if (appl.ttsLevel() == 0)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::UpdateConflictNotRecovered;
+                }
+                else
+                {
+                    queryRun.reset();
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::UpdateConflict;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initializeInventJournalTrans</Name>
+				<Source><![CDATA[
+    protected boolean initializeInventJournalTrans(InventSum _inventSum, InventDim _inventDim, InventDimParm _inventDimParm, NoYes _includeZeroOnHand)
+    {
+        boolean ret =   super(_inventSum, _inventDim, _inventDimParm, _includeZeroOnHand);
+
+        inventJournalTrans.TransDate    = DateTimeUtil::date(countDateTime);
+        inventJournalTrans.BOBTransTime = DateTimeUtil::time(countDateTime);
+        
+        // Populate fields to avoid Standard logic that will lead to InventTrans creation
+        inventJournalTrans.InventOnHand = _inventSum.AvailPhysical;
+        inventJournalTrans.Counted = _inventSum.AvailPhysical;
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCountDateTime</Name>
+				<Source><![CDATA[
+    public TransDateTime parmCountDateTime(TransDateTime _selection = countDateTime)
+    {
+        countDateTime = _selection;
+        return countDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmInventSite</Name>
+				<Source><![CDATA[
+    public InventSiteId parmInventSite(InventSiteId _inventSiteId = inventSiteId)
+    {
+        inventSiteId = _inventSiteId;
+        return inventSiteId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmInventLocationId</Name>
+				<Source><![CDATA[
+    public InventLocationId parmInventLocationId(InventLocationId _inventLocationId = inventLocationId)
+    {
+        inventLocationId = _inventLocationId;
+        return inventLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newCountCreateItems</Name>
+				<Source><![CDATA[
+    public static DNRInventCountCreateItems newCountCreateItems(InventJournalId _journalId, TransDateTime   _transDateTime)
+    {
+        DNRInventCountCreateItems   inventCountCreateItems  = new DNRInventCountCreateItems();
+        InventJournalTable          inventJournalTable      = InventJournalTable::find(_journalId);
+        
+        inventCountCreateItems.getLast();
+        inventCountCreateItems.parmJournalId(_journalId);
+        inventCountCreateItems.parmCountDate(DateTimeUtil::date(_transDateTime));
+        inventCountCreateItems.parmInventDimParm(InventJournalTable::journalId2inventDimParm(_journalId));
+        inventCountCreateItems.parmInventSite(inventJournalTable.InventSiteId);
+        inventCountCreateItems.parmInventLocationId(inventJournalTable.InventLocationId);
+        inventCountCreateItems.parmCountDateTime(_transDateTime);
+
+        return inventCountCreateItems;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        #DNRConstants
+
+        JournalForm                 journalForm         = JournalForm::fromArgs(_args);
+        InventJournalId             journalId           = InventCountCreate_Base::argsJournalId(_args);
+        DNRInventCountCreateItems   inventCountCreate   = DNRInventCountCreateItems::newCountCreateItems(journalId, DateTimeUtil::newDateTime(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), #INVMidday));
+
+        InventCountCreate_Base::mainHandling(inventCountCreate, journalId, journalForm);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

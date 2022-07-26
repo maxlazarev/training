@@ -1,0 +1,382 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRMarkupClass2_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(Markup))]
+final class DNRMarkupClass2_Extension
+{
+    public AmountCur markupWorkTransAmount;
+    private MarkupAmount totalMarkupAmount;
+    private boolean skipVarianceCalculation;
+    private boolean skipIntercompanyInvoice;
+
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>insertJournalMarkupTrans</Name>
+				<Source><![CDATA[
+    protected MarkupTrans insertJournalMarkupTrans(MarkupTrans _markupTrans,
+                                                   Common _destin,
+                                                   AmountCur _calculatedAmount,
+                                                   Voucher _voucher,
+                                                   TransDate _transDate,
+                                                   AmountCur _posted,
+                                                   MarkupTrans _originalMarkupTrans)
+    {
+        if (_markupTrans && _markupTrans.transTableId == tableNum(SalesLine) || _markupTrans.transTableId == tableNum(PurchLine))
+        {
+            Common common = _markupTrans.parentRecord();
+
+            if (common.getFieldValue(literalStr(RORTradeType)) != RORTradeType::SalesPurch && _markupTrans.FINManualCharge == NoYes::No && _markupTrans.FINMarkupAccountType != FINMarkupAccountType::None)
+            {
+                _markupTrans.InterCompanySkipUpdate = NoYes::Yes;
+            }
+        }
+
+        MarkupTrans ret = next insertJournalMarkupTrans(_markupTrans, _destin, _calculatedAmount, _voucher, _transDate, _posted, _originalMarkupTrans);
+
+        // Store the originating order/line info so that we can reverse the charges in the credit wizard
+        if (_destin.TableId == tableNum(CustInvoiceJour)
+        ||  _destin.TableId == tableNum(CustInvoiceTrans))
+        {
+            MarkupTrans origMarkupTrans = MarkupTrans::findRecId(ret.OrigRecId);
+            ret.FINOrigRecId = origMarkupTrans.TransRecId;
+            ret.FINOrigTableId = origMarkupTrans.TransTableId;
+
+            ret.update();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINcopy</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    /* This is a copy of the /Classes/Markup/Methods/copy method with 2 differences:
+       - We call our custom FINbuildMarkupTransCopyQuery method to map the charges back to the correct line/order in case of a consolidated invoice 
+         and to only reverse non-rental charges
+       - We return a set of the generated charges */
+    public static Set FINcopy(
+        NoYes _reverseSign,
+        Common _bufferFrom,
+        Common _bufferTo,
+        boolean _copyPostingFields = false,
+        CurrencyCode _currencyCode = '',
+        SourceDocumentLineAccountingStatus _targetAccountingStatus = SourceDocumentLineAccountingStatus::None,
+        boolean _initCalculatedAmount = false
+        )
+    {
+        #ISOCountryRegionCodes
+        boolean countryRegion_RU = SysCountryRegionCode::isLegalEntityInCountryRegion([#isoRU]);
+        Set chargesSet = new Set(Types::Record);
+        boolean mcrCallCenterEnabled = MCROrderParameters::isCallCenterEnabledAndInUse();
+
+        if (_currencyCode == '')
+        {
+            CurrencyCodeMap currencyCodeMap = new DictTable(_bufferTo.TableId).fieldName2Id('CurrencyCode') ? _bufferTo : _bufferFrom;
+            _currencyCode = currencyCodeMap.CurrencyCode;
+        }
+
+        Query query = Markup::FINbuildMarkupTransCopyQuery(_bufferFrom, _bufferTo);
+        QueryRun queryRun = new QueryRun(query);
+        while (queryRun.next())
+        {
+            ttsbegin;
+
+            MarkupTrans oldMarkupTrans = queryRun.get(tableNum(MarkupTrans));
+
+            MarkupTrans newMarkupTrans;
+
+            if (prmisDefault(_targetAccountingStatus))
+            {
+                newMarkupTrans = Markup::copySingleMarkupTrans(_reverseSign, oldMarkupTrans, _currencyCode, _bufferFrom, _bufferTo, _copyPostingFields, _bufferFrom);
+            }
+            else
+            {
+                // <GEERU>
+                if (countryRegion_RU)
+                {
+                    newMarkupTrans = Markup::copySingleMarkupTrans(_reverseSign, oldMarkupTrans, _currencyCode, _bufferFrom, _bufferTo, _copyPostingFields, _bufferFrom, _targetAccountingStatus, false, _initCalculatedAmount);
+                }
+                else
+                {
+                    // </GEERU>
+                    newMarkupTrans = Markup::copySingleMarkupTrans(_reverseSign, oldMarkupTrans, _currencyCode, _bufferFrom, _bufferTo, _copyPostingFields, _bufferFrom, _targetAccountingStatus);
+                    // <GEERU>
+                }
+                // </GEERU>
+            }
+
+            if (SysCountryRegionCode::isLegalEntityInConsolidatedCountryRegion())
+            {
+                // Copy line level tax adjustments for miscellaneous charges for country regions that support line level tax adjustments.
+                TaxWorkRegulation::copy(oldMarkupTrans, newMarkupTrans);
+            }
+
+            if  (TaxSolutionScopeIntegrationUtil::isCompanyEnabled())
+            {
+                if (_bufferFrom.TableId == tableNum(PurchReqLine) || _bufferFrom.TableId == tableNum(PurchRFQLine) || _bufferFrom.TableId == tableNum(SalesQuotationLine))
+                {
+                    TransTaxInformationHelper::copyTransTaxInformation(oldMarkupTrans, newMarkupTrans);
+                }
+            }
+                
+            chargesSet.add(newMarkupTrans);
+            ttscommit;
+        }
+
+        return chargesSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINbuildMarkupTransCopyQuery</Name>
+				<Source><![CDATA[
+    private static Query FINbuildMarkupTransCopyQuery(Common _bufferFrom, Common _bufferTo)
+    {
+        Query query;
+
+        if ((_bufferFrom.TableId == tableNum(CustInvoiceJour) && _bufferTo.TableId == tableNum(SalesTable))
+        ||  (_bufferFrom.TableId == tableNum(CustInvoiceTrans) && _bufferTo.TableId == tableNum(SalesLine)))
+        {
+            query = Markup::buildMarkupTransCopyQuery(_bufferFrom);
+            QueryBuildDataSource markUpTransDataSource = query.dataSourceTable(tableNum(MarkupTrans));
+
+            markUpTransDataSource.addRange(fieldNum(MarkupTrans, FINOrigTableId)).value(queryValue(_bufferTo.TableId));
+            markUpTransDataSource.addRange(fieldNum(MarkupTrans, FINOrigRecId)).value(queryValue(_bufferTo.RecId));
+
+            markUpTransDataSource.addRange(fieldNum(MarkupTrans, FINMarkupAccountType)).value(queryValue(FINMarkupAccountType::None));
+        }
+
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTransAmount</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    public AmountCur FINGetMarkupWorkTransAmount()
+    {
+        return markupWorkTransAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCalcMarkupWorkTransAmount</Name>
+				<Source><![CDATA[
+    public void FINCalcMarkupWorkTransAmount(Common _source, ParmId _parmId)
+    {
+        FINMarkupWorkTrans   markupWorkTrans;
+
+        markupWorkTransAmount = 0;
+
+        while select markupWorkTrans
+            where markupWorkTrans.RefTableId == _source.TableId
+            &&    markupWorkTrans.RefRecId == _source.RecId
+            &&   (!_parmId || markupWorkTrans.ParmId == _parmId)
+        {
+            markupWorkTransAmount += markupWorkTrans.AmountCur;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINparmSkipVarianceCalculation</Name>
+				<Source><![CDATA[
+    public boolean FINparmSkipVarianceCalculation(boolean _skipVarianceCalculation = skipVarianceCalculation)
+    {
+        skipVarianceCalculation = _skipVarianceCalculation;
+        return skipVarianceCalculation;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupAmountFromMarkupCategory</Name>
+				<Source><![CDATA[
+    // Extensibility TODO: Request pending at Microsoft - 426207
+    public static MarkupAmount FINGetMarkupAmountFromMarkupCategory(MarkupTrans             _markupTrans,
+                                                                    RefReturnInvoiceTrans_W _refReturnInvoiceTrans_W,
+                                                                    Qty                     _qty,
+                                                                    AmountCur               _value,
+                                                                    AmountCur               _interCompanyValue,
+                                                                    TransDate               _transDate,
+                                                                    AmountCur               _absoluteValue,
+                                                                    ParmId                  _parmId,
+                                                                    boolean                 _mcrPostingInvoice,
+                                                                    boolean                 _isInterCompanyMarkup)
+    {
+        MarkupAmount ret = Markup::getMarkupAmountFromMarkupCategory(_markupTrans, _refReturnInvoiceTrans_W, _qty, _value, _interCompanyValue, _transDate, _absoluteValue, _parmId, _mcrPostingInvoice, _isInterCompanyMarkup);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>skipMarkupTransCalculation</Name>
+				<Source><![CDATA[
+    // event handler methods
+    // Probably code for event handler is not needed anymore. Left here to be able to resotre code from old environment quickly.
+    /*
+    [PostHandlerFor(classStr(Markup), methodStr(Markup, calc))]
+    public static void calc_post(XppPrePostArgs _args)
+    {
+        Markup      markup = _args.getThis();
+        Common      source = _args.getArg('_source');
+        ParmId      parmId = _args.getArg('_parmId');
+                
+        if (!parmId && markup.getTax_IN() is TaxSales)
+        {
+            TaxSales taxSales = markup.getTax_IN();
+            SalesCalcTax_Sales      salesCalcTaxSales = taxSales.getSalesFormLetter();
+
+            if (salesCalcTaxSales is SalesCalcTax_ParmTrans)
+            {
+                SalesCalcTax_ParmTrans  salesCalcTaxParmTrans = salesCalcTaxSales;
+                parmId = salesCalcTaxParmTrans.getSalesParmTable_RU().ParmId;
+            }
+            markup.FINCalcMarkupWorkTransAmount(source, parmId);
+        }
+        else if (!parmId && markup.getTax_IN() is TaxSalesQuotation)
+        {
+            TaxSalesQuotation taxSalesQuotation = markup.getTax_IN();
+            SalesQuotationCalcTax_Sales salesCalcTaxQuotation = taxSalesQuotation.FINGetSalesQuotationFormLetter();
+
+            if (salesCalcTaxQuotation is SalesQuotationCalcTax_ParmTrans)
+            {
+                SalesQuotationCalcTax_ParmTrans  salesCalcTaxParmTrans = salesCalcTaxQuotation;
+                //parmId = salesCalcTaxParmTrans.getSalesParmTable_RU().ParmId;
+            }
+            markup.FINCalcMarkupWorkTransAmount(source, parmId);
+        }
+        else if (!parmId && markup.getTax_IN() is TaxProj)
+        {
+            TaxProj taxProj = markup.getTax_IN();
+            SalesCalcTax_ProjProposal  salesCalcTaxProjProposal = TaxProj.FINSalesCalcTax();
+            parmId = salesCalcTaxProjProposal.parmProjProposalJour().ProposalId;
+            markup.FINCalcMarkupWorkTransAmount(source, parmId);
+        }
+        if (!parmId && source && source.TableId == tableNum(VendInvoiceInfoLine))
+        {
+            VendInvoiceInfoLine vendInvoiceInfoLine = source;
+            
+            parmId = vendInvoiceInfoLine.ParmId;
+            markup.FINCalcMarkupWorkTransAmount(source, parmId);
+        }
+    }
+
+    [PostHandlerFor(classStr(Markup), staticMethodStr(Markup, copyFromPurchOrder))]
+    public static void copyFromPurchOrder_post(XppPrePostArgs _args)
+    {
+        Markup markup = _args.getThis();
+        PurchLine purchLine = _args.getArg('_bufferFrom') as PurchLine;
+        VendInvoiceInfoLine vendInvoiceInfoLine = _args.getArg('_bufferTo') as VendInvoiceInfoLine;
+        SourceDocumentLineAccountingStatus targetAccountingStatus = _args.getArg('_targetAccountingStatus');
+        
+        if (purchLine && vendInvoiceInfoLine && targetAccountingStatus == SourceDocumentLineAccountingStatus::Draft)
+        {
+            FINMarkupTransGenerator::createVendDraftMarkupTrans(vendInvoiceInfoLine.parmId, purchLine, vendInvoiceInfoLine);
+        }
+    }
+*/
+
+    protected boolean skipMarkupTransCalculation(MarkupTrans _markupTrans)
+    {
+        boolean ret = next skipMarkupTransCalculation(_markupTrans);
+
+        if (!ret && skipVarianceCalculation && _markupTrans.FINMarkupAccountType == FINMarkupAccountType::Variance)
+        {
+            return true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcTrans</Name>
+				<Source><![CDATA[
+    static MarkupAmount calcTrans(MarkupTrans    _markupTrans,
+                                   Qty            _qty,
+                                   AmountCur      _value,
+                                   AmountCur      _interCompanyValue,
+                                   TransDate      _transDate,
+                                   AmountCur      _absoluteValue,
+                                   ParmId         _parmId,
+                                   boolean        _mcrPostingInvoice,
+                                   boolean        _isInterCompanyMarkup )
+    {
+        MarkupAmount ret;
+
+        if (_isInterCompanyMarkup && _markupTrans)
+        {
+            if (_markupTrans.transTableId == tableNum(SalesLine) || _markupTrans.transTableId == tableNum(PurchLine))
+            {
+                Common common = _markupTrans.parentRecord();
+
+                if (common.getFieldValue(literalStr(RORTradeType)) != RORTradeType::SalesPurch)
+                {
+                    _isInterCompanyMarkup = false;
+                }
+            }
+        }
+
+        ret = next calcTrans(_markupTrans, _qty, _value, _interCompanyValue, _transDate, _absoluteValue, _parmId, _mcrPostingInvoice, _isInterCompanyMarkup);
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINparmSkipIntercompanyInvoice</Name>
+				<Source><![CDATA[
+    public boolean FINparmSkipIntercompanyInvoice(boolean _skipIntercompanyInvoice = skipIntercompanyInvoice)
+    {
+        skipIntercompanyInvoice = _skipIntercompanyInvoice;
+        return skipIntercompanyInvoice;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkDiscardLine</Name>
+				<Source><![CDATA[
+    protected boolean checkDiscardLine(MarkupTrans      _markupTrans,
+                                       DocumentStatus   _documentStatus,
+                                       boolean          _searchInvoice,
+                                       InvoiceId        _invoiceId)
+    {
+        boolean ret;
+
+        if (this.FINparmSkipIntercompanyInvoice())
+        {
+            _searchInvoice = false;
+        }
+
+        ret = next checkDiscardLine(_markupTrans, _documentStatus, _searchInvoice, _invoiceId);
+
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORReturnNoteLinesGenerate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RORReturnNoteLinesGenerate extends RunBase
+{
+    RORTmpReturnNoteLine            returnNoteLine;
+
+    RORReturnNoteTableForm          returnNoteTableForm;
+    SalesTableCheckIfUpdateContract checkIfContract;
+    SalesQuantity                   salesQuantity;
+
+    RORVenueCode                    venueCode;
+    ItemId                          itemId;
+    InventLocationId                inventLocationId;
+    InventSiteId                    inventSiteId;
+    TransDateTime                   returnDateTime;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>canCreateLine</Name>
+				<Source><![CDATA[
+    private boolean canCreateLine(SalesTable    _salesTable,
+                                  SalesLine     _salesLine)
+    {
+        boolean                         ret;
+        boolean                         isRentalDirectDelivery;
+        SalesLine                       parentLine;
+        InventTransOriginSalesLine      inventTransOriginSalesLine;
+        BOBRentalTrans                  rentalTrans;
+        SalesTableCanBeUpdatedContract  canBeUpdatedContract;
+        container                       canBeUpdated;
+    
+        if (_salesLine.RORTradeType == RORTradeType::Rental
+        ||  _salesLine.RORTradeType == RORTradeType::SubRental)
+        {
+            select firstonly RecId from inventTransOriginSalesLine
+            where inventTransOriginSalesLine.SalesLineDataAreaId    == _salesLine.dataAreaId
+            &&    inventTransOriginSalesLine.SalesLineInventTransId == _salesLine.InventTransId
+                exists join rentalTrans
+                where rentalTrans.InventTransOrigin == inventTransOriginSalesLine.InventTransOrigin
+                &&    rentalTrans.SubStatus         >= BOBRentalSubStatus::Delivered
+                &&    rentalTrans.SubStatus         <  BOBRentalSubStatus::Returned
+                &&    rentalTrans.FromDateTime      <= returnDateTime
+                &&    rentalTrans.ToDateTime        >= returnDateTime;
+    
+            ret = inventTransOriginSalesLine.RecId;
+        }
+    
+        if (ret)
+        {
+            // Check whether the return not can be posted
+            if (_salesTable.InterCompanyDirectDelivery
+            &&  _salesTable.SalesType == SalesType::RORRental
+            &&  _salesTable.referencePurchTable().interCompanySalesTable())
+            {
+                isRentalDirectDelivery = true;
+            }
+    
+            ret = !isRentalDirectDelivery;
+        }
+    
+        if (ret)
+        {
+            canBeUpdated         = _salesTable.checkIfUpdate(checkIfContract.pack());
+            canBeUpdatedContract = SalesTableCanBeUpdatedContract::create(canBeUpdated);
+            ret                  = canBeUpdatedContract.RORparmCanReturnNoteBeUpdated();
+        }
+    
+        if (ret)
+        {
+            ret = conPeek(salesQuantity.qtySales(_salesLine), 1);
+        }
+    
+        ret = ret && _salesTable.type().RORmayReturnNoteBeUpdated();
+        ret = ret && !_salesLine.isReturnReservationLine();
+        ret = ret && !_salesTable.returnItem();
+        ret = ret &&  _salesLine.type().RORmayReturnNoteBeUpdated();
+        ret = ret && !WPPWorkOrderTable::excludeOrderLine(_salesLine.TableId, _salesLine.RecId, WPPTaskType::Load);
+    
+        if (ret && _salesLine.RORParentLineRecId)
+        {
+            // Find the parent line
+            parentLine = SalesLine::findRecId(_salesLine.RORParentLineRecId);
+    
+            while (ret && parentLine)
+            {
+                // Check whether the parent line is not linked to a work order
+                // and where the task is of type InternalDelivery
+                ret = !WPPWorkOrderTable::excludeOrderLine(parentLine.TableId, parentLine.RecId, WPPTaskType::InternalDelivery);
+    
+                if (ret)
+                {
+                    parentLine = SalesLine::findRecId(parentLine.RORParentLineRecId);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        DialogRunbase   dialog;
+    
+        dialog = Dialog::newFormnameRunbase(formStr(RORTmpReturnNoteTable), this);
+        dialog.caption(RORReturnNoteLinesGenerate::description());
+        dialog = this.dialogInternal(dialog, true);
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generateLines</Name>
+				<Source><![CDATA[
+    public void generateLines()
+    {
+        SalesTable          salesTable;
+        SalesLine           salesLine;
+        InventDim           inventDim;
+        BOBRentalType       rentalType;
+        CustAccount         custAccount;
+        InventSiteId        inventSiteIdPrev;
+        InventLocationId    inventLocationIdPrev;
+        itemId              itemIdPrev;
+        boolean             insertLastRecord;
+    
+        custAccount = returnNoteTableForm.parmCustAccount();
+    
+        while select salesTable
+        order by salesLine.ItemId, inventDim.InventSiteId, inventDim.InventLocationId, salesLine.SalesUnit
+        where salesTable.CustAccount == custAccount
+        &&  (!venueCode || salesTable.RORVenueCode == venueCode)
+            join salesLine
+            where salesLine.SalesId == salesTable.SalesId
+            &&    (!itemId || salesLine.ItemId == itemId)
+            &&   !salesLine.Blocked
+                join inventSiteId, inventLocationId from inventDim
+                where inventDim.inventDimId == salesLine.InventDimId
+                &&   (!inventLocationId || inventDim.InventLocationId == inventLocationId)
+                &&   (!inventSiteId     || inventDim.InventSiteId     == inventSiteId)
+                    notExists join rentalType
+                    where rentalType.RentalTypeId == salesLine.BOBRentalTypeIdRequested
+                    &&    rentalType.Classification == BOBRentalTypeClassification::Serialized
+        {
+            // Do not insert the first record
+            if (returnNoteLine.ItemId
+            &&  itemIdPrev
+            &&  (salesLine.ItemId           != itemIdPrev
+            ||   inventDim.InventSiteId     != inventSiteIdPrev
+            ||   inventDim.inventLocationId != inventLocationIdPrev))
+            {
+                returnNoteLine.insert();
+                returnNoteLine.clear();
+            }
+    
+            if (this.canCreateLine(salesTable, salesLine))
+            {
+                returnNoteLine.VenueCode           = venueCode;
+                returnNoteLine.ItemId              = salesLine.ItemId;
+                returnNoteLine.InventSiteId        = inventDim.InventSiteId;
+                returnNoteLine.InventLocationId    = inventDim.InventLocationId;
+                returnNoteLine.AvailableReturnQty += salesLine.RORRemainSalesReturn;
+                returnNoteLine.SalesLineRecId      = conIns(returnNoteLine.SalesLineRecId, conLen(returnNoteLine.SalesLineRecId) + 1, salesLine.RecId);
+    
+                itemIdPrev           = salesLine.ItemId;
+                inventSiteIdPrev     = inventDim.InventSiteId;
+                inventLocationIdPrev = inventDim.InventLocationId;
+    
+                // When the last values are set in the table then
+                // the record is not inserted yet, this is done after the last loop
+                insertLastRecord = true;
+            }
+        }
+    
+        if (insertLastRecord
+        &&  returnNoteLine.ItemId)
+        {
+            returnNoteLine.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+    
+        // Global, so it only have to be initialized once
+        checkIfContract = SalesTableCheckIfUpdateContract::construct();
+        checkIfContract.RORparmCheckReturnNote(true);
+    
+        salesQuantity = SalesQuantity::construct(DocumentStatus::RORReturnNote);
+        salesQuantity.RORparmRentalSubStatus(BOBRentalSubStatus::Returned);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmReturnNoteTableForm</Name>
+				<Source><![CDATA[
+    public RORReturnNoteTableForm parmReturnNoteTableForm(RORReturnNoteTableForm _returnNoteTableForm = returnNoteTableForm)
+    {
+        returnNoteTableForm = _returnNoteTableForm;
+    
+        return returnNoteTableForm;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        returnDateTime = returnNoteTableForm.parmReturnDateTime();
+    
+        delete_from returnNoteLine;
+    
+        this.generateLines();
+    
+        returnNoteTableForm.parmReturnNoteLine(returnNoteLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static server RORReturnNoteLinesGenerate construct()
+    {
+        return new RORReturnNoteLinesGenerate();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    client server static ClassDescription description()
+    {
+        return "@DNR7223";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        RORReturnNoteTableForm      returnNoteTableForm;
+        RORReturnNoteLinesGenerate  returnNoteLinesGenerate;
+    
+        if (!_args.caller()
+        ||  classIdGet(_args.caller()) != classNum(RORReturnNoteTableForm))
+        {
+            throw error(Error::missingParameter(null));
+        }
+    
+        returnNoteTableForm = _args.caller();
+    
+        returnNoteLinesGenerate = RORReturnNoteLinesGenerate::construct();
+        returnNoteLinesGenerate.parmReturnNoteTableForm(returnNoteTableForm);
+    
+        if (returnNoteLinesGenerate.prompt())
+        {
+            returnNoteLinesGenerate.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

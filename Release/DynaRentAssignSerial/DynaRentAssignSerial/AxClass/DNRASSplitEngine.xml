@@ -1,0 +1,403 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRASSplitEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class DNRASSplitEngine
+{
+    RORRentalLine callerRentalLine;
+    Map splitLinesMap;
+    Map qtyMap;
+    Counter numOfLinesToSplit;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static DNRASSplitEngine construct(RORRentalLine _callerRentalLine, Counter _numOfLinesToSplit)
+    {
+        DNRASSplitEngine ret = DNRASSplitEngine::constructNoThrow(_callerRentalLine);
+
+        if (!ret)
+        {
+            throw error(strFmt("@SYS31187", tableId2name(_callerRentalLine.TableId)));
+        }
+
+        ret.parmCallerRentalLine(_callerRentalLine);
+        ret.parmNumOfLinesToSplit(_numOfLinesToSplit);
+        ret.initializeMaps();
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>constructNoThrow</Name>
+				<Source><![CDATA[
+    public static DNRASSplitEngine constructNoThrow(RORRentalLine _callerRentalLine)
+    {
+        DNRASSplitEngine ret;
+
+        switch (_callerRentalLine.TableId)
+        {
+            case tableNum(SalesLine):
+                ret = new DNRASSplitEngine_Sales();
+                break;
+
+            case tableNum(SalesQuotationLine):
+                ret = new DNRASSplitEngine_Quotation();
+                break;
+
+            case tableNum(PurchLine):
+                ret = new DNRASSplitEngine_Purch();
+                break;
+
+            case tableNum(InventTransferLine):
+                ret = new DNRASSplitEngine_Transfer();
+                break;
+
+            default:
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if (this.validate())
+        {
+            ttsbegin;
+
+            using (DNRASUpdateRelatedLinesOnQtyChangeDisposableContext context = new DNRASUpdateRelatedLinesOnQtyChangeDisposableContext())
+            {
+                context.parmMustValidateParentLineQty(false);
+                context.parmMustUpdateChildLinesQty(false);
+
+                List splitLines = this.createSplitLines(callerRentalLine, 1, numOfLinesToSplit);
+
+                // Check if the expected number of split lines have been created (since the lines are created asynchronously).
+                if (splitLines.elements() != numOfLinesToSplit)
+                {
+                    throw error(strFmt("@DNR:ErrorOccurredWhileSplittingLine", callerRentalLine.ItemId));
+                }
+
+                splitLinesMap.insert(callerRentalLine.RecId, splitLines);
+
+                this.splitChildLines();
+                this.restoreParentRecIdReferences();
+            }
+
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>splitChildLines</Name>
+				<Source><![CDATA[
+    public void splitChildLines()
+    {
+        Set childLines = this.getChildLines(callerRentalLine);
+        SetEnumerator childLinesEnumerator = childLines.getEnumerator();
+
+        while (childLinesEnumerator.moveNext())
+        {
+            RORRentalLine childLine = childLinesEnumerator.current();
+                    
+            this.setActiveRentalLine(childLine);
+            this.splitChildLine(childLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>restoreParentRecIdReferences</Name>
+				<Source><![CDATA[
+    protected void restoreParentRecIdReferences()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateParentReference</Name>
+				<Source><![CDATA[
+    protected void updateParentReference(InventTransId _inventTransId, InventTransId _inventTransIdParent)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>splitChildLine</Name>
+				<Source><![CDATA[
+    private void splitChildLine(RORRentalLine _childLine)
+    {
+        ttsbegin;
+
+        Qty splitQty = 1;
+
+        if (_childLine.TradeType == RORTradeType::SalesPurch || _childLine.inventTable().BOBIsBulkRentalItem())
+        {
+            // There should always exist a key in the map 'qtyMap' that is equal to 'parentLine.RecId'. If, for whatever reason, that is
+            // not the case, then assign 1 (one) to the variable 'parentQty'. This will result in the variable 'numOfLinesToSplit' being
+            // set to 0 (zero).
+            Qty parentQty = qtyMap.exists(_childLine.ParentLineRecId) ? qtyMap.lookup(_childLine.ParentLineRecId) : 1;
+            splitQty = _childLine.RentQty / parentQty;
+        }
+
+        List splitLines = this.createSplitLines(_childLine, splitQty, numOfLinesToSplit);
+        List splitLinesParent = splitLinesMap.lookup(_childLine.ParentLineRecId);
+
+        // Check if the expected number of split child lines have been created (since the lines are created asynchronously).
+        // The number of split child lines should be equal to the number of split parent lines.
+        if (splitLines.elements() != numOfLinesToSplit 
+        ||  splitLines.elements() != splitLinesParent.elements())
+        {
+            throw error(strFmt("@DNR:ErrorOccurredWhileSplittingLine", _childLine.ItemId));
+        }
+
+        splitLinesMap.insert(_childLine.RecId, splitLines);
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getChildLines</Name>
+				<Source><![CDATA[
+    protected Set getChildLines(RORRentalLine _parentLine)
+    {
+        Set ret = new Set(Types::Record);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSplitLines</Name>
+				<Source><![CDATA[
+    private List createSplitLines(RORRentalLine _rentalLine, Qty _splitQty, Counter _numOfLinesToSplit)
+    {
+        ttsbegin;
+
+        // Purchase lines cannot be split asynchronously because an update conflict might arise when archiving the purchase table version (during the insert of a new purchase line)
+        List ret = _rentalLine.TableId == tableNum(PurchLine) ? 
+                   this.createSplitLinesSync(_rentalLine, _splitQty, _numOfLinesToSplit):
+                   this.createSplitLinesAsync(_rentalLine, _splitQty, _numOfLinesToSplit);
+
+        this.updateRentalLineOrig(_rentalLine.RentQty - (_numOfLinesToSplit * _splitQty));
+
+        ttscommit;
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSplitLinesSync</Name>
+				<Source><![CDATA[
+    private List createSplitLinesSync(RORRentalLine _rentalLine, Qty _splitQty, Counter _numOfLinesToSplit)
+    {
+        ttsbegin;
+
+        List ret = new List(Types::String);
+
+        for (Counter splitLineCounter = 1; splitLineCounter <= _numOfLinesToSplit; splitLineCounter++)
+        {
+            RORRentalLine splitLine = this.createSplitRentalLine(_splitQty);
+            ret.addEnd(splitLine.InventTransId);
+        }
+
+        ttscommit;
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSplitLinesAsync</Name>
+				<Source><![CDATA[
+    private List createSplitLinesAsync(RORRentalLine _rentalLine, Qty _splitQty, Counter _numOfLinesToSplit)
+    {
+        ttsbegin;
+
+        List ret = new List(Types::String);
+        System.Collections.Generic.List<System.Threading.Tasks.Task> tasks = new System.Collections.Generic.List<System.Threading.Tasks.Task>();
+
+        ClassId splitClassId = this.getSplitEngineClassId();
+        MethodName splitMethod = this.getSplitMethod();
+
+        for (Counter splitLineCounter = 1; splitLineCounter <= _numOfLinesToSplit; splitLineCounter++)
+        {
+            container splitParameters = this.getSplitParameters(_rentalLine, _splitQty, splitLineCounter);
+            var task = runAsync(splitClassId, splitMethod, splitParameters);
+
+            tasks.add(task);
+        }
+
+        System.Threading.Tasks.Task[] allTasks = tasks.ToArray();
+        System.Threading.Tasks.Task::WaitAll(allTasks);
+
+        for (Counter taskNum = 0; taskNum < allTasks.Length; taskNum++)
+        {
+            InventTransId splitLineInventTransId = conPeek(AsyncTaskResult::getAsyncTaskResult(allTasks.GetValue(taskNum)).getResult(), 1);
+            ret.addEnd(splitLineInventTransId);
+        }
+
+        ttscommit;
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine parmCallerRentalLine(RORRentalLine _callerRentalLine = callerRentalLine)
+    {
+        callerRentalLine = _callerRentalLine;
+        this.setActiveRentalLine(callerRentalLine);
+
+        return callerRentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmNumOfLinesToSplit</Name>
+				<Source><![CDATA[
+    public Counter parmNumOfLinesToSplit(Counter _numOfLinesToSplit)
+    {
+        numOfLinesToSplit = _numOfLinesToSplit;
+        return numOfLinesToSplit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initializeMaps</Name>
+				<Source><![CDATA[
+    private void initializeMaps()
+    {
+        splitLinesMap = new Map(Types::Int64, Types::Class);
+        qtyMap = new Map(Types::Int64, Types::Real);
+
+        qtyMap.insert(callerRentalLine.RecId, callerRentalLine.RentQty);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitEngineClassId</Name>
+				<Source><![CDATA[
+    protected ClassId getSplitEngineClassId()
+    {
+        return 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitMethod</Name>
+				<Source><![CDATA[
+    protected MethodName getSplitMethod()
+    {
+        return '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitParameters</Name>
+				<Source><![CDATA[
+    protected container getSplitParameters(RORRentalLine _rentalLine, Qty _splitQty, Counter _splitLineCounter)
+    {
+        return conNull();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSplitLinesMap</Name>
+				<Source><![CDATA[
+    public Map parmSplitLinesMap(Map _splitLinesMap = splitLinesMap)
+    {
+        splitLinesMap = _splitLinesMap;
+        return splitLinesMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>confirmSplitLines</Name>
+				<Source><![CDATA[
+    public void confirmSplitLines()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSplitRentalLine</Name>
+				<Source><![CDATA[
+    abstract public RORRentalLine createSplitRentalLine(Qty _splitQty, LineNumber _lineNum = 0, SalesLineCreationSequenceNumber _lineCreationSequenceNumber = 0, RORLineParent _parentLineRecId = 0)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setActiveRentalLine</Name>
+				<Source><![CDATA[
+    abstract protected void setActiveRentalLine(RORRentalLine _rentalLine)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSplitRentalLine</Name>
+				<Source><![CDATA[
+    abstract public RORRentalLine initSplitRentalLine(Qty _splitQty)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    abstract protected boolean validate()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalLineOrig</Name>
+				<Source><![CDATA[
+    abstract public void updateRentalLineOrig(Qty _splitQty)
+    {
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

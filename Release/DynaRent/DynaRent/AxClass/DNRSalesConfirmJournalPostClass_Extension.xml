@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesConfirmJournalPostClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesConfirmJournalPost))]
+public final class DNRSalesConfirmJournalPostClass_Extension
+{
+    private RORParameters rentalParameters;
+    private InventTransOriginSalesLine originSalesLine;
+    private SalesParmLine salesParmLineLocal;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initRelatedLineTables</Name>
+				<Source><![CDATA[
+    protected void initRelatedLineTables()
+    {
+        next initRelatedLineTables();
+
+        if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            select firstonly originSalesLine
+            where originSalesLine.SalesLineDataAreaId == salesLine.dataAreaId
+            &&    originSalesLine.SalesLineInventTransId == salesLine.InventTransId
+                join salesParmLineLocal
+                where salesParmLineLocal.ParmId == salesParmTable.ParmId
+                &&    salesParmLineLocal.OrigSalesId == salesLine.SalesId
+                &&    salesParmLineLocal.InventTransId == originSalesLine.SalesLineInventTransId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkBeforePostingLine</Name>
+				<Source><![CDATA[
+    protected void checkBeforePostingLine()
+    {
+        next checkBeforePostingLine();
+
+        if (!rentalParameters)
+        {
+            rentalParameters = RORParameters::find();
+        }
+    
+        if(salesLine.RemainInventPhysical // no need to validate in case everything was already delivered
+        && salesLine.RORTradeType != RORTradeType::SalesPurch 
+        && rentalParameters.SubRentalWarehouse != salesLine.inventDim().InventLocationId)
+        {
+            BOBRentalTrans rentalTrans;
+
+            select sum(Qty) from rentalTrans
+            where rentalTrans.SubStatus == BOBRentalSubStatus::Confirmed
+            &&    rentalTrans.InventTransOrigin == originSalesLine.InventTransOrigin;
+    
+            Qty qtyConfirmed = -rentalTrans.Qty;
+            Qty qtyNotConfirmedYet = (qtyConfirmed ? max(0, salesLine.RemainInventPhysical - qtyConfirmed) : salesLine.RemainInventPhysical);
+            BOBRentalInventOnHand onHand = new BOBRentalInventOnHand();
+    
+            if(!onHand.validateStatusUpdate(salesLine, min(salesParmLineLocal.InventNow, qtyNotConfirmedYet), BOBRentalSubStatus::Confirmed))
+            {
+                throw error(strFmt("@DNR7097", salesParmLineLocal.DeliverNow, salesLine.ItemId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournalPost</Name>
+				<Source><![CDATA[
+    public void postJournalPost()
+    {
+        next postJournalPost();
+    
+        //Below code is moved to async mode for better performance
+        runAsync(classNum(DNRSalesConfirmJournalPostClass_Extension),
+                    staticMethodStr(DNRSalesConfirmJournalPostClass_Extension, workOrderSynchronizerRunAsync),
+                    buf2Con(salesTable));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>workOrderSynchronizerRunAsync</Name>
+				<Source><![CDATA[
+    public static void workOrderSynchronizerRunAsync(container _params, System.Threading.CancellationToken _cancellationToken)
+    {
+        SalesTable hostRecord = con2Buf(_params);
+        WPPWorkOrderSynchronizer workOrderSynchronizer = WPPWorkOrderSynchronizer::newSalesTable(hostRecord);
+        workOrderSynchronizer.run();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateJournalLine</Name>
+				<Source><![CDATA[
+    protected void updateJournalLine()
+    {
+        next updateJournalLine();
+
+        SalesParmTable  salesParmTable = this.parmParmTable() as SalesParmTable;
+                
+        if (salesLine.BOBSellFixedAsset
+        && !salesLine.BOBConversionJourId
+        &&  SalesLine::BOBEditAssetId(salesLine, false, '') != ''
+        &&  salesLine.BOBRentalTypeId())
+        {
+            BOBConversionJournalEngine::syncFromSalesLine(salesLine, salesParmTable.Transdate);
+            //The method call above updates the salesLine and we shall reread it to avoid any Update Conflict in method updateSourceLine
+            salesLine.reRead();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSalesTable</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void updateSalesTable()
+    {
+        if (salesTable.RORIsModified)
+        {
+            salesTable.RORIsModified = NoYes::No;
+            salesTable.doUpdate();  // doUpdate for performance reasons 
+            salesTable.type().RORupdateAmendmentLog(custConfirmJour.ConfirmDocNum);
+        }
+
+        SalesLine salesLineLocal;
+            
+        //For better performance skip calling the update method
+        salesLineLocal.skipEvents(true); 
+        salesLineLocal.skipDataMethods(true);
+            
+        update_recordSet salesLineLocal
+        setting RORIsModified = NoYes::No
+        where salesLineLocal.SalesId == salesTable.SalesId;
+
+        next updateSalesTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Cannot be refactored without altering functionality of method")]
+    protected void updateSourceLine()
+    {
+        next updateSourceLine();
+    
+        if(salesLine.RORIsModified || salesLine.BOBMustReConfirm)
+        {
+            salesLine.selectForUpdate(true);
+    
+            if(salesLine.BOBMustReConfirm)
+            {
+                salesLine.BOBMustReConfirm = NoYes::No;
+            }
+    
+            SalesLineType salesLineType = salesLine.type();
+    
+            if(salesLine.RORIsModified)
+            {
+                salesLine.RORIsModified = NoYes::No;
+
+                if (salesLineType is SalesLineType_RORRental)
+                {
+                    SalesLineType_RORRental salesLineType_RORRental = salesLineType as SalesLineType_RORRental;
+                    salesLineType_RORRental.RORupdateAmendmentLog(custConfirmJour.ConfirmDocNum);
+                }
+                else
+                {
+                    salesLineType.RORupdateAmendmentLog(custConfirmJour.ConfirmDocNum);
+                }
+            }
+    
+            salesLine.doUpdate(); //Skip the update method for better performance 
+        }
+
+        if (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental)
+        {
+            InventTrans inventTrans;
+        
+            while select inventTrans
+            where inventTrans.InventTransOrigin == originSalesLine.InventTransOrigin
+            &&    inventTrans.StatusIssue == StatusIssue::OnOrder
+            {
+                salesLine.selectForUpdate(true);
+                InventMovement inventMovement = InventMovement::construct(salesLine);
+                BOBRentalTransManager transManager = BOBRentalTransManager::newInventMovement(inventMovement, inventTrans, BOBRentalSubStatus::Confirmed);
+                transManager.parmDoUpdateBuffer(true);
+                transManager.updateSubStatus(inventTrans.Qty);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,783 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRAppEmplJourTransPost</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class DNRAppEmplJourTransPost
+{
+    Map processingRecIdsSetPerCompany;
+    DNRAppEmplJourTrans appWorkOrderJournalTrans;
+    ProjParameters projParameters;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static DNRAppEmplJourTransPost construct(Map _processingRecIdsSetPerCompany)
+    {
+        DNRAppEmplJourTransPost workOrderLineEmplAppTransPost = new DNRAppEmplJourTransPost();
+        workOrderLineEmplAppTransPost.setProcessingRecIdsSetPerCompany(_processingRecIdsSetPerCompany);
+
+        return workOrderLineEmplAppTransPost;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setProcessingRecIdsSetPerCompany</Name>
+				<Source><![CDATA[
+    private void setProcessingRecIdsSetPerCompany(Map _processingRecIdsSetPerCompany)
+    {
+        processingRecIdsSetPerCompany = _processingRecIdsSetPerCompany;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        MapEnumerator processingRecIdsSetPerCompanyEnumerator = processingRecIdsSetPerCompany.getEnumerator();
+
+        while (processingRecIdsSetPerCompanyEnumerator.moveNext())
+        {
+            DataAreaId companyId = processingRecIdsSetPerCompanyEnumerator.currentKey();
+
+            changecompany (companyId)
+            {
+                Set processingRecIdsSet = processingRecIdsSetPerCompanyEnumerator.currentValue();
+                SetEnumerator processingRecIdsSetEnumerator = processingRecIdsSet.getEnumerator();
+                projParameters = ProjParameters::find();
+
+                while (processingRecIdsSetEnumerator.moveNext())
+                {
+                    appWorkOrderJournalTrans = DNRAppEmplJourTrans::findRecId(processingRecIdsSetEnumerator.current(), true);
+                    int curInfoLogLineNum = infologLine();
+
+                    try
+                    {
+                        ttsbegin;
+
+                        this.processTransaction();
+                        appWorkOrderJournalTrans.TransactionProcessingStatus = DNRAppEmplJourTransactionProcessingStatus::Posted;
+                        appWorkOrderJournalTrans.update();
+
+                        ttscommit;
+                    }
+                    catch
+                    {
+                        ttsbegin;
+
+                        int newInfoLogLineNumStart;
+                        int newInfoLogLineNumEnd = infologLine();
+
+                        for (newInfoLogLineNumStart = curInfoLogLineNum + 1; newInfoLogLineNumStart <= newInfoLogLineNumEnd; newInfoLogLineNumStart++)
+                        {
+                            ErrorMsg errorMsg = infolog.text(newInfoLogLineNumStart);
+                            DNRAppEmplJourTransErrorLog::createLog(tableNum(DNRAppEmplJourTrans), appWorkOrderJournalTrans.RecId, errorMsg);
+                        }
+
+                        appWorkOrderJournalTrans.TransactionProcessingStatus = DNRAppEmplJourTransactionProcessingStatus::Error;
+                        appWorkOrderJournalTrans.update();
+
+                        ttscommit;
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processTransaction</Name>
+				<Source><![CDATA[
+    protected void processTransaction()
+    {
+        if (this.validateProjectExists())
+        {
+            switch (appWorkOrderJournalTrans.RegistrationType)
+            {
+                case DNRAppEmplJourRegistrationType::Item:
+                    this.processItemJournalRegistration();
+                    break;
+
+                case DNRAppEmplJourRegistrationType::Fee:
+                    this.processFeeJournalRegistration();
+                    break;
+
+                case DNRAppEmplJourRegistrationType::Hour:
+                    this.processHourJournalRegistration();
+                    break;
+
+                case DNRAppEmplJourRegistrationType::ItemReq:
+                    this.processItemReqRegistration();
+                    break;
+
+                default:
+                    break; // do nothing
+            }
+        }
+        else
+        {
+            throw error(strFmt("@DNR:ProjectIdXNotFound", appWorkOrderJournalTrans.ProjectId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateProjectExists</Name>
+				<Source><![CDATA[
+    protected boolean validateProjectExists()
+    {
+        ProjTable projTable = projTable::find(appWorkOrderJournalTrans.ProjectId);
+
+        return (projTable.RecId != 0);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processItemJournalRegistration</Name>
+				<Source><![CDATA[
+    protected void processItemJournalRegistration()
+    {
+        InventJournalTable      journalTable;
+        InventJournalTrans      journalTrans, journalTransSelect;
+        InventJournalTableData  journalTableData = JournalTableData::newTable(journalTable);
+        InventJournalTransData  journalTransData = journalTableData.journalStatic().newJournalTransData(journalTrans, journalTableData);
+
+        select firstonly journalTable
+        where journalTable.WPPProjId == appWorkOrderJournalTrans.ProjectId
+        &&    journalTable.JournalType == InventJournalType::project
+        &&    !journalTable.Posted;
+
+        if (!journalTable)
+        {
+            this.initItemJournalTable(journalTable, journalTableData.nextJournalId());
+
+            if (journalTable.validateWrite())
+            {
+                journalTable.insert();
+            }
+            else 
+            {
+                throw error("@DNR:EmplAppItemJourHeaderCreateError");
+            }
+        }
+
+        // Init JournalTrans
+        journalTableData.initFromJournalName(journalTableData.journalStatic().findJournalName(journalTable.JournalNameId));
+
+        select maxof(LineNum), count(RecId) from journalTransSelect
+        order by LineNum desc
+        where journalTransSelect.JournalId == journalTable.JournalId;
+
+        this.initItemJournalTrans(journalTrans, journalTransSelect.LineNum + 1, journalTable.VoucherNumberSequenceTable, journalTransData);
+        
+        if (journalTrans.validateWrite())
+        {
+            journalTrans.insert();
+        }
+        else 
+        {
+            throw error("@DNR:EmplAppItemJourLineCreateError");
+        }
+        
+        this.updateInventJournalTotalLines(journalTable.JournalId, journalTransSelect.RecId+1, journalTransSelect.LineNum+1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventJournalTotalLines</Name>
+				<Source><![CDATA[
+    private void updateInventJournalTotalLines(InventJournalId _journalId, Qty _numberOfLines, LineNum _lineNum)
+    {
+        InventJournalTable journalTableUpd;
+
+        update_recordset journalTableUpd
+        setting NumOfLines = _numberOfLines
+        where journalTableUpd.JournalId == _journalId;
+        
+        appWorkOrderJournalTrans.JournalId = _journalId;
+        appWorkOrderJournalTrans.ProjectJournalLineNumber = _lineNum;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateProjectJournalTotalLines</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void updateProjectJournalTotalLines(ProjJournalId _journalId, Qty _numberOfLines, LineNum _lineNumber)
+    {
+        ProjJournalTable journalTableUpd;
+
+        update_recordset journalTableUpd
+        setting NumOfLines = _numberOfLines
+        where journalTableUpd.JournalId == _journalId;
+
+        appWorkOrderJournalTrans.JournalId = _journalId;
+        appWorkOrderJournalTrans.ProjectJournalLineNumber = _lineNumber;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initItemJournalTable</Name>
+				<Source><![CDATA[
+    protected void initItemJournalTable(InventJournalTable _journalTable, JournalId _newJournalId)
+    {
+        InventJournalName inventJournalName = InventJournalName::find(projParameters.InventJournalNameId);
+    
+        if (!inventJournalName)
+        {
+            throw error("@DNR6671");
+        }
+
+        _journalTable.clear();
+        _journalTable.initValue();
+        _journalTable.initFromInventJournalName(inventJournalName);
+        _journalTable.JournalId = _newJournalId;
+        _journalTable.WPPProjId = appWorkOrderJournalTrans.ProjectId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initItemJournalTrans</Name>
+				<Source><![CDATA[
+    protected void initItemJournalTrans(InventJournalTrans _journalTrans, LineNum _newLineNum, InventJournalVoucherNumberSeq _voucherNumberSequenceTable, InventJournalTransData _journalTransData)
+    {
+        _journalTrans.clear();
+        _journalTrans.initValue();
+            
+        _journalTrans.LineNum = _newLineNum;
+        NumberSeq numberSeq = NumberSeq::newGetVoucherFromId(_voucherNumberSequenceTable, false);
+        _journalTrans.Voucher = numberSeq.voucher();
+        
+        _journalTransData.initFromJournalTable();
+        
+        _journalTrans.ProjCategoryId = projParameters.ItemCategory;
+        _journalTrans.ProjId = appWorkOrderjournalTrans.ProjectId;
+        _journalTrans.initFromProjTable(ProjTable::find(appWorkOrderjournalTrans.ProjectId));
+        _journalTrans.TransDate = appWorkOrderjournalTrans.TransDate;
+        
+        inventDim inventDim;
+        inventDim.InventSiteId = appWorkOrderjournalTrans.SiteId;
+        inventDim.InventLocationId = appWorkOrderjournalTrans.WarehouseId;
+        inventDim.inventSerialId = appWorkOrderjournalTrans.ItemSerialNumber;
+        inventDim = InventDim::findOrCreate(inventDim);
+        _journalTrans.InventDimId = inventDim.inventDimId;
+
+        _journalTrans.Qty = appWorkOrderjournalTrans.Qty;
+        _journalTrans.ItemId = appWorkOrderjournalTrans.ItemId;
+
+        if (!_journalTrans.ProjSalesCurrencyId)
+        {
+            _journalTrans.ProjSalesCurrencyId = appWorkOrderjournalTrans.CurrencyCode;
+        }
+
+        WPPResourceTable resourceTable;
+        HcmWorker        worker;
+        
+        select firstonly RecId from worker
+            join TableId from resourceTable
+            where resourceTable.ResourceId == appWorkOrderJournalTrans.GeneratedBy
+            &&    resourceTable.ResourceCategory == WPPResourceCategory::HumanResource
+            &&    resourceTable.RelationAccount == worker.PersonnelNumber;
+
+        _journalTrans.Worker = worker.RecId;
+
+        InventMov_Journal movement = _journalTrans.inventMovement();
+        movement.parmQtyModified(true);
+        movement.journalSetItemId(inventDim);
+
+        _journalTrans.InventTransId = NumberSeq::newGetNum(InventParameters::numRefInventTransId()).num();
+
+        if (!_journalTrans.CostAmount)
+        {
+            InventTableModule inventTableModule = InventTableModule::find(_journalTrans.ItemId, ModuleInventPurchSales::Purch);
+            InventPriceMap inventPriceMap  = _journalTrans.inventTable().inventCostPriceMap('', null, inventTableModule, _journalTrans.TransDate);
+
+            _journalTrans.CostPrice  = inventPriceMap.price();
+            _journalTrans.PriceUnit  = inventPriceMap.priceUnit();
+            _journalTrans.CostMarkup = inventPriceMap.markup();
+            _journalTrans.ProjUnitId = inventTableModule.UnitId;
+            _journalTrans.CostAmount = _journalTrans.Qty * _journalTrans.CostPrice;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findOrCreateProjJournal</Name>
+				<Source><![CDATA[
+    private ProjJournalTable findOrCreateProjJournal(ProjId _projId, ProjJournalType _projJournalType, ProjCategoryId _categoryId, ProjJournalTableData _journalTableData)
+    {
+        ProjJournalTable journalTable;
+
+        select firstonly journalTable
+        where journalTable.ProjId == _projId
+        &&    journalTable.JournalType == _projJournalType
+        &&    journalTable.CategoryId == _categoryId
+        &&    !journalTable.Posted;
+        
+        if (!journalTable)
+        {
+            switch (_projJournalType)
+            {
+                case ProjJournalType::Revenue :
+                    this.initFeeJournalTable(journalTable, _journalTableData.nextJournalId());
+                    break;
+
+                case ProjJournalType::Hour :
+                    this.initHourJournalTable(journalTable, _journalTableData.nextJournalId());
+            }
+
+            if (journalTable.validateWrite())
+            {
+                journalTable.insert();
+
+                this.addWorkOrderLineProjJournalLink(journalTable, appWorkOrderJournalTrans.WorkOrderId, appWorkOrderJournalTrans.WorkOrderLineNumber);
+            }
+            else
+            {
+                throw error("@DNR:EmplAppProjJourHeaderCreateError");
+            }
+        }
+
+        return journalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addWorkOrderLineProjJournalLink</Name>
+				<Source><![CDATA[
+    protected void addWorkOrderLineProjJournalLink(ProjJournalTable _journalTable, WPPWorkOrderId _workOrderId, Line _workOrderLineNumber)
+    {
+        WPPWorkOrderLine workOrderLine = WPPWorkOrderLine::find(_workOrderId, _workOrderLineNumber);
+        WPPWorkOrderLineProjJournalLink workOrderLineProjJournalLink = WPPWorkOrderLineProjJournalLink::find(workOrderLine.RecId, _journalTable.JournalId);
+
+        if (!workOrderLineProjJournalLink.RecId)
+        {
+            workOrderLineProjJournalLink.clear();
+            workOrderLineProjJournalLink.initValue();
+
+            workOrderLineProjJournalLink.initFromProjJournalTable(_journalTable);
+            workOrderLineProjJournalLink.initFromWorkOrderLine(workOrderLine);
+
+            workOrderLineProjJournalLink.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processFeeJournalRegistration</Name>
+				<Source><![CDATA[
+    protected void processFeeJournalRegistration()
+    {
+        ProjJournalTable journalTable;
+        ProjJournalTrans journalTrans, journalTransSelect;
+        ProjJournalTableData journalTableData = JournalTableData::newTable(journalTable);
+        ProjJournalTransData journalTransData = journalTableData.journalStatic().newJournalTransData(journalTrans, journalTableData);
+
+        journalTable = this.findOrCreateProjJournal(appWorkOrderJournalTrans.ProjectId, ProjJournalType::Revenue, ProjParameters.RevenueCategory, journalTableData);
+        journalTableData.journalTable(journalTable);
+
+        select maxof(LineNum), count(RecId) from journalTransSelect
+        where journalTransSelect.JournalId == journalTable.JournalId;
+
+        this.initFeeJournalTrans(journalTrans, journalTransSelect.LineNum + 1, journalTable, journalTransData, journalTableData);
+
+        if (journalTrans.validateWrite())
+        {
+            journalTrans.insert();
+        }
+        else
+        {
+            throw error("@DNR:EmplAppProjJourLineCreateError");
+        }
+
+        this.updateProjectJournalTotalLines(journalTable.JournalId, journalTransSelect.RecId+1, journalTransSelect.LineNum+1);
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFeeJournalTable</Name>
+				<Source><![CDATA[
+    protected void initFeeJournalTable(ProjJournalTable _journalTable, JournalId _newJournalId)
+    {
+        _journalTable.clear();
+        _journalTable.JournalId = _newJournalId;
+        _journalTable.JournalType = ProjJournalType::Revenue;
+        _journalTable.JournalNameId = projParameters.RevenueJournalNameId;
+        _journalTable.CategoryId = projParameters.RevenueCategory;
+        _journalTable.ProjId = appWorkOrderJournalTrans.ProjectId;
+        _journalTable.initFromProjJournalName(ProjJournalName::find(_journalTable.JournalNameId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFeeJournalTrans</Name>
+				<Source><![CDATA[
+    protected void initFeeJournalTrans(ProjJournalTrans _journalTrans, LineNum _newLineNum, ProjJournalTable _journalTable, ProjJournalTransData _journalTransData, ProjJournalTableData _journalTableData)
+    {
+        ProjTable projTable = ProjTable::find(appWorkOrderJournalTrans.ProjectId);
+
+        _journalTrans.clear();
+        _journalTransData.initFromJournalTable();
+
+        _journalTrans.LineNum = _newLineNum;
+        _journalTrans.ProjId = appWorkOrderJournalTrans.ProjectId;
+        _journalTrans.DefaultDimension = projTable.DefaultDimension;
+        _journalTrans.TaxGroupId = ProjParameters::taxGroupInvoice(projTable.ProjId);
+        NumberSeq numberSeq = NumberSeq::newGetVoucherFromId(_journalTable.VoucherNumberSequenceTable, false);
+        _journalTrans.Voucher = numberSeq.voucher();
+
+        // Init JournalTrans
+        _journalTableData.initFromJournalName(_journalTableData.journalStatic().findJournalName(_journalTable.JournalNameId));
+        
+        ProjInvoiceTable projInvoiceTable = projTable.projInvoice();
+        _journalTrans.setTransDate();
+        _journalTrans.TransDate = appWorkOrderJournalTrans.TransDate;
+        _journalTrans.ProjTransDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()); 
+        _journalTrans.Txt = appWorkOrderJournalTrans.Description;
+        _journalTrans.WPPResourceId = appWorkOrderJournalTrans.GeneratedBy;
+
+        ResResourceWorkCenterView resourceView = this.findResourceViewProjJour();
+        
+        if (resourceView.RecId)
+        {
+            _journalTrans.Resource = resourceView.RecId;
+        }
+        else
+        {
+            throw error(strFmt("@DNR:ResourceIdNotFound", appWorkOrderJournalTrans.GeneratedBy));
+        }
+        
+        _journalTrans.initFromProjTable(projTable);
+
+        //Initializing category id in the end
+        WPPWorkOrderLine workOrderLine = WPPWorkOrderLine::findTaskId(appWorkOrderJournalTrans.WorkOrderId, appWorkOrderJournalTrans.WorkOrderLineTaskId);
+        _journalTrans.CategoryId = _journalTrans.WPPDefaultProjCategory(workOrderLine.TaskId, workOrderLine.RecId);
+            
+        // Fallback #1 from resource
+        if (!_journalTrans.CategoryId)
+        {
+            _journalTrans.CategoryId = this.getProjCategory(appWorkOrderJournalTrans.GeneratedBy);
+        }
+            
+        // Fallback #2 from the journal table
+        if(!_journalTrans.CategoryId)
+        {
+            _journalTrans.CategoryId = _journalTable.CategoryId;
+        }
+
+        // Fallback #3 from the parameters
+        if (!_journalTrans.CategoryId)
+        {
+            _journalTrans.CategoryId = projParameters.RevenueCategory;
+        }
+
+        _journalTrans.initFromResource();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findResourceViewProjJour</Name>
+				<Source><![CDATA[
+    protected ResResourceWorkCenterView findResourceViewProjJour()
+    {
+        ResResourceWorkCenterView resourceView;
+        WPPResourceTable resourceTable;
+        HcmWorker worker;
+
+        select firstonly RecId from resourceView
+            join TableId from worker
+            where worker.RecId == resourceView.Worker
+                join TableId from resourceTable
+                where resourceTable.ResourceId == appWorkOrderJournalTrans.GeneratedBy
+                &&    resourceTable.ResourceCategory == WPPResourceCategory::HumanResource
+                &&    resourceTable.RelationAccount == worker.PersonnelNumber;
+
+        return resourceView;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processHourJournalRegistration</Name>
+				<Source><![CDATA[
+    protected void processHourJournalRegistration()
+    {
+        ProjJournalTable journalTable;
+        ProjJournalTrans journalTrans, journalTransSelect;
+        ProjJournalTableData journalTableData = JournalTableData::newTable(journalTable);
+        ProjJournalTransData journalTransData = journalTableData.journalStatic().newJournalTransData(journalTrans, journalTableData);
+
+        journalTable = this.findOrCreateProjJournal(appWorkOrderJournalTrans.ProjectId, ProjJournalType::Hour, ProjParameters.EmplCategory, journalTableData);
+        journalTableData.journalTable(journalTable);
+
+        select maxof(LineNum), count(RecId) from journalTransSelect
+        order by LineNum desc
+        where journalTransSelect.JournalId == journalTable.JournalId;
+
+        this.initHourJournalTrans(journalTrans, journalTransSelect.LineNum + 1, journalTable, journalTransData, journalTableData);
+
+        if (journalTrans.validateWrite())
+        {
+            journalTrans.insert();
+        }
+        else
+        {
+            throw error("@DNR:EmplAppProjJourLineCreateError");
+        }
+
+        this.updateProjectJournalTotalLines(journalTable.JournalId, journalTransSelect.RecId+1, journalTransSelect.LineNum + 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initHourJournalTable</Name>
+				<Source><![CDATA[
+    protected void initHourJournalTable(ProjJournalTable _journalTable, JournalId _newJournalId)
+    {
+        _journalTable.clear();
+        _journalTable.JournalId = _newJournalId;
+        _journalTable.JournalType = ProjJournalType::Hour;
+        _journalTable.JournalNameId = projParameters.EmplJournalNameId;
+        _journalTable.CategoryId = projParameters.EmplCategory;
+        _journalTable.ProjId = appWorkOrderJournalTrans.ProjectId;
+        _journalTable.initFromProjJournalName(ProjJournalName::find(projParameters.EmplJournalNameId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initHourJournalTrans</Name>
+				<Source><![CDATA[
+    protected void initHourJournalTrans(ProjJournalTrans _journalTrans, LineNum _newLineNum, ProjJournalTable _journalTable, ProjJournalTransData _journalTransData, ProjJournalTableData _journalTableData)
+    {
+        ProjTable projTable = ProjTable::find(appWorkOrderJournalTrans.projectid);
+        utcdatetime dtMinValue  = DateTimeUtil::addYears(DateTimeUtil::getSystemDateTime(), -1);
+
+        FromDateTime fromDateTime = appWorkOrderJournalTrans.FromDateTime;
+        FromDateTime toDateTime = appWorkOrderJournalTrans.ToDateTime;
+
+        // Apply timezone offset
+        //fromDateTime = DateTimeUtil::addMinutes(fromDateTime, (-1 * this.SourceTimeZoneDifference)); // RLAM - Question
+        //toDateTime = DateTimeUtil::addMinutes(toDateTime,   (-1 * this.SourceTimeZoneDifference)); // RLAM - Question
+
+        _journalTrans.clear();
+        _journalTransData.initFromJournalTable();
+
+        _journalTrans.LineNum = _newLineNum;
+        _journalTrans.ProjId = appWorkOrderJournalTrans.ProjectId;
+
+        this.initHourJournalTransCategoryId(_journalTrans, _journalTable);
+
+        _journalTrans.DefaultDimension = projTable.DefaultDimension;
+        _journalTrans.TaxGroupId = ProjParameters::taxGroupInvoice(projTable.ProjId);
+
+        NumberSeq numberSeq = NumberSeq::newGetVoucherFromId(_journalTable.VoucherNumberSequenceTable, false);
+        _journalTrans.Voucher = numberSeq.voucher();
+
+        // Init JournalTrans
+        _journalTableData.initFromJournalName(_journalTableData.journalStatic().findJournalName(_journalTable.JournalNameId));
+        
+        ProjInvoiceTable projInvoiceTable = projTable.projInvoice();
+        _journalTrans.setTransDate();
+        _journalTrans.TransDate = appWorkOrderJournalTrans.TransDate;
+        _journalTrans.ToTime = _journalTrans.FromTime + appWorkOrderJournalTrans.Hours;
+        _journalTrans.ProjTransDate = appWorkOrderJournalTrans.TransDate;
+        _journalTrans.Txt = appWorkOrderJournalTrans.Description;
+        _journalTrans.DNRHourStartDateTime = fromDateTime;
+        _journalTrans.DNRHourEndDateTime = toDateTime;
+        _journalTrans.FromTime = DateTimeUtil::time(fromDateTime);
+        _journalTrans.ToTime = DateTimeUtil::time(toDateTime);
+
+        if (appWorkOrderJournalTrans.Hours)
+        {
+            _journalTrans.Qty = appWorkOrderJournalTrans.Hours;
+        }
+        else if (fromDateTime > dtMinValue && toDateTime > dtMinValue)
+        {
+            _journalTrans.Qty = DateTimeUtil::getDifference(_journalTrans.DNRHourEndDateTime, _journalTrans.DNRHourStartDateTime) / 3600;
+        }
+
+        if (appWorkOrderJournalTrans.CurrencyCode)
+        {
+            _journalTrans.CurrencyId = appWorkOrderJournalTrans.CurrencyCode;
+        }
+        else if (projInvoiceTable.CurrencyId)
+        {
+            _journalTrans.CurrencyId = projInvoiceTable.CurrencyId;
+        }
+        else
+        {
+            _journalTrans.CurrencyId = Ledger::accountingCurrency(CompanyInfo::current());
+        }
+
+        _journalTrans.initFromProjTable(projTable);
+        
+        ResResourceWorkCenterView resourceView = this.findResourceViewProjJour();
+        
+        if (resourceView.RecId)
+        {
+            _journalTrans.Resource = resourceView.RecId;
+            _journalTrans.setHourPrices();
+            _journalTrans.setPeriodDate();
+
+            _journalTrans.WPPResourceId = appWorkOrderJournalTrans.GeneratedBy;
+        }
+        else
+        {
+            throw error(strFmt("@DNR:ResourceIdNotFound", appWorkOrderJournalTrans.GeneratedBy));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initHourJournalTransCategoryId</Name>
+				<Source><![CDATA[
+    private void initHourJournalTransCategoryId(ProjJournalTrans _journalTrans, ProjJournalTable _journalTable)
+    {
+        WPPParameters wppParameters = WPPParameters::find();
+
+        if (appWorkOrderJournalTrans.HourRegistrationType == DNRAppEmplHourRegistrationType::Break)
+        {
+            if (!wppParameters.DNRAppEmplBreakTimeCategoryId)
+            {
+                throw error("@DNR:BreakTimeMissingError");
+            }
+
+            _journalTrans.CategoryId = wppParameters.DNRAppEmplBreakTimeCategoryId;
+        }
+        else if (appWorkOrderJournalTrans.HourRegistrationType == DNRAppEmplHourRegistrationType::Overtime)
+        {
+            if (!wppParameters.DNRAppEmplExtraTimeCategoryId)
+            {
+                throw error("@DNR:ExtraTimeMissingError");
+            }
+
+            _journalTrans.CategoryId = wppParameters.DNRAppEmplExtraTimeCategoryId;
+        }
+        else if (appWorkOrderJournalTrans.HourRegistrationType == DNRAppEmplHourRegistrationType::Travel)
+        {
+            if (!wppParameters.TravelTimeCategoryId)
+            {
+                throw error("@DNR:TravelTimeMissingError");
+            }
+
+            _journalTrans.CategoryId = wppParameters.TravelTimeCategoryId;
+        }
+        else
+        {
+            WPPWorkOrderLine  workOrderLine;
+            workOrderLine = WPPWorkOrderLine::findTaskId(appWorkOrderJournalTrans.WorkOrderId, appWorkOrderJournalTrans.WorkOrderLineTaskId);
+
+            _journalTrans.CategoryId = _journalTrans.WPPDefaultProjCategory(workOrderLine.TaskId, workOrderLine.RecId);
+            
+            // Fallback #1 from resource
+            if (!_journalTrans.CategoryId)
+            {
+                _journalTrans.CategoryId = this.getProjCategory(appWorkOrderJournalTrans.GeneratedBy);
+            }
+            
+            // Fallback #2 from the journal table
+            if(!_journalTrans.CategoryId)
+            {
+                _journalTrans.CategoryId = _journalTable.CategoryId;
+            }
+
+            // Fallback #3 from the parameters
+            if (!_journalTrans.CategoryId)
+            {
+                _journalTrans.CategoryId = projParameters.EmplCategory;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjCategory</Name>
+				<Source><![CDATA[
+    private ProjCategoryIdAll getProjCategory(WPPResourceId _resourceId)
+    {
+        WPPResourceTable resourceTable;
+        WPPResourceType resourceType;
+        
+        if(_resourceId)
+        {
+            select firstOnly ProjCategoryIdDefault from resourceType
+                exists join resourceTable
+                where resourceTable.ResourceId == _resourceId
+                &&    resourceTable.ResourceTypeId == resourceType.ResourceTypeId;
+        }
+
+        return resourceType.ProjCategoryIdDefault;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processItemReqRegistration</Name>
+				<Source><![CDATA[
+    protected void processItemReqRegistration()
+    {
+        salesline           salesLine;
+        WPPWorkOrderLine    workOrderLine;
+        
+        workOrderLine = WPPWorkOrderLine::find(appWorkOrderJournalTrans.WorkOrderId, appWorkOrderJournalTrans.WorkOrderLineNumber);
+        ProjTable projTable = workOrderLine.projTable();
+
+        SalesTableForm_ProjectSalesItem salesTableForm = SalesTableForm::construct((SalesTableFormId::ProjectSalesItem),projTable);
+        salesLine.Clear();
+        salesLine.initValue();
+        salesLine.SalesType = SalesType::ItemReq;
+        salesTableForm.salesLine_initValue(salesLine);
+        if (SalesLine.ProjId && !salesLine.ActivityNumber)
+        {
+            SalesLineType_ItemReq::setSalesLineReceiptDate(salesLine);
+        }
+        salesTableForm.salesLine_Create(salesLine);
+        salesLine.ItemId = appWorkOrderJournalTrans.ItemId;
+        salesTableForm.resetSalesLine(salesLine);
+        salesLine.ItemId = appWorkOrderJournalTrans.ItemId;
+        salesLine.itemIdChanged();        
+        salesLine.SalesQty = appWorkOrderJournalTrans.Qty;
+        InventDim   inventDim;
+        inventDim.InventLocationId = appWorkOrderJournalTrans.WarehouseId;
+        inventDim.InventSiteId = appWorkOrderJournalTrans.SiteId;
+        inventDim.inventSerialId = appWorkOrderJournalTrans.ItemSerialNumber;
+        inventDim = InventDim::findOrCreate(inventDim);
+        salesLine.InventDimId = inventDim.inventDimId;
+
+        if (salesLine.validateWrite() && salesTableForm.salesLine_validateWrite(salesLine, inventDim))
+        {
+            salesTableForm.salesLine_Write(salesLine);
+            salesLine.write();
+        }
+    
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

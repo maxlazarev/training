@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>PurchTableType_RORSubRental</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class PurchTableType_RORSubRental extends PurchTableType_Purch
+{
+    boolean             unConfirmedAmendmentsExist;
+    boolean             unConfirmedChangesExist;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>canPackingslipBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean canPackingslipBeUpdated(DocumentStatus _documentStatus = DocumentStatus::PackingSlip)
+    {
+        boolean ret;
+    
+        ret = super(_documentStatus);
+    
+        if (ret)
+        {
+            ret = (purchTable.PurchaseType == PurchaseType::RORSubRental && !(RORParameters::find().AutomaticallyPostSubRental && RORSubrentalReference::existPurch(purchTable.PurchId)));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canPurchaseOrderBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean canPurchaseOrderBeUpdated()
+    {
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canSubStatusBeUpdatedContainer</Name>
+				<Source><![CDATA[
+    private container canSubStatusBeUpdatedContainer(container _con)
+    {
+        container                   ret = _con;
+        Set                         setPotentialStatus = new Set(Types::Enum);
+        Set                         setAvailableStatus = new Set(Types::Enum);
+        BOBRentalType               rentalType;
+        BOBRentalTrans              rentalTrans;
+        InventTransOriginPurchLine  inventTransOriginPurchLine;
+        RefRecId                    postingPolicyRecIdPrev;
+        boolean                     updateFromPurch;
+        PurchLine                   purchLine;
+    
+        // Only enable sub status postings when no unconfirmed amendments exist
+        if (!unConfirmedAmendmentsExist
+        &&  !unConfirmedChangesExist)
+        {
+            // This bit only works when a object has been assigned,
+            // therefore it has been rewritten
+    
+            // Find all statuses that exist for this order
+            // where the order lines are not SalesPurch
+    
+            /*while select PostingPolicyRecId from rentalType
+            group by PostingPolicyRecId
+                join RentalTypeId from objectTable
+                where objectTable.RentalTypeId == rentalType.RentalTypeId
+                    join SubStatus from rentalTrans
+                    group by SubStatus
+                    where rentalTrans.ObjectId == objectTable.ObjectId
+                        exists join inventTrans
+                        where inventTrans.RecId == rentalTrans.InventTransRecId
+                            join TableId from inventTransOriginPurchLine
+                            where inventTransOriginPurchLine.InventTransOrigin == inventTrans.InventTransOrigin
+                                join TableId from purchLine
+                                where purchLine.PurchId       == purchTable.PurchId
+                                &&    purchLine.dataAreaId    == inventTransOriginPurchLine.PurchLineDataAreaId
+                                &&    purchLine.InventTransId == inventTransOriginPurchLine.PurchLineInventTransId*/
+    
+            while select PostingPolicyRecId from rentalType
+            group by PostingPolicyRecId
+                join SubStatus from rentalTrans
+                group by SubStatus
+                where rentalTrans.RentalTypeId == rentalType.RentalTypeId
+                    join TableId from inventTransOriginPurchLine
+                    where inventTransOriginPurchLine.InventTransOrigin == rentalTrans.InventTransOrigin
+                        join TableId from purchLine
+                        where purchLine.PurchId       == purchTable.PurchId
+                        &&    purchLine.dataAreaId    == inventTransOriginPurchLine.PurchLineDataAreaId
+                        &&    purchLine.InventTransId == inventTransOriginPurchLine.PurchLineInventTransId
+                        &&    purchLine.RORTradeType  != RORTradeType::SalesPurch
+            {
+                if (rentalType.PostingPolicyRecId != postingPolicyRecIdPrev)
+                {
+                    if (postingPolicyRecIdPrev)
+                    {
+                        // Union existing set with that from this status group
+                        setPotentialStatus = Set::union(setPotentialStatus, BOBPostingPolicyRule::getPossibleStatuses(InventDirection::Receipt, setAvailableStatus, postingPolicyRecIdPrev));
+                    }
+    
+                    postingPolicyRecIdPrev = rentalType.PostingPolicyRecId;
+                    setAvailableStatus = new Set(Types::Enum);
+                }
+    
+                setAvailableStatus.add(rentalTrans.SubStatus);
+            }
+    
+    
+            if (postingPolicyRecIdPrev)
+            {
+                // Union existing set with that from this status group
+                setPotentialStatus = Set::union(setPotentialStatus, BOBPostingPolicyRule::getPossibleStatuses(InventDirection::Receipt, setAvailableStatus, postingPolicyRecIdPrev));
+            }
+        }
+        else
+        {
+            setPotentialStatus.add(BOBRentalSubStatus::Confirmed);
+        }
+    
+        if (enum2int(purchTable.DocumentStatus) >= enum2int(DocumentStatus::Confirmation))
+        {
+    
+            if (!setPotentialStatus.in(BOBRentalSubStatus::Picked) && this.canReceiptsListBeUpdated())
+            {
+                setPotentialStatus.add(BOBRentalSubStatus::Picked);
+            }
+    
+            if (!setPotentialStatus.in(BOBRentalSubStatus::Delivered) && this.canPackingslipBeUpdated())
+            {
+                setPotentialStatus.add(BOBRentalSubStatus::Delivered);
+            }
+    
+            if (!setPotentialStatus.in(BOBRentalSubStatus::Invoiced) && this.canInvoiceBeUpdated())
+            {
+                setPotentialStatus.add(BOBRentalSubStatus::Invoiced);
+            }
+    
+        }
+    
+        // Position 1 to 6 are used by standard As code
+        ret = conIns(ret, PurchTableType::posPurchaseOrder(),       setPotentialStatus.in(BOBRentalSubStatus::Confirmed));
+        ret = conIns(ret, PurchTableType::posReceiptsList(),        setPotentialStatus.in(BOBRentalSubStatus::Picked));
+        ret = conIns(ret, PurchTableType::posPackingSlip(),         setPotentialStatus.in(BOBRentalSubStatus::Delivered));
+        ret = conIns(ret, PurchTableType::posInvoice(),             setPotentialStatus.in(BOBRentalSubStatus::Invoiced));
+        ret = conIns(ret, PurchTableType::posInvoice4Paym_RU(),     false);
+        ret = conIns(ret, PurchTableType::posFacture_RU(),          false);
+
+    
+        ret = conIns(ret, PurchTableType::RORPosPreperation(),      setPotentialStatus.in(BOBRentalSubStatus::Prepared));
+        ret = conIns(ret, PurchTableType::RORPosOutbound(),         setPotentialStatus.in(BOBRentalSubStatus::Outbound));
+        ret = conIns(ret, PurchTableType::RORPosBuild(),            setPotentialStatus.in(BOBRentalSubStatus::Built));
+        ret = conIns(ret, PurchTableType::RORPosEventStart(),       setPotentialStatus.in(BOBRentalSubStatus::EventStarted));
+        ret = conIns(ret, PurchTableType::RORPosEventEnd(),         setPotentialStatus.in(BOBRentalSubStatus::EventEnded));
+        ret = conIns(ret, PurchTableType::RORPosStrike(),           setPotentialStatus.in(BOBRentalSubStatus::Strike));
+        ret = conIns(ret, PurchTableType::RORPosInbound(),          setPotentialStatus.in(BOBRentalSubStatus::Inbound));
+        ret = conIns(ret, PurchTableType::RORPosReturned(),         setPotentialStatus.in(BOBRentalSubStatus::Returned));
+        ret = conIns(ret, PurchTableType::RORPosReturnInspection(), setPotentialStatus.in(BOBRentalSubStatus::ReturnInspected));
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkIfUpdate</Name>
+				<Source><![CDATA[
+    public container checkIfUpdate(container _packedCheckIfUpdateContract)
+    {
+        PurchTableCheckIfUpdateContract checkIfUpdateContract;
+        PurchTableCanBeUpdatedContract  canBeUpdatedContract;
+        container                       canSubStatusUpdatedContainer;
+    
+        canBeUpdatedContract = PurchTableCanBeUpdatedContract::construct();
+    
+        if (_packedCheckIfUpdateContract == conNull())
+        {
+            checkIfUpdateContract = PurchTableCheckIfUpdateContract::newCheckAll();
+        }
+        else
+        {
+            checkIfUpdateContract = PurchTableCheckIfUpdateContract::create(_packedCheckIfUpdateContract);
+        }
+
+        canSubStatusUpdatedContainer = this.canSubStatusBeUpdatedContainer(canSubStatusUpdatedContainer);
+    
+        if (checkIfUpdateContract.parmCheckPurchaseOrder())
+        {
+            canBeUpdatedContract.parmCanPurchaseOrderBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::posPurchaseOrder()) && this.canPurchaseOrderBeUpdated());
+        }
+        if (checkIfUpdateContract.parmCheckReceiptsList())
+        {
+            canBeUpdatedContract.parmCanReceiptsListBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::posReceiptsList()) && this.canReceiptsListBeUpdated());
+        }
+        if (checkIfUpdateContract.parmCheckPackingSlip())
+        {
+            canBeUpdatedContract.parmCanPackingSlipBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::posPackingSlip()) && this.canPackingslipBeUpdated());
+        }
+        if (checkIfUpdateContract.parmCheckInvoice())
+        {
+            canBeUpdatedContract.parmCanInvoiceBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::posInvoice()) && this.canInvoiceBeUpdated(checkIfUpdateContract.parmExcludePendingInvoice()));
+        }
+    
+        if (checkIfUpdateContract.RORparmCheckPreparation())
+        {
+            canBeUpdatedContract.RORparmCanPreparationBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosPreperation()));
+        }
+        if (checkIfUpdateContract.RORparmCheckOutbound())
+        {
+            canBeUpdatedContract.RORparmCanOutboundBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosOutbound()));
+        }
+        if (checkIfUpdateContract.RORparmCheckBuild())
+        {
+            canBeUpdatedContract.RORparmCanBuildBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosBuild()));
+        }
+        if (checkIfUpdateContract.RORparmCheckEventStart())
+        {
+            canBeUpdatedContract.RORparmCanEventStartBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosEventStart()));
+        }
+        if (checkIfUpdateContract.RORparmCheckEventEnd())
+        {
+            canBeUpdatedContract.RORparmCanEventEndBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosEventEnd()));
+        }
+        if (checkIfUpdateContract.RORparmCheckStrike())
+        {
+            canBeUpdatedContract.RORparmCanStrikeBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosStrike()));
+        }
+        if (checkIfUpdateContract.RORparmCheckInbound())
+        {
+            canBeUpdatedContract.RORparmCanInboundBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosInbound()));
+        }
+        if (checkIfUpdateContract.RORparmCheckReturnNote())
+        {
+            canBeUpdatedContract.RORparmCanReturnNoteBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosReturned()));
+        }
+        if (checkIfUpdateContract.RORparmCheckInspection())
+        {
+            canBeUpdatedContract.RORparmCanInspectionBeUpdated(conPeek(canSubStatusUpdatedContainer, PurchTableType::RORPosReturnInspection()));
+        }
+
+        return canBeUpdatedContract.pack();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>existUnConfirmedAmendments</Name>
+				<Source><![CDATA[
+    private boolean existUnConfirmedAmendments()
+    {
+        ROROrderAmendmentLog    orderAmendmentLog;
+        PurchLine               purchLine;
+    
+        // First try to find an amendment log that is linked to the SalesTable
+        // and is not confirmed yet
+        select firstOnly RecId from orderAmendmentLog
+        where !orderAmendmentLog.ConfirmId
+        &&     orderAmendmentLog.RefTableId == purchTable.TableId
+        &&     orderAmendmentLog.RefRecId   == purchTable.RecId;
+    
+        if (!orderAmendmentLog.RecId)
+        {
+            // If no record is found then try to find an amendment log that is linked to SalesLine
+            select firstOnly RecId from orderAmendmentLog
+            where !orderAmendmentLog.ConfirmId
+                exists join purchLine
+                where purchLine.TableId == orderAmendmentLog.RefTableId
+                &&    purchLine.RecId   == orderAmendmentLog.RefRecId
+                &&    purchLine.PurchId == purchTable.PurchId;
+        }
+    
+        return orderAmendmentLog.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>existUnConfirmedChanges</Name>
+				<Source><![CDATA[
+    private boolean existUnConfirmedChanges()
+    {
+        boolean ret;
+    
+        if (purchTable.RORIsModified)
+        {
+            ret = true;
+        }
+    
+        if (!ret)
+        {
+            ret = (select firstOnly RecId from PurchLine
+                   where PurchLine.PurchId == purchTable.PurchId
+                   &&    PurchLine.RORIsModified).RecId;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    public void  initValue()
+    {
+        super();
+    
+        purchTable.PurchaseType = PurchaseType::RORSubRental;
+        purchTable.RORIsModified = NoYes::Yes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mayPurchaseOrderBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean mayPurchaseOrderBeUpdated()
+    {
+        boolean ret;
+    
+        ret = super();
+    
+        ret = (purchTable.DocumentState == VersioningDocumentState::Approved || purchTable.DocumentState == VersioningDocumentState::InExternalReview) // These condition from super() shall never be skipped. 
+              && (ret || unConfirmedChangesExist || unConfirmedAmendmentsExist);
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(PurchTable _purchTable)
+    {
+        super(_purchTable);
+    
+        unConfirmedAmendmentsExist = this.existUnConfirmedAmendments();
+        unConfirmedChangesExist    = this.existUnConfirmedChanges();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePurchLineDelete</Name>
+				<Source><![CDATA[
+    public void updatePurchLineDelete()
+    {
+        ttsBegin;
+        purchTable = PurchTable::findRecId(purchTable.RecId, true);
+        purchTable.RORIsModified = NoYes::Yes;
+        purchTable.doUpdate();
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateField</Name>
+				<Source><![CDATA[
+    public boolean validateField(FieldId _fieldId)
+    {
+        boolean ret;
+    
+        ret = super(_fieldId);
+    
+        switch (_fieldId)
+        {
+            case fieldNum(PurchTable, ProjId):
+                // Linking a project to a subrental should work the same way as for rental order. No need to check if transactions exist for the project.
+                //ret = PurchTable::WPPhasProjectTrans(purchTable.ProjId);
+                break;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    public boolean validateWrite()
+    {
+        boolean ok;
+    
+        ok = super();
+    
+        if (!purchTable.INVInvoiceProfileId)
+        {
+            ok = checkFailed("@DNR6283");
+        }
+    
+        if (!purchTable.DNRCalendarId)
+        {
+            ok = checkFailed(strFmt("@SYS26332", fieldId2pname(tableNum(PurchTable), fieldNum(PurchTable, DNRCalendarId))));
+        }
+    
+        if (!purchTable.RORPriceTimeUnit)
+        {
+            ok = checkFailed(strFmt("@SYS26332", fieldId2pname(tableNum(PurchTable), fieldNum(PurchTable, RORPriceTimeUnit))));
+        }
+    
+        // Automatically checked
+        //if(!purchTable.RORVenueCode
+        //&&  RORParameters::find().isWorkLocationMandatory)
+        //{
+        //    ok = checkFailed(strFmt("@SYS26332", fieldId2pname(tableNum(PurchTable), fieldNum(PurchTable, RORVenueCode))));
+        //}
+    
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    static PurchTableType  construct(PurchTable purchTable)
+    {
+        return new PurchTableType_RORSubRental(purchTable);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

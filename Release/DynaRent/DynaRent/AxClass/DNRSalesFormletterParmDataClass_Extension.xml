@@ -1,0 +1,511 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesFormletterParmDataClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesFormletterParmData))]
+public final class DNRSalesFormletterParmDataClass_Extension
+{
+    private DNRSalesFormletterParmDataStrategy strategy;
+
+    private         RORParameters       rentalParameters = RORParameters::find();
+    private         CustInvoiceJour     custInvoiceJour;
+    public static   FormLetterContract  formLetterContractParm;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createParmUpdate</Name>
+				<Source><![CDATA[
+    protected Common createParmUpdate()
+    {
+        Common ret = next createParmUpdate();
+               
+        if (isConfigurationKeyEnabled(configurationKeyNum(INVInvoicePeriod)))
+        {
+            FormLetterContract formLetterContract = this.INVParmFormLetterContract();
+            ret = this.INVSetCalculationPoint(ret, formLetterContract);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>defaultSumBy</Name>
+				<Source><![CDATA[
+    protected AccountOrder defaultSumBy()
+    {
+        AccountOrder ret = next defaultSumBy();
+
+        if (salesTable.SalesType == SalesType::RORRental 
+        && !(this is SalesFormletterParmDataInvoice || this is SalesFormletterParmDataInvoiceProject))
+        {
+            ret = AccountOrder::None;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        next init();
+
+        FormLetterContract formLetterContract = this.INVParmFormLetterContract();
+
+        switch (this.parmDocumentStatus())
+        {
+            case DocumentStatus::RORSubStatus:
+                salesQuantity.RORparmRentalSubStatus(formLetterContract ? formLetterContract.RORparmRentalSubStatus() : this.BOBParmRentalSubStatus());
+                break;
+    
+            case DocumentStatus::RORReturnNote:
+                salesQuantity.RORparmRentalSubStatus(BOBRentalSubStatus::Returned);
+                break;
+    
+            case DocumentStatus::Invoice:
+                salesQuantity.RORparmRentalSubStatus(BOBRentalSubStatus::Invoiced);
+                break;
+    
+            default:
+                if (formLetterContract)
+                {
+                    salesQuantity.RORparmRentalSubStatus(formLetterContract.RORparmRentalSubStatus());
+                }
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParmTable</Name>
+				<Source><![CDATA[
+    protected SalesParmTable initParmTable(SalesTable           _salesTable,
+                                           Common               _salesLine,
+                                           TradeLineRefId       _tableRefId,
+                                           CustPostingProfile   _postingProfile,
+                                           InventProfileType_RU _inventProfileType,
+                                           InventOwnerId_RU     _inventOwnerId,
+                                           MCRPackingBoxName    _mcrPackingBoxName)
+    {
+        FormLetterContract formLetterContract = this.INVParmFormLetterContract();
+
+        WPPParameters   workOrderParameters;
+        SalesParmUpdate salesParmUpdateLoc;
+        SalesParmTable  ret = next initParmTable(_salesTable, _salesLine, _tableRefId, _postingProfile, _inventProfileType, _inventOwnerId, _mcrPackingBoxName);
+
+        salesParmUpdateLoc  = this.parmParmUpdate() as SalesParmUpdate;
+        if (salesParmUpdateLoc.INVTransdate && this.parmTransDate() != salesParmUpdateLoc.INVTransdate)
+        {
+            formLetterContract.parmTransDate(salesParmUpdateLoc.INVTransdate);
+            this.parmTransDate(salesParmUpdateLoc.INVTransdate);
+        }
+
+        
+        ret.BOBRentalSubStatus = formLetterContract.RORparmRentalSubStatus();
+        this.BOBSetTransDateTime(ret, _salesTable, _salesLine);
+
+        workOrderParameters = WPPParameters::find();
+
+        switch (ret.Ordering)
+        {
+            case DocumentStatus::PackingSlip:
+                if (this.RORSubRentalExists(salesTable.SalesId ? salesTable.SalesId : _salesTable.SalesId))
+                {
+                    ret.RORAutomaticallyPostSubRental = rentalParameters.AutomaticallyPostSubRental;
+                }
+    
+                if (formLetterContract.WPPparmWorkOrderId())
+                {
+                    ret.WPPDuplTaskOnPartialFormLetterPosting = workOrderParameters.DuplicateTaskOnPartialFormLetterPosting;
+                }
+                break;
+
+            case DocumentStatus::PickingList,
+                DocumentStatus::RORSubStatus:
+    
+                if (formLetterContract.WPPparmWorkOrderId())
+                {
+                    ret.WPPDuplTaskOnPartialFormLetterPosting = workOrderParameters.DuplicateTaskOnPartialFormLetterPosting;
+                }
+                break;
+    
+            case DocumentStatus::RORReturnNote:
+                if (this.RORSubRentalExists())
+                {
+                    ret.RORAutomaticallyPostSubRental = rentalParameters.AutomaticallyPostSubRental;
+                }
+    
+                if (formLetterContract.WPPparmWorkOrderId())
+                {
+                    ret.WPPDuplTaskOnPartialFormLetterPosting = workOrderParameters.DuplicateTaskOnPartialFormLetterPosting;
+                }
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mayJournalTransBePosted</Name>
+				<Source><![CDATA[
+    protected boolean mayJournalTransBePosted(Common _salesLine)
+    {
+        SalesLine salesLine = _salesLine as SalesLine;
+        SalesLine salesRentalLine;
+
+        boolean ret = next mayJournalTransBePosted(_salesLine);
+
+        if (ret
+        &&  salesLine.RORTradeType != RORTradeType::SalesPurch
+        // enum2Int() method is applied to remove the compilation errors of enum comparisation not allowed
+        &&  enum2int(this.parmDocumentStatus()) > enum2int(DocumentStatus::PickingList)
+        &&  enum2int(this.parmDocumentStatus()) < enum2int(DocumentStatus::Invoice))
+        {
+            ret = !SalesFormletterParmData::RORorderLineMustBeRegistered(salesLine);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSalesParmUpdateFormletter</Name>
+				<Source><![CDATA[
+    static SalesParmUpdate initSalesParmUpdateFormletter(DocumentStatus _documentStatus,
+                                                                container      _salesFormletterPacked,
+                                                                boolean        _onlyCreateParmUpdate,
+                                                                boolean        _storno,
+                                                                boolean        _stornoPhysical)
+    {
+        SalesParmUpdate     ret;
+        // *** Repeated code
+        SalesFormLetter     salesFormLetter;
+
+        salesFormLetter = SalesFormLetter::construct(_documentStatus);
+        salesFormLetter.unpack(_salesFormletterPacked);
+        salesFormLetter.getLast(true);
+
+        formLetterContractParm  = salesFormLetter.getContract();
+        ret                     = next initSalesParmUpdateFormLetter(_documentStatus, _salesFormletterPacked, _onlyCreateParmUpdate, _storno, _stornoPhysical);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newChooseLines</Name>
+				<Source><![CDATA[
+    static SalesFormletterParmData newChooseLines(
+        container      _salesFormletterContractPacked,
+        boolean        _reuseParmUpdate,
+        boolean        _onlyCreateParmUpdate,
+        boolean        _executeLateSelection)
+    {
+        SalesFormletterParmData     ret;
+        // *** Repeated code
+        SalesFormLetterContract     salesFormLetterContract = SalesFormLetterContract::newFromPackedVersion(_salesFormletterContractPacked);
+
+        formLetterContractParm  = salesFormLetterContract;
+        ret                     = next newChooseLines(_salesFormletterContractPacked, _reuseParmUpdate, _onlyCreateParmUpdate, _executeLateSelection);
+        //ret.INVParmCustInvoiceJour(salesFormLetterContract.INVParmCustInvoiceJour());
+        ret.RORparmPostFuelLine(salesFormLetterContract.RORParmPostFuelLine());
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newData</Name>
+				<Source><![CDATA[
+    static formletterParmData newData(DocumentStatus _documentStatus, VersioningUpdateType _updateType)                                 
+    {
+        formletterParmData ret = next newData(_documentStatus, _updateType);
+
+        DNRSalesFormLetterParmDataNewDataDisposableContext context = DNRSalesFormLetterParmDataNewDataDisposableContext::current();
+
+        if (formLetterContractParm)
+        {
+            ret.INVParmFormLetterContract(formLetterContractParm);
+
+            BOBRentalSubStatus rentalSubStatus = formLetterContractParm.RORparmRentalSubStatus();
+            
+            RORFormLetterSubStatusController formLetterSubStatusController = SalesFormLetter::formLetterSubStatusController;
+
+            if (formLetterSubStatusController)
+            {
+                rentalSubStatus = formLetterSubStatusController.parmRentalSubStatus();
+            }
+            else if (formLetterContractParm is SalesFormLetterRORSubStatusContract) // In case of late selection, the formLetterSubStatusController is not initialized
+            {
+                rentalSubStatus = formLetterContractParm.RORparmRentalSubStatus();
+            }
+            else
+            {
+                rentalSubStatus = FormLetterServiceController::RORdocumentStatus2RentalSubStatus(_documentStatus);
+            }
+
+            ret.INVParmFormLetterContract().RORparmRentalSubStatus(rentalSubStatus);
+
+            // immediately reset the value of the static class variable after it has been used
+            formLetterContractParm = null;
+        }
+        else if(context && context.DNRParmRentalSubStatus())
+        {
+            ret.BOBParmRentalSubStatus(context.DNRParmRentalSubStatus());
+        }
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newReArrange</Name>
+				<Source><![CDATA[
+    static SalesFormletterParmData newReArrange(container _salesFormletterContractPacked, boolean _isExecutingInBatch)
+    {
+        SalesFormletterParmData     ret;
+        // *** Repeated code
+        SalesFormLetterContract     salesFormLetterContract = SalesFormLetterContract::newFromPackedVersion(_salesFormletterContractPacked);
+
+        formLetterContractParm  = salesFormLetterContract;
+        ret                     = next newReArrange(_salesFormletterContractPacked, _isExecutingInBatch);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newReSelect</Name>
+				<Source><![CDATA[
+    static SalesFormletterParmData newReSelect(container _salesFormletterContractPacked)
+    {
+        SalesFormletterParmData     ret;
+        // *** Repeated code
+        SalesFormLetterContract     salesFormLetterContract = SalesFormLetterContract::newFromPackedVersion(_salesFormletterContractPacked);
+
+        formLetterContractParm  = salesFormLetterContract;
+        ret                     = next newReSelect(_salesFormletterContractPacked);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINmustSetCalculationDateTime</Name>
+				<Source><![CDATA[
+    // extension methods
+    
+    public boolean FINmustSetCalculationDateTime(SalesParmUpdate _salesParmUpdate, FormLetterContract _formLetterContract)
+    {
+        return true; // Logic is implemented in a post-event in the DynaRent invoicing module
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINmustSetInvoiceDateTimes</Name>
+				<Source><![CDATA[
+    public boolean FINmustSetInvoiceDateTimes(SalesParmUpdate _salesParmUpdate, FormLetterContract _formLetterContract)
+    {
+        return true; // Logic is implemented in a post-event in the DynaRent invoicing module
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetCalculationPoint</Name>
+				<Source><![CDATA[
+    private SalesParmUpdate INVSetCalculationPoint(SalesParmUpdate _salesParmUpdate, FormLetterContract _formLetterContract)
+    {
+        if (this.FINmustSetInvoiceDateTimes(_salesParmUpdate, _formLetterContract))
+        {
+            if (this.FINmustSetCalculationDateTime(_salesParmUpdate, _formLetterContract))
+            {
+                #TimeConstants
+                int timeZoneDifference = (DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(DateTimeUtil::getSystemDateTime(), DateTimeUtil::getUserPreferredTimeZone())) - DateTimeUtil::time(DateTimeUtil::getSystemDateTime()));
+                int timeWithOffset = _formLetterContract.RORTransTime() + timeZoneDifference;
+    
+                // DateTime in data base always store in GMT time
+                _salesParmUpdate.INVCalculationDateTime = DateTimeUtil::newDateTime(timeWithOffset > #SecondsPerDay ? _formLetterContract.parmTransDate() - 1 : _formLetterContract.parmTransDate(), _formLetterContract.RORTransTime());
+    
+                // set time to 0:00
+                _salesParmUpdate.INVCalculationDateTime = DateTimeUtil::newDateTime(DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(DateTimeUtil::getSystemDateTime(), DateTimeUtil::getUserPreferredTimeZone())), 0, DateTimeUtil::getUserPreferredTimeZone());
+            }
+        
+            _salesParmUpdate.INVTransdate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+        }
+        
+        return _salesParmUpdate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORorderLineMustBeRegistered</Name>
+				<Source><![CDATA[
+    private static boolean RORorderLineMustBeRegistered(SalesLine _salesLine)
+    {
+        BOBRentalTrans              rentalTrans;
+        InventTrans                 inventTrans;
+        InventTransOriginSalesLine  inventTransOriginSalesLine;
+        BOBPostingPolicyRule        postingPolicyRule;
+        BOBRentalType               rentalType;
+    
+        select firstOnly RecId from postingPolicyRule
+        where postingPolicyRule.SubStatus == BOBRentalSubStatus::Picked
+        &&    postingPolicyRule.RentalControl == BOBSubStatusControl::Mandatory
+            exists join rentalType
+            where rentalType.PostingPolicyRecId == postingPolicyRule.PostingPolicyRecId
+            &&    ((_salesLine.BOBRentalTypeIdAssigned && rentalType.RentalTypeId == _salesLine.BOBRentalTypeIdAssigned)
+            ||     (_salesLine.BOBRentalTypeIdRequested && rentalType.RentalTypeId == _salesLine.BOBRentalTypeIdRequested));
+    
+        if (postingPolicyRule)
+        {
+            // Check whether the order has been (partially) picked
+            select firstOnly RecId from inventTrans
+            where inventTrans.StatusIssue == StatusIssue::Picked
+                join TableId from rentalTrans
+                where rentalTrans.InventTransRecId == inventTrans.RecId
+                &&    rentalTrans.SubStatus == BOBRentalSubStatus::Picked
+                    exists join inventTransOriginSalesLine
+                    where inventTransOriginSalesLine.InventTransOrigin      == rentalTrans.InventTransOrigin
+                    &&    inventTransOriginSalesLine.SalesLineDataAreaId    == _salesLine.dataAreaId
+                    &&    inventTransOriginSalesLine.SalesLineInventTransId == _salesLine.InventTransId;
+    
+            // When it is partially checked,
+            // then it is possible to continue to the next step for the order
+            if (inventTrans.RecId)
+            {
+                return false;
+            }
+            else
+            {
+                select firstOnly RecId from inventTrans
+                where inventTrans.StatusIssue == StatusIssue::OnOrder
+                    join TableId from rentalTrans
+                    where rentalTrans.InventTransRecId == inventTrans.RecId
+                    &&    rentalTrans.SubStatus == BOBRentalSubStatus::Picked
+                        exists join inventTransOriginSalesLine
+                        where inventTransOriginSalesLine.InventTransOrigin      == rentalTrans.InventTransOrigin
+                        &&    inventTransOriginSalesLine.SalesLineDataAreaId    == _salesLine.dataAreaId
+                        &&    inventTransOriginSalesLine.SalesLineInventTransId == _salesLine.InventTransId;
+            }
+        }
+    
+        return inventTrans.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVParmCustInvoiceJour</Name>
+				<Source><![CDATA[
+    public CustInvoiceJour INVParmCustInvoiceJour(CustInvoiceJour _custInvoiceJour = custInvoiceJour)
+    {
+        custInvoiceJour = _custInvoiceJour;
+        return custInvoiceJour;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVGetTransDateTime</Name>
+				<Source><![CDATA[
+    public void INVGetTransDateTime(SalesParmTable _dummySalesParmTable, SalesTable _salesTable, SalesLine _salesLine = null)
+    {
+        this.BOBSetTransDateTime(_dummySalesParmTable, _salesTable, _salesLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORSubRentalExists</Name>
+				<Source><![CDATA[
+    private boolean RORSubRentalExists(SalesId _salesId = salesTable.SalesId)
+    {
+        PurchTable  purchTable;
+        SalesLine   salesLine;
+    
+        select firstOnly RecId from purchTable
+        where purchTable.PurchaseType == PurchaseType::RORSubRental
+            exists join salesLine
+            where salesLine.InventRefId   == purchTable.PurchId
+            &&    salesLine.inventRefType == InventRefType::Purch
+            &&    salesLine.SalesId       == _salesId;
+    
+        return purchTable.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetInvoiceDateTime</Name>
+				<Source><![CDATA[
+    public void INVSetInvoiceDateTime(SalesParmLine _salesParmLine, SalesLine _salesLineLocal = null)
+    {
+        this.parmSalesFormletterParmDataStrategy().INVSetInvoiceDateTime(_salesParmLine, _salesLineLocal);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateInventDim</Name>
+				<Source><![CDATA[
+    public InventDimId RORUpdateInventDim(InventDim _inventDim, SalesLine _salesLine)
+    {
+        return this.parmSalesFormletterParmDataStrategy().RORUpdateInventDim(_inventDim, _salesLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORcheckCreateParmLine</Name>
+				<Source><![CDATA[
+    public boolean RORcheckCreateParmLine(SalesLine _salesLine)
+    {
+        return this.parmSalesFormletterParmDataStrategy().RORcheckCreateParmLine(_salesLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBSetTransDateTime</Name>
+				<Source><![CDATA[
+    public void BOBSetTransDateTime(SalesParmTable _salesParmTable, SalesTable _salesTable, SalesLine _salesLine = null)
+    {
+        this.parmSalesFormletterParmDataStrategy().BOBSetTransDateTime(_salesParmTable, _salesTable, _salesLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSalesFormletterParmDataStrategy</Name>
+				<Source><![CDATA[
+    private DNRSalesFormletterParmDataStrategy parmSalesFormletterParmDataStrategy()
+    {
+        if(!strategy)
+        {
+            strategy = DNRSalesFormletterParmDataStrategy::construct(this);
+        }
+        return strategy;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

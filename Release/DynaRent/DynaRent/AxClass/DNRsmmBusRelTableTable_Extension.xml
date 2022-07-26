@@ -1,0 +1,521 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRsmmBusRelTableTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(smmBusRelTable))]
+public final class DNRsmmBusRelTableTable_Extension
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>DNRCustAccount</Name>
+				<Source><![CDATA[
+    // chain-of-command wrapper methods
+    [SysClientCacheDataMethodAttribute(true)]
+    display CustAccount DNRCustAccount()
+    {
+        return this.custAccount();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRDirPartyNumber</Name>
+				<Source><![CDATA[
+    display DirPartyNumber DNRDirPartyNumber()
+    {
+        return (select PartyNumber from DirPartyTable
+            where DirPartyTable.RecId == this.Party).PartyNumber;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update(boolean _updateMasterTables)
+    {
+        ttsbegin;
+
+        next update(_updateMasterTables);
+
+        smmBusRelTypeGroup  busRelTypeGroup = smmBusRelTypeGroup::find(this.BusRelTypeId);
+        if(_updateMasterTables && busRelTypeGroup.TableType == smmBusRelTypeSourceTable::IRMCustVend)
+        {
+            this.updateCustTable();
+            this.updateVendTable();
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>convert2CustOrVend</Name>
+				<Source><![CDATA[
+    protected void convert2CustOrVend(CustVendTable _custVendTable)
+    {
+        smmBusRelTypeId tmpBusRelTypeId = this.BusRelTypeId;
+        CustGroupId     custGroupId = this.CustGroup;
+        VendGroupId     vendGroupId = this.VendGroup;
+
+        next convert2CustOrVend(_custVendTable);
+
+        if(_custVendTable.TableId == tableNum(CustTable))
+        {
+            smmBusRelTypeSourceTable smmBusRelTypeSourceTableCustTable = smmBusRelTypeGroup::find(tmpBusRelTypeId).TableType;
+            if(smmBusRelTypeSourceTableCustTable == smmBusRelTypeSourceTable::Vendor || smmBusRelTypeSourceTableCustTable == smmBusRelTypeSourceTable::IRMCustVend)
+            {
+                this.BusRelTypeId = smmBusRelTypeGroup::IRMGetCustVendType(true);
+                if(smmBusRelTypeGroup::find(this.BusRelTypeId).TableType == smmBusRelTypeSourceTable::IRMCustVend)
+                {
+                    this.VendGroup = vendGroupId;   //Dont Clear VendGroup if propect is also a Customer
+                }
+            }
+        }
+        else if(_custVendTable.TableId == tableNum(VendTable))
+        {
+            smmBusRelTypeSourceTable smmBusRelTypeSourceTableVendTable = smmBusRelTypeGroup::find(tmpBusRelTypeId).TableType;
+            if(smmBusRelTypeSourceTableVendTable == smmBusRelTypeSourceTable::Customer || smmBusRelTypeSourceTableVendTable == smmBusRelTypeSourceTable::IRMCustVend)
+            {
+                this.BusRelTypeId = smmBusRelTypeGroup::IRMGetCustVendType(true);
+                
+                if(smmBusRelTypeGroup::find(this.BusRelTypeId).TableType == smmBusRelTypeSourceTable::IRMCustVend)
+                {
+                    this.CustGroup = custGroupId; //Dont Clear CustGroup if propect is also a Vendor
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initializeConvertedBusRel</Name>
+				<Source><![CDATA[
+    // *** Repeated code
+    protected smmConvertedBusRel initializeConvertedBusRel(TableId _tableId, CustVendAC _account)
+    {
+        next initializeConvertedBusRel(_tableId, _account);
+        smmConvertedBusRel convertedBusRel = smmConvertedBusRel::IRMFind(this.BusRelAccount, this.Party, true);
+
+        convertedBusRel.initFromBusRelTable(this);
+
+        switch (_tableId)
+        {
+            case tableNum(CustTable) :
+                convertedBusRel.CustAccount = _account;
+                break;
+
+            case tableNum(VendTable) :
+                convertedBusRel.VendAccount = _account;
+                break;
+        }
+
+        return convertedBusRel;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromVendTable</Name>
+				<Source><![CDATA[
+    public void initFromVendTable(smmBusRelTypeId _type, VendTable _vendTable)
+    {
+        smmBusRelTypeId tmpBusRelTypeId = this.BusRelTypeId;
+        CustGroupId     tmpCustGroup    = this.CustGroup;
+
+        next initFromVendTable(_type, _vendTable);
+
+        // do not change the type back to 'vendor' in case the prospect is also a customer
+        if(smmBusRelTypeGroup::find(tmpBusRelTypeId).TableType == smmBusRelTypeSourceTable::IRMCustVend)
+        {
+            this.BusRelTypeId = tmpBusRelTypeId;
+        }
+
+        this.CustGroup    = tmpCustGroup;   //Dont clear Customer Group when prospect is also a Vendor
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteFromCustVend</Name>
+				<Source><![CDATA[
+    static void deleteFromCustVend(TableId _tableId, DirPartyRecId _partyRecId)
+    {
+        TableId tmpTableId = _tableId;
+        smmBusRelTable busRelTable = smmBusRelTable::findByParty(_partyRecId, true);
+
+        if (busRelTable.BusRelTypeId == smmBusRelTypeGroup::IRMGetCustVendType())
+        {
+            busRelTable.RORUpdateBusRelTypeId(busRelTable.BusRelTypeId);
+            tmpTableId = 0;
+        }
+
+        next deleteFromCustVend(tmpTableId, _partyRecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCustomerFromBusinessRelation</Name>
+				<Source><![CDATA[
+    protected CustTable initCustomerFromBusinessRelation(smmBusRelTable _smmBusRelTable, CustAccount _custAccount)
+    {
+        CustTable localCustTable = next initCustomerFromBusinessRelation(_smmBusRelTable, _custAccount);
+
+        if (localCustTable.AccountNum)
+        {
+            localCustTable.RORInitFromSmmBusRelTable(_smmBusRelTable);
+        }
+
+        return localCustTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCustTable</Name>
+				<Source><![CDATA[
+    protected CustTable initCustTable()
+    {
+        CustTable localCustTable;
+        LedgerDefaultDimensionValueSet localDefaultDimensionOrig;
+        localDefaultDimensionOrig = this.DefaultDimension;
+
+        localCustTable = next initCustTable();
+
+        if (localCustTable)
+        {
+            if (FINDimAttributeSetup::existTableId(tableNum(CustTable)))
+            {
+                localCustTable.DefaultDimension      = localDefaultDimensionOrig;
+            }
+            
+            localCustTable.FINCreditCheckStatus = this.FINCreditCheckStatus;
+            localCustTable.RORInitFromSmmBusRelTable(this);
+        }
+        return localCustTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>retreiveQuickCreateSettings</Name>
+				<Source><![CDATA[
+    public static container retreiveQuickCreateSettings()
+    {
+        container quickCreateSettings = next retreiveQuickCreateSettings();
+
+        quickCreateSettings += [menuitemDisplayStr(RORSalesQuotationTableForNewFromBusRel), MenuItemType::Display];
+
+        return quickCreateSettings;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINFindByLedgerDimensionCust</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public static smmBusRelTable FINFindByLedgerDimensionCust(LedgerDimensionAccount _ledgerDimension, boolean _forupdate = false, ConcurrencyModel _concurrencyModel = ConcurrencyModel::Auto)
+    {
+        smmBusRelTable busRelTable;
+        busRelTable.selectForUpdate(_forupdate);
+        if (_forupdate  && _concurrencyModel != ConcurrencyModel::Auto)
+        {
+            busRelTable.concurrencyModel(_concurrencyModel);
+        }
+    
+        CustTable custTable;
+        DimensionAttributeValueCombination ledgerDimension;
+        select firstonly busRelTable
+            exists join custTable
+            where custTable.Party == busRelTable.Party
+                join RecId from ledgerDimension
+                where ledgerDimension.DisplayValue == custTable.AccountNum
+                &&    ledgerDimension.RecId == _ledgerDimension;
+    
+        return busRelTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINFindByLedgerDimensionVend</Name>
+				<Source><![CDATA[
+    public static smmBusRelTable FINFindByLedgerDimensionVend(LedgerDimensionAccount    _ledgerDimension,
+                                                              boolean                   _forupdate = false,
+                                                              ConcurrencyModel          _concurrencyModel = ConcurrencyModel::Auto)
+    {
+        smmBusRelTable                      busRelTable;
+        VendTable                           vendTable;
+        DimensionAttributeValueCombination  ledgerDimension;
+    
+        busRelTable.selectForUpdate(_forupdate);
+        if (_forupdate  && _concurrencyModel != ConcurrencyModel::Auto)
+        {
+            busRelTable.concurrencyModel(_concurrencyModel);
+        }
+    
+        select firstonly busRelTable
+            exists join vendTable
+            where vendTable.Party == busRelTable.Party
+                join RecId from ledgerDimension
+                where ledgerDimension.DisplayValue == vendTable.AccountNum
+                &&    ledgerDimension.RecId == _ledgerDimension;
+    
+        return busRelTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>IRMCreateProspect</Name>
+				<Source><![CDATA[
+    public static client server void IRMCreateProspect(CustVendTable _custVendTable)
+    {
+        smmBusRelTable      smmBusRelTable;
+        DirParty            dirParty;
+    
+        dirParty = DirParty::constructFromPartyRecId(_custVendTable.Party);
+    
+        smmBusRelTable.initValue();
+        smmBusRelTable.BusRelAccount = smmParameters::getNumber(smmNumbSeqUsed::BusRel);
+        smmBusRelTable.initFromDirParty(dirParty);
+        smmBusRelTable.modifiedField(fieldNum(smmBusRelTable,Party));
+    
+        switch (_custVendTable.TableId)
+        {
+            case tableNum(CustTable):
+                CustTable custTable = _custVendTable as CustTable;
+                smmBusRelTable.INVInvoiceProfileId = custTable.INVInvoiceProfileId;
+                smmBusRelTable.RORPriceTimeUnit = custTable.RORPriceTimeUnit;
+                smmBusRelTable.DNRRentalCalendarId = custTable.DNRRentalCalendarId;
+
+                smmBusRelTable.BusRelTypeId = DirPartyTableHelper::isvendor(_custVendTable.Party) ? smmBusRelTypeGroup::IRMGetCustVendType() : smmBusRelTypeGroup::getCustomerType();
+                break;
+    
+            case tableNum(VendTable):
+                VendTable vendTable = _custVendTable as VendTable;
+                smmBusRelTable.INVInvoiceProfileId = vendTable.INVInvoiceProfileId;
+                smmBusRelTable.RORPriceTimeUnit = vendTable.RORPriceTimeUnit;
+                smmBusRelTable.DNRRentalCalendarId = vendTable.DNRRentalCalendarId;
+
+                smmBusRelTable.BusRelTypeId = DirPartyTableHelper::isCustomer(_custVendTable.Party) ? smmBusRelTypeGroup::IRMGetCustVendType() : smmBusRelTypeGroup::getVendorType();
+                break;
+        }
+    
+        smmBusRelTable.CreditMax           = _custVendTable.CreditMax;
+        smmBusRelTable.LineOfBusinessId    = _custVendTable.LineOfBusinessId;
+        smmBusRelTable.DefaultDimension    = _custVendTable.DefaultDimension;
+    
+        if (smmBusRelTable.validateWrite())
+        {
+            smmBusRelTable.insert();
+        }
+    
+        smmBusRelTable.createConvertedBusRel(_custVendTable.TableId, _custVendTable.AccountNum);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>IRMExistByParty</Name>
+				<Source><![CDATA[
+    public static client boolean IRMExistByParty(DirPartyRecId _partyRecId)
+    {
+        return _partyRecId && (select firstonly RecId from smmBusRelTable
+                               where smmBusRelTable.Party == _partyRecId).RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>IRMLookupBusRelWithTypes</Name>
+				<Source><![CDATA[
+    public static client void IRMLookupBusRelWithTypes(FormStringControl _callerControl,
+                                                       boolean _showCustomers = true,
+                                                       boolean _showVendors = true,
+                                                       boolean _showRelations = true,
+                                                       boolean _showCustVend = true)
+    {
+        #DNRConstants
+        SysTableLookup          lookup;
+        Query                   query;
+        QueryBuildDataSource    qbds;
+        ;
+    
+        query = new Query();
+        qbds = query.addDataSource(tableNum(smmBusRelTable));
+        qbds.addSortField(fieldNum(smmBusRelTable, BusRelAccount));
+        qbds.addSelectionField(fieldNum(smmBusRelTable, BusRelAccount));
+        qbds.addSelectionField(fieldNum(smmBusRelTable, Party));
+        qbds.addSelectionField(fieldNum(smmBusRelTable, BusRelTypeId));
+        qbds.addSelectionField(fieldNum(smmBusRelTable, MainContactWorker));
+    
+        if(_showCustomers || _showVendors || _showRelations || _showCustVend)
+        {
+            qbds = qbds.addDataSource(tableNum(smmBusRelTypeGroup));
+            qbds.relations(true);
+            qbds.addSelectionField(fieldNum(smmBusRelTypeGroup, TableId));
+    
+            if(_showCustomers)
+            {
+                qbds.addRange(fieldNum(smmBusRelTypeGroup, TableType)).value(SysQuery::value(smmBusRelTypeSourceTable::Customer));
+            }
+            if(_showVendors)
+            {
+                qbds.addRange(fieldNum(smmBusRelTypeGroup, TableType)).value(SysQuery::value(smmBusRelTypeSourceTable::Vendor));
+            }
+            if(_showRelations)
+            {
+                qbds.addRange(fieldNum(smmBusRelTypeGroup, TableType)).value(SysQuery::value(smmBusRelTypeSourceTable::Relation));
+            }
+            if(_showCustVend)
+            {
+                qbds.addRange(fieldNum(smmBusRelTypeGroup, TableType)).value(SysQuery::value(smmBusRelTypeSourceTable::IRMCustVend));
+            }
+        }
+        else
+        {
+            qbds.addRange(fieldNum(smmBusRelTable, BusRelAccount)).value(#DNRvalueNoMatch);
+        }
+    
+        lookup = SysTableLookup::newParameters(tableNum(smmBusRelTable), _callerControl);
+        lookup.addLookupfield(fieldNum(smmBusRelTable, BusRelAccount), true);
+        lookup.addLookupfield(fieldNum(smmBusRelTable, Party));
+        lookup.addLookupfield(fieldNum(smmBusRelTable, BusRelTypeId));
+        lookup.addLookupfield(fieldNum(smmBusRelTable, MainContactWorker));
+    
+        lookup.parmQuery(query);
+        lookup.performFormLookup();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>IRMUpdateProspect</Name>
+				<Source><![CDATA[
+    public static client server void IRMUpdateProspect(CustVendTable _custVendTable)
+    {
+        smmBusRelTable  smmBusRelTable;
+        DirParty        dirParty = DirParty::constructFromPartyRecId(_custVendTable.Party);
+    
+        ttsBegin;
+        smmBusRelTable = smmBusRelTable::findByParty(_custVendTable.Party, true);
+    
+        switch (_custVendTable.TableId)
+        {
+            case tableNum(CustTable):
+                smmBusRelTable.BusRelTypeId = DirPartyTableHelper::isvendor(_custVendTable.Party) ? smmBusRelTypeGroup::IRMGetCustVendType() : smmBusRelTypeGroup::getCustomerType();
+                break;
+    
+            case tableNum(VendTable):
+                smmBusRelTable.BusRelTypeId = DirPartyTableHelper::isCustomer(_custVendTable.Party) ? smmBusRelTypeGroup::IRMGetCustVendType() : smmBusRelTypeGroup::getVendorType();
+                break;
+    
+            default:
+                break;
+        }
+    
+        if (smmBusRelTable.validateWrite())
+        {
+            // Created from a customer/vendor;
+            // so do not update the master tables
+            smmBusRelTable.update(false);
+        }
+    
+        smmBusRelTable.createConvertedBusRel(_custVendTable.TableId, _custVendTable.AccountNum);
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORInitFromCustVendTable</Name>
+				<Source><![CDATA[
+    public void RORInitFromCustVendTable(CustVendTable _custVendTable)
+    {
+        switch (_custVendTable.TableId)
+        {
+            case tableNum(CustTable):
+                CustTable custTable = _custVendTable as CustTable;
+
+                this.INVInvoiceProfileId = custTable.INVInvoiceProfileId;
+                this.RORPriceTimeUnit = custTable.RORPriceTimeUnit;
+                this.DNRRentalCalendarId = custTable.DNRRentalCalendarId;
+                break;
+    
+            case tableNum(VendTable):
+                VendTable vendTable = _custVendTable as VendTable;
+
+                this.INVInvoiceProfileId = vendTable.INVInvoiceProfileId;
+                this.RORPriceTimeUnit = vendTable.RORPriceTimeUnit;
+                this.DNRRentalCalendarId = vendTable.DNRRentalCalendarId;
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateBusRelTypeId</Name>
+				<Source><![CDATA[
+    public void RORUpdateBusRelTypeId(smmBusRelTypeId _deletedBusRelTypeId)
+    {
+        smmBusRelTypeId     newBusRelTypeId;
+        ;
+    
+        if (this.BusRelTypeId == smmBusRelTypeGroup::IRMGetCustVendType())
+        {
+            if (_deletedBusRelTypeId == smmBusRelTypeGroup::getCustomerType())
+            {
+                newBusRelTypeId = smmBusRelTypeGroup::getVendorType();
+            }
+            else if (_deletedBusRelTypeId == smmBusRelTypeGroup::getVendorType())
+            {
+                newBusRelTypeId = smmBusRelTypeGroup::getCustomerType();
+            }
+        }
+        else if (_deletedBusRelTypeId == this.BusRelTypeId)
+        {
+            newBusRelTypeId = smmParametersTable::find().BusRelTypeId;
+        }
+    
+        if (newBusRelTypeId)
+        {
+            this.BusRelTypeId = newBusRelTypeId;
+            this.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_OnInitializingRecord</Name>
+				<Source><![CDATA[
+    // event handler methods
+
+    [DataEventHandler(tableStr(smmBusRelTable), DataEventType::InitializingRecord)]
+    public static void DNREvent_OnInitializingRecord(Common _sender, DataEventArgs _eventArgs)
+    {
+        smmBusRelTable smmBusRelTable = _sender as smmBusRelTable;
+        CustParameters custParameters = CustParameters::find();
+
+        smmBusRelTable.FINCreditCheckStatus = custParameters.FINCreditCheckStatus;
+        smmBusRelTable.INVInvoiceProfileId  = custParameters.INVInvoiceProfileId;
+        smmBusRelTable.RORPriceTimeUnit     = custParameters.RORPriceTimeUnit;
+        smmBusRelTable.DNRRentalCalendarId  = custParameters.DNRRentalCalendarId;
+        smmBusRelTable.DlvMode              = custParameters.RORCustDlvMode;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,586 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoicePeriodManager_FinancialChange</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[FINInvoicePeriodManagerAttribute(FINInvoicePeriodAction::FinancialChange)]
+class FINInvoicePeriodManager_FinancialChange extends FINInvoicePeriodManager
+{
+    // Map( [fromDateTime, toDateTime, FINInvoicePeriodPriceComponent::CalendarId]; ['05', '07', ReasonText] )
+    Map changesMap = new Map(Types::Container, Types::Container);
+    boolean mustSetPendingCredit = true;
+    FINCreditLineDetails creditParmLineDetails;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setMustSetPendingCredit</Name>
+				<Source><![CDATA[
+    public void setMustSetPendingCredit(boolean _mustSetPendingCredit)
+    {
+        // if FALSE then it is a credit process and invoice period status was already set outside of the class. 
+        // No need to check "allow update invoice periods" parameter either.
+        mustSetPendingCredit = _mustSetPendingCredit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCreditParmLineDetails</Name>
+				<Source><![CDATA[
+    public void setCreditParmLineDetails(FINCreditLineDetails _creditParmLineDetails)
+    {
+        creditParmLineDetails = _creditParmLineDetails;        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runFromMap</Name>
+				<Source><![CDATA[
+    public static void runFromMap(INVInvoicePeriodHost _invoicePeriodHost, Map _changesMap, boolean _mustSetPendingCredit, FINCreditLineDetails _creditParmLineDetails = null)
+    {
+        FINInvoicePeriodManager_FinancialChange invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::FinancialChange, _invoicePeriodHost);
+        invoicePeriodManager.setChanges(_changesMap);
+        invoicePeriodManager.setMustSetPendingCredit(_mustSetPendingCredit);
+        invoicePeriodManager.setCreditParmLineDetails(_creditParmLineDetails);
+        invoicePeriodManager.run();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setChanges</Name>
+				<Source><![CDATA[
+    public void setChanges(Map _changesMap)
+    {
+        changesMap = _changesMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if (changesMap && !changesMap.empty())
+        {
+            MapEnumerator enumerator = changesMap.getEnumerator();
+
+            while (enumerator.moveNext())
+            {
+                TransDateTime fromDateTime;
+                TransDateTime toDateTime;
+                FINInvoicePeriodPriceComponent priceComponent;
+                anytype newValue, oldValue;
+                RORAmendmentReasonText reasonText;
+
+                [fromDateTime, toDateTime, priceComponent] = enumerator.currentKey();
+                [newValue, oldValue, reasonText] =  enumerator.currentValue();
+
+                if (this.canProcessInvoicedPeriod(fromDateTime, toDateTime))
+                {
+                    this.parmAmendmentOldValue(oldValue);
+                    this.parmAmendmentReasonText(reasonText);
+                    this.processSingleChange(fromDateTime, toDateTime, priceComponent, newValue);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canProcessInvoicedPeriod</Name>
+				<Source><![CDATA[
+    public boolean canProcessInvoicedPeriod(TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        boolean ret = true;
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        FINCreditPeriodLink creditPeriodLink;
+        
+        if (mustSetPendingCredit && !FINRentalInvoiceProfile::find(invoicePeriodHost.InvoiceProfileId).AllowChangeDateForInvoicedPeriods)
+        {
+            // Ensure that no previously-invoiced periods exist after the desired end date/time
+            select firstonly RecId from invPeriodQtyPhysical
+            order by ReturnDateTime desc
+            where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+            &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+                exists join invPeriodQtyFinancial
+                where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+                &&    invPeriodQtyFinancial.InvoiceId
+                &&    invPeriodQtyFinancial.PeriodStartDateTime < _toDateTime
+                &&    invPeriodQtyFinancial.PeriodEndDateTime > _fromDateTime;
+
+            if (invPeriodQtyPhysical)
+            {
+                ret = checkFailed("@DNR8269");
+            }                                
+
+            if (ret && !creditParmLineDetails)
+            {
+                select firstonly RecId from invPeriodQtyPhysical
+                order by ReturnDateTime desc
+                where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+                &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+                    exists join invPeriodQtyFinancial
+                    where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+                    &&    invPeriodQtyFinancial.InvoiceId
+                    &&    invPeriodQtyFinancial.PeriodStartDateTime < _toDateTime
+                    &&    invPeriodQtyFinancial.PeriodEndDateTime > _fromDateTime
+                        join TableId from creditPeriodLink
+                        where creditPeriodLink.CreditInvoiceId == invPeriodQtyFinancial.InvoiceId;
+
+                if (invPeriodQtyPhysical.RecId)
+                {
+                    ret = checkFailed("@DNR:EffectivityPeriodCredited");
+                }
+            }
+        }
+
+        if (mustSetPendingCredit)
+        {
+            FINCustInvoiceJourProForma custInvoiceJourProForma = FINInvoicePeriodManager_FinancialChange::getActiveInvoiceProposal(invoicePeriodHost.InventTransId, _fromDateTime, _toDateTime);
+
+            if (custInvoiceJourProForma.invoiceId)
+            {
+                throw warning(strFmt("@DNR:InvoiceProrosalExistsForCurrentLine", custInvoiceJourProForma.invoiceId));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getActiveInvoiceProposal</Name>
+				<Source><![CDATA[
+    public static FINCustInvoiceJourProForma getActiveInvoiceProposal(InventTransId _inventTransId, TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        FinCustInvoiceTransProforma  custInvoiceTransProforma;
+        FinCustInvoiceJourProforma   custInvoiceJourProforma;
+        FINCustInvoiceTransProFormaInvoiceTrans custInvoiceTransProFormaInvoiceTrans;
+        CustInvoiceJour custInvoiceJour;
+        Map specificationMap;
+
+        while select RecId from custInvoiceTransProforma
+        where custInvoiceTransProforma.InventTransId  == _inventTransId
+            outer join PeriodSpecificationPacked, Timezone from custInvoiceTransProFormaInvoiceTrans
+            where custInvoiceTransProFormaInvoiceTrans.CustInvoiceTransRecId == custInvoiceTransProforma.RecId
+                join custInvoiceJourProforma
+                where custInvoiceJourProforma.InvoiceId == custInvoiceTransProforma.InvoiceId
+                && custInvoiceJourProforma.InvoiceDate == custInvoiceTransProforma.InvoiceDate
+                && custInvoiceJourProforma.NumberSequenceGroup == custInvoiceTransProforma.NumberSequenceGroup
+                && custInvoiceJourProforma.SalesId == custInvoiceTransProforma.SalesId
+                && custInvoiceJourProforma.IsProFormaInvoiceActive
+                    notexists join custInvoiceJour
+                    where  custInvoiceJour.InvoiceAccount == custInvoiceJourProforma.InvoiceAccount
+                    &&     custInvoiceJour.InvoiceId == custInvoiceJourProforma.InvoiceId
+                    &&     custInvoiceJour.LedgerVoucher == custInvoiceJourProforma.LedgerVoucher
+        {
+            
+            if (custInvoiceTransProFormaInvoiceTrans.PeriodSpecificationPacked)
+            {
+                specificationMap = Map::create(custInvoiceTransProFormaInvoiceTrans.PeriodSpecificationPacked);
+            }
+            else
+            {
+                return custInvoiceJourProforma;
+            }
+
+            if (!specificationMap.empty())
+            {
+                MapEnumerator enumerator = specificationMap.getEnumerator();
+                while (enumerator.moveNext())
+                {
+                    Map periodDefinitionMap = enumerator.currentValue();
+
+                    if (FINInvoicePeriodManager_FinancialChange::checkSingleDelivery(periodDefinitionMap, custInvoiceTransProFormaInvoiceTrans.timezone, _fromDateTime, _toDateTime) == false)
+                    {
+                        return custInvoiceJourProforma;
+                    }
+                }
+            }
+        }
+
+        return custInvoiceJourProforma;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkSingleDelivery</Name>
+				<Source><![CDATA[
+    public static boolean checkSingleDelivery(Map _periodDefinitionMap, Timezone _timezone, TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        MapEnumerator specificationEnumerator = _periodDefinitionMap.getEnumerator();
+             
+        while (specificationEnumerator.moveNext())
+        {
+            TransDateTime fromDateTimeInTimeZone;
+            TransDateTime toDateTimeInTimeZone;
+
+            [fromDateTimeInTimeZone, toDateTimeInTimeZone] = specificationEnumerator.currentKey();
+            TransDateTime fromDateTimeInvoice = DateTimeUtil::removeTimeZoneOffset(fromDateTimeInTimeZone, _timezone);
+            TransDateTime toDateTimeInvoice = DateTimeUtil::removeTimeZoneOffset(toDateTimeInTimeZone, _timezone);
+
+            if ((fromDateTimeInvoice < _toDateTime || _toDateTime == DateTimeUtil::minValue()) && (_fromDateTime < toDateTimeInvoice || _fromDateTime == DateTimeUtil::minValue()))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSingleChange</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "update happens in the splitPeriod and extendPeriod methods")]
+    protected void processSingleChange(TransDateTime _fromDateTime, TransDateTime _toDateTime, FINInvoicePeriodPriceComponent _priceComponent, anytype _value)
+    {
+        RORRentalDateTime amendmentEndDateTime = _toDateTime;
+        boolean createNewRecord = true;
+
+        ttsbegin;
+
+        // for crediting process always create a new amendment. It might be merged after approval/confirmation.
+        if (!creditParmLineDetails.RecId)
+        {
+            if (_priceComponent != FINInvoicePeriodPriceComponent::CalendarId)
+            {
+                RORRentalDateTimes rentalDateTimesHost = RORRentalDateTimes::findReference(invoicePeriodHost.TableId, invoicePeriodHost.RecId);
+                amendmentEndDateTime = ((rentalDateTimesHost && rentalDateTimesHost.OffRentDateTime == _toDateTime) ? DateTimeUtil::maxValue() : _toDateTime);
+            }
+            
+            FINInvoicePeriodAmendment invoicePeriodAmendment;
+
+            while select forupdate invoicePeriodAmendment
+            where invoicePeriodAmendment.RefTableId == invoicePeriodHost.TableId
+            &&    invoicePeriodAmendment.RefRecId == invoicePeriodHost.RecId
+            &&    invoicePeriodAmendment.PriceComponent == _priceComponent
+            &&    invoicePeriodAmendment.ToDateTime >= _fromDateTime
+            &&    invoicePeriodAmendment.FromDateTime <= _toDateTime
+            &&    (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed) 
+            {
+                if (this.valueChanged(invoicePeriodAmendment, _value)
+                // Amendments with values the same as on order line should be removed.
+                || this.comparePeriodHostValue(_priceComponent, _value))
+                {
+                    this.splitPeriod(invoicePeriodAmendment, _fromDateTime, amendmentEndDateTime);
+                }
+                else
+                {
+                    this.extendPeriod(invoicePeriodAmendment, _fromDateTime, _toDateTime);
+                    createNewRecord = false;
+                }
+            }
+        }
+
+        // Create a new record if it didn't overlap with existing records or value changed since a last amendment.
+        // Values the same as on order line (reseting of amendment) will not be stored.
+        if (createNewRecord 
+        && (creditParmLineDetails || !this.comparePeriodHostValue(_priceComponent, _value)))
+        {
+            this.createPeriod(_fromDateTime, amendmentEndDateTime, _priceComponent, _value);
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>valueChanged</Name>
+				<Source><![CDATA[
+    protected boolean valueChanged(FINInvoicePeriodAmendment _invoicePeriodAmendment, anytype _value)
+    {
+        return (_invoicePeriodAmendment.getValue() != _value);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>comparePeriodHostValue</Name>
+				<Source><![CDATA[
+    protected boolean comparePeriodHostValue(FINInvoicePeriodPriceComponent _priceComponent, anytype _value)
+    {
+        // Return 'false' if value is different than on corresponding order line.
+        boolean ret = true;
+
+        switch (_priceComponent)
+        {
+            case FINInvoicePeriodPriceComponent::CalendarId :
+                ret = (any2Str(_value) == invoicePeriodHost.CalendarId);
+                break;
+
+            case FINInvoicePeriodPriceComponent::RentalPrice :
+                ret = (any2Real(_value) == invoicePeriodHost.Price);
+                break;
+
+            case FINInvoicePeriodPriceComponent::LinePercent :
+                ret = (any2Real(_value) == invoicePeriodHost.LinePercent);
+                break;
+
+            case FINInvoicePeriodPriceComponent::RentalModeId :
+                ret = (any2Str(_value) == invoicePeriodHost.RentalModeId);
+                break;
+
+            case FINInvoicePeriodPriceComponent::InvoiceProfileId :
+                ret = (any2Str(_value) == invoicePeriodHost.InvoiceProfileId);
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>splitPeriod</Name>
+				<Source><![CDATA[
+    protected void splitPeriod(FINInvoicePeriodAmendment _invoicePeriodAmendment, TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        TransDateTime newToDateTime = max(_invoicePeriodAmendment.FromDateTime, _fromDateTime);
+        TransDateTime newFromDateTime = min(_invoicePeriodAmendment.ToDateTime, _toDateTime);
+        FINInvoicePeriodAmendment  origCopy;
+
+        origCopy.data(_invoicePeriodAmendment);
+
+        if (_invoicePeriodAmendment.FromDateTime >= _fromDateTime
+        &&  _invoicePeriodAmendment.ToDateTime <= _toDateTime)
+        {
+            _invoicePeriodAmendment.createAmendmentLog(AccessType::Delete);
+
+            _invoicePeriodAmendment.delete();
+
+            // Set status back to FullyInvoiced when deleting amendment. It will be set to PendingCredit if new amendment will be created.
+            if (mustSetPendingCredit)
+            {
+                FINInvoicePeriodQtyFinancial::markUnMarkDateTimeForCredit(FINInvoiceTransPeriodStatus::FullyInvoiced, _fromDateTime, _toDateTime, invoicePeriodHost);
+            }
+        }
+        else
+        {
+            if (_invoicePeriodAmendment.FromDateTime < newToDateTime
+            && _invoicePeriodAmendment.ToDateTime != newToDateTime)
+            {
+                _invoicePeriodAmendment.ToDateTime = newToDateTime;
+                _invoicePeriodAmendment.update(); 
+               
+                _invoicePeriodAmendment.createAmendmentLog(AccessType::Edit, _invoicePeriodAmendment.FromDateTime, _invoicePeriodAmendment.ToDateTime);
+            }
+        
+            if ( origCopy.ToDateTime > newFromDateTime)
+            {
+                if (_invoicePeriodAmendment.ToDateTime == origCopy.ToDateTime)
+                {
+                    if (_invoicePeriodAmendment.FromDateTime != newFromDateTime)
+                    {
+                        // First split
+                        _invoicePeriodAmendment.FromDateTime = newFromDateTime;
+                        _invoicePeriodAmendment.update();    
+                    
+                        _invoicePeriodAmendment.createAmendmentLog(AccessType::Edit, _invoicePeriodAmendment.FromDateTime, _invoicePeriodAmendment.ToDateTime);
+                    }
+                }
+                else
+                {
+                    // Second split
+                    FINInvoicePeriodAmendment newRecord;
+
+                    newRecord.data(origCopy);
+                    newRecord.FromDateTime = newFromDateTime;
+                    newRecord.insert(); 
+                   
+                    newRecord.createAmendmentLog(AccessType::Add, _invoicePeriodAmendment.FromDateTime, _invoicePeriodAmendment.ToDateTime);
+                }
+            }
+        }
+
+        this.clearContractDataCache(_invoicePeriodAmendment);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>extendPeriod</Name>
+				<Source><![CDATA[
+    protected void extendPeriod(FINInvoicePeriodAmendment _invoicePeriodAmendment, TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        if (_invoicePeriodAmendment.FromDateTime != _fromDateTime
+        || _invoicePeriodAmendment.ToDateTime != _toDateTime)
+        {
+            TransDateTime newFromDateTime = min(_invoicePeriodAmendment.FromDateTime, _fromDateTime);
+            TransDateTime newToDateTime = max(_invoicePeriodAmendment.ToDateTime, _toDateTime);
+
+            _invoicePeriodAmendment.FromDateTime = newFromDateTime;
+            _invoicePeriodAmendment.ToDateTime = newToDateTime;
+            _invoicePeriodAmendment.update();
+
+            _invoicePeriodAmendment.createAmendmentLog(AccessType::Edit, _fromDateTime, _toDateTime);
+            this.clearContractDataCache(_invoicePeriodAmendment);
+            
+            if (mustSetPendingCredit)
+            {
+                FINInvoicePeriodQtyFinancial::markUnMarkDateTimeForCredit(FINInvoiceTransPeriodStatus::PendingCredit, _fromDateTime, _toDateTime, invoicePeriodHost);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPeriod</Name>
+				<Source><![CDATA[
+    protected void createPeriod(TransDateTime _fromDateTime, TransDateTime _toDateTime, FINInvoicePeriodPriceComponent _priceComponent, anytype _value)
+    {
+        if (_fromDateTime != DateTimeUtil::minValue() || _toDateTime != DateTimeUtil::minValue())
+        {
+            FINInvoicePeriodAmendment invoicePeriodAmendment = this.createInvoicePeriodAmendment(_fromDateTime, _toDateTime, _priceComponent, _value);
+            this.createAmendmentLogOnCreatePeriod(invoicePeriodAmendment);
+            this.clearContractDataCache(invoicePeriodAmendment);
+
+            if (creditParmLineDetails)
+            {
+                FINCreditPendingChangesReference::createReference(creditParmLineDetails, invoicePeriodAmendment, creditParmLineDetails.creditLine().DocumentState, _fromDateTime, _toDateTime);
+            }
+        }
+
+        if (mustSetPendingCredit)
+        {
+            FINInvoicePeriodQtyFinancial::markUnMarkDateTimeForCredit(FINInvoiceTransPeriodStatus::PendingCredit, _fromDateTime, _toDateTime, invoicePeriodHost);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAmendmentLogOnCreatePeriod</Name>
+				<Source><![CDATA[
+    protected void createAmendmentLogOnCreatePeriod(FINInvoicePeriodAmendment _invoicePeriodAmendment)
+    {
+        _invoicePeriodAmendment.createAmendmentLog(AccessType::Add);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initInvoicePeriodAmendment</Name>
+				<Source><![CDATA[
+    protected FINInvoicePeriodAmendment initInvoicePeriodAmendment(TransDateTime _fromDateTime, TransDateTime _toDateTime, FINInvoicePeriodPriceComponent _priceComponent, anytype _value)
+    {
+        FINInvoicePeriodAmendment invoicePeriodAmendment;
+
+        invoicePeriodAmendment.RefTableId = invoicePeriodHost.TableId;
+        invoicePeriodAmendment.RefRecId = invoicePeriodHost.RecId;
+        invoicePeriodAmendment.FromDateTime = _fromDateTime;
+        invoicePeriodAmendment.ToDateTime = _toDateTime;
+        invoicePeriodAmendment.PriceComponent = _priceComponent;
+        invoicePeriodAmendment.setValue(_value);
+        invoicePeriodAmendment.setOldValue(amendmentOldValue);
+        invoicePeriodAmendment.ReasonText = amendmentReasonText;
+
+        return invoicePeriodAmendment;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInvoicePeriodAmendment</Name>
+				<Source><![CDATA[
+    protected FINInvoicePeriodAmendment createInvoicePeriodAmendment(TransDateTime _fromDateTime, TransDateTime _toDateTime, FINInvoicePeriodPriceComponent _priceComponent, anytype _value)
+    {
+        FINInvoicePeriodAmendment invoicePeriodAmendment = this.initInvoicePeriodAmendment(_fromDateTime, _toDateTime, _priceComponent, _value);
+        invoicePeriodAmendment.insert();
+
+        return invoicePeriodAmendment;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getChangesMap</Name>
+				<Source><![CDATA[
+    public static Map getChangesMap(INVInvoicePeriodHost _invoicePeriodHost, INVInvoicePeriodHost _origBuffer, TransDateTime _effectiveDateTimeFrom, TransDateTime _effectiveDateTimeTo)
+    {
+        Map changesMap = new Map(Types::Container, Types::Container);
+        
+        if (_invoicePeriodHost.Price != _origBuffer.Price)
+        {
+            if (_invoicePeriodHost.PriceTimeUnit != _origBuffer.PriceTimeUnit)
+            {
+                RORAmendmentReasonText reasonText = strFmt("@DNR:ChangedValueFromTo", 
+                                                           "@DNR44", 
+                                                           UnitOfMeasure::find(_origBuffer.PriceTimeUnit).Symbol,
+                                                           UnitOfMeasure::find(_invoicePeriodHost.PriceTimeUnit).Symbol);
+                changesMap.insert([_effectiveDateTimeFrom, _effectiveDateTimeTo, 'RentalPrice'], [_invoicePeriodHost.Price, _origBuffer.Price, reasonText]);
+            }
+            else
+            {
+                changesMap.insert([_effectiveDateTimeFrom, _effectiveDateTimeTo, 'RentalPrice'], [_invoicePeriodHost.Price, _origBuffer.Price]);
+            }
+        }
+
+        if (_invoicePeriodHost.LinePercent != _origBuffer.LinePercent)
+        {
+            changesMap.insert([_effectiveDateTimeFrom, _effectiveDateTimeTo, 'LinePercent'], [_invoicePeriodHost.LinePercent, _origBuffer.LinePercent, '']);
+        }
+
+        if (_invoicePeriodHost.RentalModeId != _origBuffer.RentalModeId)
+        {
+            changesMap.insert([_effectiveDateTimeFrom, _effectiveDateTimeTo, 'RentalModeId'], [_invoicePeriodHost.RentalModeId, _origBuffer.RentalModeId, '']);
+        }
+
+        if (_invoicePeriodHost.CalendarId != _origBuffer.CalendarId)
+        {
+            changesMap.insert([_effectiveDateTimeFrom, _effectiveDateTimeTo, 'CalendarId'], [_invoicePeriodHost.CalendarId, _origBuffer.CalendarId, '']);
+        }
+
+        return changesMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearContractDataCache</Name>
+				<Source><![CDATA[
+    protected void clearContractDataCache(FINInvoicePeriodAmendment _invoicePeriodAmendment)
+    {
+        if (!isConfigurationkeyEnabled(configurationKeyNum(DNRCEIntegration)))
+        {
+            return;
+        }
+
+        container clearCachePriceComponents = this.getClearContractDataCachePriceComponents();
+
+        if (conFind(clearCachePriceComponents, _invoicePeriodAmendment.PriceComponent))
+        {
+            RAGContractData::clearContractCacheData(_invoicePeriodAmendment.RefTableId, _invoicePeriodAmendment.RefRecId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getClearContractDataCachePriceComponents</Name>
+				<Source><![CDATA[
+    protected container getClearContractDataCachePriceComponents()
+    {
+        return [FINInvoicePeriodPriceComponent::CalendarId, 
+                FINInvoicePeriodPriceComponent::InvoiceProfileId, 
+                FINInvoicePeriodPriceComponent::RateCode, 
+                FINInvoicePeriodPriceComponent::RentalModeId];
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

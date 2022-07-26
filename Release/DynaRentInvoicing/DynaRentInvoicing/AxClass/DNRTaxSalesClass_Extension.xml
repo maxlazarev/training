@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRTaxSalesClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(TaxSales))]
+final class DNRTaxSalesClass_Extension
+{
+   
+    public FINMarkupWorkTrans   markupWorkTrans;
+    public boolean              markupWorkTransAdminister;
+    public RefTableId           markupWorkTransParentSourceTableId;
+    public RefRecId             markupWorkTransParentSourceRecId;
+    public SalesLine            parentSalesLine;
+    
+    
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>FINCalcMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    // method based /Classes/TaxSales/calcMarkup
+    public void FINCalcMarkupWorkTrans(Map _amountInclTax, Map _amountExclTax)
+    {
+        SalesCalcTax_Sales  salesFormLetterLocal = this.getSalesFormLetter();
+        TaxAmount           taxAmount;
+        NoYes               moreMarkup;
+        TaxBaseCur          baseAmount;
+        DiscPct             cashDisc        = salesFormLetterLocal.taxCashDiscPercent();
+        AmountCur           lineAmount;
+        System.Object []    obj;
+        boolean             taxIncludedInItemPriceLocal;
+        boolean             taxCalculateLineLocal = taxCalculateLine;
+        ParmId              parmId;
+         
+        moreMarkup  = true;
+        markupWorkTransParentSourceTableId = this.sourceTableId();
+        markupWorkTransParentSourceRecId = this.sourceRecId();
+
+        parentSalesLine = SalesLine::findRecId(this.sourceRecId());
+
+        if (salesFormLetterLocal is SalesCalcTax_ParmTrans)
+        {
+            SalesCalcTax_ParmTrans salesFormLetter_ParmTrans = salesFormLetterLocal;
+            SalesParmTable  salesParmTable = salesFormLetter_ParmTrans.getSalesParmTable_RU();
+
+            parmId = salesParmTable.ParmId;
+        }
+
+        while select markupWorkTrans
+            where markupWorkTrans.RefTableId == markupWorkTransParentSourceTableId
+            && markupWorkTrans.RefRecId == markupWorkTransParentSourceRecId
+            && ((parmId && markupWorkTrans.ParmId == parmId) ||
+                (!parmId && !markupWorkTrans.ParmLineRecId))
+        {
+            markupWorkTransAdminister= NoYes::Yes;
+                
+            this.FINConfigureTaxForMarkupLine();
+
+            lineAmount = markupWorkTrans.AmountCur * -1;
+                
+            // get the amount excluding tax
+            if (salesFormLetterLocal.isTaxIncluded())
+            {
+                baseAmount = this.amountExclTax(
+                                    lineAmount,
+                                    false,
+                                    false,
+                                    0,
+                                    '',
+                                    '',
+                                    markupWorkTrans.RecId,
+                                    markupWorkTrans.TableId);
+            }
+            else
+            {
+                baseAmount = lineAmount;
+            }
+
+            // If this is a Tax included scenario then store the line amount and base amounts for later use.
+            if (salesFormLetterLocal.isTaxIncluded())
+            {
+                _amountInclTax.insert([markupWorkTrans.TableId, markupWorkTrans.RecId], lineAmount);
+                _amountExclTax.insert([markupWorkTrans.TableId, markupWorkTrans.RecId], baseAmount);
+                taxIncludedInItemPriceLocal = true;
+            }
+
+            // deduct non tax portion of the cash discount from the base amount
+            if (this.taxParameters().TaxLessCashDisc)
+            {
+                baseAmount -= baseAmount * cashDisc / 100;
+            }
+
+            this.insertLineInInternal(baseAmount,
+                                        0,
+                                        '',
+                                        '',
+                                        0,
+                                        salesFormLetterLocal.markupDefaultDimension(),
+                                        salesFormLetterLocal.operationAccountMarkup(),// change
+                                        salesFormLetterLocal.operationPostingMarkup());// change
+                            
+            if (taxCalculateLineLocal)
+            {
+                taxAmount = this.calcTax();
+                
+                this.saveInProcessTransaction();
+                
+            }
+        }
+        markupWorkTransAdminister = NoYes::No;
+        markupWorkTransParentSourceTableId = 0;
+        markupWorkTransParentSourceRecId = 0;
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINConfigureTaxForMarkupLine</Name>
+				<Source><![CDATA[
+    protected void FINConfigureTaxForMarkupLine()
+    {
+        SalesCalcTax_Sales      salesFormLetterLocal = this.getSalesFormLetter();
+        NoYes                   moreMarkup;
+        TransDate               taxCalculationDate;
+        TaxCalculationDateType  taxCalculationDateType = this.taxParameters().TaxCalculationDateType;
+        boolean                 checkTaxCodesByLine;
+                
+        if (markupWorkTrans)
+        {
+            markupWorkTransAdminister = NoYes::Yes;
+
+            switch (taxCalculationDateType)
+            {
+                case TaxCalculationDateType::DeliveryDate:
+                    taxCalculationDate = salesFormLetterLocal.deliveryDateMarkup();
+                    break;
+
+                case TaxCalculationDateType::DocumentDate:
+                    taxCalculationDate = salesFormLetterLocal.documentDate();
+                    break;
+
+                case TaxCalculationDateType::InvoiceDate:
+                    taxCalculationDate = salesFormLetterLocal.invoiceDate();
+                    break;
+            }
+                        
+            this.insertIntersection(markupWorkTrans.TaxGroup,
+                markupWorkTrans.TaxItemGroup,
+                salesFormLetterLocal.transTransId(),
+                markupWorkTrans.Txt,
+                taxCalculationDate);
+
+            checkTaxCodesByLine = this.checkTaxCodesByLine();
+            if (! checkTaxCodesByLine)
+            {
+                throw error("@SYS22772");
+            }
+        }
+        else
+        {
+            markupWorkTransAdminister   = NoYes::No;
+            moreMarkup                  = false;
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    public FINMarkupWorkTrans FINGetMarkupWorkTrans()
+    {
+        return markupWorkTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTransAdminister</Name>
+				<Source><![CDATA[
+    public boolean FINGetMarkupWorkTransAdminister()
+    {
+        return markupWorkTransAdminister;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTransParentSourceTableId</Name>
+				<Source><![CDATA[
+    public RefTableId FINGetMarkupWorkTransParentSourceTableId()
+    {
+        return markupWorkTransParentSourceTableId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTransParentSourceRecId</Name>
+				<Source><![CDATA[
+    public RefRecId FINGetMarkupWorkTransParentSourceRecId()
+    {
+        return markupWorkTransParentSourceRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    public void FINSetMarkupWorkTrans(FINMarkupWorkTrans _markupWorkTrans)
+    {
+        markupWorkTrans = _markupWorkTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetMarkupWorkTransAdminister</Name>
+				<Source><![CDATA[
+    public void FINSetMarkupWorkTransAdminister(boolean _markupWorkTransAdminister)
+    {
+        markupWorkTransAdminister = _markupWorkTransAdminister;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetMarkupWorkTransParentSourceTableId</Name>
+				<Source><![CDATA[
+    public void FINSetMarkupWorkTransParentSourceTableId(RefTableId _markupWorkTransParentSourceTableId)
+    {
+        markupWorkTransParentSourceTableId = _markupWorkTransParentSourceTableId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetMarkupWorkTransParentSourceRecId</Name>
+				<Source><![CDATA[
+    public void FINSetMarkupWorkTransParentSourceRecId(RefRecId _markupWorkTransParentSourceRecId)
+    {
+        markupWorkTransParentSourceRecId = _markupWorkTransParentSourceRecId;
+        
+    }
+
+    // event handler methods
+    // Probably code for event handler is not needed anymore. Left here to be able to resotre code from old environment quickly.
+    /*
+    [PostHandlerFor(classStr(TaxSales), methodStr(TaxSales, calcMarkup))]
+    public static void calcMarkup_post(XppPrePostArgs _args)
+    {
+        Map         amountInclTax = _args.getArg('_amountInclTax');
+        Map         amountExclTax = _args.getArg('_amountExclTax');
+        TaxSales    taxSales = _args.getThis();
+
+        taxSales.FINCalcMarkupWorkTrans(amountInclTax, amountExclTax);
+    }
+
+    [PostHandlerFor(classStr(TaxSales), methodStr(TaxSales, sourceRecId))]
+    public static void sourceRecId_post(XppPrePostArgs _args)
+    {
+        TaxSales    taxSales = _args.getThis();
+
+
+        if (taxSales.FINGetMarkupWorkTransAdminister())
+        {
+            _args.setReturnValue(taxSales.FINGetMarkupWorkTrans().RecId);
+        }
+    }
+
+    [PostHandlerFor(classStr(TaxSales), methodStr(TaxSales, sourceTableId))]
+    public static void sourceTableId_post(XppPrePostArgs _args)
+    {
+        TaxSales    taxSales = _args.getThis();
+
+
+        if (taxSales.FINGetMarkupWorkTransAdminister())
+        {
+            _args.setReturnValue(taxSales.FINGetMarkupWorkTrans().TableId);
+        }
+    }
+
+    [PostHandlerFor(classStr(TaxSales), methodStr(TaxSales, parmParentSourceRecId))]
+    public static void parmParentSourceRecId_post(XppPrePostArgs _args)
+    {
+        TaxSales    taxSales = _args.getThis();
+
+
+        if (taxSales.FINGetMarkupWorkTransParentSourceRecId())
+        {
+            _args.setReturnValue(taxSales.FINGetMarkupWorkTransParentSourceRecId());
+        }
+    }
+
+    [PostHandlerFor(classStr(TaxSales), methodStr(TaxSales, parmParentSourceTableId))]
+    public static void parmParentSourceTableId_post(XppPrePostArgs _args)
+    {
+        TaxSales    taxSales = _args.getThis();
+
+
+        if (taxSales.FINGetMarkupWorkTransParentSourceTableId())
+        {
+            _args.setReturnValue(taxSales.FINGetMarkupWorkTransParentSourceTableId());
+        }
+    }
+
+    [PostHandlerFor(classStr(Tax), methodStr(Tax, skipTaxCalculations))]
+    public static void skipTaxCalculations_post(XppPrePostArgs _args)
+    {
+        _args.setReturnValue(false);
+    }
+*/
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

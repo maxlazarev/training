@@ -1,0 +1,452 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalInventCountCreate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBRentalInventCountCreate extends RunBaseBatch
+{
+    QueryRun                    queryRun;
+
+    InventJournalId             journalId;
+    TransDate                   countDate;
+    Integer                     maxLines;
+    NoYes                       physicalUpdates;
+    NoYes                       includeZeroOnHand;
+    InventLocationId            warehouse;
+
+    DialogRunbase               dialog;
+    DialogField                 dialogJournalId;
+    DialogField                 dialogCountDate;
+    DialogField                 dialogMaxLines;
+    DialogField                 dialogPhysicalUpdates;
+    DialogField                 dialogIncludeZeroOnHand;
+    DialogField                 dialogInventLocationId;
+
+    DialogGroup                 dialogGroupSetup;
+
+    #define.CurrentVersion(1)
+    #localmacro.CurrentList
+        CountDate,
+        JournalId,
+        warehouse,
+        physicalUpdates,
+        maxLines
+    #endmacro
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>canGoBatchJournal</Name>
+				<Source><![CDATA[
+    public boolean canGoBatchJournal()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createCountingTrans</Name>
+				<Source><![CDATA[
+    private void createCountingTrans()
+    {
+        #DNRConstants
+
+        Set                     rentalTypeIds;
+        BOBRentalType           rentalType;
+        BOBRentalSum            rentalSum;
+        BOBRentalTransDelta     transDelta;
+        BOBTmpRentalSum         tmpRentalSum;
+        BOBRentalInventOnHand   rentalInventOnHand;
+        InventJournalTrans      inventJournalTrans;
+        InventDim               inventDim;
+        InventJournalTable      inventJournalTable;
+        RecordInsertList        insertList;
+        ;
+    
+        inventJournalTable  = InventJournalTable::find(journalId);
+        rentalTypeIds       = new Set(Types::String);
+        rentalInventOnHand  = new BOBRentalInventOnHand();
+        insertList          = new RecordInsertList(tableNum(InventJournalTrans));
+    
+        // add relevant RentalTypeIds to a Set
+        while select RentalTypeId from rentalSum
+        group by RentalTypeId
+        {
+            rentalTypeIds.add(rentalSum.RentalTypeId);
+        }
+    
+        while select RentalTypeId from transDelta
+        group by RentalTypeId
+        {
+            rentalTypeIds.add(transDelta.RentalTypeId);
+        }
+    
+        if (warehouse)
+        {
+            inventDim.clear();
+            inventDim.initValue();
+            inventDim.InventSiteId      = InventLocation::find(warehouse).InventSiteId;
+            inventDim.InventLocationId  = warehouse;
+        }
+    
+        // iterate the query
+        while (queryRun.next())
+        {
+            rentalType = queryRun.get(tableNum(BOBRentalType));
+    
+            if(rentalTypeIds.in(rentalType.RentalTypeId))
+            {
+                delete_from tmpRentalSum;
+    
+                tmpRentalSum = rentalInventOnHand.populateTmpRentalSum_Date(rentalType.RentalTypeId, warehouse, countDate, countDate);
+    
+                while select tmpRentalSum
+                where (includeZeroOnHand || tmpRentalSum.Qty)
+                {
+                    inventJournalTrans.clear();
+                    inventJournalTrans.initValue();
+                    inventJournalTrans.initFromInventJournalTable(inventJournalTable);
+                    inventJournalTrans.JournalType      = InventJournalType::Count;
+                    inventJournalTrans.ItemId           = InventTable::BOBFindFromRentalType(rentalType.RentalTypeId).ItemId;
+                    inventJournalTrans.BOBRentalTypeId  = tmpRentalSum.RentalTypeId;
+                    inventJournalTrans.TransDate        = tmpRentalSum.TransDate;
+                    inventJournalTrans.BOBTransTime     = #INVMidday;
+                    inventJournalTrans.Qty              = 0;
+                    inventJournalTrans.CostAmount       = 0;
+                    inventJournalTrans.InventOnHand     = tmpRentalSum.Qty;
+    
+                    if (tmpRentalSum.InventLocationId != warehouse)
+                    {
+                        inventDim.InventSiteId      = InventLocation::find(tmpRentalSum.InventLocationId).InventSiteId;
+                        inventDim.InventLocationId  = tmpRentalSum.InventLocationId;
+                    }
+    
+                    inventJournalTrans.setInventDimIdFromInventDim(inventDim);
+                    insertList.add(inventJournalTrans);
+    
+                    if (inventJournalTrans.LineNum >= maxLines)
+                    {
+                        insertList.insertDatabase();
+                        info("@SYS59529");
+                        return;
+                    }
+                }
+
+                insertList.insertDatabase();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        dialog = super();
+    
+        dialogGroupSetup = dialog.addGroup("@SYS2186");
+    
+        dialogJournalId = dialog.addField(extendedTypeStr(InventJournalId));
+        dialogJournalId.value(journalId);
+        dialogJournalId.active(false);
+    
+        dialogInventLocationId = dialog.addField(extendedTypeStr(InventLocationId));
+        dialogInventLocationId.value(warehouse);
+    
+        dialogCountDate = dialog.addField(extendedTypeStr(CountDate), '', "@SYS54348");
+        dialogCountDate.value(countDate);
+    
+        dialogMaxLines = dialog.addField(extendedTypeStr(Integer), "@SYS59525", "@SYS59526");
+        dialogMaxLines.value(maxLines);
+    
+        dialogPhysicalUpdates = dialog.addField(enumStr(NoYes), "@SYS59503", "@SYS59504");
+        dialogPhysicalUpdates.value(physicalUpdates);
+    
+        dialogIncludeZeroOnHand = dialog.addFieldValue(enumStr(NoYes), includeZeroOnHand, "@SYS98263", "@SYS98264");
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        journalId           = dialogJournalId.value();
+        countDate           = dialogCountDate.value();
+        physicalUpdates     = dialogPhysicalUpdates.value();
+        maxLines            = dialogMaxLines.value();
+        includeZeroOnHand   = dialogIncludeZeroOnHand.value();
+        warehouse           = dialogInventLocationId.value();
+    
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParmDefault</Name>
+				<Source><![CDATA[
+    public void initParmDefault()
+    {
+        super();
+    
+        maxLines    = 999;
+        countDate   = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(InventJournalId _journalId)
+    {
+        super();
+    
+        queryRun    = new SysQueryRun(queryStr(BOBRentalTypeCount));
+        journalId   = _journalId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [#CurrentVersion, #CurrentList, queryRun.pack()];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCountDate</Name>
+				<Source><![CDATA[
+    public TransDate parmCountDate(TransDate _countDate = countDate)
+    {
+        countDate = _countDate;
+        return countDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmJournalId</Name>
+				<Source><![CDATA[
+    protected InventJournalId parmJournalId(InventJournalId _journalId = journalId)
+    {
+        journalId = _journalId;
+        return journalId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmRentalTypeId</Name>
+				<Source><![CDATA[
+    public InventLocationId parmRentalTypeId(InventLocationId _warehouse = warehouse)
+    {
+        warehouse = _warehouse;
+        return warehouse;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryRun</Name>
+				<Source><![CDATA[
+    public QueryRun queryRun()
+    {
+        return queryRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        #OCCRetryCount
+    
+        try
+        {
+            ttsbegin;
+    
+            if (this.validate())
+            {
+                this.createCountingTrans();
+            }
+    
+            ttscommit;
+        }
+        catch (Exception::Deadlock)
+        {
+            retry;
+        }
+        catch (Exception::UpdateConflict)
+        {
+            if (appl.ttsLevel() == 0)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::UpdateConflictNotRecovered;
+                }
+                else
+                {
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::UpdateConflict;
+            }
+        }
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runsImpersonated</Name>
+				<Source><![CDATA[
+    public boolean runsImpersonated()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showQueryValues</Name>
+				<Source><![CDATA[
+    public boolean showQueryValues()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version     version = RunBase::getVersion(_packedClass);
+        container   packedQuery;
+    
+        switch (version)
+        {
+            case #CurrentVersion:
+                [version, #CurrentList, packedQuery] = _packedClass;
+                if (packedQuery)
+                {
+                   queryRun = new QueryRun(packedQuery);
+                }
+                break;
+            default:
+                return false;
+        }
+    
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean ret = true;
+    
+        if (!countDate)
+        {
+            ret = checkFailed(strFmt("@SYS26332", "@SYS25005"));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public static ClassDescription description()
+    {
+        return "@DNR10091";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args args)
+    {
+        BOBRentalInventCountCreate  rentalInventCountCreate;
+        FieldId                     journalFieldId;
+        InventJournalId             journalId;
+        FormRun                     callerForm;
+    
+        if (args && args.caller() && args.dataset() )
+        {
+            journalFieldId = fieldName2id(args.dataset(), fieldStr(InventJournalTrans, JournalId));
+    
+            if (journalFieldId)
+            {
+                journalId = args.record().(journalFieldId);
+            }
+    
+            if (!journalId)
+            {
+                callerForm = args.caller();
+    
+                if (callerForm && callerForm.args() && callerForm.args().record() && callerForm.args().record().TableId)
+                {
+                    journalFieldId = fieldName2id(callerForm.args().record().TableId, fieldStr(InventJournalTable, JournalId));
+    
+                    if (journalFieldId)
+                    {
+                        journalId = callerForm.args().record().(journalFieldId);
+                    }
+                }
+            }
+        }
+    
+        if (!journalId)
+        {
+            throw error("@SYS22539");
+        }
+    
+        rentalInventCountCreate = new BOBRentalInventCountCreate(journalId);
+    
+        if (rentalInventCountCreate.prompt())
+        {
+            rentalInventCountCreate.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchInvoiceJournalCreateClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchInvoiceJournalCreate))]
+public final class DNRPurchInvoiceJournalCreateClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkInvoiceMatchingEnabled</Name>
+				<Source><![CDATA[
+    protected boolean checkInvoiceMatchingEnabled(VendParameters _vendParameters)
+    {
+        boolean ret = next checkInvoiceMatchingEnabled(_vendParameters);
+
+        ret = (ret && vendInvoiceInfoTable.purchTable().PurchaseType != PurchaseType::RORSubRental);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>endCreate</Name>
+				<Source><![CDATA[
+    protected void endCreate()
+    {
+        next endCreate();
+        
+        PurchParmUpdate purchParmUpdate = this.parmParmUpdate();
+    
+        if(!purchParmUpdate.Proforma)
+        {
+            this.BOBUpdateObjects(purchParmUpdate.ParmId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateObjects</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private void BOBUpdateObjects(ParmId _parmId)
+    {
+        VendInvoiceInfoTable        invoiceInfoTable;
+        VendInvoiceInfoLine         invoiceInfoLine;
+        VendInvoiceInfoLine_Asset   invoiceInfoLineAsset;
+        PurchTable                  purchTable;
+        PurchLine                   purchLine;
+        InventDim                   inventDim;
+        BOBObjectTable              objectTable;
+        AssetGroup                  assetGroup;
+        BOBAssetObjectCategory      assetCategory;
+        TransDateTime               postingDateTime;
+    
+        while select TransDate, BOBTransTime from invoiceInfoTable
+        where invoiceInfoTable.ParmId == _parmId
+        &&    invoiceInfoTable.ParmJobStatus == ParmJobStatus::Waiting
+            join ReceiveNow, InventTransId, DeliveryPostalAddress from invoiceInfoLine
+            where  invoiceInfoLine.ParmId == invoiceInfoTable.ParmId
+            &&     invoiceInfoLine.TableRefId == invoiceInfoTable.TableRefId
+                join RecId from purchTable
+                where purchTable.PurchId == invoiceInfoLine.OrigPurchId
+                    join RORTradeType from purchLine
+                    where purchLine.PurchId == purchTable.PurchId
+                    &&    purchLine.RecId == invoiceInfoLine.PurchLineRecId
+                        join TableId from inventDim
+                        where inventDim.inventDimId == purchLine.InventDimId
+                        &&    inventDim.inventSerialId // serialized rental items only
+                            join  objectTable
+                            where objectTable.InventSerialId == inventDim.inventSerialId
+                                outer join CreateFixedAsset from invoiceInfoLineAsset
+                                where invoiceInfoLineAsset.VendInvoiceInfoLineRecId == invoiceInfoLine.RecId
+                                    outer join BOBObjectCategory from assetGroup
+                                    where assetGroup.GroupId == invoiceInfoLineAsset.AssetGroup
+        {
+            assetCategory = (invoiceInfoLineAsset.CreateFixedAsset ? assetGroup.BOBObjectCategory : BOBAssetObjectCategory::None);
+            postingDateTime = DateTimeUtil::newDateTime(invoiceInfoTable.TransDate,
+                                                        invoiceInfoTable.BOBTransTime,
+                                                        DateTimeUtil::getUserPreferredTimeZone());
+            if(invoiceInfoLine.ReceiveNow > 0)
+            {
+                BOBObjectManager::invoicePurchLine(objectTable,
+                                                   purchLine.RORTradeType,
+                                                   invoiceInfoLine.InventTransId,
+                                                   invoiceInfoLine.DeliveryPostalAddress,
+                                                   assetCategory,
+                                                   invoiceInfoLineAsset.CreateFixedAsset,
+                                                   postingDateTime,
+                                                   purchTable);
+            }
+            else
+            {
+                BOBObjectManager::creditPurchLine(objectTable);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRInterCompanySyncPurchLineTypeClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(InterCompanySyncPurchLineType))]
+public final class DNRInterCompanySyncPurchLineTypeClass_Extension
+{   
+    private  boolean isRentalDirectDelivery;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>skipSynchronization</Name>
+				<Source><![CDATA[
+    protected boolean skipSynchronization()
+    {
+        boolean ret = next skipSynchronization();
+
+        if (purchTable.InterCompanyDirectDelivery
+        &&  purchTable.InterCompanyOrder
+        &&  purchTable.PurchaseType == PurchaseType::RORSubRental
+        &&  (purchLine.RORTradeType != RORTradeType::SalesPurch || purchLine.RORLineType != RORLineType::Normal))
+        {
+            isRentalDirectDelivery = true;
+        }
+        
+        if (isRentalDirectDelivery
+        // never create supplementary item line across companies
+        &&  !purchLine.InterCompanyInventTransId
+        &&  purchLine.RORLineType != RORLineType::Normal)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createOrUpdateSalesLine</Name>
+				<Source><![CDATA[
+    protected void createOrUpdateSalesLine()
+    {
+        next createOrUpdateSalesLine();
+
+        if (isRentalDirectDelivery
+        &&  axSalesLine.salesLine().RORLineType == RORLineType::Normal)
+        {
+            if (!RORSubRentalReference::exist(axSalesLine.salesLine().InventTransId, purchLine.InventTransId))
+            {
+                RORSubRentalReference reference;
+                // Reference created in company of IC rental order
+                reference.SalesId               = axSalesLine.salesLine().SalesId;
+                reference.SalesInventTransId    = axSalesLine.salesLine().InventTransId;
+                reference.PurchId               = purchLine.PurchId;
+                reference.PurchInventTransId    = purchLine.InventTransId;
+                reference.insert();
+            }
+        }
+    
+        if (isRentalDirectDelivery
+        &&  axSalesLine.salesLine().RORLineType == RORLineType::Normal
+        &&  !axSalesLine.salesLine().RORParentLineRecId)
+        {
+            if (create)
+            {
+                RORRentalLineEditorForm::createSupplementaryItemsLines(axSalesLine.salesLine());
+            }
+            else
+            {
+                axSalesLine.salesLine().RORRentalLine::updateKitComponentPricing(RORKitPricingActionType::ModifyLine);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSalesLineData</Name>
+				<Source><![CDATA[
+    protected void setSalesLineData()
+    {
+        next setSalesLineData();
+
+        if (create || purchLine.fieldChanged(fieldNum(PurchLine, RORLineType)))
+        {
+            axSalesLine.parmRORLineType(purchLine.RORLineType);
+        }
+    
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, RORTradeType)))
+        {
+            axSalesLine.parmRORTradeType(axSalesLine.salesLine().inventTable().RORGetItemTradeType((purchLine.RORTradeType == RORTradeType::SalesPurch) ? RORTradeType::SalesPurch : RORTradeType::Rental));
+        }
+    
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, RORKitComponentType)))
+        {
+            axSalesLine.parmRORKitComponentType(purchLine.RORKitComponentType);
+        }
+    
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, INVRentalModeId)))
+        {
+            axSalesLine.parmINVRentalModeId(purchLine.INVRentalModeId);
+        }
+    
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, INVRateMultiplierTier)))
+        {
+            axSalesLine.parmINVRateMultiplierTier(purchLine.INVRateMultiplierTier);
+        }
+    
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, INVInvoiceProfileId)))
+        {
+            axSalesLine.parmINVInvoiceProfileId(purchLine.INVInvoiceProfileId);
+        }
+    
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, DNRCalendarId)))
+        {
+            axSalesLine.parmDNRCalendarId(purchLine.DNRCalendarId);
+        }
+    
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, RORPriceTimeUnit)))
+        {
+            axSalesLine.parmRORPriceTimeUnit(purchLine.RORPriceTimeUnit);
+        }
+
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, BOBRentalTypeId)))
+        {
+            axSalesLine.parmBOBRentalTypeIdRequested(BOBRentalType::findFromItemId(purchLine.ItemId).RentalTypeId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>needRecalcPricingInfo</Name>
+				<Source><![CDATA[
+    protected boolean needRecalcPricingInfo()
+    {
+        boolean ret = next needRecalcPricingInfo();
+
+        return (isRentalDirectDelivery)
+        &&  (axSalesLine.salesLine().SalesQty != 0
+        ||  (!purchLine.InventRefTransId && axSalesLine.parmSalesType() == SalesType::ReturnItem && axSalesLine.parmExpectedRetQty() != 0))
+        &&  (create || purchLineType.interCompanyIsPriceDiscSearchNeeded());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>recalcPricingInfo</Name>
+				<Source><![CDATA[
+    protected void recalcPricingInfo()
+    {
+        SalesLine salesLineLocal;
+
+        buf2Buf(axSalesLine.salesLine(), salesLineLocal);
+        salesLineLocal.initFromSalesTable(salesTable);
+
+        next recalcPricingInfo();
+
+        if (create || purchLine.fieldChanged(fieldNum(PurchLine, BOBRentalTypeId)))
+        {
+            salesLineLocal.BOBRentalTypeIdRequested = BOBRentalType::findFromItemId(purchLine.ItemId).RentalTypeId;
+        }
+
+        axSalesLine.parmRORRentalGrossAmount(salesLineLocal.RORRentalGrossAmount);
+        axSalesLine.parmRORIsPriceFixed(salesLineLocal.RORIsPriceFixed);
+        axSalesLine.parmRORIsPriceNet(salesLineLocal.RORIsPriceNet);
+    
+        purchLine.RORRentalGrossAmount = salesLineLocal.RORRentalGrossAmount;
+        purchLine.RORIsPriceFixed      = salesLineLocal.RORIsPriceFixed;
+        purchLine.RORIsPriceNet        = salesLineLocal.RORIsPriceNet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyModifiedPricingFieldsFromPurchLine</Name>
+				<Source><![CDATA[
+    protected void copyModifiedPricingFieldsFromPurchLine()
+    {
+        next copyModifiedPricingFieldsFromPurchLine();
+
+        if (create || purchLine.fieldChanged(fieldNum(purchLine, RORRentalGrossAmount)))
+        {
+            axSalesLine.parmRORRentalGrossAmount(purchLine.RORRentalGrossAmount);
+        }
+        else
+        {
+            axSalesLine.parmRORRentalGrossAmount(axSalesLine.salesLine().RORRentalGrossAmount);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

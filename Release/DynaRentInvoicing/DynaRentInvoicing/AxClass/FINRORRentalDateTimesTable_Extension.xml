@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINRORRentalDateTimesTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(RORRentalDateTimes))]
+public final class FINRORRentalDateTimesTable_Extension
+{
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>FINValidateActiveInvoiceProposal</Name>
+				<Source><![CDATA[
+    public boolean FINValidateActiveInvoiceProposal(TransDateTime _dateTimeFrom, TransDateTime _dateTimeTo)
+    {
+        utcdatetime dateTimeTo = (_dateTimeTo == DateTimeUtil::minValue()) ? DateTimeUtil::addSeconds(_dateTimeFrom, 1) : _dateTimeTo;
+
+        if (this.RefTableId == tableNum(SalesLine))
+        {
+            InventTransId inventTransId = (select firstonly InventTransId from SalesLine where SalesLine.RecId == this.RefRecId).InventTransId;
+            FINCustInvoiceJourProForma custInvoiceJourProForma = FINInvoicePeriodManager_FinancialChange::getActiveInvoiceProposal(
+                                                                                                            inventTransId, 
+                                                                                                            _dateTimeFrom < dateTimeTo ? _dateTimeFrom : dateTimeTo,
+                                                                                                            _dateTimeFrom < dateTimeTo ? dateTimeTo : _dateTimeFrom);
+
+            if (custInvoiceJourProForma.InvoiceId)
+            {
+                if ((appl.ttsLevel() == 0) && (Box::YesNo(strFmt("@DNR:RentalInvoiceProposalCancelRequest", custInvoiceJourProForma.InvoiceId), DialogButton::Yes, "@SYS114651") == DialogButton::Yes))
+                {
+                    Args args = new Args();
+                    args.parmObject(FINProformaInvoiceJournalReference::newInvoiceJournal(custInvoiceJourProForma.RecId));
+                    args.record(custInvoiceJourProForma);
+                            
+                    MenuFunction menuFunction = new MenuFunction(menuitemActionStr(FINSalesInvoiceProformaJournalCancel), MenuItemType::Action);
+                    menuFunction.run(args);
+                }
+                else
+                {
+                    return checkFailed(strFmt("@DNR:InvoiceProrosalExistsForCurrentLine", custInvoiceJourProForma.InvoiceId));
+                }
+
+            }
+        }
+
+        if (this.RefTableId == tableNum(SalesTable))
+        {
+            SalesLine salesLine;
+            SalesId   salesId = (select firstonly SalesId from SalesTable where SalesTable.RecId == this.RefRecId).SalesId;
+    
+            while select InventTransId from salesLine
+                where salesLine.SalesId == SalesId
+            {
+                FINCustInvoiceJourProForma custInvoiceJourProForma = FINInvoicePeriodManager_FinancialChange::getActiveInvoiceProposal(
+                                                                                                            salesLine.InventTransId,
+                                                                                                            _dateTimeFrom < _dateTimeTo ? _dateTimeFrom : _dateTimeTo,
+                                                                                                            _dateTimeFrom < _dateTimeTo ? _dateTimeTo : _dateTimeFrom);
+                if (custInvoiceJourProForma.InvoiceId)
+                {
+                    return checkFailed(strFmt("@DNR:InvoiceProrosalExistsForCurrentLine", custInvoiceJourProForma.InvoiceId));
+                }
+            }
+        }
+
+        return true; 
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINRecalculateTotals</Name>
+				<Source><![CDATA[
+    public boolean FINRecalculateTotals()
+    {
+        boolean             ret;
+        RORRentalDateTimes  rentalDateTimesOrig = this.orig();
+
+        if ((this.RefTableId == tableNum(SalesQuotationLine)
+        ||   this.RefTableId == tablenum(SalesLine))
+        &&  (this.OnRentDateTime             != rentalDateTimesOrig.OnRentDateTime
+        ||   this.OffRentDateTime            != rentalDateTimesOrig.OffRentDateTime
+        ||   this.ExpectedOffRentDateTime    != rentalDateTimesOrig.ExpectedOffRentDateTime))
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update(RORSubrentalSynchroniser _subrentalSynchroniser, boolean _maySynchronize, boolean _forceStopTierRangeRecalculation, boolean _checkClearTimes)
+    {
+        boolean updateTotals, isRentalTotalsConfigKeyEnabled;
+        
+        isRentalTotalsConfigKeyEnabled = isConfigurationkeyEnabled(configurationKeyNum(DNRRentalTotals));
+
+        if (isRentalTotalsConfigKeyEnabled)
+        {
+            updateTotals = this.FINRecalculateTotals();
+        }
+
+        next update(_subrentalSynchroniser, _maySynchronize, _forceStopTierRangeRecalculation, _checkClearTimes);
+
+        if (isRentalTotalsConfigKeyEnabled && updateTotals)
+        {
+            switch (this.RefTableId)
+            {
+                case tableNum(SalesQuotationLine):
+                    SalesQuotationTable salesQuotationTableLocal = SalesQuotationLine::findRecId(this.RefRecId).salesQuotationTable();
+
+                    if ((salesQuotationTableLocal.QuotationType == QuotationType::RORRental
+                    ||  salesQuotationTableLocal.QuotationType == QuotationType::RORProjRental)
+                    &&  !salesQuotationTableLocal.FINRecalculateRentalTotals)
+                    {
+                        salesQuotationTableLocal.FINUpdateRecalculateRentalTotals(true);
+                    }
+                    break;
+
+                case tableNum(SalesLine):
+                    SalesTable salesTableLocal = SalesLine::findRecId(this.RefRecId).salesTable();
+
+                    if (salesTableLocal.SalesType == SalesType::RORRental
+                    &&  !salesTableLocal.FINRecalculateRentalTotals)
+                    {
+                        salesTableLocal.FINUpdateRecalculateRentalTotals(true);
+                    }
+                    break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findReference</Name>
+				<Source><![CDATA[
+    public static RORRentalDateTimes findReference(
+        RefTableId          _refTableId,
+        RefRecId            _refRecId,
+        boolean             _forupdate,
+        ConcurrencyModel    _concurrencyModel)
+    {
+        RORRentalDateTimes ret = next findReference(_refTableId, _refRecId, _forupdate, _concurrencyModel);
+
+        if (ret.RecId == 0)
+        {
+            FINSyncContractLineTierAsyncDisposableContext asyncContext = FINSyncContractLineTierAsyncDisposableContext::current();
+
+            if (asyncContext)
+            {
+                RORRentalDateTimes rentalDateTimesAsyncContext = asyncContext.parmRentalDateTimes();
+
+                ret = (rentalDateTimesAsyncContext.RefRecId == _refRecId && rentalDateTimesAsyncContext.RefTableId == _refTableId) ? rentalDateTimesAsyncContext : ret;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBTmpOnHandRentalInventoryForm</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBTmpOnHandRentalInventoryForm
+{
+    Set         availableInventLocationSet;
+    LineNum     lineNumber;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getQtyBeforePeriod</Name>
+				<Source><![CDATA[
+    private Qty getQtyBeforePeriod(BOBRentalTypeId  _rentalTypeId,
+                                   InventLocationId _inventLocationId,
+                                   FromDate         _fromDate,
+                                   NoYes            _onlyNegInventory)
+    {
+        BOBRentalSum    rentalSum;
+    
+        // First get the Available from the Rental sum record
+        // that lays closest to the _fromDate
+        select firstOnly Available from rentalSum
+        order by TransDateTime desc
+        where rentalSum.RentalTypeId     == _rentalTypeId
+        &&    rentalSum.InventLocationId == _inventLocationId
+        &&    rentalSum.TransDateTime    <  DateTimeUtil::newDateTime(_fromDate, 0, DateTimeUtil::getUserPreferredTimeZone())
+        //&&  (!_onlyNegInventory || rentalSum.Available < 0)
+        ;
+    
+        return rentalSum.Available;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTotalQtyPerItem</Name>
+				<Source><![CDATA[
+    public UnitQty getTotalQtyPerItem(
+        TableId   _tableId,
+        Num       _salesPurchId,
+        ItemId    _itemId,
+        LineNum   _lineNum = 0)
+    {
+        UnitQty                 totalQty;
+        SalesTable              salesTable;
+        SalesQuotationTable     salesQuotationTable;
+        PurchTable              purchTable;
+        SalesLine               salesLine;
+        SalesQuotationLine      salesQuotationLine;
+        PurchLine               purchLine;
+        InventTransferLine      inventTransferLine;
+        BOBRentalType           rentalType;
+        BOBPostingPolicy        postingPolicy;
+        BOBPostingPolicyRule    postingPolicyRule;
+        BOBRentalSubStatus      rentalSubStatus;
+    
+        switch (_tableId)
+        {
+            case tableNum(SalesLine):
+                salesTable = SalesTable::find(_salesPurchId);
+    
+                select sum(SalesQty) from salesLine
+                where salesLine.SalesId == _salesPurchId
+                &&    salesLine.ItemId  == _itemId
+                    exists join rentalType
+                    where (salesLine.BOBRentalTypeIdAssigned && rentalType.RentalTypeId == salesLine.BOBRentalTypeIdAssigned)
+                    ||    (salesLine.BOBRentalTypeIdRequested && rentalType.RentalTypeId == salesLine.BOBRentalTypeIdRequested)
+                        join TableId from postingPolicy
+                        where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                        &&    postingPolicy.IncludeInAvailabilityOverview
+                            join TableId from postingPolicyRule
+                            where postingPolicyRule.PostingPolicyRecId == postingPolicy.RecId
+                            &&    postingPolicyRule.SubStatus == salesLine.BOBRentalSubStatus
+                            &&   (salesTable.SalesType == SalesType::RORRental && !postingPolicyRule.IsAvailableRental)
+                            ||   (salesTable.SalesType != SalesType::RORRental && !postingPolicyRule.IsAvailableSales);
+    
+                totalQty = salesLine.SalesQty;
+                break;
+    
+            case tableNum(SalesQuotationLine):
+                salesQuotationTable = SalesQuotationTable::find(_salesPurchId);
+    
+                select sum(SalesQty) from salesQuotationLine
+                where salesQuotationLine.QuotationId == _salesPurchId
+                &&    salesQuotationLine.ItemId      == _itemId
+                    exists join rentalType
+                    where (salesQuotationLine.BOBRentalTypeIdAssigned && rentalType.RentalTypeId == salesQuotationLine.BOBRentalTypeIdAssigned)
+                    ||    (salesQuotationLine.BOBRentalTypeIdRequested && rentalType.RentalTypeId == salesQuotationLine.BOBRentalTypeIdRequested)
+                        join TableId from postingPolicy
+                        where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                        &&    postingPolicy.IncludeInAvailabilityOverview
+                            join TableId from postingPolicyRule
+                            where postingPolicyRule.PostingPolicyRecId == postingPolicy.RecId
+                            &&    postingPolicyRule.SubStatus == salesQuotationLine.BOBRentalSubStatus
+                            &&   (salesQuotationTable.QuotationType == QuotationType::RORRental && !postingPolicyRule.IsAvailableRental)
+                            ||   (salesQuotationTable.QuotationType != QuotationType::RORRental && !postingPolicyRule.IsAvailableSales);
+    
+                totalQty = salesQuotationLine.SalesQty;
+                break;
+    
+            case tableNum(PurchLine):
+                purchTable = PurchTable::find(_salesPurchId);
+    
+                select sum(PurchQty) from purchLine
+                where purchLine.PurchId == _salesPurchId
+                &&    purchLine.ItemId  == _itemId
+                    exists join rentalType
+                    where purchLine.BOBRentalTypeId && rentalType.RentalTypeId == purchLine.BOBRentalTypeId
+                        join TableId from postingPolicy
+                        where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                        &&    postingPolicy.IncludeInAvailabilityOverview
+                            join TableId from postingPolicyRule
+                            where postingPolicyRule.PostingPolicyRecId == postingPolicy.RecId
+                            &&    postingPolicyRule.SubStatus == salesLine.BOBRentalSubStatus
+                            &&   (purchTable.PurchaseType == PurchaseType::RORSubRental && !postingPolicyRule.IsAvailableSubRental)
+                            ||   (purchTable.PurchaseType != PurchaseType::RORSubRental && !postingPolicyRule.IsAvailablePurchase);
+    
+                totalQty = purchLine.PurchQty;
+                break;
+    
+            case tableNum(InventTransferLine):
+                rentalSubStatus = InventTransferLine::find(_salesPurchId, _lineNum).BOBRentalSubStatus();
+    
+                select sum(QtyTransfer) from inventTransferLine
+                where inventTransferLine.Transferid == _salesPurchId
+                &&    inventTransferLine.ItemId     == _itemId
+                    exists join rentalType
+                    where rentalType.RentalTypeId == inventTransferLine.BOBRentalTypeId
+                        join TableId from postingPolicy
+                        where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                        &&    postingPolicy.IncludeInAvailabilityOverview
+                            join TableId from postingPolicyRule
+                            where postingPolicyRule.PostingPolicyRecId  == postingPolicy.RecId
+                            &&    postingPolicyRule.SubStatus           == rentalSubStatus
+                            &&    inventTransferLine.RORTradeType       == RORTradeType::Rental
+                            &&    !postingPolicyRule.IsAvailableRental;
+    
+                totalQty = salesLine.SalesQty;
+                break;
+    
+        }
+    
+        return totalQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpBuffer</Name>
+				<Source><![CDATA[
+    public BOBTmpRentalInventOnHand populateTmpBuffer(BOBRentalTypeId   _rentalTypeId,
+                                                      InventLocationId  _inventLocationId,
+                                                      FromDate          _fromDate,
+                                                      ToDate            _toDate,
+                                                      NoYes             _onlyNegInventory,
+                                                      UnitQty           _orderQty)
+    {
+        BOBTmpRentalInventOnHand    tmpRentalInventOnHand;
+        BOBRentalSum                rentalSum, rentalSumLatest;
+        InventLocation              inventLocation;
+        TransDate                   currentDate;
+        SetEnumerator               setEnumerator;
+        InventLocationId            inventLocationId;
+        boolean                     addEmptyLine;
+        Map                         availableMap = new Map(Types::String, Types::Real);
+        #DNRConstants
+    
+        lineNumber = 1;
+        if (_inventLocationId)
+        {
+            availableMap.insert(_inventLocationId, this.getQtyBeforePeriod(_rentalTypeId, _inventLocationId, _fromDate, _onlyNegInventory));
+    
+            if (!availableInventLocationSet.in(_inventLocationId))
+            {
+                availableInventLocationSet.add(_inventLocationId);
+            }
+        }
+        else
+        {
+            setEnumerator = availableInventLocationSet.getEnumerator();
+    
+            while (setEnumerator.moveNext())
+            {
+                inventLocationId = setEnumerator.current();
+                availableMap.insert(inventLocationId, this.getQtyBeforePeriod(_rentalTypeId, inventLocationId, _fromDate, _onlyNegInventory));
+            }
+    
+            while select inventLocationId from inventLocation
+            {
+                if (!availableInventLocationSet.in(inventLocation.InventLocationId))
+                {
+                    availableMap.insert(inventLocation.InventLocationId, this.getQtyBeforePeriod(_rentalTypeId, inventLocation.InventLocationId, _fromDate, _onlyNegInventory));
+    
+                    if (availableMap.lookup(inventLocation.InventLocationId) != 0)
+                    {
+                        availableInventLocationSet.add(inventLocation.InventLocationId);
+                    }
+                }
+            }
+        }
+    
+        for (currentDate = _fromDate; currentDate <= _toDate; currentDate++)
+        {
+            addEmptyLine = false;
+            setEnumerator = availableInventLocationSet.getEnumerator();
+    
+            while (setEnumerator.moveNext())
+            {
+                inventLocationId = setEnumerator.current();
+    
+                select firstOnly minOf(Available), InventLocationId from rentalSum
+                group by InventLocationId, RentalTypeId
+                where rentalSum.RentalTypeId     == _rentalTypeId
+                &&    rentalSum.InventLocationId == inventLocationId
+                &&    rentalSum.TransDateTime    >= DateTimeUtil::newDateTime(currentDate, 0, DateTimeUtil::getUserPreferredTimeZone())
+                &&    rentalSum.TransDateTime    <= DateTimeUtil::newDateTime(currentDate, #INVTimeMax, DateTimeUtil::getUserPreferredTimeZone());
+    
+                select firstOnly Available from rentalSumLatest
+                order by TransDateTime desc
+                where rentalSumLatest.RentalTypeId     == _rentalTypeId
+                &&    rentalSumLatest.InventLocationId == inventLocationId
+                &&    rentalSumLatest.TransDateTime    >= DateTimeUtil::newDateTime(currentDate, 0, DateTimeUtil::getUserPreferredTimeZone())
+                &&    rentalSumLatest.TransDateTime    <= DateTimeUtil::newDateTime(currentDate, #INVTimeMax, DateTimeUtil::getUserPreferredTimeZone());
+    
+    
+    
+                // Show negative inventory only
+                if (_onlyNegInventory)
+                {
+                    tmpRentalInventOnHand.clear();
+    
+                    if ((rentalSum.InventLocationId && rentalSum.Available - _orderQty < 0)
+                    ||  ((availableMap.exists(inventLocationId) ? availableMap.lookup(inventLocationId) : 0) - _orderQty < 0 && !rentalSum.Available > 0 && !rentalSum.InventLocationId))
+                    {
+                        tmpRentalInventOnHand.Available          = rentalSum.Available < 0 ? rentalSum.Available : (availableMap.exists(inventLocationId) ? availableMap.lookup(inventLocationId) : 0);
+                        tmpRentalInventOnHand.AvailableInclOrder = tmpRentalInventOnHand.Available - _orderQty;
+                        tmpRentalInventOnHand.NotYetDelivered   = tmpRentalInventOnHand.calculateNotYetDelivered(_rentalTypeId, inventLocationId, currentDate);
+                        tmpRentalInventOnHand.NotYetReturned    = tmpRentalInventOnHand.calculateNotYetReturned(_rentalTypeId, inventLocationId, currentDate);
+                        tmpRentalInventOnHand.InventLocationId  = inventLocationId;
+                        tmpRentalInventOnHand.RentalTypeId      = _rentalTypeId;
+                        tmpRentalInventOnHand.TransDate         = currentDate;
+                        tmpRentalInventOnHand.LineNum           = lineNumber;
+                        tmpRentalInventOnHand.insert();
+                        lineNumber++;
+    
+                        addEmptyLine = availableInventLocationSet.elements() > 1 && !_inventLocationId;
+                    }
+    
+                    if (rentalSum.InventLocationId || (availableMap.exists(inventLocationId) && availableMap.lookup(inventLocationId) != 0))
+                    {
+                        availableMap.insert(inventLocationId, rentalSum.InventLocationId ? rentalSumLatest.Available : tmpRentalInventOnHand.Available ? tmpRentalInventOnHand.Available : availableMap.exists(inventLocationId) ? availableMap.lookup(inventLocationId) : 0);
+                    }
+                    else
+                    {
+                        availableMap.insert(inventLocationId, 0);
+                    }
+                }
+                // Show all inventory
+                else
+                {
+                    if (rentalSum.InventLocationId || (availableMap.exists(inventLocationId) && availableMap.lookup(inventLocationId) != 0))
+                    {
+                        tmpRentalInventOnHand.Available          = rentalSum.InventLocationId ? rentalSum.Available : (availableMap.exists(inventLocationId) ? availableMap.lookup(inventLocationId) : 0);
+                        tmpRentalInventOnHand.AvailableInclOrder = tmpRentalInventOnHand.Available - _orderQty;
+    
+                        availableMap.insert(inventLocationId, rentalSum.InventLocationId ? rentalSumLatest.Available : (availableMap.exists(inventLocationId) ? availableMap.lookup(inventLocationId) : 0));
+                    }
+                    else
+                    {
+                        tmpRentalInventOnHand.Available             = 0;
+                        tmpRentalInventOnHand.AvailableInclOrder    = tmpRentalInventOnHand.Available - _orderQty;
+                        availableMap.insert(inventLocationId, 0);
+                    }
+    
+                    tmpRentalInventOnHand.NotYetDelivered   = tmpRentalInventOnHand.calculateNotYetDelivered(_rentalTypeId, inventLocationId, currentDate);
+                    tmpRentalInventOnHand.NotYetReturned    = tmpRentalInventOnHand.calculateNotYetReturned(_rentalTypeId, inventLocationId, currentDate);
+                    tmpRentalInventOnHand.InventLocationId  = inventLocationId;
+                    tmpRentalInventOnHand.RentalTypeId      = _rentalTypeId;
+                    tmpRentalInventOnHand.TransDate         = currentDate;
+                    tmpRentalInventOnHand.LineNum           = lineNumber;
+                    tmpRentalInventOnHand.insert();
+                    lineNumber++;
+    
+                    addEmptyLine = availableInventLocationSet.elements() > 1 && !_inventLocationId;
+                }
+            }
+    
+            if (addEmptyLine)
+            {
+                // add empty line after each date
+                tmpRentalInventOnHand.clear();
+                tmpRentalInventOnHand.LineNum  = lineNumber;
+                tmpRentalInventOnHand.insert();
+                lineNumber++;
+            }
+        }
+    
+        return tmpRentalInventOnHand;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setAvailableInventLocationSet</Name>
+				<Source><![CDATA[
+    public void setAvailableInventLocationSet(
+        BOBRentalTypeId   _rentalTypeId,
+        InventLocationId  _inventLocationId,
+        FromDate          _fromDate,
+        ToDate            _toDate)
+    {
+        BOBRentalSum                rentalSum;
+        #DNRConstants
+        ;
+    
+        availableInventLocationSet = new Set(Types::String);
+    
+        while select InventLocationId from rentalSum
+        group by InventLocationId
+        where rentalSum.RentalTypeId     == _rentalTypeId
+        &&    (!_inventLocationId || rentalSum.InventLocationId == _inventLocationId)
+        &&    rentalSum.TransDateTime    >= DateTimeUtil::newDateTime(_fromDate, 0, DateTimeUtil::getUserPreferredTimeZone())
+        &&    rentalSum.TransDateTime    <= DateTimeUtil::newDateTime(_toDate, #INVTimeMax, DateTimeUtil::getUserPreferredTimeZone())
+        {
+            availableInventLocationSet.add(rentalSum.InventLocationId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static BOBTmpOnHandRentalInventoryForm construct()
+    {
+        return new BOBTmpOnHandRentalInventoryForm();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

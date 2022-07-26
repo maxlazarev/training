@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRTmpPurchLinePriceTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(TmpPurchLinePrice))]
+public final class DNRTmpPurchLinePriceTable_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setLineAmount</Name>
+				<Source><![CDATA[
+    void setLineAmount()
+    {
+        if(!this.DNRSkipSetPriceDisc)
+        {
+            this.RORSetPriceDisc();
+        }
+       
+        this.RORRecalculateMargin();
+
+        next setLineAmount();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromSalesLine</Name>
+				<Source><![CDATA[
+    public void initFromSalesLine(SalesLine _salesLine)
+    {
+        next initFromSalesLine(_salesLine);
+
+        this.RORRateCode = UnitOfMeasure::find(_salesLine.RORPriceTimeUnit).Symbol;
+        this.CurrencyCode = _salesLine.CurrencyCode;    // The currency code eventually come from vendor. This is used to find a default rental agreement on opening the form.
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORSetPriceDisc</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private void RORSetPriceDisc()
+    {
+        SalesLine           salesLine;
+        RORRentalNetAmount  netAmount;
+        ;
+    
+        salesLine = SalesLine::findRecId(this.SalesLineRefRecId);
+    
+        if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            if (RAGUtil::mustApplyRentalAgreements(salesLine.BOBRentalTypeIdRequested))
+            {
+                RAGContractDataParm contractDataParm;
+                contractDataParm.initFromTmpPurchLinePrice(salesLine, this);
+
+                RAGContractData contractData = new RAGContractData();
+                contractData.parmDataParm(contractDataParm);
+                contractData.populateContractLines();
+
+                RAGTmpContractLine tmpContractLine = contractData.getContractLineTmpRecord();
+
+                UnitOfMeasureRecId unitOfMeasureRecId =  UnitOfMeasure::findBySymbol(this.RORRateCode).RecId;
+
+                this.Price = UnitOfMeasureConverter::convert(tmpContractLine.GrossPrice_Price, unitOfMeasureRecId, tmpContractLine.GrossPrice_TimeUnit, NoYes::No);
+    
+                if (tmpContractLine.NetPrice_ContractIdSource && this.Price)
+                {
+                    // calculate LinePercent based on net price/gross price ratio
+                    netAmount = UnitOfMeasureConverter::convert(tmpContractLine.NetPrice_Price,unitOfMeasureRecId, tmpContractLine.NetPrice_TimeUnit, NoYes::No);
+                    this.LinePercent = (this.Price ? (1 - netAmount / this.Price) * 100 : 0);
+                }
+                else
+                {
+                    // calculate LinePercent based on contract discount
+                    this.LinePercent = tmpContractLine.Discount_Percentage;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORRecalculateMargin</Name>
+				<Source><![CDATA[
+    private void RORRecalculateMargin()
+    {
+        SalesLine       salesLine;
+
+        salesLine = SalesLine::findRecId(this.SalesLineRefRecId);
+        this.RORSubRentalMarginStatus = RORSubRentalMarginStatus::Neutral;
+        
+        if(salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+
+            this.RORSubRentalGrossAmount = this.Price * this.PurchQty;
+
+            Price   rentalPrice = salesLine.SalesQty ? salesLine.RORRentalGrossAmount / salesLine.SalesQty : 0;;
+            Price   subrentalPrice = this.PurchQty ? this.RORSubRentalGrossAmount / this.PurchQty : 0;
+
+            RAGParameters   parameters = RAGParameters::find();
+
+            if(parameters.RORCalculateSubRentalMargin)
+            {
+                this.RORSubRentalMarginPct = (rentalPrice ? (rentalPrice - subrentalPrice) / rentalPrice * 100 : 0);
+            
+                if(this.RORSubRentalMarginPct > parameters.RORSubRentalMinimumMargin)
+                {
+                    this.RORSubRentalMarginStatus = RORSubRentalMarginStatus::Positive;
+                }
+                else if(this.RORSubRentalMarginPct < 0)
+                {
+                    this.RORSubRentalMarginStatus = RORSubRentalMarginStatus::Negative;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

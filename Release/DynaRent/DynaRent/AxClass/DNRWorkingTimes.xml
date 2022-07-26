@@ -1,0 +1,989 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRWorkingTimes</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+///    The <c>DNRWorkingTimes</c> class is used to fetch working times for a resource and a specified
+///    interval of time.
+/// </summary>
+class DNRWorkingTimes
+{
+    date        startDate;
+    TimeOfDay   startTime;
+    date        endDate;
+    TimeOfDay   endTime;
+    boolean     forward;
+    int         workingTimesCount;
+    // workingTimes works as the return value for processCalendarTimeInterval
+    container   workingTimes;
+    // workingTimesCumulative is a 2-level stack of calculated working times. The contents of this structure is cached.
+    container   workingTimesCumulative;
+    int         slotsToReturn;
+
+    #TimeConstants
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>addCalendarDateResultToCache</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Adds the specified container to the cache for the specified parameters.
+    /// </summary>
+    /// <param name="_topLevelCalculation">
+    ///     A boolean value indicating whether the calculation is happening at top level.
+    /// </param>
+    /// <param name="_calendarId">
+    ///    A <c>CalendarId</c> object that specifies the calendar for which to fetch the working times.
+    /// </param>
+    /// <param name="_startDate">
+    ///     The date that specifies the start date that should be used to clip the working time.
+    /// </param>
+    /// <param name="_startTime">
+    ///     A <c>TimeOfDay</c> value that specifies the start time that should be used to clip the working time.
+    /// </param>
+    /// <param name="_endDate">
+    ///     A date that specifies the end date that should be used to clip the working time.
+    /// </param>
+    /// <param name="_endTime">
+    ///     A <c>TimeOfDay</c> value that specifies the end time that should be used to clip the working time.
+    /// </param>
+    /// <param name="_effectivityPct">
+    ///     A percentage value that is used to compute the effectiveness of the working times.
+    /// </param>
+    /// <param name="_properties">
+    ///     A list of properties that should be added to the calendar line property.
+    /// </param>
+    /// <param name="_cacheValue">
+    ///     The container with the values to add to cache.
+    /// </param>
+    protected void addCalendarDateResultToCache(
+        boolean           _topLevelCalculation,
+        DNRCalendarId     _calendarId,
+        date              _startDate,
+        timeOfDay         _startTime,
+        date              _endDate,
+        timeOfDay         _endTime,
+        EffectivityPct    _effectivityPct = 100,
+        Map               _properties     = new Map(Types::String, Types::Real),
+        container         _cacheValue     = conNull())
+    {
+        SysGlobalObjectCache    cache = new SysGlobalObjectCache();
+        cache.insert(DNRWorkingTimes::getGlobalObjectCacheScope(),
+            this.createCacheKey(_topLevelCalculation, _calendarId, _startDate, _startTime, _endDate, _endTime, _effectivityPct, _properties),
+            _cacheValue);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addWorkCalendarLineToResult</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Adds a <c>DNRCalendarDateLine</c> record to the result set.
+    /// </summary>
+    /// <param name="_workCalendarDateLine">
+    /// A <c>DNRCalendarDateLine</c> record that contains the working time interval to add to the results.
+    /// </param>
+    /// <param name="_limitStartDate">
+    /// The date that specifies the start date that should be used to clip the working time.
+    /// </param>
+    /// <param name="_limitStartTime">
+    /// A <c>TimeOfDay</c> value that specifies the start time that should be used to clip the working time.
+    /// </param>
+    /// <param name="_limitEndDate">
+    /// A date that specifies the end date that should be used to clip the working time.
+    /// </param>
+    /// <param name="_limitEndTime">
+    /// A <c>TimeOfDay</c> value that specifies the end time that should be used to clip the working time.
+    /// </param>
+    /// <param name="_effectivityPct">
+    /// A percentage value that is used to compute the effectiveness of the working times.
+    /// </param>
+    /// <param name="_properties">
+    /// A list of properties that should be added to the calendar line property.
+    /// </param>
+    protected void addWorkCalendarLineToResult(DNRCalendarDateLine       _workCalendarDateLine,
+                                               date                     _limitStartDate,
+                                               TimeOfDay                _limitStartTime,
+                                               date                     _limitEndDate,
+                                               TimeOfDay                _limitEndTime,
+                                               EffectivityPct           _effectivityPct = 100,
+                                               container                _properties = conNull())
+    {
+        utcdatetime     resultStartTime;
+        utcdatetime     resultEndTime;
+        container       dateResult;
+
+        int             listenerLength;
+        int             listenerIterator;
+        container       listener;
+
+        // align start time
+        resultStartTime = DateTimeUtil::newDateTime(_workCalendarDateLine.TransDate, _workCalendarDateLine.FromTime);
+        if (_workCalendarDateLine.TransDate     <   _limitStartDate   ||
+            (_workCalendarDateLine.TransDate    ==  _limitStartDate   &&
+             _workCalendarDateLine.FromTime     <   _limitStartTime))
+        {
+            resultStartTime = DateTimeUtil::newDateTime(_limitStartDate, _limitStartTime);
+        }
+
+        // align end time
+        resultEndTime = DateTimeUtil::newDateTime(_workCalendarDateLine.TransDate, _workCalendarDateLine.ToTime);
+        if (_workCalendarDateLine.TransDate     >   _limitEndDate   ||
+            (_workCalendarDateLine.TransDate    ==  _limitEndDate   &&
+             _workCalendarDateLine.ToTime       >   _limitEndTime))
+        {
+            resultEndTime = DateTimeUtil::newDateTime(_limitEndDate, _limitEndTime);
+        }
+
+        // only add if there is a time difference between start and end
+        if (resultStartTime < resultEndTime)
+        {
+            // add the working time to the results
+            dateResult   = [[resultStartTime,
+                resultEndTime,
+                (_workCalendarDateLine.Effectivity / 100) * (_effectivityPct / 100),
+                _workCalendarDateLine.PropertyId ?
+                    (_properties + [WrkCtrSchedulingProperty::propertySchedulingProperty(_workCalendarDateLine.PropertyId), 0.0]) :
+                    _properties]];
+
+            workingTimes        += dateResult;
+            listenerLength      =  conlen(workingTimesCumulative);
+            for (listenerIterator = 1; listenerIterator <= listenerLength; listenerIterator++)
+            {
+                listener = conPeek(workingTimesCumulative, listenerIterator);
+                listener += dateResult;
+                workingTimesCumulative = conPoke(workingTimesCumulative, listenerIterator, listener);
+            }
+
+            slotsToReturn ++;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createCacheKey</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Creates a container with a key based on the specified parameters that can be used for caching.
+    /// </summary>
+    /// <param name="_topLevelCalculation">
+    ///     A boolean value indicating whether the calculation is happening at top level.
+    /// </param>
+    /// <param name="_calendarId">
+    ///    A <c>CalendarId</c> object that specifies the calendar for which to fetch the working times.
+    /// </param>
+    /// <param name="_startDate">
+    ///     The date that specifies the start date that should be used to clip the working time.
+    /// </param>
+    /// <param name="_startTime">
+    ///     A <c>TimeOfDay</c> value that specifies the start time that should be used to clip the working time.
+    /// </param>
+    /// <param name="_endDate">
+    ///     A date that specifies the end date that should be used to clip the working time.
+    /// </param>
+    /// <param name="_endTime">
+    ///     A <c>TimeOfDay</c> value that specifies the end time that should be used to clip the working time.
+    /// </param>
+    /// <param name="_effectivityPct">
+    ///     A percentage value that is used to compute the effectiveness of the working times.
+    /// </param>
+    /// <param name="_properties">
+    ///     A list of properties that should be added to the calendar line property.
+    /// </param>
+    /// <returns>
+    ///     A container representing the cache key.
+    /// </returns>
+    protected container createCacheKey(
+        boolean           _topLevelCalculation,
+        DNRCalendarId     _calendarId,
+        date              _startDate,
+        timeOfDay         _startTime,
+        date              _endDate,
+        timeOfDay         _endTime,
+        EffectivityPct    _effectivityPct,
+        Map               _properties)
+    {
+        return [strFmt('%1-%2-%3-%4-%5-%6-%7', _topLevelCalculation, _calendarId, _startDate, _startTime, _endDate, _endTime, _effectivityPct), _properties.pack()];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createCacheValue</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Creates a container that can be stored in the cache.
+    /// </summary>
+    /// <param name="_processingSingleDay">
+    ///     A boolean value indicating whether the processing happened for a single day.
+    /// </param>
+    /// <param name="_workingDaysCalculated">
+    ///     A container with the calculated results for the working days.
+    /// </param>
+    /// <returns>
+    ///     A container that can be stored in the cache.
+    /// </returns>
+    private container createCacheValue(boolean _processingSingleDay, container _workingDaysCalculated)
+    {
+        if (_workingDaysCalculated == conNull())
+        {
+            // this is a non-working day or a day without working times
+            if (_processingSingleDay)
+            {
+                return [_processingSingleDay];
+            }
+            else
+            {
+                return conNull();
+            }
+        }
+        else
+        {
+            return [_processingSingleDay, _workingDaysCalculated];
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCalendarDateResultFromCache</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Gets the container with values for the specified parameters from the cache.
+    /// </summary>
+    /// <param name="_topLevelCalculation">
+    ///     A boolean value indicating whether the calculation is happening at top level.
+    /// </param>
+    /// <param name="_calendarId">
+    ///    A <c>CalendarId</c> object that specifies the calendar for which to fetch the working times.
+    /// </param>
+    /// <param name="_startDate">
+    ///     The date that specifies the start date that should be used to clip the working time.
+    /// </param>
+    /// <param name="_startTime">
+    ///     A <c>TimeOfDay</c> value that specifies the start time that should be used to clip the working time.
+    /// </param>
+    /// <param name="_endDate">
+    ///     A date that specifies the end date that should be used to clip the working time.
+    /// </param>
+    /// <param name="_endTime">
+    ///     A <c>TimeOfDay</c> value that specifies the end time that should be used to clip the working time.
+    /// </param>
+    /// <param name="_effectivityPct">
+    ///     A percentage value that is used to compute the effectiveness of the working times.
+    /// </param>
+    /// <param name="_properties">
+    ///     A list of properties that should be added to the calendar line property.
+    /// </param>
+    /// <returns>
+    ///     A container with the cached values.
+    /// </returns>
+    protected container getCalendarDateResultFromCache(
+        boolean           _topLevelCalculation,
+        DNRCalendarId     _calendarId,
+        date              _startDate,
+        timeOfDay         _startTime,
+        date              _endDate,
+        timeOfDay         _endTime,
+        EffectivityPct    _effectivityPct = 100,
+        Map               _properties     = new Map(Types::String, Types::Real))
+    {
+        SysGlobalObjectCache    cache   = new SysGlobalObjectCache();
+        container               results;
+
+        results = cache.find(DNRWorkingTimes::getGlobalObjectCacheScope(),
+            this.createCacheKey(_topLevelCalculation, _calendarId, _startDate, _startTime, _endDate, _endTime, _effectivityPct, _properties));
+        return results;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getWorkingTimes</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Gets the working times for the resource specified by the <c>wrkCtrId</c> field and the interval
+    ///    that was set up when the object was created.
+    /// </summary>
+    /// <returns>
+    ///    A container that stores the working time records. Each element in the container is another
+    ///    container that holds the <c>startDateTime</c>, <c>endDateTime</c>, <c>effectivity</c>, and
+    ///    <c>propertyId</c> values.
+    /// </returns>
+    /// <remarks>
+    ///    This class always returns an empty container. Override in derived classes.
+    /// </remarks>
+    public container getWorkingTimes()
+    {
+        container result;
+
+        return result;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmEndDate</Name>
+				<Source><![CDATA[
+    protected date parmEndDate(date _endDate = endDate)
+    {
+        endDate = _endDate;
+        return endDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmEndTime</Name>
+				<Source><![CDATA[
+    protected TimeOfDay parmEndTime(TimeOfDay _endTime = endTime)
+    {
+        endTime = _endTime;
+        return endTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmForward</Name>
+				<Source><![CDATA[
+    protected boolean parmForward(boolean _forward = forward)
+    {
+        forward = _forward;
+        return forward;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmStartDate</Name>
+				<Source><![CDATA[
+    protected date parmStartDate(date _startDate = startDate)
+    {
+        startDate = _startDate;
+        return startDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmStartTime</Name>
+				<Source><![CDATA[
+    protected TimeOfDay parmStartTime(TimeOfDay _startTime = startTime)
+    {
+        startTime = _startTime;
+        return startTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmWorkingTimesCount</Name>
+				<Source><![CDATA[
+    protected int parmWorkingTimesCount(int _workingTimesCount = workingTimesCount)
+    {
+        workingTimesCount = _workingTimesCount;
+        return workingTimesCount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processCalendarTimeInterval</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Processes working times for a calendar by considering the base calendar information.
+    /// </summary>
+    /// <param name="_calendarId">
+    ///    A <c>CalendarId</c> object that specifies the calendar for which to fetch the working times.
+    /// </param>
+    /// <param name="_startDate">
+    ///    The Date value that specifies the start date of the interval for which to fetch working times.
+    /// </param>
+    /// <param name="_startTime">
+    ///    A <c>TimeOfDay</c> object that specifies the start time of the interval for which to fetch working
+    ///    times.
+    /// </param>
+    /// <param name="_endDate">
+    ///    The date value that specifies the end date of the interval for which to fetch working times.
+    /// </param>
+    /// <param name="_endTime">
+    ///    A <c>TimeOfDay</c> object that specifies the end time of the interval for which to fetch working
+    ///    times.
+    /// </param>
+    /// <param name="_effectivityPct">
+    ///    A percentage value that will be used to compute the effectiveness of the resulting working times.
+    ///    This value is multiplied with the efficiency of each working time.
+    /// </param>
+    /// <param name="_properties">
+    ///    A list of properties that should be added to the calendar line property.
+    /// </param>
+    /// <returns>
+    ///    true if fetching working times should continue; otherwise, false.
+    /// </returns>
+    protected boolean processCalendarTimeInterval(DNRCalendarId     _calendarId,
+                                                  date              _startDate,
+                                                  TimeOfDay         _startTime,
+                                                  date              _endDate,
+                                                  TimeOfDay         _endTime,
+                                                  EffectivityPct    _effectivityPct = 100,
+                                                  Map               _properties = new Map(Types::String, Types::Real))
+    {
+        boolean     topLevelCalculation;
+        int         localResultsIndex;
+        container   cachedResults;
+        container   currentRunResults;
+        boolean     retValue;
+
+        topLevelCalculation = conLen(workingTimesCumulative) == 0;
+        cachedResults       = this.getCalendarDateResultFromCache(
+            topLevelCalculation,
+            _calendarId,
+            _startDate,
+            _startTime,
+            _endDate,
+            _endTime,
+            _effectivityPct,
+            _properties);
+
+        if (!this.validateCachedValue(topLevelCalculation, cachedResults))
+        {
+            // push
+            workingTimesCumulative += [conNull()];
+            localResultsIndex      =  conLen(workingTimesCumulative);
+
+            retValue = this.processCalendarTimeIntervalAux(
+                _calendarId,
+                _startDate,
+                _startTime,
+                _endDate,
+                _endTime,
+                _effectivityPct,
+                _properties);
+
+            // peek
+            currentRunResults = conPeek(workingTimesCumulative, localResultsIndex);
+            currentRunResults = this.createCacheValue(retValue, currentRunResults);
+            if (currentRunResults != conNull())
+            {
+                this.addCalendarDateResultToCache(
+                    topLevelCalculation,
+                    _calendarId,
+                    _startDate,
+                    _startTime,
+                    _endDate,
+                    _endTime,
+                    _effectivityPct,
+                    _properties,
+                    currentRunResults);
+            }
+            // pop
+            workingTimesCumulative = conDel(workingTimesCumulative, localResultsIndex, 1);
+        }
+        else
+        {
+            [retValue, currentRunResults] = this.unpackCachedContainer(cachedResults);
+            workingTimes += currentRunResults;
+
+            // add the unpacked cached result to the result stack
+            if (conLen(workingTimesCumulative) >= 1)
+            {
+                cachedResults           =   conPeek(workingTimesCumulative, 1);
+                cachedResults           +=  currentRunResults;
+                workingTimesCumulative  =   conPoke(workingTimesCumulative, 1, cachedResults);
+            }
+        }
+
+        return retValue;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processCalendarTimeIntervalAux</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Processes working times for a calendar by considering the base calendar information.
+    /// </summary>
+    /// <param name="_calendarId">
+    ///    A <c>CalendarId</c> object that specifies the calendar for which to fetch the working times.
+    /// </param>
+    /// <param name="_startDate">
+    ///    The Date value that specifies the start date of the interval for which to fetch working times.
+    /// </param>
+    /// <param name="_startTime">
+    ///    A <c>TimeOfDay</c> object that specifies the start time of the interval for which to fetch working
+    ///    times.
+    /// </param>
+    /// <param name="_endDate">
+    ///    The date value that specifies the end date of the interval for which to fetch working times.
+    /// </param>
+    /// <param name="_endTime">
+    ///    A <c>TimeOfDay</c> object that specifies the end time of the interval for which to fetch working
+    ///    times.
+    /// </param>
+    /// <param name="_effectivityPct">
+    ///    A percentage value that will be used to compute the effectiveness of the resulting working times.
+    ///    This value is multiplied with the efficiency of each working time.
+    /// </param>
+    /// <param name="_properties">
+    ///    A list of properties that should be added to the calendar line property.
+    /// </param>
+    /// <returns>
+    ///    true if fetching working times should continue; otherwise, false.
+    /// </returns>
+    private boolean processCalendarTimeIntervalAux(DNRCalendarId    _calendarId,
+                                                  date              _startDate,
+                                                  timeOfDay         _startTime,
+                                                  date              _endDate,
+                                                  timeOfDay         _endTime,
+                                                  EffectivityPct    _effectivityPct = 100,
+                                                  Map               _properties = new Map(Types::String, Types::Real))
+    {
+        date                lastProcessDate;
+        TimeOfDay           lastProcessTime;
+        DNRCalendarId       baseCalendarId;
+        DNRCalendarDate     workCalendarDate;
+
+        if (_startDate == _endDate &&
+            _startTime == _endTime)
+        {
+            return true;
+        }
+
+        if (forward)
+        {
+            lastProcessDate = _startDate;
+            lastProcessTime = _startTime;
+
+            while select TransDate from workCalendarDate
+                order by workCalendarDate.TransDate
+                where   workCalendarDate.TransDate          >=  _startDate          &&
+                        workCalendarDate.TransDate          <=  _endDate            &&
+                        workCalendarDate.WorkTimeControl    ==  WorkTimeControl::UseBasic   &&
+                        workCalendarDate.CalendarId         ==  _calendarId
+            {
+                if (lastProcessDate < workCalendarDate.TransDate)
+                {
+                    if (!this.processTimeInterval(_calendarId,
+                                                  lastProcessDate,
+                                                  lastProcessTime,
+                                                  workCalendarDate.TransDate,
+                                                  0,
+                                                  _effectivityPct,
+                                                  _properties))
+                    {
+                        return false;
+                    }
+                }
+                if (!baseCalendarId)
+                {
+                    baseCalendarId = WorkCalendarTable::find(_calendarId).BasicCalendarId;
+                }
+                lastProcessDate = workCalendarDate.TransDate;
+                lastProcessTime = #SecondsPerDay;
+                if (!this.processCalendarTimeInterval(baseCalendarId,
+                                                      workCalendarDate.TransDate,
+                                                      0,
+                                                      workCalendarDate.TransDate,
+                                                      #SecondsPerDay,
+                                                      _effectivityPct,
+                                                      _properties))
+                {
+                    return false;
+                }
+            }
+            if (lastProcessDate     <   _endDate ||
+                (lastProcessDate    ==  _endDate &&
+                 lastProcessTime    <   _endTime))
+            {
+                return this.processTimeInterval(_calendarId,
+                                                lastProcessDate,
+                                                lastProcessTime,
+                                                _endDate,
+                                                _endTime,
+                                                _effectivityPct,
+                                                _properties);
+            }
+        }
+        else
+        {
+            lastProcessDate = _endDate;
+            lastProcessTime = _endTime;
+
+            while select TransDate from workCalendarDate
+                order by workCalendarDate.TransDate desc
+                where   workCalendarDate.TransDate          >=  _startDate          &&
+                        workCalendarDate.TransDate          <=  _endDate            &&
+                        workCalendarDate.WorkTimeControl    ==  WorkTimeControl::UseBasic   &&
+                        workCalendarDate.CalendarId         ==  _calendarId
+            {
+                if (lastProcessDate > workCalendarDate.TransDate)
+                {
+                    if (!this.processTimeInterval(_calendarId,
+                                                  workCalendarDate.TransDate,
+                                                  #SecondsPerDay,
+                                                  lastProcessDate,
+                                                  lastProcessTime,
+                                                  _effectivityPct,
+                                                  _properties))
+                    {
+                        return false;
+                    }
+                }
+                if (!baseCalendarId)
+                {
+                    baseCalendarId = DNRCalendarTable::find(_calendarId).BasicCalendarId;
+                }
+                lastProcessDate = workCalendarDate.TransDate;
+                lastProcessTime = 0;
+                if (!this.processCalendarTimeInterval(baseCalendarId,
+                                                      workCalendarDate.TransDate,
+                                                      0,
+                                                      workCalendarDate.TransDate,
+                                                      #SecondsPerDay,
+                                                      _effectivityPct,
+                                                      _properties))
+                {
+                    return false;
+                }
+            }
+            if (lastProcessDate     >   _startDate ||
+                (lastProcessDate    ==  _startDate &&
+                 lastProcessTime    >   _startTime))
+            {
+                return this.processTimeInterval(_calendarId,
+                                                _startDate,
+                                                _startTime,
+                                                lastProcessDate,
+                                                lastProcessTime,
+                                                _effectivityPct,
+                                                _properties);
+            }
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processTimeInterval</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Processes working times for a calendar without considering any base calendar.
+    /// </summary>
+    /// <param name="_calendarId">
+    ///    A <c>CalendarId</c> object that specifies the calendar for which to fetch the working times.
+    /// </param>
+    /// <param name="_startDate">
+    ///    A date value that specifies the start date of the interval for which to fetch working times.
+    /// </param>
+    /// <param name="_startTime">
+    ///    A <c>TimeOfDay</c> value that specifies the start time of the interval for which to fetch working
+    ///    times.
+    /// </param>
+    /// <param name="_endDate">
+    ///    A date value that specifies the end date of the interval for which to fetch working times.
+    /// </param>
+    /// <param name="_endTime">
+    ///    A <c>TimeOfDay</c> value that specifies the end time of the interval for which to fetch working
+    ///    times.
+    /// </param>
+    /// <param name="_effectivityPct">
+    ///    A percentage value that will be used in computing the effectiveness of the resulting working times.
+    ///    This value is multiplied with the efficiency of each working time.
+    /// </param>
+    /// <param name="_properties">
+    ///    A list of properties that should be added to the calendar line property.
+    /// </param>
+    /// <returns>
+    ///    true if fetching working times should continue; otherwise, false.
+    /// </returns>
+    /// <remarks>
+    ///    The method just fetches the working times from the <c>WorkCalendarDateLine</c> table.
+    /// </remarks>
+    protected boolean processTimeInterval(DNRCalendarId     _calendarId,
+                                          date              _startDate,
+                                          TimeOfDay         _startTime,
+                                          date              _endDate,
+                                          TimeOfDay         _endTime,
+                                          EffectivityPct    _effectivityPct = 100,
+                                          Map               _properties = new Map(Types::String, Types::Real))
+    {
+        DNRCalendarDateLine     workCalendarDateLine;
+
+        Query                   query;
+        QueryRun                queryRun;
+        QueryBuildDataSource    dsWorkCalendarDateLine;
+        container               propertiesContainer;
+
+        if (_startDate == _endDate &&
+            _startTime == _endTime)
+        {
+            return true;
+        }
+
+        query = new Query();
+        dsWorkCalendarDateLine = query.addDataSource(tableNum(DNRCalendarDateLine));
+        dsWorkCalendarDateLine.addRange(fieldNum(DNRCalendarDateLine, CalendarId)).value(queryValue(_calendarId));
+        dsWorkCalendarDateLine.addRange(fieldNum(DNRCalendarDateLine, TransDate)).value(SysQuery::range(_startDate, _endDate));
+
+        dsWorkCalendarDateLine.addOrderByField(fieldNum(DNRCalendarDateLine, TransDate), forward ? SortOrder::Ascending : SortOrder::Descending);
+
+        propertiesContainer = DNRWorkingTimes::propertiesMap2Container(_properties);
+
+        queryRun = new QueryRun(query);
+        while (queryRun.next())
+        {
+            workCalendarDateLine    = queryRun.get(tableNum(DNRCalendarDateLine));
+
+            if ((workCalendarDateLine.TransDate == _startDate   && workCalendarDateLine.ToTime <= _startTime) ||
+                (workCalendarDateLine.TransDate == _endDate     && workCalendarDateLine.FromTime >= _endTime))
+            {
+                continue;
+            }
+
+            this.addWorkCalendarLineToResult(workCalendarDateLine,
+                                             _startDate,
+                                             _startTime,
+                                             _endDate,
+                                             _endTime,
+                                             _effectivityPct,
+                                             propertiesContainer);
+            if (slotsToReturn >= workingTimesCount && workingTimesCount !=0 )
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpackCachedContainer</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Unpacks the specified cached container.
+    /// </summary>
+    /// <param name="_cachedContainer">
+    ///     The container with the results from cache.
+    /// </param>
+    /// <returns>
+    ///     A container with the unpacked results.
+    /// </returns>
+    private container unpackCachedContainer(container _cachedContainer)
+    {
+        boolean     retValue;
+        container   workingTimesCached = connull();
+
+        if (conLen(_cachedContainer) == 1)
+        {
+            [retValue] = _cachedContainer;
+        }
+        else
+        {
+            [retValue, workingTimesCached] = _cachedContainer;
+        }
+
+        return [retValue, workingTimesCached];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateCachedValue</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Validates that the cached value is can be used.
+    /// </summary>
+    /// <param name="_topLevelCalculation">
+    ///     A boolean value indicating whether the cache expected is the result of a top level calculation.
+    /// </param>
+    /// <param name="_cachedValue">
+    ///     The cached value to validate.
+    /// </param>
+    /// <returns>
+    ///     true if the cached value is correct; otherwise, false.
+    /// </returns>
+    /// <remarks>
+    ///     The <c>GlobalObjectCache</c> clears some entries on the cache doing memory release.
+    /// </remarks>
+    private boolean validateCachedValue(boolean _topLevelCalculation, container _cachedValue)
+    {
+        boolean ret = (_cachedValue != conNull());
+
+        if (_topLevelCalculation)
+        {
+            ret = ret && (conLen(_cachedValue) == 2);
+        }
+
+        if (ret)
+        {
+            if (_topLevelCalculation)
+            {
+                //date ranges or working days w/ working times must have a cached value
+                ret = (conpeek(_cachedValue, 2) != conNull());
+            }
+            else
+            {
+                if (conLen(_cachedValue) == 1)
+                {
+                    // non-working days or days w/o working times
+                    ret = conpeek(_cachedValue, 1)  == true;
+                }
+                else
+                {
+                    //the lenght of the working days must be 1 for non-top level calculations
+                    ret = (conlen(conpeek(_cachedValue, 2)) == 1);
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addPropertiesFromContainer</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Adds a property string to the container if it does not already exists.
+    /// </summary>
+    /// <param name="_mapProperties">
+    ///    A container with the properties to which the new property has to be added.
+    /// </param>
+    /// <param name="_propertiesToAdd">
+    ///    A real value that defines the property grade.
+    /// </param>
+    protected static void addPropertiesFromContainer(Map        _mapProperties,
+                                                     container  _propertiesToAdd)
+    {
+        int             i;
+
+        for (i = 0; i < conLen(_propertiesToAdd) / 2; i++)
+        {
+            DNRWorkingTimes::addProperty(_mapProperties,
+                                        conPeek(_propertiesToAdd, (i * 2) + 1),
+                                        conPeek(_propertiesToAdd, (i * 2) + 2));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addProperty</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Adds a property string to the container if it does not already exists.
+    /// </summary>
+    /// <param name="_mapProperties">
+    ///    A <c>Map</c> object that has the properties to which the new property has to be added.
+    /// </param>
+    /// <param name="_property">
+    ///    A string defining the property ID.
+    /// </param>
+    /// <param name="_propertyGrade">
+    ///    A real value that defines the property grade.
+    /// </param>
+    protected static void addProperty(Map  _mapProperties,
+                                      str  _property,
+                                      real _propertyGrade = 0.0)
+    {
+        if (_mapProperties.exists(_property))
+        {
+            if (_mapProperties.lookup(_property) < _propertyGrade)
+            {
+                _mapProperties.insert(_property, _propertyGrade);
+            }
+        }
+        else
+        {
+            _mapProperties.insert(_property, _propertyGrade);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static DNRWorkingTimes construct()
+    {
+        return new DNRWorkingTimes();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getGlobalObjectCacheScope</Name>
+				<Source><![CDATA[
+    private static GlobalObjectCacheScope getGlobalObjectCacheScope()
+    {
+        return classStr(DNRWorkingTimes) + getcurrentpartition() + curext();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>invalidateGlobalCacheScope</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Clears the global working time cache.
+    /// </summary>
+    public static void invalidateGlobalCacheScope()
+    {
+        SysGlobalObjectCache    cache = new SysGlobalObjectCache();
+
+        cache.clear(DNRWorkingTimes::getGlobalObjectCacheScope());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>propertiesMap2Container</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Converts a map of properties to a container of properties.
+    /// </summary>
+    /// <param name="_properties">
+    /// A map of properties.
+    /// </param>
+    /// <returns>
+    /// A container of properties.
+    /// </returns>
+    protected static container propertiesMap2Container(Map _properties)
+    {
+        MapEnumerator   mapEnumerator;
+        container       result;
+
+        mapEnumerator = _properties.getEnumerator();
+        while (mapEnumerator.moveNext())
+        {
+            result += [mapEnumerator.currentKey(), mapEnumerator.currentValue()];
+        }
+
+        return result;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

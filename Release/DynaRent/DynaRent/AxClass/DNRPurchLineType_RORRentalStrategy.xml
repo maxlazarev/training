@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchLineType_RORRentalStrategy</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[DNRExtensionStrategyFactoryAttribute(classStr(PurchLineType_RORRental))]
+class DNRPurchLineType_RORRentalStrategy extends DNRPurchLineTypeStrategy
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>RORmayReturnNoteBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean RORmayReturnNoteBeUpdated()
+    {
+        //PurchTable purchTable = this.parmPurchLineType().parmPurchTable();
+        //ok = purchTable.type().RORmayReturnNoteBeUpdated();
+        PurchLine purchLine = this.parmPurchLineType().parmPurchLine();
+        
+        // Don't add the line when the Invoice start/end basis is Base on on-rent/off-rent date/time
+        // and the off-rent date/time is not filled (on-rent is always filled because it is mandatory)
+        if (purchLine.RORTradeType != RORTradeType::SalesPurch
+        &&  FINRentalInvoiceProfile::find(purchLine.INVInvoiceProfileId).InvoiceStartEndBasis == INVInvoiceStartEndBasis::OrderDates
+        &&  purchLine.RORRentalDateTimesHost::rentalDateTimes().OffRentDateTime < DateTimeUtil::addYears(DateTimeUtil::minValue(), 1))
+        {
+            return false;
+        }
+        
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDeleteInventSerial</Name>
+				<Source><![CDATA[
+    public void BOBDeleteInventSerial()
+    {
+        PurchLine purchLine = this.parmPurchLineType().parmPurchLine();
+
+        if (purchLine.BOBRentalTypeId)
+        {
+            BOBObjectTable objectTable;
+            InventSerial inventSerial;
+            InventDim inventDim;
+
+            select firstOnly forUpdate inventSerial
+                join objectTable
+                where objectTable.InventSerialId == inventSerial.InventSerialId
+                    exists join inventDim
+                    where inventDim.inventSerialId  == inventSerial.InventSerialId
+                    &&    inventDim.inventDimId     == purchLine.InventDimId
+                    &&    inventDim.inventSerialId;
+            
+            //Check BOBObjectManager::validateDelete() here already, since we do not want
+            //inventSerial.delete() to throw an error, as this would prevent the PurchLine from being deleted.
+            if (inventSerial && BOBObjectManager::validateDelete(objectTable, false))
+            {
+                //Update inventSum to reflect the transactions that were removed by removing the PurchLine.
+                new InventSumRecalcItem(objectTable.inventTable().ItemId, false, CheckFix::Fix).updateNow();
+                
+                if (inventSerial.validateDelete())
+                {
+                    inventSerial.delete();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORDeleteChildren</Name>
+				<Source><![CDATA[
+    public boolean RORDeleteChildren()
+    {
+        PurchLine purchLine = this.parmPurchLineType().parmPurchLine();
+        boolean linesDeleted = false;
+        
+        // Only do this if we can legimitately delete the current line, and it has an InventTransId
+        // (ie has already been saved)
+        if (this.getPurchLineType_RORRental().validateDelete(true) && purchLine.RecId)
+        {
+            ttsBegin;
+            // if parent is deleted than it doesn't matter if line was mandatory for the parent or not.
+            this.getPurchLineType_RORRental().parmCheckRORKitRequiredLevel(false);
+            PurchLine purchLineDelete;
+
+            // Try to delete children (component etc)
+            while select forUpdate purchLineDelete
+            where purchLineDelete.RORParentLineRecId == purchLine.RecId
+            {
+                if (purchLineDelete.validateDelete(true))
+                {
+                    //purchLineDelete.type().RORcheckDeleteChildren();
+                    purchLineDelete.delete(false, true); // Skip parent update to stop update conflicts
+                    linesDeleted = true;
+                }
+            }
+            ttsCommit;
+        }
+        
+        return linesDeleted;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORupdateAmendmentLog</Name>
+				<Source><![CDATA[
+    public void RORupdateAmendmentLog(ConfirmId _confirmId)
+    {
+        PurchLine purchLine = this.parmPurchLineType().parmPurchLine();
+        ROROrderAmendmentLog orderAmendmentLog;
+        
+        update_recordSet orderAmendmentLog
+        setting ConfirmId = _confirmId
+        where orderAmendmentLog.RefTableId == purchLine.TableId
+        &&    orderAmendmentLog.RefRecId   == purchLine.RecId
+        &&    !orderAmendmentLog.ConfirmId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPurchLineType_RORRental</Name>
+				<Source><![CDATA[
+    private PurchLineType_RORRental getPurchLineType_RORRental()
+    {
+        return this.parmPurchLineType();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

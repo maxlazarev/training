@@ -1,0 +1,470 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoiceServiceController_SubRentalInvoice</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINInvoiceServiceController_SubRentalInvoice extends FINInvoiceServiceController
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINInvoiceServiceController_SubRentalInvoice construct(PurchParmUpdate _parmUpdate)
+    {
+        FINInvoiceServiceController_SubRentalInvoice controller = new FINInvoiceServiceController_SubRentalInvoice();
+        controller.setParmUpdate(_parmUpdate);
+        return controller;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalizeInvoiceRunData</Name>
+				<Source><![CDATA[
+    protected void journalizeInvoiceRunData()
+    {
+        if (parmId)
+        {
+            FINVendInvoiceRun   vendInvoiceRun;
+
+            select forupdate firstonly vendInvoiceRun
+                where vendInvoiceRun.ParmId == parmId;
+
+            vendInvoiceRun.ParmId = parmId;
+            vendInvoiceRun.WorkCalendarPacked = FINInvoiceServiceController::getWorkCalendar().pack();
+            vendInvoiceRun.write();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildWorkCalendar</Name>
+				<Source><![CDATA[
+    protected void buildWorkCalendar()
+    {
+        // build a map of all invoice profiles so we don't have to select them from the database during the next step
+        FINRentalInvoiceProfile invoiceProfile;
+        Map invoiceProfileMap = new Map(Types::String, Types::Enum);
+        
+        while select invoiceProfile
+        {
+            invoiceProfileMap.insert(invoiceProfile.InvoiceProfileId, invoiceProfile.isHourlyInvoicing());
+        }
+ 
+        // build a map of all relevant calendars and whether or not they need hourly invoicing
+        PurchLine purchLine;
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+        FINInvoicePeriodAmendment invoicePeriodAmendment;
+        Map calendarMap = new Map(Types::String, Types::Enum);
+ 
+        while select INVInvoiceProfileId, DNRCalendarId from purchLine
+        where purchLine.RORTradeType != RORTradeType::SalesPurch
+            join RecId from vendInvoiceInfoLine
+            where vendInvoiceInfoLine.ParmId == parmId
+            &&    vendInvoiceInfoLine.PurchLineRecId == purchLine.RecId
+                outer join StrValue from invoicePeriodAmendment
+                where invoicePeriodAmendment.RefTableId == purchLine.TableId
+                &&    invoicePeriodAmendment.RefRecId == purchLine.RecId
+                &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+        {
+            boolean mustPopulateTimes = invoiceProfileMap.lookup(purchLine.INVInvoiceProfileId);
+ 
+            if(calendarMap.exists(purchLine.DNRCalendarId))
+            {
+                mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(purchLine.DNRCalendarId));
+            }
+ 
+            calendarMap.insert(purchLine.DNRCalendarId, mustPopulateTimes);
+
+            if (invoicePeriodAmendment.StrValue)
+            {
+                if (calendarMap.exists(invoicePeriodAmendment.StrValue))
+                {
+                    mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(invoicePeriodAmendment.StrValue));
+                }
+ 
+                calendarMap.insert(invoicePeriodAmendment.StrValue, mustPopulateTimes);
+            }
+        }
+ 
+        // build a work calendar cache with all the necessary working dates/times for this invoice run
+        FromDate invoiceFromDate;
+        ToDate invoiceToDate;
+        [ invoiceFromDate, invoiceToDate ] = this.calculateInvoiceDateRange();
+ 
+        // In order to make the full period invoicing work
+        // we load extra calendar days before and after on/off rent dates
+        invoiceFromDate = invoiceFromDate - 90;
+        invoiceToDate   = invoiceToDate + 90;
+
+        workCalendar = new FINWorkCalendar();
+        workCalendar.populate(calendarMap, invoiceFromDate, invoiceToDate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateInvoiceDateRange</Name>
+				<Source><![CDATA[
+    protected container calculateInvoiceDateRange()
+    {
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+        PurchLine purchLine;
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+         
+        select firstonly minof(DeliveryDateTime) from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId == tableNum(PurchLine)
+            exists join vendInvoiceInfoLine
+            where vendInvoiceInfoLine.ParmId == parmId
+            &&    vendInvoiceInfoLine.PurchLineRecId == invoicePeriodQtyPhysical.RefRecId
+                join TableId from purchLine
+                where purchLine.RecId == vendInvoiceInfoLine.PurchLineRecId
+                &&    purchLine.RORTradeType != RORTradeType::SalesPurch
+                    join TableId from invoicePeriodQtyFinancial
+                    where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+                    &&    !invoicePeriodQtyFinancial.InvoiceId;
+ 
+        PurchParmUpdate parmUpdateLocal = parmUpdate as PurchParmUpdate;
+        // Populate calendar cache for 1 day before invoicePeriodQtyPhysical.DeliveryDateTime in GMT so we don't need to worry about time zones.
+        FromDate invoiceMinDate = DateTimeUtil::date(invoicePeriodQtyPhysical.DeliveryDateTime) - 1;
+
+        TransDateTime maxDateTime = DateTimeUtil::maxValue();
+        select firstonly maxof(ReturnDateTime) from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId == tableNum(PurchLine)
+            &&    invoicePeriodQtyPhysical.ReturnDateTime != maxDateTime
+            exists join vendInvoiceInfoLine
+            where vendInvoiceInfoLine.ParmId == parmId
+            &&    vendInvoiceInfoLine.PurchLineRecId == invoicePeriodQtyPhysical.RefRecId
+                join TableId from purchLine
+                where purchLine.RecId == vendInvoiceInfoLine.PurchLineRecId
+                &&    purchLine.RORTradeType != RORTradeType::SalesPurch
+                    join TableId from invoicePeriodQtyFinancial
+                    where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+                    &&    !invoicePeriodQtyFinancial.InvoiceId;
+
+        TransDateTime endDateTime = max(parmUpdateLocal.INVCalculationDateTime, invoicePeriodQtyPhysical.ReturnDateTime);
+               
+        if (calcEstimation)
+        {
+            RORRentalDateTimes rentalDateTimes;
+            
+            select maxof(ExpectedOffRentDateTime) from rentalDateTimes
+            where rentalDateTimes.OffRentDateTime == maxDateTime
+                exists join purchLine
+                where purchLine.TableId == rentalDateTimes.RefTableId
+                &&    purchLine.RecId == rentalDateTimes.RefRecId
+                &&    purchLine.RORTradeType != RORTradeType::SalesPurch
+                    join TableId from vendInvoiceInfoLine
+                    where vendInvoiceInfoLine.ParmId == parmId
+                    &&    vendInvoiceInfoLine.PurchLineRecId == purchLine.RecId;
+
+            endDateTime = rentalDateTimes.ExpectedOffRentDateTime;
+
+            select maxof(OffRentDateTime) from rentalDateTimes
+            where rentalDateTimes.OffRentDateTime != maxDateTime
+                exists join purchLine
+                where purchLine.TableId == rentalDateTimes.RefTableId
+                &&    purchLine.RecId == rentalDateTimes.RefRecId
+                &&    purchLine.RORTradeType != RORTradeType::SalesPurch
+                    join TableId from vendInvoiceInfoLine
+                    where vendInvoiceInfoLine.ParmId == parmId
+                    &&    vendInvoiceInfoLine.PurchLineRecId == purchLine.RecId;
+
+            endDateTime = max(endDateTime, rentalDateTimes.OffRentDateTime);
+            endDateTime = DateTimeUtil::newDateTime(endMth(DateTimeUtil::date(endDateTime)), 0);
+        }
+        // For monthly invoice profile we may need to know all open days for a specific month even if it is beyond calculation point.
+        ToDate invoiceMaxDate = max(DateTimeUtil::date(endDateTime) + 1, endMth(DateTimeUtil::date(parmUpdateLocal.INVCalculationDateTime)));
+        invoiceMinDate = str2DateDMY(strFmt("1-%1-%2", mthOfYr(invoiceMinDate), year(invoiceMinDate)));
+                 
+        return [ invoiceMinDate, invoiceMaxDate ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performInvoiceCalculation</Name>
+				<Source><![CDATA[
+    protected void performInvoiceCalculation()
+    {
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+        PurchLine purchLine;
+        PurchTable purchTable;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+        RecordInsertList calcParmInsertList = new RecordInsertList(tableNum(FINInvoiceCalculatorParm));
+
+        while select  vendInvoiceInfoLine
+        where vendInvoiceInfoLine.ParmId == parmId
+            join purchLine
+            where purchLine.RecId == vendInvoiceInfoLine.PurchLineRecId
+            &&    purchLine.RORTradeType != RORTradeType::SalesPurch
+                join FINForceUntilCalculationDateTime, FINForceFromCalculationDateTime from purchTable
+                where purchTable.PurchId == purchLine.PurchId
+                    outer join invoiceCalculatorParm
+                    where invoiceCalculatorParm.ParmId          == parmId
+                    &&    invoiceCalculatorParm.OrderLineTableId == purchLine.TableId
+                    &&    invoiceCalculatorParm.OrderLineRecId   == purchLine.RecId
+        {
+            invoiceCalculatorParm.ParmUpdatePacked = buf2Con(parmUpdate);
+            invoiceCalculatorParm.IsEstimation = calcEstimation;
+            invoiceCalculatorParm.CreditJourRefRecId = creditJourRefRecId;
+            invoiceCalculatorParm.HeaderForceUntilCalculationDateTime = purchTable.FINForceUntilCalculationDateTime;
+            invoiceCalculatorParm.HeaderForceFromCalculationDateTime = purchTable.FINForceFromCalculationDateTime;
+
+            FINInvoiceCalculator invoiceCalculator = FINInvoiceCalculator::construct(purchLine, vendInvoiceInfoLine, invoiceCalculatorParm);
+            invoiceCalculator.run();
+
+            FINInvoiceCalculatorParm finInvoiceCalculatorParm = invoiceCalculator.getInvoiceCalculatorParm();
+            
+            if (invoiceCalculatorParm.RecId)
+            {
+                FINInvoiceCalculatorParm calcParmDel;
+                
+                // delete the record to avoid any possible Unique key violations
+                delete_from calcParmDel where calcParmDel.RecId == invoiceCalculatorParm.RecId;
+            }
+
+            calcParmInsertList.add(finInvoiceCalculatorParm);
+        }
+      
+                
+        calcParmInsertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifyParmLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void modifyParmLine()
+    {
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+        PurchLine purchLine;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+       
+        PurchParmUpdate purchParmUpdate = parmUpdate as PurchParmUpdate;
+        if (purchParmUpdate.SpecQty == PurchUpdate::All)
+        {
+            while select forupdate vendInvoiceInfoLine
+            where vendInvoiceInfoLine.ParmId == parmId
+                join invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmLineTableId  == vendInvoiceInfoLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId    == vendInvoiceInfoLine.RecId
+                &&    invoiceCalculatorParm.ParmId == parmId
+            {
+                // Because of partial deliveries we need to check qty when SpecQty = All
+                FINRentalJournalizer journalizedData = new FINRentalJournalizer();
+                journalizedData.unpack(invoiceCalculatorParm.RentalCalcPacked);
+                Qty qty = journalizedData.getInvoicedQty();
+                int chargedPeriods = journalizedData.getChargedPeriods();
+
+                if (!qty)
+                {
+                    // If only "Credited" checkbox is marked in an invoicing form then use this qty
+                    FINCreditJournalizer journalizedCreditData = new FINCreditJournalizer();
+                    if (invoiceCalculatorParm.CreditCalcPacked)
+                    {
+                        journalizedCreditData.unpack(invoiceCalculatorParm.CreditCalcPacked);
+                    }
+                    qty = journalizedCreditData.getInvoicedQty();
+                }
+
+                if (!qty)
+                {
+                    // If fully invoiced and return not posted yet then use qty 1 to be able to invoice return amount.
+                    FINTransportPriceJournalizer journalizedTransportData = new FINTransportPriceJournalizer();
+                    if (invoiceCalculatorParm.TransportCalcPacked)
+                    {
+                        journalizedTransportData.unpack(invoiceCalculatorParm.TransportCalcPacked);
+                    }
+                    
+                    if (journalizedTransportData.getReturnAmount())
+                    {
+                        qty = 1;
+                    }
+                }
+
+                vendInvoiceInfoLine.ReceiveNow = qty;
+                vendInvoiceInfoLine.INVInvoicePeriods = chargedPeriods;
+                vendInvoiceInfoLine.FINLineAmount = invoiceCalculatorParm.InvoiceAmount;
+                vendInvoiceInfoLine.LineAmount = 0;
+                vendInvoiceInfoLine.update();
+            }
+        }
+        else
+        {
+            update_recordset vendInvoiceInfoLine
+            setting FINLineAmount = invoiceCalculatorParm.InvoiceAmount,
+                    LineAmount = 0,
+                    INVInvoicePeriods = invoiceCalculatorParm.ChargedPeriods
+            where vendInvoiceInfoLine.ParmId == parmId
+                join invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmLineTableId  == vendInvoiceInfoLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId    == vendInvoiceInfoLine.RecId
+                &&    invoiceCalculatorParm.ParmId == parmId;
+        }
+       
+        update_recordset vendInvoiceInfoLine
+        setting FINLineAmount = vendInvoiceInfoLine.LineAmount
+            where vendInvoiceInfoLine.ParmId == parmId
+                exists join purchLine
+                where purchLine.RecId == vendInvoiceInfoLine.PurchLineRecId
+                && purchLine.RORTradeType == RORTradeType::SalesPurch;
+
+        delete_from vendInvoiceInfoLine
+        where vendInvoiceInfoLine.ParmId == parmId
+            exists join purchLine
+            where purchLine.RecId == vendInvoiceInfoLine.PurchLineRecId
+            &&    purchLine.RORTradeType != RORTradeType::SalesPurch
+                notexists join invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmLineTableId  == vendInvoiceInfoLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId    == vendInvoiceInfoLine.RecId
+                &&    invoiceCalculatorParm.ParmId == parmId
+                &&    invoiceCalculatorParm.MustBeInvoiced;
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>discardChildLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void discardChildLine()
+    {
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+        PurchLine purchLine, purchLineParent;
+        FINRentalInvoiceProfile invoiceProfile;
+        Map invoicedParent = new Map(Types::Int64, Types::Enum);
+        Map childParentDelete = new Map(Types::Int64, Types::Enum);
+        boolean mustDeleteParmLine;
+        DNRTmpIdList tmpIdList;
+        RecordInsertList recordInsertList = new RecordInsertList(tableNum(DNRTmpIdList), false, false, false, false, false, tmpIdList);
+               
+        ttsBegin;
+        delete_from tmpIdList;
+                                      
+        while select RecId from vendInvoiceInfoLine
+        where vendInvoiceInfoLine.ParmId == parmId
+            join RORTradeType, RORParentLineRecId, PurchQty from purchLine
+            where purchLine.RORParentLineRecId
+            &&    purchLine.InventTransId == vendInvoiceInfoLine.InventTransId
+                join purchLineParent
+                where purchLineParent.RecId == purchLine.RORParentLineRecId
+                    join InvoiceChildLinesAfterParent from invoiceProfile
+                    where invoiceProfile.InvoiceProfileId == purchLineParent.INVInvoiceProfileId
+        {
+            if (!invoiceProfile.InvoiceChildLinesAfterParent
+            ||  (purchLine.RORTradeType == RORTradeType::SalesPurch && purchLine.PurchQty < 0))
+            {
+                continue;
+            }
+
+            // Check parent only once
+            if (childParentDelete.exists(purchLine.RORParentLineRecId))
+            {
+                if (childParentDelete.lookup(purchLine.RORParentLineRecId))
+                {
+                    tmpIdList.RefRecId = vendInvoiceInfoLine.RecId;
+                    recordInsertList.add(tmpIdList);
+                    mustDeleteParmLine = true;
+                }
+            }
+            else
+            {
+                if (!invoicedParent.exists(purchLine.RORParentLineRecId))
+                {
+                    boolean parentIsFullyInvoiced = !purchLineParent.RORRentalLine::FINExistUninvoicedCreditedForLine();
+                    invoicedParent.insert(purchLine.RORParentLineRecId, (parentIsFullyInvoiced 
+                                                                     || (purchline.RORTradeType == RORTradeType::SalesPurch && purchLineParent.RORRentalLine::FINExistsJournalizedPeriod())));
+                }
+
+                // Do not check if parent was invoiced before.
+                if (invoicedParent.lookup(purchLine.RORParentLineRecId))
+                {
+                    childParentDelete.insert(purchLine.RORParentLineRecId, NoYes::Yes);
+                }
+                else
+                {
+                    vendInvoiceInfoLine vendInvoiceInfoLineParent;
+                    FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+                    select firstonly RecId from vendInvoiceInfoLineParent
+                    where vendInvoiceInfoLineParent.PurchLineRecId == purchLine.RORParentLineRecId
+                        exists join invoiceCalculatorParm
+                        where invoiceCalculatorParm.ParmLineTableId  == vendInvoiceInfoLineParent.TableId
+                        &&    invoiceCalculatorParm.ParmLineRecId    == vendInvoiceInfoLineParent.RecId
+                        &&    invoiceCalculatorParm.MustBeInvoiced;
+
+                    childParentDelete.insert(purchLine.RORParentLineRecId, (vendInvoiceInfoLineParent.RecId == 0 ? NoYes::Yes : NoYes::No));
+
+                    if (childParentDelete.lookup(purchLine.RORParentLineRecId))
+                    {
+                        tmpIdList.RefRecId = vendInvoiceInfoLine.RecId;
+                        recordInsertList.add(tmpIdList);
+                        mustDeleteParmLine = true;
+                    }
+                }
+            }
+        }
+
+        recordInsertList.insertDatabase();
+        ttsCommit;
+
+        if (mustDeleteParmLine)
+        {
+            delete_from vendInvoiceInfoLine
+                exists join tmpIdList
+                where tmpIdList.RefRecId == vendInvoiceInfoLine.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanUpOrphanCalcParmAsync</Name>
+				<Source><![CDATA[
+    public static void cleanUpOrphanCalcParmAsync(container _parameter)
+    {
+        Counter retryCount;
+        PurchLine purchLine;
+        ParmId parmId;
+        FINInvoiceCalculatorParm parmDelete;
+        FINInvoiceCalculatorParm invoiceCalcParm;
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+
+        [parmId] = _parameter;
+        try
+        {
+            while select RecId from invoiceCalcParm
+            where invoiceCalcParm.ParmId == parmId
+            &&    invoiceCalcParm.ParmLineTableId == tableNum(VendInvoiceInfoLine)
+                join TableId from purchLine
+                where purchLine.RecId == invoiceCalcParm.OrderLineRecId
+                    notexists join vendInvoiceInfoLine
+                    where vendInvoiceInfoLine.RecId == invoiceCalcParm.ParmLineRecId
+            {
+                // delete one record at a time to reduce blocking issues.
+                delete_from parmDelete where parmDelete.RecId == invoiceCalcParm.RecId;
+            }
+        }
+        catch (Exception::Deadlock)
+        {
+            if (!retryCount)
+            {
+                retryCount += 1;
+                retry;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

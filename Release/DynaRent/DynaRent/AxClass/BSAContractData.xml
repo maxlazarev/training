@@ -1,0 +1,1128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BSAContractData</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BSAContractData
+{
+    //DB tables
+    BSAContractTable                contractTable;
+    BSAContractDataParm             contractDataParm;
+
+    //TempDB tables
+    BSATmpContractLine              tmpContractLine;
+    BSATmpContractLineMaintPlan     tmpContractLineMaintPlan;
+    BSATmpContractLinePricing       tmpContractLinePricing;
+    BSATmpContractLineSubscription  tmpContractLineSubscription;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>buildContractLineQuery</Name>
+				<Source><![CDATA[
+    private Query buildContractLineQuery(BSAContractLineTierType _contractLineTierType)
+    {
+        Query                   query = new Query();
+    
+        QueryBuildDataSource    qbdsContractTable;
+        QueryBuildDataSource    qbdsContractLine;
+    
+        qbdsContractTable = query.addDataSource(tableNum(BSAContractTable));
+        qbdsContractTable.addRange(fieldNum(BSAContractTable, ContractId)).value(this.buildHierarchyRange()); //No more ranges needed, as these are already filtered
+    
+        if (_contractLineTierType == BSAContractLineTierType::Subscription)
+        {
+            qbdsContractTable.addRange(fieldNum(BSAContractTable, BusRelType)).value(SysQuery::value(TableGroupAll::Table));
+        }
+    
+        qbdsContractTable.addSortField(fieldNum(BSAContractTable, BusRelType), SortOrder::Descending);
+    
+        qbdsContractLine = qbdsContractTable.addDataSource(tableNum(BSAContractLine));
+        qbdsContractLine.addLink(fieldNum(BSAContractTable, ContractId), fieldNum(BSAContractLine, ContractId));
+        qbdsContractLine.addRange(fieldNum(BSAContractLine, ContractLineTierType)).value(queryValue(_contractLineTierType));
+        qbdsContractLine.addSortField(fieldNum(BSAContractLine, AgreementType), SortOrder::Ascending);
+    
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildHierarchyRange</Name>
+				<Source><![CDATA[
+    private Range buildHierarchyRange()
+    {
+        BSAContractTable        contractTableLocal;
+        smmBusRelTable          smmBusRelTable;
+        Range                   ret = '';
+        boolean                 found = false;
+        ;
+    
+        switch(contractTable.BusRelType)
+        {
+            case TableGroupAll::Table:
+                ret = contractTable.ContractId;
+                //Fallthru to build hierarchy
+    
+            case TableGroupAll::GroupId:
+                if (contractTable.BusRelType == TableGroupAll::GroupId)
+                {
+                    ret = contractTable.ContractId;
+                }
+                else
+                {
+                    select firstOnly ContractId from contractTableLocal
+                    where   contractTableLocal.BusRelType       == TableGroupAll::GroupId
+                    &&      contractTableLocal.FromDate         <= contractDataParm.ValidOnDateFrom
+                    &&      contractDataParm.ValidOnDateTo      <= contractTableLocal.ToDate
+                    &&      contractTableLocal.CurrencyCode     == contractDataParm.CurrencyCode
+                    &&      contractTableLocal.Status           == BSAContractStatus::Confirmed
+                        exists join smmBusRelTable
+                        where   smmBusRelTable.RAGBusRelGroupId == contractTableLocal.BusRelRelation
+                        &&      smmBusRelTable.BusRelAccount    == contractTable.BusRelRelation;
+    
+                    ret = (contractTableLocal.ContractId ? strFmt('%1,%2', contractTableLocal.ContractId, ret) : ret);
+                }
+                //Fallthru to build hierarchy
+    
+            case TableGroupAll::All:
+                if (contractTable.BusRelType == TableGroupAll::All)
+                {
+                    ret = contractTable.ContractId;
+                }
+                else
+                {
+                    select firstOnly ContractId from contractTableLocal
+                    where   contractTableLocal.BusRelType       == TableGroupAll::All
+                    &&      contractTableLocal.FromDate         <= contractDataParm.ValidOnDateFrom
+                    &&      contractDataParm.ValidOnDateTo      <= contractTableLocal.ToDate
+                    &&      contractTableLocal.CurrencyCode     == contractDataParm.CurrencyCode
+                    &&      contractTableLocal.Status           == BSAContractStatus::Confirmed;
+    
+                    ret = (contractTableLocal.ContractId ? strFmt('%1,%2', contractTableLocal.ContractId, ret) : ret);
+                }
+                break;
+    
+            default:
+                throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeTier</Name>
+				<Source><![CDATA[
+    public void cascadeTier(BSAContractLineTierType _contractLineTierType, boolean _reset, boolean _pricingCountCurrentCalls)
+    {
+        switch(_contractLineTierType)
+        {
+            case BSAContractLineTierType::MaintPlans :
+                this.cascadeTmpContractLineMaintPlan(_reset);
+                break;
+    
+            case BSAContractLineTierType::Pricing :
+                this.cascadeTmpContractLinePricing(_pricingCountCurrentCalls, _reset);
+                break;
+    
+            case BSAContractLineTierType::Subscription :
+                this.cascadeTmpContractLineSubscription(_reset);
+                break;
+    
+            default:
+                throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeTmpContractLineMaintPlan</Name>
+				<Source><![CDATA[
+    private void cascadeTmpContractLineMaintPlan(boolean _reset = false)
+    {
+        QueryRun                queryRun = new QueryRun(this.buildContractLineQuery(BSAContractLineTierType::MaintPlans));
+        BSAContractLine         contractLine;
+    
+        NoYes                   includePlan;
+        BOBMaintenancePlanCode  maintenancePlanCode;
+    
+        BOBObjectTable          objectTable;
+        EcoResProduct           ecoResProduct;
+        InventTable             inventTable;
+        InventItemGroupItem     inventItemGroupItem;
+    
+        boolean                 isCurrentContract;
+        Description             inheritedSourceText;
+        ;
+    
+        if (_reset)
+        {
+            update_recordSet tmpContractLineMaintPlan
+            setting IncludePlan     = NoYes::No,
+                    IsOverridden    = NoYes::No,
+                    InheritedSource = '';
+        }
+    
+        while (queryRun.next())
+        {
+            contractLine = queryRun.get(tableNum(BSAContractLine));
+    
+            isCurrentContract = contractTable.ContractId == contractLine.ContractId;
+    
+            inheritedSourceText = strFmt(
+                                   (contractLine.AgreementType == BSAAgreementType::Agreement ? "@DNR8338" : "@DNR8336"),
+                                    contractLine.AgreementType,
+                                    contractLine.AgreementRelation,
+                                   (isCurrentContract ? "@DNR8337" : contractLine.ContractId));
+    
+            [maintenancePlanCode, includePlan] = contractLine.Value;
+    
+            switch(contractLine.AgreementType)
+            {
+                case BSAAgreementType::ObjectId:
+                    //BO
+                    update_recordSet tmpContractLineMaintPlan
+                    setting IncludePlan                 = includePlan,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineMaintPlan.AgreementType          == BSAAgreementType::ObjectId
+                    &&      tmpContractLineMaintPlan.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLineMaintPlan.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLineMaintPlan.BOBMaintenancePlanCode == maintenancePlanCode;
+                    break;
+    
+                case BSAAgreementType::ItemId:
+                    //Item
+                    update_recordSet tmpContractLineMaintPlan
+                    setting IncludePlan                 = includePlan,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineMaintPlan.AgreementType          == BSAAgreementType::ItemId
+                    &&      tmpContractLineMaintPlan.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLineMaintPlan.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLineMaintPlan.BOBMaintenancePlanCode == maintenancePlanCode;
+    
+                    //BO
+                    update_recordSet tmpContractLineMaintPlan
+                    setting IncludePlan                 = includePlan,
+                            IsOverridden                = NoYes::No,
+                            InheritedSource             = inheritedSourceText,
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineMaintPlan.AgreementType          == BSAAgreementType::ObjectId
+                    &&      tmpContractLineMaintPlan.AgreementParentRelation== contractLine.AgreementRelation
+                    &&      tmpContractLineMaintPlan.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLineMaintPlan.BOBMaintenancePlanCode == maintenancePlanCode;
+                    break;
+    
+                case BSAAgreementType::ItemGroup:
+                    //Item Group
+                    update_recordSet tmpContractLineMaintPlan
+                    setting IncludePlan                 = includePlan,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineMaintPlan.AgreementType          == BSAAgreementType::ItemGroup
+                    &&      tmpContractLineMaintPlan.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLineMaintPlan.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLineMaintPlan.BOBMaintenancePlanCode == maintenancePlanCode;
+    
+                    //Item
+                    update_recordSet tmpContractLineMaintPlan
+                    setting IncludePlan                 = includePlan,
+                            IsOverridden                = NoYes::No,
+                            InheritedSource             = inheritedSourceText,
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineMaintPlan.AgreementType          == BSAAgreementType::ItemId
+                    &&      tmpContractLineMaintPlan.AgreementParentRelation== contractLine.AgreementRelation
+                    &&      tmpContractLineMaintPlan.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLineMaintPlan.BOBMaintenancePlanCode == maintenancePlanCode;
+    
+                    //BO
+                    update_recordSet tmpContractLineMaintPlan
+                    setting IncludePlan                 = includePlan,
+                            IsOverridden                = NoYes::No,
+                            InheritedSource             = inheritedSourceText,
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineMaintPlan.AgreementType          == BSAAgreementType::ObjectId
+                    &&      tmpContractLineMaintPlan.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLineMaintPlan.BOBMaintenancePlanCode == maintenancePlanCode
+                        exists join objectTable
+                        where objectTable.ObjectId == tmpContractLineMaintPlan.AgreementRelation
+                            join TableId from ecoResProduct
+                            where ecoResProduct.DisplayProductNumber == ecoResProduct.BOBRentalTypeId
+                            &&    ecoResProduct.BOBRentalTypeId == objectTable.RentalTypeId
+                                join TableId from inventTable
+                                where inventTable.Product == ecoResProduct.RecId
+                                    join TableId from inventItemGroupItem
+                                    where inventItemGroupItem.ItemId            == inventTable.ItemId
+                                    &&    inventItemGroupItem.ItemDataAreaId    == inventTable.DataAreaId
+                                    &&    inventItemGroupItem.ItemGroupId       == contractLine.AgreementRelation;
+                break;
+    
+                case BSAAgreementType::Agreement:
+                    //All
+                    update_recordSet tmpContractLineMaintPlan
+                    setting IncludePlan                 = includePlan,
+                            IsOverridden                = NoYes::No,
+                            InheritedSource             = inheritedSourceText,
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineMaintPlan.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLineMaintPlan.BOBMaintenancePlanCode == maintenancePlanCode;
+    
+                    //Current, in order to set overridden
+                    update_recordSet tmpContractLineMaintPlan
+                    setting IncludePlan                 = includePlan,
+                            IsOverridden                = (isCurrentContract ? NoYes::Yes : NoYes::No),
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineMaintPlan.AgreementType          == BSAAgreementType::Agreement
+                    &&      tmpContractLineMaintPlan.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLineMaintPlan.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLineMaintPlan.BOBMaintenancePlanCode == maintenancePlanCode;
+    
+                break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeTmpContractLinePricing</Name>
+				<Source><![CDATA[
+    private void cascadeTmpContractLinePricing(boolean _countCurrentCalls, boolean _reset = false)
+    {
+        QueryRun                queryRun = new QueryRun(this.buildContractLineQuery(BSAContractLineTierType::Pricing));
+        BSAContractLine         contractLine;
+    
+        BSAMaxCalls             maxCalls;
+        PriceGroupId            priceGroupId;
+        ProjLinePropertyId      projLinePropertyId;
+        BSATaskRelation         taskRelation;
+        TableGroupAll           taskType;
+    
+        BOBObjectTable          objectTable;
+        EcoResProduct           ecoResProduct;
+        InventTable             inventTable;
+        InventItemGroupItem     inventItemGroupItem;
+    
+        boolean                 isCurrentContract;
+        Description             inheritedSourceText;
+        BSAMaxCalls             currentCalls;
+        ;
+    
+        if (_reset)
+        {
+            update_recordSet tmpContractLinePricing
+            setting MaxCalls            = 0,
+                    PriceGroupId        = '',
+                    ProjLinePropertyId  = '',
+                    IsOverridden        = NoYes::No,
+                    InheritedSource     = '';
+        }
+    
+        while (queryRun.next())
+        {
+            contractLine = queryRun.get(tableNum(BSAContractLine));
+    
+            isCurrentContract   = contractTable.ContractId == contractLine.ContractId;
+    
+            if (_countCurrentCalls)
+            {
+                currentCalls        = this.pricingTaskCallCount(contractLine);
+            }
+    
+            inheritedSourceText = strFmt(
+                                    contractLine.AgreementType == BSAAgreementType::Agreement ? "@DNR8338" : "@DNR8336",
+                                    contractLine.AgreementType,
+                                    contractLine.AgreementRelation,
+                                    isCurrentContract ? "@DNR8337" : contractLine.ContractId);
+    
+            [taskRelation, taskType, priceGroupId, projLinePropertyId, maxCalls] = contractLine.Value;
+    
+            switch(contractLine.AgreementType)
+            {
+                case BSAAgreementType::ObjectId:
+                    //BO
+                    update_recordSet tmpContractLinePricing
+                    setting MaxCalls                    = maxCalls,
+                            currentCalls                = currentCalls,
+                            PriceGroupId                = priceGroupId,
+                            ProjLinePropertyId          = projLinePropertyId,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLinePricing.AgreementType          == BSAAgreementType::ObjectId
+                    &&      tmpContractLinePricing.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLinePricing.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLinePricing.TaskType               == taskType
+                    &&      tmpContractLinePricing.TaskRelation           == taskRelation;
+                    break;
+    
+                case BSAAgreementType::ItemId:
+                    //Item
+                    update_recordSet tmpContractLinePricing
+                    setting MaxCalls            = maxCalls,
+                            currentCalls        = currentCalls,
+                            PriceGroupId        = priceGroupId,
+                            ProjLinePropertyId  = projLinePropertyId,
+                            IsOverridden        = isCurrentContract,
+                            InheritedSource     = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical = contractLine.RecId
+                    where   tmpContractLinePricing.AgreementType          == BSAAgreementType::ItemId
+                    &&      tmpContractLinePricing.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLinePricing.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLinePricing.TaskType               == taskType
+                    &&      tmpContractLinePricing.TaskRelation           == taskRelation;
+    
+                    //BO
+                    update_recordSet tmpContractLinePricing
+                    setting MaxCalls                    = maxCalls,
+                            currentCalls                = currentCalls,
+                            PriceGroupId                = priceGroupId,
+                            ProjLinePropertyId          = projLinePropertyId,
+                            IsOverridden                = NoYes::No,
+                            InheritedSource             = inheritedSourceText,
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLinePricing.AgreementType          == BSAAgreementType::ObjectId
+                    &&      tmpContractLinePricing.AgreementParentRelation== contractLine.AgreementRelation
+                    &&      tmpContractLinePricing.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLinePricing.TaskType               == taskType
+                    &&      tmpContractLinePricing.TaskRelation           == taskRelation;
+                    break;
+    
+                case BSAAgreementType::ItemGroup:
+                    //Item Group
+                    update_recordSet tmpContractLinePricing
+                    setting MaxCalls                    = maxCalls,
+                            currentCalls                = currentCalls,
+                            PriceGroupId                = priceGroupId,
+                            ProjLinePropertyId          = projLinePropertyId,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLinePricing.AgreementType          == BSAAgreementType::ItemGroup
+                    &&      tmpContractLinePricing.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLinePricing.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLinePricing.TaskType               == taskType
+                    &&      tmpContractLinePricing.TaskRelation           == taskRelation;
+    
+                    //Item
+                    update_recordSet tmpContractLinePricing
+                    setting MaxCalls                    = maxCalls,
+                            currentCalls                = currentCalls,
+                            PriceGroupId                = priceGroupId,
+                            ProjLinePropertyId          = projLinePropertyId,
+                            IsOverridden                = NoYes::No,
+                            InheritedSource             = inheritedSourceText,
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLinePricing.AgreementType          == BSAAgreementType::ItemId
+                    &&      tmpContractLinePricing.AgreementParentRelation== contractLine.AgreementRelation
+                    &&      tmpContractLinePricing.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLinePricing.TaskType               == taskType
+                    &&      tmpContractLinePricing.TaskRelation           == taskRelation;
+    
+                    //BO
+                    update_recordSet tmpContractLinePricing
+                    setting MaxCalls            = maxCalls,
+                            currentCalls        = currentCalls,
+                            PriceGroupId        = priceGroupId,
+                            ProjLinePropertyId  = projLinePropertyId,
+                            IsOverridden        = NoYes::No,
+                            InheritedSource     = inheritedSourceText,
+                            ContractLineSourcePhysical = contractLine.RecId
+                    where   tmpContractLinePricing.AgreementType                == BSAAgreementType::ObjectId
+                    &&      tmpContractLinePricing.ContractLineTierType         == contractLine.ContractLineTierType
+                    &&      tmpContractLinePricing.TaskType                     == taskType
+                    &&      tmpContractLinePricing.TaskRelation                 == taskRelation
+                        exists join objectTable
+                        where objectTable.ObjectId == tmpContractLinePricing.AgreementRelation
+                            join TableId from ecoResProduct
+                            where ecoResProduct.DisplayProductNumber            == ecoResProduct.BOBRentalTypeId
+                            &&    ecoResProduct.BOBRentalTypeId                 == objectTable.RentalTypeId
+                                join TableId from inventTable
+                                where inventTable.Product == ecoResProduct.RecId
+                                    join TableId from inventItemGroupItem
+                                    where inventItemGroupItem.ItemId            == inventTable.ItemId
+                                    &&    inventItemGroupItem.ItemDataAreaId    == inventTable.DataAreaId
+                                    &&    inventItemGroupItem.ItemGroupId       == contractLine.AgreementRelation;
+                break;
+    
+                case BSAAgreementType::Agreement:
+                    //All
+                    update_recordSet tmpContractLinePricing
+                    setting MaxCalls            = maxCalls,
+                            currentCalls        = currentCalls,
+                            PriceGroupId        = priceGroupId,
+                            ProjLinePropertyId  = projLinePropertyId,
+                            IsOverridden        = NoYes::No,
+                            InheritedSource     = inheritedSourceText,
+                            ContractLineSourcePhysical = contractLine.RecId
+                    where   tmpContractLinePricing.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLinePricing.TaskType               == taskType
+                    &&      tmpContractLinePricing.TaskRelation           == taskRelation;
+    
+                    //Current, in order to set overridden
+                    update_recordSet tmpContractLinePricing
+                    setting MaxCalls            = maxCalls,
+                            currentCalls        = currentCalls,
+                            PriceGroupId        = priceGroupId,
+                            ProjLinePropertyId  = projLinePropertyId,
+                            IsOverridden        = (isCurrentContract ? NoYes::Yes : NoYes::No),
+                            InheritedSource     = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical = contractLine.RecId
+                    where   tmpContractLinePricing.AgreementType          == BSAAgreementType::Agreement
+                    &&      tmpContractLinePricing.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLinePricing.ContractLineTierType   == contractLine.ContractLineTierType
+                    &&      tmpContractLinePricing.TaskType               == taskType
+                    &&      tmpContractLinePricing.TaskRelation           == taskRelation;
+    
+                break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeTmpContractLineSubscription</Name>
+				<Source><![CDATA[
+    private void cascadeTmpContractLineSubscription(boolean _reset = false)
+    {
+        QueryRun                queryRun = new QueryRun(this.buildContractLineQuery(BSAContractLineTierType::Subscription));
+        BSAContractLine         contractLine;
+    
+        Name                    name;
+        SMASubscriptionGroupId  smaSubscriptionGroupId;
+        SMABasePrice            smaBasePrice;
+        ProjCategoryId          projCategoryId;
+        NoYes                   flatFee;
+        NoYes                   active;
+        BSAInvoiceGroupId       invoiceGroupId;
+        SMAStartDate            startDate;
+        SMAEnddate              endDate;
+    
+        BOBObjectTable          objectTable;
+        EcoResProduct           ecoResProduct;
+        InventTable             inventTable;
+        InventItemGroupItem     inventItemGroupItem;
+    
+        boolean                 isCurrentContract;
+        Description             inheritedSourceText;
+        ;
+    
+        if (_reset)
+        {
+            update_recordSet tmpContractLineSubscription
+            setting Name                    = '',
+                    SMASubscriptionGroupId  = '',
+                    SMABasePrice            = 0,
+                    ProjCategoryId          = '',
+                    FlatFee                 = NoYes::No,
+                    Active                  = NoYes::Yes,
+                    InvoiceGroupId          = '',
+                    SMAStartDate            = contractTable.FromDate,
+                    SMAEnddate              = contractTable.ToDate,
+                    IsOverridden            = NoYes::No,
+                    InheritedSource         = '';
+        }
+    
+        while (queryRun.next())
+        {
+            contractLine = queryRun.get(tableNum(BSAContractLine));
+    
+            isCurrentContract = contractTable.ContractId == contractLine.ContractId;
+    
+            inheritedSourceText = strFmt(
+                                    contractLine.AgreementType == BSAAgreementType::Agreement ? "@DNR8338" : "@DNR8336",
+                                    contractLine.AgreementType,
+                                    contractLine.AgreementRelation,
+                                    isCurrentContract ? "@DNR8337" : contractLine.ContractId);
+    
+            [name,
+             smaSubscriptionGroupId,
+             smaBasePrice,
+             projCategoryId,
+             flatFee,
+             active,
+             invoiceGroupId,
+             startDate,
+             endDate]           = contractLine.Value;
+    
+            switch(contractLine.AgreementType)
+            {
+                case BSAAgreementType::ObjectId:
+                    //BO
+                    update_recordSet tmpContractLineSubscription
+                    setting Name                        = name,
+                            SMASubscriptionGroupId      = smaSubscriptionGroupId,
+                            smaBasePrice                = smaBasePrice,
+                            ProjCategoryId              = projCategoryId,
+                            FlatFee                     = flatFee,
+                            Active                      = active,
+                            invoiceGroupId              = invoiceGroupId,
+                            SMAStartDate                = startDate,
+                            SMAEnddate                  = endDate,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineSubscription.AgreementType          == BSAAgreementType::ObjectId
+                    &&      tmpContractLineSubscription.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLineSubscription.ContractLineTierType   == contractLine.ContractLineTierType;
+                    break;
+    
+                case BSAAgreementType::ItemId:
+                    //Item
+                    update_recordSet tmpContractLineSubscription
+                    setting Name                        = name,
+                            SMASubscriptionGroupId      = smaSubscriptionGroupId,
+                            smaBasePrice                = smaBasePrice,
+                            ProjCategoryId              = projCategoryId,
+                            FlatFee                     = flatFee,
+                            Active                      = active,
+                            invoiceGroupId              = invoiceGroupId,
+                            SMAStartDate                = startDate,
+                            SMAEnddate                  = endDate,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineSubscription.AgreementType          == BSAAgreementType::ItemId
+                    &&      tmpContractLineSubscription.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLineSubscription.ContractLineTierType   == contractLine.ContractLineTierType;
+    
+                    //BO
+                    if (!flatFee)
+                    {
+                        update_recordSet tmpContractLineSubscription
+                        setting Name                        = name,
+                                SMASubscriptionGroupId      = smaSubscriptionGroupId,
+                                smaBasePrice                = smaBasePrice,
+                                ProjCategoryId              = projCategoryId,
+                                FlatFee                     = flatFee,
+                                Active                      = active,
+                                invoiceGroupId              = invoiceGroupId,
+                                SMAStartDate                = startDate,
+                                SMAEnddate                  = endDate,
+                                IsOverridden                = NoYes::No,
+                                InheritedSource             = inheritedSourceText,
+                                ContractLineSourcePhysical  = contractLine.RecId
+                        where   tmpContractLineSubscription.AgreementType          == BSAAgreementType::ObjectId
+                        &&      tmpContractLineSubscription.AgreementParentRelation== contractLine.AgreementRelation
+                        &&      tmpContractLineSubscription.ContractLineTierType   == contractLine.ContractLineTierType;
+                    }
+                    break;
+    
+                case BSAAgreementType::ItemGroup:
+                    //Item Group
+                    update_recordSet tmpContractLineSubscription
+                    setting Name                        = name,
+                            SMASubscriptionGroupId      = smaSubscriptionGroupId,
+                            smaBasePrice                = smaBasePrice,
+                            ProjCategoryId              = projCategoryId,
+                            FlatFee                     = flatFee,
+                            Active                      = active,
+                            invoiceGroupId              = invoiceGroupId,
+                            SMAStartDate                = startDate,
+                            SMAEnddate                  = endDate,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineSubscription.AgreementType          == BSAAgreementType::ItemGroup
+                    &&      tmpContractLineSubscription.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLineSubscription.ContractLineTierType   == contractLine.ContractLineTierType;
+    
+                    //Item
+                    if (!flatFee)
+                    {
+                        update_recordSet tmpContractLineSubscription
+                        setting Name                        = name,
+                                SMASubscriptionGroupId      = smaSubscriptionGroupId,
+                                smaBasePrice                = smaBasePrice,
+                                ProjCategoryId              = projCategoryId,
+                                flatFee                     = flatFee,
+                                Active                      = active,
+                                invoiceGroupId              = invoiceGroupId,
+                                SMAStartDate                = startDate,
+                                SMAEnddate                  = endDate,
+                                IsOverridden                = NoYes::No,
+                                InheritedSource             = inheritedSourceText,
+                                ContractLineSourcePhysical  = contractLine.RecId
+                        where   tmpContractLineSubscription.AgreementType          == BSAAgreementType::ItemId
+                        &&      tmpContractLineSubscription.AgreementParentRelation== contractLine.AgreementRelation
+                        &&      tmpContractLineSubscription.ContractLineTierType   == contractLine.ContractLineTierType;
+                    }
+    
+                    //BO
+                    if (!flatFee)
+                    {
+                        update_recordSet tmpContractLineSubscription
+                        setting Name                        = name,
+                                SMASubscriptionGroupId      = smaSubscriptionGroupId,
+                                smaBasePrice                = smaBasePrice,
+                                ProjCategoryId              = projCategoryId,
+                                FlatFee                     = flatFee,
+                                Active                      = active,
+                                invoiceGroupId              = invoiceGroupId,
+                                SMAStartDate                = startDate,
+                                SMAEnddate                  = endDate,
+                                IsOverridden                = NoYes::No,
+                                InheritedSource             = inheritedSourceText,
+                                ContractLineSourcePhysical  = contractLine.RecId
+                        where   tmpContractLineSubscription.AgreementType           == BSAAgreementType::ObjectId
+                        &&      tmpContractLineSubscription.ContractLineTierType    == contractLine.ContractLineTierType
+                            exists join objectTable
+                            where objectTable.ObjectId == tmpContractLineSubscription.AgreementRelation
+                                join TableId from ecoResProduct
+                                where ecoResProduct.DisplayProductNumber            == ecoResProduct.BOBRentalTypeId
+                                &&    ecoResProduct.BOBRentalTypeId                 == objectTable.RentalTypeId
+                                    join TableId from inventTable
+                                    where inventTable.Product == ecoResProduct.RecId
+                                        join TableId from inventItemGroupItem
+                                        where inventItemGroupItem.ItemId            == inventTable.ItemId
+                                        &&    inventItemGroupItem.ItemDataAreaId    == inventTable.DataAreaId
+                                        &&    inventItemGroupItem.ItemGroupId       == contractLine.AgreementRelation;
+                    }
+                    break;
+    
+                case BSAAgreementType::Agreement:
+                    //All
+                    if (!flatFee)
+                    {
+                        update_recordSet tmpContractLineSubscription
+                        setting Name                        = name,
+                                SMASubscriptionGroupId      = smaSubscriptionGroupId,
+                                smaBasePrice                = smaBasePrice,
+                                ProjCategoryId              = projCategoryId,
+                                FlatFee                     = flatFee,
+                                Active                      = active,
+                                invoiceGroupId              = invoiceGroupId,
+                                SMAStartDate                = startDate,
+                                SMAEnddate                  = endDate,
+                                IsOverridden                = NoYes::No,
+                                InheritedSource             = inheritedSourceText,
+                                ContractLineSourcePhysical  = contractLine.RecId
+                        where   tmpContractLineSubscription.ContractLineTierType   == contractLine.ContractLineTierType;
+                    }
+    
+                    //Current, in order to set overridden
+                    update_recordSet tmpContractLineSubscription
+                    setting Name                        = name,
+                            SMASubscriptionGroupId      = smaSubscriptionGroupId,
+                            smaBasePrice                = smaBasePrice,
+                            ProjCategoryId              = projCategoryId,
+                            FlatFee                     = flatFee,
+                            Active                      = active,
+                            invoiceGroupId              = invoiceGroupId,
+                            SMAStartDate                = startDate,
+                            SMAEnddate                  = endDate,
+                            IsOverridden                = isCurrentContract,
+                            InheritedSource             = (isCurrentContract ? '' : inheritedSourceText),
+                            ContractLineSourcePhysical  = contractLine.RecId
+                    where   tmpContractLineSubscription.AgreementType          == BSAAgreementType::Agreement
+                    &&      tmpContractLineSubscription.AgreementRelation      == contractLine.AgreementRelation
+                    &&      tmpContractLineSubscription.ContractLineTierType   == contractLine.ContractLineTierType;
+    
+                    break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpContractLine</Name>
+				<Source><![CDATA[
+    public BSATmpContractLine getTmpContractLine()
+    {
+        return tmpContractLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpContractLineMainPlan</Name>
+				<Source><![CDATA[
+    public BSATmpContractLineMaintPlan getTmpContractLineMainPlan()
+    {
+        return tmpContractLineMaintPlan;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpContractLinePricing</Name>
+				<Source><![CDATA[
+    public BSATmpContractLinePricing getTmpContractLinePricing()
+    {
+        return tmpContractLinePricing;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpContractLineSubscription</Name>
+				<Source><![CDATA[
+    public BSATmpContractLineSubscription getTmpContractLineSubscription()
+    {
+        return tmpContractLineSubscription;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(BSAContractDataParm _contractDataParm)
+    {
+        contractDataParm = _contractDataParm;
+    
+        contractTable = BSAContractTable::find(contractDataParm.ContractId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpContractLine</Name>
+				<Source><![CDATA[
+    private void populateTmpContractLine(ItemGroupId            _itemGroupId        = '',
+                                         ItemId                 _itemId             = '',
+                                         BOBObjectId            _objectId           = '')
+    {
+        InventItemGroup             inventItemGroup;
+        InventItemGroupItem         inventItemGroupItem;
+        inventTable                 inventTable;
+        EcoResProduct               ecoResProduct;
+        BOBObjectTable              objectTable;
+        BSAAgreementType            agreementType;
+        BSAContractLineTierType     contractLineTierType    = BSAContractLineTierType::Line;
+        BSAContractId               contractId              = contractTable.ContractId;
+        BOBObjectCategory           objectCatagory;
+        smmBusRelTable              busRelTable;
+    
+        switch (contractDataParm.ObjectFilterType)
+        {
+            case BSAObjectFilterType::External :
+                objectCatagory = BOBObjectCategory::External;
+                break;
+    
+            case BSAObjectFilterType::Rental :
+                objectCatagory = BOBObjectCategory::Rental;
+                break;
+    
+            default:
+                //'All' means filter does not get used
+                break;
+        }
+    
+        //All
+        tmpContractLine.clear();
+        tmpContractLine.AgreementType = BSAAgreementType::Agreement;
+        tmpContractLine.ContractLineTierType = BSAContractLineTierType::Line;
+        tmpContractLine.ContractId = contractTable.ContractId;
+        tmpContractLine.insert();
+    
+        //Group
+        agreementType = BSAAgreementType::ItemGroup;
+    
+        insert_recordset tmpContractLine (AgreementType, AgreementRelation, AgreementRelationName, ContractLineTierType, ContractId)
+            select agreementType, ItemGroupId, Name, contractLineTierType, contractId from inventItemGroup
+            where  (!_itemGroupId || inventItemGroup.ItemGroupId == _itemGroupId)
+                exists join inventItemGroupItem
+                where inventItemGroupItem.ItemGroupId == inventItemGroup.ItemGroupId
+                    join inventTable
+                    where inventTable.ItemId == inventItemGroupItem.ItemId
+                        join ecoResProduct
+                        where ecoResProduct.RecId == inventTable.Product
+                            join objectTable
+                            where objectTable.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                            &&   (objectTable.Category == objectCatagory || contractDataParm.ObjectFilterType == BSAObjectFilterType::All)
+                                join busRelTable
+                                where   busRelTable.Party   == objectTable.OrganizationParty
+                                &&    ((contractDataParm.BusRelType == TableGroupAll::Table     && busRelTable.BusRelAccount       == contractDataParm.BusRelRelation)
+                                ||     (contractDataParm.BusRelType == TableGroupAll::GroupId   && busRelTable.RAGBusRelGroupId    == contractDataParm.BusRelRelation)
+                                ||     (contractDataParm.BusRelType == TableGroupAll::All));
+    
+        //Item
+        agreementType = BSAAgreementType::ItemId;
+        insert_recordset tmpContractLine (AgreementType, AgreementRelation, AgreementRelationName, ContractLineTierType, ContractId, AgreementParentRelation)
+            select agreementType, ItemId, NameAlias, contractLineTierType, contractId from inventTable
+            where  (!_itemId || inventTable.ItemId  == _itemId)
+                join ItemGroupId from inventItemGroupItem
+                where   inventItemGroupItem.ItemId          == inventTable.ItemId
+                &&      inventItemGroupItem.ItemDataAreaId  == inventTable.dataAreaId
+                    exists join ecoResProduct
+                    where ecoResProduct.RecId == inventTable.Product
+                        join objectTable
+                        where objectTable.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                        &&   (objectTable.Category == objectCatagory || contractDataParm.ObjectFilterType == BSAObjectFilterType::All)
+                            join busRelTable
+                            where   busRelTable.Party   == objectTable.OrganizationParty
+                            &&    ((contractDataParm.BusRelType == TableGroupAll::Table     && busRelTable.BusRelAccount       == contractDataParm.BusRelRelation)
+                            ||     (contractDataParm.BusRelType == TableGroupAll::GroupId   && busRelTable.RAGBusRelGroupId    == contractDataParm.BusRelRelation)
+                            ||     (contractDataParm.BusRelType == TableGroupAll::All));
+    
+    
+        //Business object
+        agreementType = BSAAgreementType::ObjectId;
+        insert_recordset tmpContractLine (AgreementType, AgreementRelation, /*AssetId,*/ InventSerialId, AgreementRelationName, ContractLineTierType, ContractId, AgreementParentRelation)
+            select agreementType, ObjectId, /*AssetId,*/ InventSerialId, Name, contractLineTierType, contractId, RentalTypeId from objectTable // Q: Replaced Item with RentalType as parent relation and commented AssetId initialization, Need to verify if that works?
+            where  (!_objectId || objectTable.ObjectId == _objectId)
+            &&     (objectTable.Category == objectCatagory || contractDataParm.ObjectFilterType == BSAObjectFilterType::All)
+                join busRelTable
+                where   busRelTable.Party == objectTable.OrganizationParty
+                &&    ((contractDataParm.BusRelType == TableGroupAll::Table     && busRelTable.BusRelAccount    == contractDataParm.BusRelRelation)
+                ||     (contractDataParm.BusRelType == TableGroupAll::GroupId   && busRelTable.RAGBusRelGroupId == contractDataParm.BusRelRelation));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpContractLineMaintPlan</Name>
+				<Source><![CDATA[
+    private void populateTmpContractLineMaintPlan()
+    {
+        BOBDefaultMaintenancePlan   defaultMainenancePlan;
+        TableId                     tableIdConst                = tableNum(BOBDefaultMaintenancePlan);
+        BSAContractLineTierType     contractLineTierTypeConst   = BSAContractLineTierType::MaintPlans;
+    
+        insert_recordset tmpContractLineMaintPlan  (AgreementType, AgreementRelation, AgreementParentRelation, ContractLineTierType, ContractId,
+                                                    ContractLineSource, BOBMaintenancePlanCode, RefTableId, RefRecId)
+        select  AgreementType, AgreementRelation, AgreementParentRelation,
+                contractLineTierTypeConst, contractId, RecId from tmpContractLine
+            join PlanCode, tableIdConst, RecId from defaultMainenancePlan
+            where defaultMainenancePlan.PlanType != BOBMaintenancePlanType::Recall;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpContractLinePricing</Name>
+				<Source><![CDATA[
+    private void populateTmpContractLinePricing()
+    {
+        WPPWorkOrderTaskTable       taskTable;
+        WPPTaskGroup                taskGroup;
+        TableGroupAll               taskType;
+        TableId                     tableIdConst;
+        BSAContractLineTierType     contractLineTierTypeConst = BSAContractLineTierType::Pricing;
+    
+        taskType = TableGroupAll::All;
+    
+        insert_recordset tmpContractLinePricing (AgreementType, AgreementRelation, AgreementParentRelation, ContractLineTierType, ContractId, ContractLineSource, TaskType)
+        select AgreementType, AgreementRelation, AgreementParentRelation, contractLineTierTypeConst, contractId, RecId, taskType from tmpContractLine;
+    
+        taskType = TableGroupAll::GroupId;
+        tableIdConst = tableNum(WPPTaskGroup);
+    
+        insert_recordset tmpContractLinePricing (AgreementType, AgreementRelation, AgreementParentRelation, ContractLineTierType, ContractId, ContractLineSource, TaskType, TaskRelation, RefTableId, RefRecId)
+        select AgreementType, AgreementRelation, AgreementParentRelation, contractLineTierTypeConst, contractId, RecId, taskType from tmpContractLine
+            join TaskGroupId, tableIdConst, RecId from taskGroup;
+    
+        taskType = TableGroupAll::Table;
+        tableIdConst = tableNum(WPPWorkOrderTaskTable);
+    
+        insert_recordset tmpContractLinePricing (AgreementType, AgreementRelation, AgreementParentRelation, ContractLineTierType, ContractId, ContractLineSource, TaskType, TaskRelation, RefTableId, RefRecId)
+        select AgreementType, AgreementRelation, AgreementParentRelation, contractLineTierTypeConst, contractId, RecId, taskType from tmpContractLine
+            join TaskId, tableIdConst, RecId from taskTable
+            where taskTable.TaskGroupId != '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpContractLineSubscription</Name>
+				<Source><![CDATA[
+    private void populateTmpContractLineSubscription()
+    {
+        TableId                         tableIdConst                = tableNum(SMASubscriptionTable);
+        BSAContractLineTierType         contractLineTierTypeConst   = BSAContractLineTierType::Subscription;
+        NoYes                           activeConstant              = NoYes::Yes;
+        TransDate                       startDate                   = contractTable.FromDate;
+        TransDate                       endDate                     = contractTable.ToDate;
+    
+        if (contractTable.BusRelType == TableGroupAll::Table)
+        {
+            insert_recordset tmpContractLineSubscription   (AgreementType, AgreementRelation, AgreementParentRelation,
+                                                            ContractLineTierType, ContractId, ContractLineSource, Active, SMAStartDate, SMAEnddate)
+            select  AgreementType, AgreementRelation, AgreementParentRelation, contractLineTierTypeConst,
+                    contractId, RecId, activeConstant, startDate, endDate from tmpContractLine;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpTables</Name>
+				<Source><![CDATA[
+    public void populateTmpTables()
+    {
+        //Create all permutations
+        this.populateTmpContractLine();
+        this.populateTmpContractLineMaintPlan();
+        this.populateTmpContractLinePricing();
+        this.populateTmpContractLineSubscription();
+    
+        //Update and cascade user changed values
+        this.cascadeTier(BSAContractLineTierType::MaintPlans,   false, false);
+        this.cascadeTier(BSAContractLineTierType::Pricing,      false, false);
+        this.cascadeTier(BSAContractLineTierType::Subscription, false, false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pricingTaskCallCount</Name>
+				<Source><![CDATA[
+    private Counter pricingTaskCallCount(BSAContractLine _contractLine)
+    {
+        WPPWorkOrderLine        workOrderLine;
+        WPPWorkOrderTable       workOrderTable;
+        BOBObjectView           objectView;
+        BOBObjectTable          objectTable;
+        WPPWorkOrderTaskTable   workOrderTaskTable;
+        CustTable               custTable;
+        smmBusRelTable          busRelTable;
+    
+        BSAContractTable        contractTableLineParent;
+    
+        BSAMaxCalls             maxCalls;
+        PriceGroupId            priceGroupId;
+        ProjLinePropertyId      projLinePropertyId;
+        BSATaskRelation         taskRelation;
+        TableGroupAll           taskType;
+    
+        if (_contractLine.ContractLineTierType != BSAContractLineTierType::Pricing)
+        {
+            return 0;
+        }
+    
+        [taskRelation, taskType, priceGroupId, projLinePropertyId, maxCalls] = _contractLine.Value;
+        contractTableLineParent = _contractLine.contractTable();
+    
+        select firstonly count(RecId) from workOrderLine
+            exists join workOrderTaskTable
+            where   workOrderLine.TaskId                == workOrderTaskTable.TaskId
+            &&      workOrderTaskTable.TaskGroupId
+            &&    ((taskType == TableGroupAll::Table    && workOrderTaskTable.TaskId        == taskRelation)
+            ||     (taskType == TableGroupAll::GroupId  && workOrderTaskTable.TaskGroupId   == taskRelation)
+            ||     (taskType == TableGroupAll::All))
+                join TableId from workOrderTable
+                where   workOrderTable.WorkOrderId            == workOrderLine.WorkOrderId
+                &&      workOrderTable.StartDate              >= contractTableLineParent.FromDate
+                &&      workOrderTable.StartDate              <= contractTableLineParent.ToDate
+                &&     (workOrderTable.ProjInvoiceProjId      == contractTableLineParent.ProjInvoiceProjId || !contractTableLineParent.ProjInvoiceProjId)
+                &&      workOrderTable.CustVendAccountType    == CustVendACType::Cust
+                    join TableId from objectTable
+                    where objectTable.RecId == workOrderTable.BOBObjectTableRecId
+                        join TableId from objectView
+                        where objectView.ObjectId == objectTable.ObjectId
+                        &&    ((_contractLine.AgreementType == BSAAgreementType::ObjectId  && objectView.ObjectId    == _contractLine.AgreementRelation)
+                        //||     (_contractLine.AgreementType == BSAAgreementType::ItemId    && objectView.ItemId      == _contractLine.AgreementRelation)
+                        // ||     (_contractLine.AgreementType == BSAAgreementType::ItemGroup && objectView.ItemGroupId == _contractLine.AgreementRelation) // Q: How to rewrite this?
+                        ||     (_contractLine.AgreementType == BSAAgreementType::Agreement))
+                            join TableId from busRelTable
+                            where   busRelTable.Party       == workOrderTable.OrganizationParty
+                            &&      busRelTable.Currency    == contractTableLineParent.CurrencyCode
+                            &&    ((contractTableLineParent.BusRelType == TableGroupAll::Table    && busRelTable.BusRelAccount      == contractTableLineParent.BusRelRelation)
+                            ||     (contractTableLineParent.BusRelType == TableGroupAll::GroupId  && busRelTable.RAGBusRelGroupId   == contractTableLineParent.BusRelRelation)
+                            ||     (contractTableLineParent.BusRelType == TableGroupAll::All));
+    
+        //Converting int64 to int as RecId is both of type Int64 and the only field really suited to use for this.
+        //Since there is no way there’s ever going to be more than 2 million records that satisfy this query,
+        //we can safely sacrifice the unnecessary precision
+        return int642int(workOrderLine.RecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getApplicableMaintPlans</Name>
+				<Source><![CDATA[
+    public static BSATmpContractLineMaintPlan getApplicableMaintPlans(TransDate _validOnDateFrom, TransDate _validOnDateTo, smmBusRelAccount _busRelAccount)
+    {
+        BSAContractDataParm contractDataParm;
+        BSAContractData     contractData;
+    
+        contractDataParm = BSAContractDataParm::populateWithActiveContract(_busRelAccount, _validOnDateFrom, _validOnDateTo);
+    
+        contractData = new BSAContractData(contractDataParm);
+        contractData.populateTmpContractLine();
+        contractData.populateTmpContractLineMaintPlan();
+        contractData.cascadeTmpContractLineMaintPlan();
+    
+        return contractData.getTmpContractLineMainPlan();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getApplicablePricing</Name>
+				<Source><![CDATA[
+    public static container getApplicablePricing(WPPWorkOrderTaskTable  _workOrderTaskTable,
+                                                 BOBObjectTable         _objectTable,
+                                                 TransDate              _validOnDateFrom,
+                                                 TransDate              _validOnDateTo,
+                                                 CustTable              _custTable = null)
+    {
+        TableGroupAll               contractLevel       = TableGroupAll::Table;
+        BSAContractDataParm         contractDataParm;
+        BSAContractData             contractData;
+        ItemId                      itemId              = _objectTable.inventTable().ItemId;
+        ItemGroupId                 itemGroupId         = InventItemGroupItem::itemGroupId(itemId, curext());
+        BOBObjectId                 objectId            = _objectTable.ObjectId;
+        BSATmpContractLinePricing   tmpContractLinePricing;
+    
+        contractDataParm = BSAContractDataParm::populateWithActiveContract(smmBusRelTable::findCust(_custTable.AccountNum).BusRelAccount, _validOnDateFrom, _validOnDateTo, contractLevel);
+    
+        contractData = new BSAContractData(contractDataParm);
+        contractData.populateTmpContractLine(itemGroupId, itemId, objectId);
+        contractData.populateTmpContractLinePricing();
+        contractData.cascadeTmpContractLinePricing(true, false);
+    
+        tmpContractLinePricing = contractData.getTmpContractLinePricing();
+    
+        select firstonly RecId, PriceGroupId, ProjLinePropertyId from tmpContractLinePricing
+        order by tmpContractLinePricing.TaskType asc
+        where tmpContractLinePricing.MaxCalls      >  tmpContractLinePricing.CurrentCalls
+        &&  ((tmpContractLinePricing.AgreementType == BSAAgreementType::ObjectId  && tmpContractLinePricing.AgreementRelation == objectId)      ||
+             (tmpContractLinePricing.AgreementType == BSAAgreementType::ItemId    && tmpContractLinePricing.AgreementRelation == itemId)        ||
+             (tmpContractLinePricing.AgreementType == BSAAgreementType::ItemGroup && tmpContractLinePricing.AgreementRelation == itemGroupId)   ||
+             (tmpContractLinePricing.AgreementType == BSAAgreementType::Agreement))
+        &&  ((tmpContractLinePricing.TaskType      == TableGroupAll::Table        && tmpContractLinePricing.TaskRelation == _workOrderTaskTable.TaskId)      ||
+             (tmpContractLinePricing.TaskType      == TableGroupAll::GroupId      && tmpContractLinePricing.TaskRelation == _workOrderTaskTable.TaskGroupId) ||
+             (tmpContractLinePricing.TaskType      == TableGroupAll::All));
+    
+        return [tmpContractLinePricing.PriceGroupId, tmpContractLinePricing.ProjLinePropertyId];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getApplicableSubscription</Name>
+				<Source><![CDATA[
+    public static BSATmpContractLineSubscription getApplicableSubscription(BSAContractTable _contractTable)
+    {
+        BSAContractDataParm contractDataParm;
+        BSAContractData contractData;
+    
+        contractDataParm.initFromContractTable(_contractTable);
+    
+        contractData = new BSAContractData(contractDataParm);
+        contractData.populateTmpContractLine();
+        contractData.populateTmpContractLineSubscription();
+        contractData.cascadeTmpContractLineSubscription();
+    
+        return contractData.getTmpContractLineSubscription();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

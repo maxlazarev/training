@@ -1,0 +1,513 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINAutoSettlement</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINAutoSettlement extends RunBase
+{
+    //-------------------------------------------------------------
+    // Automatic Ledger settlement based on a selection of ranges
+    //-------------------------------------------------------------
+    int                             totSettled;
+    int                             dimNumber;
+
+    // ranges
+    FINSettleMethod                 settleMethod;
+    RecId                           searchDim;
+    FromDate                        fromDate;
+    ToDate                          toDate;
+    LedgerDimensionDefaultAccount   ledgerAccount;
+    OperationsTax                   operationsTax;
+    PeriodCode                      periodCode;
+
+    #define.CurrentVersion(2)
+    #localmacro.CurrentList
+        settleMethod,
+        searchDim,
+        fromDate,
+        todate,
+        ledgerAccount,
+        operationsTax,
+        periodCode
+    #endmacro
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>autoSettleAll</Name>
+				<Source><![CDATA[
+    public void autoSettleAll()
+    {
+        GeneralJournalAccountEntry              generalJournalAccountEntry, generalJournalAccountEntrySum;
+        DimensionAttributeLevelValueView        dimensionAttributeLevelValueView;
+        LedgerTransSettlement                   ledgerTransSettlementLocal;
+        Num                                     settleId = NumberSeq::newGetNum(CompanyInfo::numRefParmId()).num();
+        GeneralJournalEntry                     generalJournalEntry, generalJournalEntrySum;
+        DimensionAttributeValueCombination      dimAttrValueComb;
+        MainAccount                             mainLedgerAccount = MainAccount::findByLedgerDimension(ledgerAccount);
+        Set                                     voucherOrDimensionSet;
+        int64                                   totalCnt, currCnt;
+        AmountMST                               amountMST;
+        AccountingDate                          accountingDate;
+        str                                     dimensionValue;
+        ;
+    
+        toDate = (toDate ? toDate : dateMax());
+        voucherOrDimensionSet = new Set(types::String);
+    
+        select RecId from generalJournalEntry
+        where generalJournalEntry.AccountingDate >= fromDate
+        &&    generalJournalEntry.AccountingDate <= toDate
+            join count(recId) from generalJournalAccountEntry
+            where generalJournalAccountEntry.GeneralJournalEntry == generalJournalEntry.RecId
+                join  dimAttrValueComb
+                where dimAttrValueComb.RecId == generalJournalAccountEntry.LedgerDimension
+                &&    dimAttrValueComb.MainAccount == mainLedgerAccount.RecId
+                    notexists join ledgerTransSettlementLocal
+                    where ledgerTransSettlementLocal.TransRecId == generalJournalAccountEntry.RecId;
+    
+        totalCnt = generalJournalAccountEntry.RecId;
+        this.progressInit(strFmt("@SYS62814", tableId2name(tableNum(GeneralJournalAccountEntry))), totalCnt, #aviUpdate);
+    
+        while select SubledgerVoucher from generalJournalEntry
+        where generalJournalEntry.AccountingDate >= fromDate
+        &&    generalJournalEntry.AccountingDate <= toDate
+            join RecId, LedgerDimension from generalJournalAccountEntry
+            where generalJournalAccountEntry.GeneralJournalEntry == generalJournalEntry.RecId
+                join  dimAttrValueComb
+                where dimAttrValueComb.RecId == generalJournalAccountEntry.LedgerDimension
+                &&    dimAttrValueComb.MainAccount == mainLedgerAccount.RecId
+                    notexists join ledgerTransSettlementLocal
+                    where ledgerTransSettlementLocal.TransRecId == generalJournalAccountEntry.RecId
+        {
+            currCnt ++;
+            progress.incCount();
+            progress.setText(strFmt("@DNR3480", currCnt, totalCnt));
+            accountingDate  = dateNull();
+            amountMST       = 0;
+    
+            //Settle on voucher...
+            if (settleMethod == FINSettleMethodEnum::Voucher)
+            {
+                if (generalJournalEntry.SubledgerVoucher
+                && !voucherOrDimensionSet.in(generalJournalEntry.SubledgerVoucher))
+                {
+                    select maxOf(AccountingDate) from generalJournalEntrySum
+                    where generalJournalEntrySum.AccountingDate >= fromDate
+                    &&    generalJournalEntrySum.AccountingDate <= toDate
+                    &&    generalJournalEntrySum.SubledgerVoucher == generalJournalEntry.SubledgerVoucher
+                        join sum(AccountingCurrencyAmount) from generalJournalAccountEntrySum
+                        where generalJournalAccountEntrySum.GeneralJournalEntry == generalJournalEntrySum.RecId
+                            join  dimAttrValueComb
+                            where dimAttrValueComb.RecId == generalJournalAccountEntrySum.LedgerDimension
+                            &&    dimAttrValueComb.MainAccount == mainLedgerAccount.RecId
+                                notexists join ledgerTransSettlementLocal
+                                where ledgerTransSettlementLocal.TransRecId == generalJournalAccountEntrySum.RecId;
+    
+                    if (generalJournalAccountEntrySum.AccountingCurrencyAmount == 0)
+                    {
+                        this.autoSettleVoucher(generalJournalEntry.SubledgerVoucher, generalJournalEntrySum.AccountingDate);
+                    }
+                    voucherOrDimensionSet.add(generalJournalEntry.SubledgerVoucher);
+                }
+            }
+            //Settle on dimension...
+            else
+            {
+                select DisplayValue from dimensionAttributeLevelValueView
+                where dimensionAttributeLevelValueView.ValueCombinationRecId == generalJournalAccountEntry.LedgerDimension
+                &&    dimensionAttributeLevelValueView.DimensionAttribute == searchDim
+                    join  dimAttrValueComb
+                    where dimAttrValueComb.RecId == generalJournalAccountEntry.LedgerDimension
+                    &&    dimAttrValueComb.MainAccount == mainLedgerAccount.RecId
+                        notexists join ledgerTransSettlementLocal
+                        where ledgerTransSettlementLocal.TransRecId == generalJournalAccountEntry.RecId;
+    
+                dimensionValue = dimensionAttributeLevelValueView.DisplayValue;
+    
+                if (dimensionValue && !voucherOrDimensionSet.in(dimensionValue))
+                {
+                    while select AccountingDate from generalJournalEntrySum
+                    where generalJournalEntrySum.AccountingDate >= fromDate
+                    &&    generalJournalEntrySum.AccountingDate <= toDate
+                        join AccountingCurrencyAmount from generalJournalAccountEntrySum
+                        where generalJournalAccountEntrySum.GeneralJournalEntry == generalJournalEntrySum.RecId
+                            join  DisplayValue from dimensionAttributeLevelValueView
+                            where dimensionAttributeLevelValueView.ValueCombinationRecId == generalJournalAccountEntrySum.LedgerDimension
+                            &&    dimensionAttributeLevelValueView.DimensionAttribute == searchDim
+                                join  RecId from dimAttrValueComb
+                                where dimAttrValueComb.RecId == dimensionAttributeLevelValueView.ValueCombinationRecId
+                                &&    dimAttrValueComb.MainAccount == mainLedgerAccount.RecId
+                                    notexists join ledgerTransSettlementLocal
+                                    where ledgerTransSettlementLocal.TransRecId == generalJournalAccountEntrySum.RecId
+                    {
+                        if (dimensionAttributeLevelValueView.DisplayValue == dimensionValue)
+                        {
+                            accountingDate = max(accountingDate, generalJournalEntrySum.AccountingDate);
+                            amountMST += generalJournalAccountEntrySum.AccountingCurrencyAmount;
+                        }
+                    }
+    
+                    if (amountMST == 0)
+                    {
+                        this.autoSettleDimension(dimensionValue, accountingDate);
+                    }
+                    voucherOrDimensionSet.add(dimensionValue);
+                }
+            }
+    
+        } //while
+    
+        if (totSettled != 0)
+        {
+            info(strFmt("@DNR3481", totSettled));
+        }
+        else
+        {
+            info("@DNR3482");
+        }
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>autoSettleDimension</Name>
+				<Source><![CDATA[
+    private void autoSettleDimension(SysDim _dimValue, TransDate  _dateMax)
+    {
+        GeneralJournalEntry                 generalJournalEntry;
+        GeneralJournalAccountEntry          generalJournalAccountEntry;
+        DimensionAttributeValueCombination  dimAttrValueComb;
+        LedgerTransSettlement               ledgerTransSettlementNotExists, ledgerTransSettlementNew;
+        DimensionAttributeLevelValueView    dimensionAttributeLevelValueView;
+        Num                                 settleId;
+        MainAccount                         mainLedgerAccount;
+    
+        settleId = NumberSeq::newGetNum(CompanyInfo::numRefParmId()).num();
+    
+        if (!settleId)
+        {
+            throw error("@DNR3486");
+        }
+    
+        mainLedgerAccount = MainAccount::findByLedgerDimension(ledgerAccount);
+    
+        ttsBegin;
+    
+        while select RecId from generalJournalEntry
+        where generalJournalEntry.AccountingDate >= fromDate
+        &&    generalJournalEntry.AccountingDate <= toDate
+            join generalJournalAccountEntry
+            where generalJournalAccountEntry.GeneralJournalEntry == generalJournalEntry.RecId
+                join  DisplayValue from dimensionAttributeLevelValueView
+                where dimensionAttributeLevelValueView.ValueCombinationRecId == generalJournalAccountEntry.LedgerDimension
+                &&    dimensionAttributeLevelValueView.DimensionAttribute == searchDim
+                    join  RecId from dimAttrValueComb
+                    where dimAttrValueComb.RecId == dimensionAttributeLevelValueView.ValueCombinationRecId
+                    &&    dimAttrValueComb.MainAccount == mainLedgerAccount.RecId
+                        notExists join ledgerTransSettlementNotExists
+                        where ledgerTransSettlementNotExists.TransRecId == generalJournalAccountEntry.RecId
+        {
+            if (dimensionAttributeLevelValueView.DisplayValue == _dimValue)
+            {
+                generalJournalAccountEntry.selectForUpdate(true);
+                generalJournalAccountEntry.FINSettleDate = _dateMax;
+                generalJournalAccountEntry.doUpdate();
+    
+                ledgerTransSettlementNew.clear();
+                ledgerTransSettlementNew.TransRecId = generalJournalAccountEntry.RecId;
+                ledgerTransSettlementNew.SettleId   = settleId;
+                ledgerTransSettlementNew.insert();
+            }
+        }
+    
+        totSettled ++;
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>autoSettleVoucher</Name>
+				<Source><![CDATA[
+    private void autoSettleVoucher(Voucher _voucher, TransDate _dateMax)
+    {
+        GeneralJournalAccountEntry              generalJournalAccountEntry;
+        LedgerTransSettlement                   ledgerTransSettlementNotExists, ledgerTransSettlementNew;
+        Num                                     settleId;
+        GeneralJournalEntry                     generalJournalEntry;
+        DimensionAttributeValueCombination      dimAttrValueComb;
+        MainAccount                             mainLedgerAccount;
+        RecordInsertList                        insertList;
+    
+        settleId = NumberSeq::newGetNum(CompanyInfo::numRefParmId()).num();
+    
+        if (!settleId)
+        {
+            throw error("@DNR3486");
+        }
+    
+        mainLedgerAccount = MainAccount::findByLedgerDimension(ledgerAccount);
+        insertList = new RecordInsertList(tableNum(LedgerTransSettlement));
+    
+        ttsBegin;
+
+        while select RecId from generalJournalEntry
+        where generalJournalEntry.SubledgerVoucher == _voucher
+            join generalJournalAccountEntry
+            where generalJournalAccountEntry.GeneralJournalEntry == generalJournalEntry.RecId
+                join  RecId from dimAttrValueComb
+                where dimAttrValueComb.RecId == generalJournalAccountEntry.LedgerDimension
+                &&    dimAttrValueComb.MainAccount == mainLedgerAccount.RecId
+                    notExists join ledgerTransSettlementNotExists
+                    where ledgerTransSettlementNotExists.TransRecId == generalJournalAccountEntry.RecId
+        {
+            generalJournalAccountEntry.selectForUpdate(true);
+            generalJournalAccountEntry.FINSettleDate = _dateMax;
+            generalJournalAccountEntry.doUpdate();
+    
+            ledgerTransSettlementNew.clear();
+            ledgerTransSettlementNew.TransRecId = generalJournalAccountEntry.RecId;
+            ledgerTransSettlementNew.SettleId   = settleId;
+            insertList.add(ledgerTransSettlementNew);
+        }
+
+        insertList.insertDatabase();
+    
+        totSettled ++;
+
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        FormRun dialogForm;
+        Args    args = new Args(formstr(FINAutoSettlement));
+        ;
+    
+        args.caller(this);
+    
+        dialogForm = classfactory.formRunClass(args);
+        dialogForm.init();
+    
+        return dialogForm;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        ;
+        return [#CurrentVersion,#CurrentList];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDimension</Name>
+				<Source><![CDATA[
+    public RecId parmDimension(RecId _searchDim = searchDim)
+    {
+        searchDim = _searchDim;
+        return searchDim;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmFromDate</Name>
+				<Source><![CDATA[
+    public FromDate parmFromDate(FromDate _fromDate = fromDate)
+    {
+        ;
+    
+        fromDate = _fromDate;
+        return fromDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmLedgerAccount</Name>
+				<Source><![CDATA[
+    public ledgerDimensionDefaultAccount parmLedgerAccount(ledgerDimensionDefaultAccount _ledgerAccount = ledgerAccount)
+    {
+        ledgerAccount = _ledgerAccount;
+        return ledgerAccount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmOperationsTax</Name>
+				<Source><![CDATA[
+    public OperationsTax parmOperationsTax(OperationsTax _operationsTax = operationsTax)
+    {
+        ;
+    
+        operationsTax = _operationsTax;
+        return operationsTax;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmPeriodCode</Name>
+				<Source><![CDATA[
+    public Periodcode parmPeriodCode(PeriodCode _periodCode = periodCode)
+    {
+        ;
+    
+        periodCode = _periodCode;
+        return periodCode;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSettleMethod</Name>
+				<Source><![CDATA[
+    public FINSettleMethod parmSettleMethod(FINSettleMethod _settleMethod = settleMethod)
+    {
+        ;
+    
+        settleMethod = _settleMethod;
+        return settleMethod;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmToDate</Name>
+				<Source><![CDATA[
+    public ToDate parmToDate(ToDate _toDate = toDate)
+    {
+        ;
+    
+        toDate = _toDate;
+        return toDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        try
+        {
+            this.autoSettleAll();
+        }
+        catch
+        {
+            error("@DNR3478");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setValues</Name>
+				<Source><![CDATA[
+    public void setValues(FINtmpAutoSettlement _tmpAutoSettlement)
+    {
+        fromDate        = _tmpAutoSettlement.FromDate;
+        toDate          = _tmpAutoSettlement.ToDate;
+        settleMethod    = _tmpAutoSettlement.SettleMethod;
+        ledgerAccount   = _tmpAutoSettlement.LedgerDimension;
+        searchDim       = _tmpAutoSettlement.DimensionAttribute;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version version = RunBase::getVersion(_packedClass);
+        boolean ret;
+        ;
+    
+        switch (version)
+        {
+            case #CurrentVersion:
+                [version,#CurrentList] = _packedClass;
+                ret = true;
+                break;
+            default:
+                ret = false;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    server static FINAutoSettlement construct()
+    {
+        ;
+        return new FINAutoSettlement();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    static ClassDescription description()
+    {
+        ;
+        return "@DNR3470";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    static void main(Args _args)
+    {
+        FINAutoSettlement  autoSettlement = FINAutoSettlement::construct();
+        ;
+    
+        autoSettlement.getLast();
+    
+        autoSettlement.parmSettleMethod(FINSettleMethodEnum::Voucher);
+        autoSettlement.parmLedgerAccount(0);
+    
+        if (autoSettlement.prompt())
+        {
+            autoSettlement.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

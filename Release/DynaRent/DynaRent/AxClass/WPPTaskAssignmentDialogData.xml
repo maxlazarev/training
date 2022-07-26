@@ -1,0 +1,595 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPTaskAssignmentDialogData</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPTaskAssignmentDialogData
+{
+    WPPTmpAssignTask    tmpData;
+    DNRTmpIdValue       tmpResourceTypeId;
+    boolean             isIndividualResource;
+    boolean             canAssignObject;
+    BOBObjectId         assignedObject;
+    
+    #HiGHPlanBoard
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>deleteNonMatchingCalendar</Name>
+				<Source><![CDATA[
+    private void deleteNonMatchingCalendar(WPPRegionCalendarId  _regionCalendarId, StartDateTime _planningFromDateTime, EndDateTime    _planningEndDateTime)
+    {
+        WPPResourceCalendarResource resourceCalendarResource;
+
+        // Delete the resources that do not meet the RegionCalenderId filter
+        if (_regionCalendarId)
+        {
+            if (isIndividualResource)
+            {
+                delete_from tmpData
+                    notExists join resourceCalendarResource 
+                    where resourceCalendarResource.ResourceId == tmpData.ResourceAccount
+                    &&    resourceCalendarResource.CalendarId == _regionCalendarId
+                    &&    resourceCalendarResource.ValidFrom <= _planningFromDateTime
+                    &&  (!resourceCalendarResource.ValidTo || resourceCalendarResource.ValidTo >= _planningEndDateTime);
+            }
+            else
+            {
+                // Delete the groups
+                delete_from tmpData
+                where !tmpData.IsIndividualResource
+                    notExists join resourceCalendarResource
+                    where resourceCalendarResource.CalendarId == _regionCalendarId
+                    &&    resourceCalendarResource.ResourceId == tmpData.ResourceAccount
+                    &&    resourceCalendarResource.ValidFrom <= _planningFromDateTime
+                    &&  (!resourceCalendarResource.ValidTo || resourceCalendarResource.ValidTo >= _planningEndDateTime);
+
+                // Delete the resources in the group
+                delete_from tmpData
+                where tmpData.IsIndividualResource
+                    notExists join resourceCalendarResource
+                    where resourceCalendarResource.CalendarId == _regionCalendarId
+                    &&    resourceCalendarResource.ResourceId == tmpData.ParentResourceAccount;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpData</Name>
+				<Source><![CDATA[
+    public WPPTmpAssignTask getTmpData()
+    {
+        return tmpData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertResourceTypeIds</Name>
+				<Source><![CDATA[
+    private void insertResourceTypeIds(Range _resourceTypeId)
+    {
+        container           con;
+        Counter             conCounter;
+        RecordInsertList    recordInsertList;
+
+        if (isIndividualResource && _resourceTypeId)
+        {
+            recordInsertList = new RecordInsertList(tableNum(DNRTmpIdValue), false, false, false, false, false, tmpResourceTypeId);
+            con = str2con(_resourceTypeId, ',');
+
+            for (conCounter = 1; conCounter <= conLen(con); conCounter++)
+            {
+                tmpResourceTypeId.clear();
+                tmpResourceTypeId.Num = strLTrim(strRTrim(conPeek(con, conCounter)));
+                recordInsertList.add(tmpResourceTypeId);
+            }
+
+            recordInsertList.insertDatabase();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertTasks</Name>
+				<Source><![CDATA[
+    private void insertTasks(Range          _resourceTypeId,
+                             StartDateTime  _planningFromDateTime,
+                             EndDateTime    _planningEndDateTime)
+    {
+        WPPResourceTable            wrkCtrTableSource;
+        WPPResourceGroupResource    resourceGroupResource;
+        WPPWorkOrderLineResource    workOrderLineResource;
+        StartDateTime               startOfDay;
+        EndDateTime                 endOfDay;
+        ValidFromDate               validFromDate;
+        ValidToDate                 validToDate;
+        ImageRes                    resourceGroupImage;
+        CCColor                     colorWhite;
+
+        #TimeConstants
+        #Resource
+
+        startOfDay = DateTimeUtil::newDateTime(DateTimeUtil::date(_planningFromDateTime), 0);
+        endOfDay   = DateTimeUtil::newDateTime(DateTimeUtil::date(_planningEndDateTime), #secondsPerDay - 1);
+
+        colorWhite = #ColorWhite;
+
+        // Do we need to filter on resource type or not
+        if (_resourceTypeId)
+        {
+            // Insert resources with planned tasks
+            insert_recordset tmpData (ResourceAccountDisplay, Name, ResourceAccount, SortingNumber, IsIndividualResource, WorkOrderLineRecId)
+            select ResourceId, Name, ResourceId, SortingNumber, IsIndividualResource from wrkCtrTableSource
+            where wrkCtrTableSource.IsIndividualResource
+                join WorkOrderLineRecId from workOrderLineResource
+                where workOrderLineResource.ResourceId == wrkCtrTableSource.ResourceId
+                &&   workOrderLineResource.PlannedFromDateTime < endOfDay 
+                &&   workOrderLineResource.PlannedToDateTime > startOfDay
+                &&   workOrderLineResource.ResourceType == WrkCtrGroupWrkCtr::WrkCtr
+                        join tmpResourceTypeId // Need to join the whole table, other wise the compiler will complain
+                        where tmpResourceTypeId.Num == wrkCtrTableSource.ResourceTypeId;
+
+            // Insert resources without planned tasks
+            insert_recordset tmpData (ResourceAccountDisplay, Name, ResourceAccount, SortingNumber, IsIndividualResource)
+            select ResourceId, Name, ResourceId, SortingNumber, IsIndividualResource from wrkCtrTableSource
+            where wrkCtrTableSource.IsIndividualResource
+                join tmpResourceTypeId
+                where tmpResourceTypeId.Num == wrkCtrTableSource.ResourceTypeId
+                    notExists join workOrderLineResource
+                    where workOrderLineResource.ResourceId == wrkCtrTableSource.ResourceId
+                    &&   workOrderLineResource.PlannedFromDateTime < endOfDay
+                    &&   workOrderLineResource.PlannedToDateTime > startOfDay
+                    &&   workOrderLineResource.ResourceType == WrkCtrGroupWrkCtr::WrkCtr;
+        }
+        else
+        {
+
+            // Insert resources with planned tasks
+            insert_recordset tmpData (ResourceAccountDisplay, Name, ResourceAccount, SortingNumber, IsIndividualResource, WorkOrderLineRecId)
+            select ResourceId, Name, ResourceId, SortingNumber, IsIndividualResource from wrkCtrTableSource
+            where  wrkCtrTableSource.IsIndividualResource
+                join WorkOrderLineRecId from workOrderLineResource
+                where workOrderLineResource.ResourceId == wrkCtrTableSource.ResourceId
+                &&   workOrderLineResource.PlannedFromDateTime < endOfDay
+                &&   workOrderLineResource.PlannedToDateTime > startOfDay
+                &&   workOrderLineResource.ResourceType == WrkCtrGroupWrkCtr::WrkCtr;
+
+            // Insert resources without planned tasks
+            insert_recordset tmpData (ResourceAccountDisplay, Name, ResourceAccount, SortingNumber, IsIndividualResource)
+            select ResourceId, Name, ResourceId, SortingNumber, IsIndividualResource from wrkCtrTableSource
+            where wrkCtrTableSource.IsIndividualResource
+                notExists join workOrderLineResource
+                where workOrderLineResource.ResourceId == wrkCtrTableSource.ResourceId
+                &&   workOrderLineResource.PlannedFromDateTime < endOfDay
+                &&   workOrderLineResource.PlannedToDateTime > startOfDay
+                &&   workOrderLineResource.ResourceType == WrkCtrGroupWrkCtr::WrkCtr;
+
+            if (!isIndividualResource)
+            {
+                validFromDate = DateTimeUtil::date(startOfDay);
+                validToDate   = DateTimeUtil::date(endOfDay);
+
+                // Add resource groups. Groups cannot be filtered on resource type
+                resourceGroupImage = #RES_FRM_BMP_CONTROL_TT;
+                insert_recordset tmpData (ResourceAccountDisplay, Name, ResourceAccount, SortingNumber, IsIndividualResource, Color, TaskRequirementMatch)
+                select ResourceId, Name, ResourceId, SortingNumber, IsIndividualResource, colorWhite, resourceGroupImage from wrkCtrTableSource
+                where !wrkCtrTableSource.IsIndividualResource;
+
+                // First some updates are required before the missing resources can be inserted
+                // Update individual resources when planning on group level
+                // Update the ones with planning records
+                update_recordSet tmpData
+                setting AssignObject = false,
+                        AssignObjectAllowed = false,
+                        ParentResourceAccount = resourceGroupResource.ResourceGroup
+                where tmpData.IsIndividualResource
+                    join TableId from workOrderLineResource
+                    where workOrderLineResource.WorkOrderLineRecId == tmpData.WorkOrderLineRecId
+                    &&    workOrderLineResource.ResourceType == WrkCtrGroupWrkCtr::WrkCtr
+                    &&    workOrderLineResource.ResourceId == tmpData.ResourceAccount
+                        join ResourceGroup from resourceGroupResource
+                            where resourceGroupResource.ResourceId == workOrderLineResource.ResourceId
+                            &&  ((resourceGroupResource.ValidFrom <= startOfDay) && (!resourceGroupResource.ValidTo || resourceGroupResource.ValidTo >= endOfDay));
+
+                // Update the ones without planning records
+                update_recordSet tmpData
+                setting AssignObject = false,
+                        AssignObjectAllowed = false,
+                        ParentResourceAccount = resourceGroupResource.ResourceGroup
+                where tmpData.IsIndividualResource
+                &&   !tmpData.WorkOrderLineRecId
+                    join TableId from wrkCtrTableSource
+                    where wrkCtrTableSource.ResourceId == tmpData.ResourceAccount
+                        join ResourceGroup from resourceGroupResource
+                        where resourceGroupResource.ResourceId == wrkCtrTableSource.ResourceId
+                        &&  ((resourceGroupResource.ValidFrom <= startOfDay) && (!resourceGroupResource.ValidTo || resourceGroupResource.ValidTo >= endOfDay));
+
+                // Insert new ones without planning records
+                // especially when resources are in more than one group
+                insert_recordset tmpData (ResourceAccountDisplay, Name, ResourceAccount, IsIndividualResource, SortingNumber, ParentResourceAccount)
+                select ResourceId, Name, ResourceId, IsIndividualResource, SortingNumber from wrkCtrTableSource
+                    join  ResourceGroup from resourceGroupResource
+                    where resourceGroupResource.ResourceId == wrkCtrTableSource.ResourceId
+                    &&  ((resourceGroupResource.ValidFrom <= startOfDay) && (!resourceGroupResource.ValidTo || resourceGroupResource.ValidTo >= endOfDay)) 
+                        notExists join tmpData
+                        where tmpData.ResourceAccount == resourceGroupResource.ResourceId
+                        &&    tmpData.ParentResourceAccount == resourceGroupResource.ResourceGroup;
+
+                delete_from tmpData
+                where tmpData.IsIndividualResource
+                &&   !tmpData.ParentResourceAccount;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(WPPWorkOrderId      _callerWorkOrderId,
+                    WrkCtrGroupWrkCtr   _wrkCtrGroupWrkCtr)
+    {
+        WPPWorkOrderTable   workOrderTable;
+        BOBRentalType       rentalType;
+        SalesLine           salesLine;
+        BOBObjectTable      objectTable;
+        InventDim           inventDim;
+
+        isIndividualResource = (_wrkCtrGroupWrkCtr == WrkCtrGroupWrkCtr::WrkCtr);
+
+        select firstOnly Classification from rentalType
+        exists join salesLine
+        where salesLine.BOBRentalTypeIdRequested == rentalType.RentalTypeId
+            join TableId from workOrderTable
+            where workOrderTable.OrderRecId == salesLine.RecId
+            &&    workOrderTable.OrderTableId == salesLine.TableId
+            &&    workOrderTable.WorkOrderId == _callerWorkOrderId;
+
+        canAssignObject = (rentalType.Classification == BOBRentalTypeClassification::Serialized);
+
+        if (canAssignObject)
+        {
+            select firstOnly ObjectId from objectTable
+                exists join inventDim
+                where inventDim.inventSerialId == objectTable.InventSerialId
+                    join TableId from salesLine
+                    where salesLine.InventDimId == inventDim.inventDimId
+                        join TableId from workOrderTable
+                        where workOrderTable.OrderTableId == salesLine.TableId
+                        &&    workOrderTable.OrderRecId   == salesLine.RecId
+                        &&    workOrderTable.WorkOrderId  == _callerWorkOrderId;
+
+            assignedObject = objectTable.ObjectId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populate</Name>
+				<Source><![CDATA[
+    public void populate(StartDateTime                  _planningFromDateTime,
+                         EndDateTime                    _planningEndDateTime,
+                         WPPLayoutManagerCode           _layoutManagerCode,
+                         boolean                        _filterCapabilities,
+                         WPPWorkOrderLine               _callerWorkOrderLine,
+                         WPPServicePlanboardSettings    _settings)
+    {
+        ttsBegin;
+        delete_from tmpData;
+
+        this.insertResourceTypeIds(_settings.ResourceTypeId);
+        this.insertTasks(_settings.ResourceTypeId, _planningFromDateTime, _planningEndDateTime);
+        this.deleteNonMatchingCalendar(_settings.RegionCalendarId, _planningFromDateTime, _planningEndDateTime);
+        this.updateTaskRequirementMatch(_callerWorkOrderLine, _filterCapabilities);
+        this.updatePlannedTaskProperties(_settings.LayoutMgrCodePlannedAbsence, _settings.LayoutMgrCodePlanned);
+        this.updateAggregates(_callerWorkOrderLine);
+        this.updateObjectAssignment();
+
+        if (!isIndividualResource)
+        {
+            this.updateOrder();
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateAggregates</Name>
+				<Source><![CDATA[
+    private void updateAggregates(WPPWorkOrderLine _callerWorkOrderLine)
+    {
+        WPPResourceCapability           wrkCtrCapabilityResource;
+        WPPTaskRequirements             taskRequirements;
+        WPPTmpCapabilityRequirementSum  tmpCapabilityRequirementSum;
+        WPPTmpTaskReqRecordCount        tmpTaskReqRecordCount;
+        RefTableId                      referenceTable;
+        RefRecId                        referenceRecord;
+
+        referenceTable = _callerWorkOrderLine.TableId;
+        referenceRecord = _callerWorkOrderLine.RecId;
+
+        // Insert the sum of the Priority and Level per WrkCtrId for the work order line that is planned
+        insert_recordset tmpCapabilityRequirementSum (PrioritySum, LevelSum, RefTableId, RefRecId, ResourceId)
+        select sum(Priority), sum(Level), referenceTable, referenceRecord, ResourceId from wrkCtrCapabilityResource
+        group by ResourceId
+                join taskRequirements // Need to join the whole table, other wise the compiler will complain
+                where taskRequirements.CapabilityId == wrkCtrCapabilityResource.CapabilityId
+                &&    taskRequirements.RefTableId == _callerWorkOrderLine.TableId
+                &&    taskRequirements.RefRecId == _callerWorkOrderLine.RecId;
+
+        // Insert the number of resource capabilities that match the task requirements
+        insert_recordset tmpTaskReqRecordCount (NumberOfRecords, RefTableId, RefRecId, ResourceId)
+        select count(RecId), referenceTable, referenceRecord from taskRequirements
+        group by wrkCtrCapabilityResource.ResourceId
+        where taskRequirements.RefTableId == _callerWorkOrderLine.TableId
+        &&    taskRequirements.RefRecId == _callerWorkOrderLine.RecId
+            join ResourceId from wrkCtrCapabilityResource
+            where wrkCtrCapabilityResource.CapabilityId == taskRequirements.CapabilityId;
+
+        // 1
+        // Set the total priority of the capabilities required for the work order line per resource
+        update_recordSet tmpData
+        setting PrioritySum = tmpCapabilityRequirementSum.PrioritySum,
+                LevelSum = tmpCapabilityRequirementSum.LevelSum
+            join PrioritySum, LevelSum from tmpCapabilityRequirementSum
+            where tmpCapabilityRequirementSum.ResourceId == tmpData.ResourceAccount;
+
+        // 2
+        // // Set the average level (PrioritySum divided by applicable number of task requirements)
+        update_recordSet tmpData
+        setting LevelAverage = tmpData.PrioritySum / tmpTaskReqRecordCount.NumberOfRecords
+            join NumberOfRecords from tmpTaskReqRecordCount
+            where tmpTaskReqRecordCount.ResourceId == tmpData.ResourceAccount
+            &&    tmpTaskReqRecordCount.NumberOfRecords > 0;
+
+        // 3
+        // Set the calculated level (PrioritySum times the LevelAverage)
+        update_recordSet tmpData
+        setting CalculatedLevel = tmpData.PrioritySum * tmpData.LevelAverage
+        where tmpData.PrioritySum > 0
+        &&    tmpData.LevelAverage > 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateObjectAssignment</Name>
+				<Source><![CDATA[
+    private void updateObjectAssignment()
+    {
+        WPPResourceTable    wrkCtrTableSource;
+        BOBObjectTable      objectTable;
+
+        if (canAssignObject)
+        {
+            // Next two statements set whether it is allowed to assign business objects
+            // 1. especially for resource groups where the resource group is set on the object
+            // 2. when the object is set on an individual resource
+            update_recordSet tmpData
+            setting AssignObjectAllowed = canAssignObject
+                exists join wrkCtrTableSource
+                where wrkCtrTableSource.ResourceId == tmpData.ResourceAccount
+                &&   !wrkCtrTableSource.IsIndividualResource
+                    join TableId from objectTable
+                    where objectTable.WPPResourceGroupRecId == wrkCtrTableSource.RecId;
+
+            update_recordSet tmpData
+            setting AssignObjectAllowed = canAssignObject
+                exists join wrkCtrTableSource
+                where wrkCtrTableSource.ResourceId == tmpData.ResourceAccount
+                &&    wrkCtrTableSource.IsIndividualResource
+                &&    wrkCtrTableSource.ResourceCategory == WPPResourceCategory::BusinessObject
+                    join TableId from objectTable
+                    where objectTable.ObjectId == wrkCtrTableSource.RelationAccount;
+
+            // Next two statements set whether business objects are assigned
+            // 1. especially for resource groups where the resource group is set on the object
+            // 2. when the object is set on an individual resource
+            update_recordSet tmpData
+            setting AssignObject = canAssignObject
+            where tmpData.AssignObjectAllowed
+                exists join wrkCtrTableSource
+                where wrkCtrTableSource.ResourceId == tmpData.ResourceAccount
+                &&   !wrkCtrTableSource.IsIndividualResource
+                    join TableId from objectTable
+                    where objectTable.WPPResourceGroupRecId == wrkCtrTableSource.RecId
+                    &&    objectTable.ObjectId == assignedObject;
+
+            update_recordSet tmpData
+            setting AssignObject = canAssignObject
+            where tmpData.AssignObjectAllowed
+                exists join wrkCtrTableSource
+                where wrkCtrTableSource.ResourceId == tmpData.ResourceAccount
+                &&    wrkCtrTableSource.IsIndividualResource
+                &&    wrkCtrTableSource.ResourceCategory == WPPresourceCategory::BusinessObject
+                    join TableId from objectTable
+                    where objectTable.ObjectId == wrkCtrTableSource.RelationAccount
+                    &&    objectTable.ObjectId == assignedObject;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateOrder</Name>
+				<Source><![CDATA[
+    private void updateOrder()
+    {
+        SortingNumber           groupSortingNumber;
+        WPPTmpCalculatedLevel   tmpCalculatedLevel, tmpCalculatedLevelGrouped;
+        WPPTmpAssignTask        tmpAssignTaskGroupSorting;
+        WPPTmpResourceSorting   tmpSorting;
+        RecordInsertList        recordInsertList;
+
+        // 1
+        // Get the Calculated level of every resource group
+        // First group by all fields, so you get a total per resource per resource group
+        insert_recordset tmpCalculatedLevel (CalculatedLevel, ParentResourceAccount, ResourceAccount)
+        select CalculatedLevel, ParentResourceAccount, ResourceAccount from tmpData
+        group by ParentResourceAccount, ResourceAccount, CalculatedLevel
+        where tmpData.ParentResourceAccount;
+
+        // Then group by resource group, so you get the total of that group
+        insert_recordset tmpCalculatedLevelGrouped (CalculatedLevel, ParentResourceAccount)
+        select sum(CalculatedLevel), ParentResourceAccount from tmpCalculatedLevel
+        group by ParentResourceAccount;
+
+        // 2
+        // Place the level on the resource group
+        update_recordSet tmpData
+        setting CalculatedLevel = tmpCalculatedLevelGrouped.CalculatedLevel
+        where !tmpData.ParentResourceAccount
+            join CalculatedLevel from tmpCalculatedLevelGrouped
+            where tmpCalculatedLevelGrouped.ParentResourceAccount == tmpData.ResourceAccount;
+
+        // 3
+        // Update the sorting on the resource group based on the Calculated Level
+        // RecordInsertList does not work with temporary tables
+        recordInsertList = new RecordInsertList(tableNum(WPPTmpResourceSorting), false, false, false, false, false, tmpSorting);
+
+        while select tmpData
+        order by CalculatedLevel desc, SortingNumber asc
+        where !tmpData.ParentResourceAccount
+        {
+            groupSortingNumber++;
+
+            tmpSorting.ResourceAccount = tmpData.ResourceAccount;
+            tmpSorting.SortingNumber = groupSortingNumber;
+            recordInsertList.add(tmpSorting);
+        }
+
+        recordInsertList.insertDatabase();
+
+        update_recordSet tmpData
+        setting GroupSortingNumber = tmpSorting.SortingNumber
+        where !tmpData.ParentResourceAccount
+            join SortingNumber from tmpSorting
+            where tmpSorting.ResourceAccount == tmpData.ResourceAccount;
+
+        // 4
+        // Update the sorting number of the group on the resources within this group
+        tmpAssignTaskGroupSorting.linkPhysicalTableInstance(tmpData);
+
+        update_recordSet tmpData
+        setting GroupSortingNumber = tmpAssignTaskGroupSorting.GroupSortingNumber
+        where tmpData.ParentResourceAccount
+            join GroupSortingNumber from tmpAssignTaskGroupSorting
+            where tmpAssignTaskGroupSorting.ResourceAccount == tmpData.ParentResourceAccount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePlannedTaskProperties</Name>
+				<Source><![CDATA[
+    private void updatePlannedTaskProperties(WPPLayoutManagerCode   _layoutManagerCodeAbsence,
+                                             WPPLayoutManagerCode   _layoutManagerCodePlanned)
+    {
+        WPPWorkOrderLineResource    workOrderLineResource;
+        WPPWorkOrderLine            workOrderLine;
+        WPPCellBackgroundColor      cellBackgroundColor;
+        WPPParameters               parameters;
+
+        parameters = WPPParameters::find();
+
+        // Set the color and text of the internal work order where the work order is
+        // the internal work order specified in the parameters
+        update_recordSet tmpData
+        setting Color = cellBackgroundColor.Color,
+                PlannedTasks = tmpData.TaskId + '-' + workOrderLineResource.InternalNote
+            join InternalNote from workOrderLineResource
+            where workOrderLineResource.WorkOrderLineRecId == tmpData.WorkOrderLineRecId
+            &&    workOrderLineResource.ResourceId == tmpData.ResourceAccount
+            &&    workOrderLineResource.ResourceType == WrkCtrGroupWrkCtr::WrkCtr
+                join TaskId from workOrderLine
+                where workOrderLine.RecId == workOrderLineResource.WorkOrderLineRecId
+                &&    workOrderLine.WorkOrderId == parameters.InternalWorkOrderId
+                    join Color from cellBackgroundColor
+                        where cellBackgroundColor.TaskId == workOrderLine.TaskId
+                        &&    cellBackgroundColor.LayoutManagerCode == _layoutManagerCodeAbsence;
+
+        // Set the color and text of the planned tasks where the work order is not
+        // the internal work order specified in the parameters
+        update_recordSet tmpData
+        setting Color = cellBackgroundColor.Color,
+                PlannedTasks = workOrderLine.TaskId + '-' + workOrderLineResource.InternalNote
+        where !tmpData.Color
+            join InternalNote from workOrderLineResource
+            where workOrderLineResource.WorkOrderLineRecId == tmpData.WorkOrderLineRecId
+            &&    workOrderLineResource.ResourceId == tmpData.ResourceAccount
+            &&    workOrderLineResource.ResourceType == WrkCtrGroupWrkCtr::WrkCtr
+                join TaskId from workOrderLine
+                where workOrderLine.RecId == workOrderLineResource.WorkOrderLineRecId
+                    join Color from cellBackgroundColor
+                        where cellBackgroundColor.Status == workOrderLine.Status
+                        &&    cellBackgroundColor.LayoutManagerCode == _layoutManagerCodePlanned;
+
+        // Set the color of resources without planned tasks
+        update_recordSet tmpData
+        setting Color = #ColorWhite
+        where !tmpData.WorkOrderLineRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateTaskRequirementMatch</Name>
+				<Source><![CDATA[
+    private void updateTaskRequirementMatch(WPPWorkOrderLine    _callerWorkOrderLine,
+                                            boolean             _filterCapabilities)
+    {
+        WPPTaskRequirements         taskRequirements;
+        WPPResourceCapability       wrkCtrCapabilityResource;
+
+        #ResAppl
+
+        // First update to "Not OK" when a match is missing
+        update_recordSet tmpData
+        setting TaskRequirementMatch = #Image_NotAtAllOK
+        where !tmpData.TaskRequirementMatch // Can already be updated when planning on group
+            join TableId from taskRequirements
+            where taskRequirements.RefTableId == _callerWorkOrderLine.TableId
+            &&    taskRequirements.RefRecId == _callerWorkOrderLine.RecId
+                notExists join wrkCtrCapabilityResource
+                where wrkCtrCapabilityResource.CapabilityId == taskRequirements.CapabilityId
+                &&    wrkCtrCapabilityResource.ResourceId == tmpData.ResourceAccount;
+
+        // Then try to update the "Not OK" to "Warning" when at least one match is found
+        update_recordSet tmpData
+        setting TaskRequirementMatch = #Image_Warning
+        where tmpData.TaskRequirementMatch == #Image_NotAtAllOK
+            exists join taskRequirements
+            where taskRequirements.RefTableId == _callerWorkOrderLine.TableId
+            &&    taskRequirements.RefRecId == _callerWorkOrderLine.RecId
+                join TableId from wrkCtrCapabilityResource
+                where wrkCtrCapabilityResource.CapabilityId == taskRequirements.CapabilityId
+                &&    wrkCtrCapabilityResource.ResourceId == tmpData.ResourceAccount;
+
+        // Everything else is "OK"
+        update_recordSet tmpData
+        setting TaskRequirementMatch = #Image_OK
+        where !tmpData.TaskRequirementMatch;
+
+        if (_filterCapabilities)
+        {
+            // Remove the resources that do not meet the requirements
+            // only when filtering on capabilities
+            delete_from tmpData
+            where tmpData.TaskRequirementMatch != #Image_OK;
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

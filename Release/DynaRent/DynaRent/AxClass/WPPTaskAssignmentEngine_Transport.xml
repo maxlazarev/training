@@ -1,0 +1,728 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPTaskAssignmentEngine_Transport</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPTaskAssignmentEngine_Transport extends WPPTaskAssignmentEngine
+{
+    WrkCtrGroupWrkCtr   planToType;
+    WPPResourceId       planToId;
+    SchedDate           schedDate;
+    DNRQueue            lineNumQueue;
+    LineNum             lineNumSeed;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>assignMultipleTasks</Name>
+				<Source><![CDATA[
+    public void assignMultipleTasks(Set                 _workOrderLines,
+                                    WrkCtrGroupWrkCtr   _planToType,
+                                    WPPResourceId       _planToId,
+                                    SchedDate           _schedDate,
+                                    LineNum             _suggestedLineNum)
+    {
+        SetEnumerator       enumerator;
+        WPPWorkOrderLine    workOrderLineAssign, workOrderLineLoad, workOrderLineExch;
+        WPPTaskType         taskType;
+        NumberOf            taskCount;
+        List                taskCounts;
+        Set                 workOrderLineData;
+        container           con;
+    
+        workOrderLineData = new Set(Types::Container);
+        taskCounts        = new List(Types::Integer);
+        lineNumQueue      = new DNRQueue(Types::Real);
+        enumerator        = _workOrderLines.getEnumerator();
+        planToType        = _planToType;
+        planToId          = _planToId;
+        schedDate         = _schedDate;
+    
+        switch (parameters.TPBAvailabilityMode)
+        {
+            case WPPResourceAvailabilityMode::RetrieveAndEnforce:
+                if (!this.isPlanningOnResourceAllowed(planToType, planToId, schedDate))
+                {
+                    throw error("@DNR8115");
+                }
+                break;
+    
+            case WPPResourceAvailabilityMode::RetrieveAndWarn:
+                if (!this.isPlanningOnResourceAllowed(planToType, planToId, schedDate))
+                {
+                    warning("@DNR8115");
+                }
+                break;
+        }
+    
+        // first we need to iterate all work order lines to figure out which line numbers we need to assign them
+        // in order to prevent having to lookup related work order lines again later, we load all results into a second set
+        while(enumerator.moveNext())
+        {
+            workOrderLineAssign = enumerator.current();
+            taskType = WPPWorkOrderTaskTable::find(workOrderLineAssign.TaskId).TaskType;
+    
+            switch(taskType)
+            {
+                case WPPTaskType::InternalDelivery,
+                     WPPTaskType::InternalLoad:
+                    taskCount = 1; // only one resource planning record for this type
+                    workOrderLineLoad = null;
+                    workOrderLineExch = null;
+                    break;
+    
+                case WPPTaskType::Delivery:
+                    if (workOrderLineAssign.workOrderTable().OrderTableId != tableNum(WMSShipment))
+                    {
+                        // find the 'yellow' pickup task if it is not a bulk task
+                        if (workOrderLineAssign.workOrderTable().BOBObjectTable().InventSerialId)
+                        {
+                            workOrderLineLoad   = this.findLoadTaskAtCustomer(workOrderLineAssign);
+                        }
+                        workOrderLineExch   = this.findExchangeTask(workOrderLineAssign); // find the exchange task
+                    }
+                    taskCount           = 2; // always at least two resource planning records must be created
+    
+                    if(workOrderLineLoad)
+                    {
+                        taskCount += 2; // internal tasks must be planned as well
+                    }
+    
+                    if(workOrderLineExch)
+                    {
+                        taskCount += 2; // exchange tasks must be planned as well
+                    }
+                    break;
+    
+                case WPPTaskType::Load:
+                    taskCount = 2; // exactly two resource planning records must be created
+                    workOrderLineLoad = null;
+                    workOrderLineExch = null;
+                    break;
+    
+                default:
+                    throw error(strFmt("@DNR7250", taskType));
+            }
+    
+            con = [ taskType, workOrderLineAssign, workOrderLineLoad, workOrderLineExch ];
+            workOrderLineData.add(con);
+            taskCounts.addEnd(taskCount);
+        }
+    
+        this.initLineNumQueue(taskCounts, _suggestedLineNum);
+    
+        // iterate the set containing all our records and perform the actual assigments
+        enumerator = workOrderLineData.getEnumerator();
+        ttsBegin;
+    
+        while(enumerator.moveNext())
+        {
+            con = enumerator.current();
+            [ taskType, workOrderLineAssign, workOrderLineLoad, workOrderLineExch ] = con;
+    
+            if(taskType == WPPTaskType::Delivery)
+            {
+                if(workOrderLineLoad)
+                {
+                    this.createResourcePlanning(workOrderLineLoad.RecId);
+                    this.planTask(workOrderLineLoad, false);
+    
+                    if (!parameters.TPBEnableDirectDelivery)
+                    {
+                        this.settleInternalTask(workOrderLineLoad, parameters.InternalDeliveryTaskId);
+                    }
+    
+                    refreshPlanBoardLoad = true;
+                }
+    
+                // Create the internal load task only when there is no load work order line
+                // And when the Enable direct delivery checkbox is not enabled
+                if (!workOrderLineLoad && !parameters.TPBEnableDirectDelivery)
+                {
+                    // plan the internal load and delivery task of the selected work order line
+                    this.settleInternalTask(workOrderLineAssign, parameters.InternalLoadTaskId);
+                }
+    
+                this.createResourcePlanning(workOrderLineAssign.RecId);
+                this.planTask(workOrderLineAssign, true);
+    
+                if(workOrderLineExch)
+                {
+                    this.createResourcePlanning(workOrderLineExch.RecId);
+                    this.planTask(workOrderLineExch, false);
+                    this.settleInternalTask(workOrderLineExch, parameters.InternalDeliveryTaskId);
+    
+                    refreshPlanBoardLoad = true;
+                }
+            }
+            else
+            {
+                // plan the load, Internal delivery or Internal load task of the selected work order line
+                this.createResourcePlanning(workOrderLineAssign.RecId);
+                this.planTask(workOrderLineAssign, true);
+    
+                // create and plan an internal delivery task for Load tasks
+                if (taskType == WPPTaskType::Load && !parameters.TPBEnableDirectDelivery)
+                {
+                    this.settleInternalTask(workOrderLineAssign, parameters.InternalDeliveryTaskId);
+                }
+            }
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assignSingleTask</Name>
+				<Source><![CDATA[
+    public void assignSingleTask(WPPWorkOrderLine   _workOrderLine,
+                                 WrkCtrGroupWrkCtr  _planToType,
+                                 WPPResourceId      _planToId,
+                                 SchedDate          _schedDate,
+                                 LineNum            _newLineNum)
+    {
+        Set set = new Set(Types::Record);
+        set.add(_workOrderLine);
+        this.assignMultipleTasks(set, _planToType, _planToId, _schedDate, _newLineNum);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createParentTask</Name>
+				<Source><![CDATA[
+    private WPPWorkOrderLine createParentTask(WPPWorkOrderLine _selectedTask, WPPWorkOrderTaskId _taskId)
+    {
+        WPPWorkOrderLine workOrderLine;
+    
+        workOrderLine.data(_selectedTask);
+        workOrderLine.LineNumber = WPPWorkOrderLine::lastLineNumber(_selectedTask.WorkOrderId) + 1;
+        workOrderLine.TaskId     = _taskId;
+        workOrderLine.ProjId     = '';
+        workOrderLine.Status     = WPPWorkOrderLineStatus::Created;
+    
+        switch (_taskId)
+        {
+            case parameters.InternalLoadTaskId:
+                workOrderLine.ParentLineRecId = _selectedTask.RecId;
+                workOrderLine.RequestedStartDateTime = DateTimeUtil::addSeconds(workOrderLine.RequestedStartDateTime, -1);
+                workOrderLine.RequestedEndDateTime   = DateTimeUtil::addSeconds(workOrderLine.RequestedEndDateTime, -1);
+                break;
+    
+            case parameters.InternalDeliveryTaskId:
+                workOrderLine.ParentLineRecId = _selectedTask.RecId;
+                workOrderLine.RequestedStartDateTime = DateTimeUtil::addSeconds(workOrderLine.RequestedStartDateTime, 1);
+                workOrderLine.RequestedEndDateTime   = DateTimeUtil::addSeconds(workOrderLine.RequestedEndDateTime, 1);
+                break;
+    
+            default:
+                // Do nothing
+                break;
+        }
+        workOrderLine.insert();
+    
+        this.createResourcePlanning(workOrderLine.RecId);
+    
+        return workOrderLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createResourcePlanning</Name>
+				<Source><![CDATA[
+    private void createResourcePlanning(WPPWorkOrderLineRecId   _workOrderLineRecId)
+    {
+        WPPWorkOrderLineResource newPlannedTask;
+    
+        newPlannedTask.clear();
+        newPlannedTask.WorkOrderLineRecId = _workOrderLineRecId;
+        newPlannedTask.PlannedDate        = schedDate;
+        newPlannedTask.ResourceType       = planToType;
+        newPlannedTask.ResourceId         = planToId;
+        newPlannedTask.LineNum            = lineNumQueue.dequeue();
+        this.insertResourcePlanning(newPlannedTask);
+    
+        WPPWorkOrderLine::updateItemReqDates(newPlannedTask.WorkOrderLineRecId, newPlannedTask.PlannedFromDateTime);
+    
+        this.RORUpdateReturnInventLocationId(_workOrderLineRecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findExchangeTask</Name>
+				<Source><![CDATA[
+    private WPPWorkOrderLine findExchangeTask(WPPWorkOrderLine  _workOrderLine)
+    {
+        WPPWorkOrderLine        selectedLoad;
+        WPPWorkOrderTaskTable   task;
+    
+        // When the work order is part of an exchange then the Load line
+        // of the exchanged work order must be planned as well (and an internal delivery task will be created as well)
+        select firstOnly selectedLoad
+        where selectedLoad.ParentLineRecId == _workOrderLine.RecId
+            exists join task
+            where task.TaskId   == selectedLoad.TaskId
+            &&    task.TaskType == WPPTaskType::Load;
+    
+        return selectedLoad;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findLoadTaskAtCustomer</Name>
+				<Source><![CDATA[
+    private WPPWorkOrderLine findLoadTaskAtCustomer(WPPWorkOrderLine _workOrderLine)
+    {
+        WPPWorkOrderLine            selectedLoad;
+        WPPWorkOrderTaskTable       task;
+        WPPWorkOrderTable           workOrderTableLoad, workOrderTableSelected;
+        WPPRequestedStartDateTime   minValueRequestedStartDateTime;
+    
+        // Time can be filled, but the date can still be empty,
+        // these tasks should not be included to find the pickup task
+        minValueRequestedStartDateTime = DateTimeUtil::addDays(DateTimeUtil::minValue(), 1);
+    
+        // Find the 'Yellow' pickup task
+        select firstOnly RecId from task
+        where task.TaskType == WPPTaskType::Load
+            join selectedLoad
+            where selectedLoad.Status                 == WPPWorkOrderLineStatus::Created
+            &&    selectedLoad.TaskId                 == task.TaskId
+            &&    selectedLoad.RequestedStartDateTime >  minValueRequestedStartDateTime
+            &&    selectedLoad.RequestedStartDateTime <  _workOrderLine.RequestedStartDateTime
+                exists join workOrderTableLoad
+                where workOrderTableLoad.WorkOrderId == selectedLoad.WorkOrderId
+                &&    workOrderTableLoad.BOBObjectTableRecId
+                    join TableId from workOrderTableSelected
+                    where workOrderTableSelected.BOBObjectTableRecId == workOrderTableLoad.BOBObjectTableRecId
+                    &&    workOrderTableSelected.RecId               != workOrderTableLoad.RecId
+                    &&    workOrderTableSelected.WorkOrderId         == _workOrderLine.WorkOrderId;
+    
+        return selectedLoad;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initLineNumQueue</Name>
+				<Source><![CDATA[
+    private void initLineNumQueue(List _taskCounts, LineNum _suggestedLineNum)
+    {
+        WPPWorkOrderLineResource    prevPlanning, nextPlanning;
+        LineNum                     newLineNum, prevLineNum, increment;
+        NumberOf                    totalNumOfTasks, taskCount;
+        ListEnumerator              enumerator;
+        Counter                     cnt;
+    
+        select maxOf(LineNum) from prevPlanning
+        where prevPlanning.ResourceId == planToId
+        &&    prevPlanning.ResourceType == planToType
+        &&    prevPlanning.PlannedDate == schedDate
+        &&    prevPlanning.LineNum < _suggestedLineNum;
+    
+        select minOf(LineNum) from nextPlanning
+        where nextPlanning.ResourceId == planToId
+        &&    nextPlanning.ResourceType == planToType
+        &&    nextPlanning.PlannedDate == schedDate
+        &&    nextPlanning.LineNum > _suggestedLineNum;
+    
+        enumerator = _taskCounts.getEnumerator();
+    
+        if(nextPlanning) // plan before existing tasks OR plan between existing tasks
+        {
+            while(enumerator.moveNext())
+            {
+                totalNumOfTasks += enumerator.current();
+            }
+    
+            increment = (nextPlanning.LineNum - prevPlanning.LineNum) / (totalNumOfTasks + 1);
+            newLineNum = prevPlanning.LineNum + increment;
+    
+            for(cnt = 0; cnt < totalNumOfTasks; cnt ++)
+            {
+                lineNumQueue.enqueue(newLineNum);
+                newLineNum += increment;
+            }
+        }
+        else // no tasks in target yet OR plan after existing tasks
+        {
+            prevLineNum = prevPlanning.LineNum;
+    
+            while(enumerator.moveNext())
+            {
+                newLineNum = prevLineNum + lineNumSeed;
+                taskCount = enumerator.current();
+                increment = lineNumSeed / taskCount;
+    
+                for(cnt = 0; cnt < taskCount; cnt ++)
+                {
+                    lineNumQueue.enqueue(newLineNum);
+                    newLineNum += increment;
+                }
+    
+                prevLineNum += lineNumSeed;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isPlanningOnResourceAllowed</Name>
+				<Source><![CDATA[
+    private boolean isPlanningOnResourceAllowed(WrkCtrGroupWrkCtr   _planToType,
+                                                WPPResourceId       _planToId,
+                                                SchedDate           _schedDate)
+    {
+        WPPGetResourceAvailability  getResourceAvailability;
+        boolean                     dateOK;
+        Map                         workingTimesMap;
+        MapEnumerator               workingTimesMapEnumerator;
+        container                   workingTimesMain, workingTimesSub;
+        Counter                     workingTimesCounter;
+        FromDateTime                fromDateTime;
+        ToDateTime                  toDateTime;
+    
+        #TimeConstants
+    
+        fromDateTime = DateTimeUtil::newDateTime(_schedDate, 0);
+        toDateTime   = DateTimeUtil::newDateTime(_schedDate, #secondsPerDay);
+    
+        getResourceAvailability = WPPGetResourceAvailability::construct(_planToType, fromDateTime, toDateTime);
+        getResourceAvailability.run(_planToId);
+        workingTimesMap         = getResourceAvailability.parmWorkingTimesMap();
+    
+        workingTimesMapEnumerator = workingTimesMap.getEnumerator();
+    
+        while (workingTimesMapEnumerator.moveNext())
+        {
+            workingTimesMain = workingTimesMapEnumerator.currentValue();
+    
+            for (workingTimesCounter = 1; workingTimesCounter <= conLen(workingTimesMain); workingTimesCounter ++)
+            {
+                workingTimesSub = conPeek(workingTimesMain, workingTimesCounter);
+                [ fromDateTime, toDateTime ] = workingTimesSub;
+    
+                if (_schedDate == DateTimeUtil::date(fromDateTime))
+                {
+                    dateOK = true;
+                }
+            }
+        }
+    
+        return dateOK;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+        lineNumSeed = WPPParameters::tpbLineNumSeed();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>planTask</Name>
+				<Source><![CDATA[
+    private void planTask(WPPWorkOrderLine _workOrderLine,
+                          boolean          _validateDate)
+    {
+        WPPWorkOrderStatusUpdate    statusUpdate;
+    
+        if (this.validate(_workOrderLine, planToId, WrkCtrGroupWrkCtr::WrkCtr, _validateDate))
+        {
+            // update work order line status
+            statusUpdate = WPPWorkOrderStatusUpdate::construct(_workOrderLine, WPPWorkOrderLineStatus::Planned);
+            statusUpdate.init(false);
+    
+            if (appl.ttsLevel() > 0 || statusUpdate.prompt(false))
+            {
+                statusUpdate.run();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reassign</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void reassign(WPPWorkOrderLineResource   _plannedTask,
+                         WrkCtrGroupWrkCtr          _planToType,
+                         WPPResourceId              _planToId,
+                         SchedDate                  _schedDate,
+                         LineNum                    _newLineNum)
+    {
+        WPPWorkOrderLine            workOrderLineParent, workOrderLineChild;
+        WPPWorkOrderLineResource    resourcePlanningParent, resourcePlanning;
+    
+        schedDate = _schedDate;
+    
+        if (this.validate(WPPWorkOrderLine::findRecId(_plannedTask.WorkOrderLineRecId), _planToId, _planToType, true))
+        {
+            // Update the task that is moved
+            update_recordSet resourcePlanning
+            setting ResourceType = _planToType,
+                    ResourceId   = _planToId,
+                    PlannedDate  = _schedDate,
+                    LineNum      = _newLineNum
+            where resourcePlanning.RecId == _plannedTask.RecId;
+        }
+    
+        // Find parent task(s) and inform the user that these tasks are not moved
+        while select TaskId, WorkOrderId from workOrderLineParent
+            join TableId from resourcePlanningParent
+            where resourcePlanningParent.WorkOrderLineRecId == workOrderLineParent.RecId
+            &&    (resourcePlanningParent.ResourceId != _planToId
+            ||    resourcePlanningParent.PlannedDate != _schedDate)
+                join TaskId, WorkOrderId from workOrderLineChild
+                where workOrderLineChild.ParentLineRecId == workOrderLineParent.RecId
+                    exists join resourcePlanning
+                    where resourcePlanning.WorkOrderLineRecId == workOrderLineChild.RecId
+                    &&    resourcePlanning.RecId == _plannedTask.RecId
+        {
+            warning(strFmt("@DNR7249", workOrderLineParent.TaskId, workOrderLineParent.WorkOrderId, workOrderLineChild.TaskId, workOrderLineChild.WorkOrderId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateReturnInventLocationId</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Update happens inside the RORUpdateReturnInventLocationId method")]
+    private void RORUpdateReturnInventLocationId(WPPWorkOrderLineRecId   _workOrderLineRecId)
+    {
+        if (planToType == WrkCtrGroupWrkCtr::WrkCtr)
+        {
+            RORReturnInventLocationId returnInventLocationId = WPPResourceTable::find(planToId).ReturnInventLocationId;
+            
+            if(returnInventLocationId)
+            {
+                SalesLine salesLine;
+                WPPWorkOrderTable workOrderTable;
+                WPPWorkOrderLine workOrderLineLocal;
+                WPPWorkOrderTaskTable taskTable;
+
+                ttsbegin;
+
+                select firstonly forupdate salesLine
+                join TableId from workOrderTable
+                where workOrderTable.OrderTableId == salesLine.TableId
+                &&    workOrderTable.OrderRecId == salesLine.RecId
+                    join TableId from workOrderLineLocal
+                    where workOrderLineLocal.RecId == _workOrderLineRecId
+                    &&    workOrderLineLocal.WorkOrderId == workOrderTable.WorkOrderId
+                        join TableId from taskTable
+                        where taskTable.TaskId == workOrderLineLocal.TaskId
+                        &&    taskTable.TaskType == WPPTaskType::InternalDelivery;
+                
+                if(salesLine)
+                {
+                    salesLine.RORUpdateReturnInventLocationId(returnInventLocationId);
+                }
+
+                ttscommit;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>settleInternalTask</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void settleInternalTask(WPPWorkOrderLine _workOrderLine, WPPWorkOrderTaskId _internalTaskId)
+    {
+        WPPWorkOrderLine            internalWorkOrderLine, workOrderLineAssign;
+        WPPWorkOrderLineResource    workOrderLineResource;
+        boolean                     parentTaskExists;
+    
+        if (_internalTaskId)
+        {
+            // Plan all unplanned internal delivery tasks within the same work order
+            while select internalWorkOrderLine
+            where internalWorkOrderLine.WorkOrderId == _workOrderLine.WorkOrderId
+            &&    internalWorkOrderLine.TaskId == _internalTaskId
+                notExists join workOrderLineResource
+                where workOrderLineResource.WorkOrderLineRecId == internalWorkOrderLine.RecId
+            {
+                this.createResourcePlanning(internalWorkOrderLine.RecId);
+                this.planTask(internalWorkOrderLine, false);
+    
+                parentTaskExists = true;
+            }
+    
+            if (!parentTaskExists)
+            {
+                internalWorkOrderLine = this.createParentTask(_workOrderLine, _internalTaskId);
+                this.planTask(internalWorkOrderLine, false);
+    
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unassign</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void unassign(WPPWorkOrderLineResource _plannedTask, Common _planBoardSettings)
+    {
+        WPPWorkOrderTaskTable       taskTableCurrent, taskTableRelated;
+        WPPWorkOrderLine            workOrderLineCurrent, workOrderLineRelated;
+        WPPWorkOrderLineResource    resourcePlanning;
+        WPPWorkOrderStatusUpdate    statusUpdate;
+    
+        if (_plannedTask.RecId)
+        {
+            ttsBegin;
+            workOrderLineCurrent = _plannedTask.workOrderLine(true);
+    
+            // Delete the work order line when it is an Internal load/delivery task
+            if (workOrderLineCurrent.TaskId == parameters.InternalLoadTaskId
+            ||  workOrderLineCurrent.TaskId == parameters.InternalDeliveryTaskId)
+            {
+                if (workOrderLineCurrent.ParentLineRecId)
+                {
+                    workOrderLineCurrent.delete();
+                }
+                else
+                {
+                    // Delete the work order line when it is an Internal load/delivery task and no parent line
+                    select firstOnly RecId from workOrderLineRelated
+                    where workOrderLineRelated.ParentLineRecId == workOrderLineCurrent.RecId
+                        exists join TableId from taskTableRelated
+                        where taskTableRelated.TaskId == workOrderLineRelated.TaskId
+                        &&  (taskTableRelated.TaskType == WPPTaskType::Delivery
+                        ||   taskTableRelated.TaskType == WPPTaskType::Load);
+    
+                    if (workOrderLineRelated)
+                    {
+                        workOrderLineCurrent.delete();
+                    }
+                }
+            }
+            else
+            {
+                taskTableCurrent = workOrderLineCurrent.workOrderTaskTable();
+    
+                // Delete any related work order line.
+                // Delete the Internal pick up task when the Delivery task is unplanned
+                // Delete the Internal delivery task when the Pick up task is unplanned
+                delete_from workOrderLineRelated
+                where (workOrderLineRelated.ParentLineRecId == workOrderLineCurrent.RecId
+                ||     workOrderLineRelated.RecId           == workOrderLineCurrent.ParentLineRecId)
+                &&    workOrderLineRelated.Status           == workOrderLineCurrent.Status
+                    exists join TableId from taskTableRelated
+                    where taskTableRelated.TaskId == workOrderLineRelated.TaskId
+                    &&  ((taskTableCurrent.TaskType == WPPTaskType::Delivery && taskTableRelated.TaskId == parameters.InternalLoadTaskId) ||
+                         (taskTableCurrent.TaskType == WPPTaskType::Load     && taskTableRelated.TaskId == parameters.InternalDeliveryTaskId))
+                        exists join resourcePlanning
+                        where resourcePlanning.WorkOrderLineRecId == workOrderLineRelated.RecId
+                        &&    resourcePlanning.ResourceType       == _plannedTask.ResourceType
+                        &&    resourcePlanning.ResourceId         == _plannedTask.ResourceId;
+    
+                // Update the status after deletion,
+                // otherwise the Status will not be same
+                statusUpdate = WPPWorkOrderStatusUpdate::construct(workOrderLineCurrent, WPPWorkOrderLineStatus::Created);
+                statusUpdate.init(false);
+    
+                if (statusUpdate.prompt(false))
+                {
+                    statusUpdate.run();
+                }
+            }
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    protected boolean validate(WPPWorkOrderLine     _workOrderLine,
+                               WPPResourceId        _planToId,
+                               WrkCtrGroupWrkCtr    _planToType,
+                               boolean              _validateDate = true)
+    {
+        boolean ret;
+        WPPWorkOrderTaskTable   workOrderTaskTable;
+    
+        ret = super(_workOrderLine, _planToId, _planToType);
+    
+        if (ret
+        &&  _validateDate)
+        {
+            if (schedDate < DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))
+            {
+                warning(strFmt("@DNR7678", _workOrderLine.TaskId));
+            }
+    
+            workOrderTaskTable = _workOrderLine.workOrderTaskTable();
+    
+            if (workOrderTaskTable.TaskType == WPPTaskType::Delivery)
+            {
+                // Notify the user that the delivery task is scheduled after the requested start date time
+                if (schedDate > DateTimeUtil::date(_workOrderLine.RequestedStartDateTime))
+                {
+                    warning(strFmt("@DNR8721", _workOrderLine.TaskId, fieldId2pname(tableNum(WPPWorkOrderLine), fieldNum(WPPWorkOrderLine, RequestedStartDateTime))));
+                }
+            }
+            else
+            if (workOrderTaskTable.TaskType == WPPTaskType::Load)
+            {
+                // Notify the user that the load task is scheduled before the requested start date time
+                if (schedDate < DateTimeUtil::date(_workOrderLine.RequestedStartDateTime))
+                {
+                    warning(strFmt("@DNR8722", _workOrderLine.TaskId, fieldId2pname(tableNum(WPPWorkOrderLine), fieldNum(WPPWorkOrderLine, RequestedStartDateTime))));
+                }
+            }
+            else
+            {
+                // Notify the user that the task (other than delivery and load) is scheduled after the requested start date time
+                if (schedDate > DateTimeUtil::date(_workOrderLine.RequestedStartDateTime))
+                {
+                    warning(strFmt("@DNR8721", _workOrderLine.TaskId, fieldId2pname(tableNum(WPPWorkOrderLine), fieldNum(WPPWorkOrderLine, RequestedStartDateTime))));
+                }
+                else
+                // Notify the user that the task (other than delivery and load) is scheduled before the requested start date time
+                if (schedDate < DateTimeUtil::date(_workOrderLine.RequestedStartDateTime))
+                {
+                    warning(strFmt("@DNR8722", _workOrderLine.TaskId, fieldId2pname(tableNum(WPPWorkOrderLine), fieldNum(WPPWorkOrderLine, RequestedStartDateTime))));
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static WPPTaskAssignmentEngine_Transport construct()
+    {
+        return new WPPTaskAssignmentEngine_Transport();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

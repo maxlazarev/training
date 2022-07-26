@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesQuantity_RORReturnNoteStrategy</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[DNRExtensionStrategyFactoryAttribute(classStr(SalesQuantity_RORReturnNote))]
+class DNRSalesQuantity_RORReturnNoteStrategy extends DNRSalesQuantityStrategy
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>RORfindSubStatusFromTo</Name>
+				<Source><![CDATA[
+    public container RORfindSubStatusFromTo(SalesPurchLine _salesPurchLine)
+    {
+        SalesLine salesLine = _salesPurchLine as SalesLine;
+        RefRecId postingPolicyRecId = BOBRentalType::find(salesLine.BOBRentalTypeId()).PostingPolicyRecId;
+        return BOBPostingPolicyRule::getPreviousSubStatusFromTo(InventDirection::Issue, postingPolicyRecId, this.parmSalesQuantity().RORparmRentalSubStatus());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORgetSubStatusFromToQty</Name>
+				<Source><![CDATA[
+    public Qty RORgetSubStatusFromToQty(SalesLine _salesLine, InventQty _requestedQty, UnitIdBase _unitId, TransDateTime _checkTransDateTime = DateTimeUtil::minValue())
+    {
+        BOBRentalSubStatus          subStatusFrom, subStatusTo;
+        BOBRentalTrans              rentalTrans;
+        InventTransOriginSalesLine  originSalesLine;
+        RefRecId                    postingPolicyRecId;
+        Qty                         qtyReturn;
+    
+        if (_salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            qtyReturn = min(_requestedQty, _salesLine.SalesQty);
+    
+            // get the posting policy
+            postingPolicyRecId = BOBRentalType::findFromItemId(_salesLine.ItemId).PostingPolicyRecId;
+    
+            // find out FROM which sub statuses it is allowed to update to 'returned'
+            [ subStatusFrom, subStatusTo ] = BOBPostingPolicyRule::getPreviousSubStatusFromTo(InventDirection::Issue,
+                                                                                              postingPolicyRecId,
+                                                                                              this.parmSalesQuantity().RORparmRentalSubStatus());
+            // select the total 'updateable' quantity
+            if (subStatusTo > BOBRentalSubStatus::None)
+            {
+                select sum(Qty) from rentalTrans
+                where rentalTrans.TransType == BOBRentalTransType::Rental
+                &&    rentalTrans.SubStatus >= subStatusFrom
+                &&    rentalTrans.SubStatus <= subStatusTo
+                &&   (!_checkTransDateTime ||
+                     (rentalTrans.FromDateTime <= _checkTransDateTime &&
+                     (rentalTrans.ToDateTime >= _checkTransDateTime || rentalTrans.CertaintyTo == BOBDateTimeCertainty::Tentative)))
+                    exists join originSalesLine
+                    where originSalesLine.SalesLineDataAreaId == _salesLine.dataAreaId
+                    &&    originSalesLine.SalesLineInventTransId == _salesLine.InventTransId
+                    &&    originSalesLine.InventTransOrigin == rentalTrans.InventTransOrigin;
+    
+                qtyReturn = -1 * UnitOfMeasureConverter::convert(rentalTrans.Qty,
+                                                                 UnitOfMeasure::unitOfMeasureIdBySymbol(_salesLine.inventTable().inventUnitId()),
+                                                                 UnitOfMeasure::unitOfMeasureIdBySymbol(_unitId),
+                                                                 NoYes::Yes,
+                                                                 InventTable::itemProduct(_salesLine.ItemId));
+            }
+        }
+    
+        return qtyReturn;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

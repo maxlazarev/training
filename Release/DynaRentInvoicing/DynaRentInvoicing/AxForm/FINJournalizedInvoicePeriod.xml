@@ -1,0 +1,1203 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>FINJournalizedInvoicePeriod</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class FINJournalizedInvoicePeriod extends FormRun
+{
+    [FormObservable]
+    FINInvoiceTransPeriodStatus callerPeriodStatus;
+    [FormObservable]
+    InvoiceId                   callerInvoiceId;
+
+    Common                      callerBuffer;
+    boolean                     isExpectedPeriod;
+    FINInvoiceCalculatorParm    invoiceCalculatorParm;
+
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        QueryBuildDataSource        qbds;
+        QueryBuildRange             qbrTableId, qbrRecId;        
+        ProjCostTrans               projCostTrans;
+        LedgerJournalTrans_Project  ledgerJournalTrans_Project;
+    
+        super();
+    
+        callerBuffer = element.args().record();
+
+        if (callerBuffer.TableId == tableNum(ProjCostTrans))
+        {
+            projCostTrans = callerBuffer;
+            select firstOnly RecId, TableId from ledgerJournalTrans_Project
+            where ledgerJournalTrans_Project.TransId == projCostTrans.TransId;
+            callerBuffer = ledgerJournalTrans_Project;
+        }
+                
+        // If FINTestingModeActive then records were already created.
+        if (!RORParameters::find().FINTestingModeActive)
+        {
+            element.prepareExpectedPeriod();
+        }
+        element.getPeriodStatus();
+                           
+        qbds = InvoicePeriodLink_ds.query().dataSourceTable(tableNum(FINJournalizedInvoicePeriodLink));
+        qbrTableId = qbds.addRange(fieldNum(FINJournalizedInvoicePeriodLink, InvoiceTransTableId));
+        qbrTableId.value(SysQuery::value(callerBuffer.TableId));
+        qbrTableId.status(RangeStatus::Hidden);
+        qbrRecId = qbds.addRange(fieldNum(FINJournalizedInvoicePeriodLink, InvoiceTransRecId));
+        qbrRecId.value(SysQuery::value(callerBuffer.RecId));
+        qbrRecId.status(RangeStatus::Hidden);
+        
+        HourTransactions.visible(FINInvoiceCalculatorEngineSetup::isProjHourInvoicingActive());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareExpectedPeriod</Name>
+				<Source><![CDATA[
+    private void prepareExpectedPeriod()
+    {
+        Common orderLine;
+        Common parmLine;
+
+        if (callerBuffer.TableId == tableNum(SalesParmLine))
+        {
+            parmLine = callerBuffer;
+            orderLine = SalesLine::findInventTransId(callerBuffer.(fieldName2Id(callerBuffer.TableId, 'InventTransId')));
+        }
+        else if (callerBuffer.TableId == tableNum(VendInvoiceInfoLine))
+        {
+            parmLine = callerBuffer;
+            orderLine = PurchLine::findInventTransId(callerBuffer.(fieldName2Id(callerBuffer.TableId, 'InventTransId')));
+        }
+        else if (callerBuffer.TableId == tableNum(ProjProposalItem))
+        {
+            parmLine = callerBuffer;
+            // actuall order line will be fetched inside of createExpectedPeriods()
+            orderLine = callerBuffer;
+        }        
+
+        if (parmLine && orderLine)
+        {
+            ParmId parmId;
+
+            if (callerBuffer.TableId == tableNum(ProjProposalItem))
+            {
+                parmId = callerBuffer.(fieldName2Id(callerBuffer.TableId, 'ProposalId'));
+            }
+            else
+            {
+                parmId = callerBuffer.(fieldName2Id(callerBuffer.TableId, 'ParmId'));
+            }
+
+            FINInvoicePeriodManager_Invoice::createExpectedPeriods(parmId, orderLine, parmLine);
+            isExpectedPeriod = true;
+        }        
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPeriodStatus</Name>
+				<Source><![CDATA[
+    private void getPeriodStatus()
+    {
+        switch (callerBuffer.TableId)
+        {
+            case tableNum(CustInvoiceTrans):
+                FINCustInvoiceTrans finCustInvoiceTrans;
+                CustInvoiceTrans custInvoiceTrans = callerBuffer;
+
+                callerInvoiceId = custInvoiceTrans.InvoiceId;
+
+                select firstonly finCustInvoiceTrans where finCustInvoiceTrans.CustInvoiceTransRecId == callerBuffer.RecId;
+                callerPeriodStatus = finCustInvoiceTrans.PeriodStatus;
+
+                invoiceCalculatorParm.initFromFINCustInvoiceTrans(finCustInvoiceTrans);
+                break;
+            case tableNum(VendInvoiceTrans):
+                FINVendInvoiceTrans finVendInvoiceTrans;
+                VendInvoiceTrans vendInvoiceTrans = callerBuffer;
+
+                callerInvoiceId = vendInvoiceTrans.InvoiceId;
+
+                select firstonly finVendInvoiceTrans where finVendInvoiceTrans.VendInvoiceTransRecId == callerBuffer.RecId;
+                callerPeriodStatus = finVendInvoiceTrans.PeriodStatus;
+
+                invoiceCalculatorParm.initFromFINVendInvoiceTrans(finVendInvoiceTrans);
+                break;
+            case tableNum(ProjInvoiceItem):
+                FINProjInvoiceItem finProjInvoiceItem;
+                ProjInvoiceItem projInvoiceItem = callerBuffer;
+
+                callerInvoiceId = projInvoiceItem.ProjInvoiceId;
+
+                select firstonly finProjInvoiceItem where finProjInvoiceItem.ProjInvoiceItemRecId == callerBuffer.RecId;
+                callerPeriodStatus = finProjInvoiceItem.PeriodStatus;
+
+                invoiceCalculatorParm.initFromFINProjInvoiceItem(finProjInvoiceItem);
+                break;
+
+            case tableNum(SalesParmLine), tableNum(VendInvoiceInfoLine):
+                callerInvoiceId = callerBuffer.(fieldName2Id(callerBuffer.TableId, 'ParmId'));
+                callerPeriodStatus = FINInvoiceTransPeriodStatus::FullyInvoiced;
+
+                select firstonly invoiceCalculatorParm
+                    where invoiceCalculatorParm.ParmLineTableId == callerBuffer.TableId
+                    &&    invoiceCalculatorParm.ParmLineRecId == callerBuffer.RecId
+                    &&    invoiceCalculatorParm.ParmId == callerInvoiceId;
+                break;
+
+            case tableNum(ProjProposalItem) :
+                callerInvoiceId = callerBuffer.(fieldName2Id(callerBuffer.TableId, 'ProposalId'));
+                callerPeriodStatus = FINInvoiceTransPeriodStatus::FullyInvoiced;
+
+                select firstonly invoiceCalculatorParm
+                    where invoiceCalculatorParm.ParmLineTableId == callerBuffer.TableId
+                    &&    invoiceCalculatorParm.ParmLineRecId == callerBuffer.RecId
+                    &&    invoiceCalculatorParm.ParmId == callerInvoiceId;
+                break;
+            case tableNum(LedgerJournalTrans_Project) :
+                 LedgerJournalTrans_Project ledgerJournalTrans_Project = callerBuffer;
+                 LedgerJournalTrans ledgerJournalTrans = LedgerJournalTrans::findRecId(ledgerJournalTrans_Project.RefRecId, false);
+                 callerInvoiceId = ledgerJournalTrans.(fieldName2Id(ledgerJournalTrans.TableId, 'Invoice'));
+                 
+                 FINCustInvoiceTrans finCustInvoiceTransProj;
+                 CustInvoiceTrans custInvoiceTransProj;
+                 SalesLine salesLine;
+
+                select firstonly finCustInvoiceTransProj
+                     exists join custInvoiceTransProj
+                     where custInvoiceTransProj.RecId == finCustInvoiceTransProj.CustInvoiceTransRecId
+                        join RecId from salesLine
+                        where salesLine.inventTransId == custInvoiceTransProj.InventTransId
+                        &&    salesLine.TableId == ledgerJournalTrans_Project.INVRefTableId
+                        &&    salesLine.RecId == ledgerJournalTrans_Project.INVRefRecId;
+                callerPeriodStatus = finCustInvoiceTransProj.PeriodStatus;
+
+                invoiceCalculatorParm.initFromFINCustInvoiceTrans(finCustInvoiceTransProj);
+                break;                    
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setPeriodStatus</Name>
+				<Source><![CDATA[
+    private void setPeriodStatus(boolean _markPendingCredit)
+    {
+        FINInvoiceTransPeriodStatus newPeriodStatus = (_markPendingCredit ? FINInvoiceTransPeriodStatus::PendingCredit : FINInvoiceTransPeriodStatus::FullyInvoiced);
+
+        if (callerPeriodStatus == FINInvoiceTransPeriodStatus::Credited
+        || callerPeriodStatus == newPeriodStatus)
+        {
+            return;
+        }
+        ttsbegin;
+        switch (callerBuffer.TableId)
+        {
+            case tableNum(CustInvoiceTrans):
+                FINCustInvoiceTrans::changePeriodStatus(newPeriodStatus, callerBuffer.RecId);                               
+                break;
+            case tableNum(VendInvoiceTrans):
+                FINVendInvoiceTrans::changePeriodStatus(newPeriodStatus, callerBuffer.RecId);                
+                break;
+            case tableNum(ProjInvoiceItem):
+                FINProjInvoiceItem::changePeriodStatus(newPeriodStatus, callerBuffer.RecId);
+                break;
+        }
+        ttscommit;
+        callerPeriodStatus = newPeriodStatus;
+        InvoicePeriod_ds.research(true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>close</Name>
+				<Source><![CDATA[
+    public void close()
+    {
+        super();
+
+        if (isExpectedPeriod)
+        {
+            FINInvoicePeriodManager_Invoice::deleteExpectedPeriods(callerBuffer);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="">
+			<DataSource>
+				<Name>InvoicePeriod</Name>
+				<Methods>
+					<Method>
+						<Name>active</Name>
+						<Source><![CDATA[
+        public int active()
+        {
+            int ret;
+        
+            ret = super();
+        
+            ProjEmplTrans_ds.executeQuery();
+        
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayPeriodStatus</Name>
+						<Source><![CDATA[
+        display FINInvoiceTransPeriodStatus displayPeriodStatus()
+        {
+            return callerPeriodStatus;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayInvoiceId</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display InvoiceId displayInvoiceId()
+        {
+            return callerInvoiceId;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayLineAmount</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display INVLineAmountInvoiced displayLineAmount(FINJournalizedInvoicePeriod _invoicePeriod)
+        {
+            return (callerInvoiceId == _invoicePeriod.InvoiceId ? _invoicePeriod.LineAmount : - _invoicePeriod.LineAmount);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayDiscAmount</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display INVDiscAmountInvoiced displayDiscAmount(FINJournalizedInvoicePeriod _invoicePeriod)
+        {
+            return (callerInvoiceId == _invoicePeriod.InvoiceId ? _invoicePeriod.DiscAmount : - _invoicePeriod.DiscAmount);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+			<DataSource>
+				<Name>ProjEmplTrans</Name>
+				<Methods>
+					<Method>
+						<Name>executeQuery</Name>
+						<Source><![CDATA[
+        [SuppressBPWarningAttribute("BPCheckNewQuerywithForm", "Validation of caller must be performed before invoking super()")]
+        public void executeQuery()
+        {
+            Query                   query;
+            QueryBuildDataSource    qbdsProjEmplTrans,
+                                    qbdsWorkOrderLine,
+                                    qbdsWorkOrderTable,
+                                    qbdsSalesLine,
+                                    qbdsSalesParmLine,
+                                    qbdsWorkOrderLineHourTransLink;
+            FromDate                fromDate;
+            ToDate                  toDate;
+            ProjInvoiceItem         callerProjInvoiceItem;
+            ProjProposalItem        callerProjProposalItem;
+            QueryBuildDataSource    qbdsProjJournalTrans;
+        
+            //callerBuffer = element.args().record();
+            FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+            select minof(PeriodStartDateTime), maxof(PeriodEndDateTime) from journalizedInvoicePeriod
+            where journalizedInvoicePeriod.RefTableId == InvoicePeriod.RefTableId
+            &&    journalizedInvoicePeriod.RefRecId == InvoicePeriod.RefRecId;
+
+            fromDate = DateTimeUtil::date(journalizedInvoicePeriod.PeriodStartDateTime);
+            toDate = DateTimeUtil::date(journalizedInvoicePeriod.PeriodEndDateTime);
+            // extend range for the first and the last period
+            FINInvoicePeriodQtyPhysical periodQtyPhysical = FINInvoicePeriodQtyPhysical::findRecId(InvoicePeriod.InvPeriodQtyPhysicalRecId); 
+
+            if (periodQtyPhysical && periodQtyPhysical.DeliveryDateTime == InvoicePeriod.PeriodStartDateTime)
+            {
+                fromDate = DateTimeUtil::date(DateTimeUtil::minValue());
+            }
+
+            if (periodQtyPhysical && periodQtyPhysical.ReturnDateTime == InvoicePeriod.PeriodEndDateTime)
+            {
+                toDate = DateTimeUtil::date(DateTimeUtil::maxValue());
+            }
+
+            query = new Query();
+        
+            qbdsProjEmplTrans = query.addDataSource(tableNum(ProjEmplTrans));
+        
+            if (callerBuffer.TableId == tableNum(SalesLine)
+            ||  callerBuffer.TableId == tableNum(SalesParmLine)
+            ||  callerBuffer.TableId == tableNum(VendInvoiceInfoLine)
+            ||  callerBuffer.TableId == tableNum(ProjProposalItem)
+            ||  callerBuffer.TableId == tableNum(ProjInvoiceItem))
+            {
+                qbdsProjEmplTrans.addRange(fieldNum(ProjEmplTrans, DataAreaId)).value(strFmt('(( %1 >= %2) && ( %1 <= %3))',
+                                                                                                fieldStr(ProjEmplTrans, TransDate),
+                                                                                                date2StrXpp(fromDate),
+                                                                                                date2StrXpp(toDate)));
+        
+                if (callerBuffer.TableId == tableNum(ProjProposalItem)
+                ||  callerBuffer.TableId == tableNum(ProjInvoiceItem)
+                ||  callerBuffer.TableId == tableNum(SalesLine)
+                ||  callerBuffer.TableId == tableNum(SalesParmLine))
+                {
+                    qbdsProjJournalTrans = qbdsProjEmplTrans.addDataSource(tableNum(ProjJournalTrans));
+                    qbdsProjJournalTrans.addLink(fieldNum(ProjEmplTrans, TransId), fieldNum(ProjJournalTrans, TransId));
+                    qbdsProjJournalTrans.joinMode(JoinMode::ExistsJoin);
+  
+                    qbdsSalesLine = qbdsProjJournalTrans.addDataSource(tableNum(SalesLine));
+                    qbdsSalesLine.relations(true);
+                    qbdsSalesLine.joinMode(JoinMode::ExistsJoin);
+                }
+                else
+                {
+                    qbdsWorkOrderLineHourTransLink = qbdsProjEmplTrans.addDataSource(tableNum(WPPWorkOrderLineHourTransLink));
+                    qbdsWorkOrderLineHourTransLink.relations(true);
+                    qbdsWorkOrderLineHourTransLink.joinMode(JoinMode::ExistsJoin);
+        
+                    qbdsWorkOrderLine = qbdsWorkOrderLineHourTransLink.addDataSource(tableNum(WPPWorkOrderLine));
+                    qbdsWorkOrderLine.relations(true);
+                    qbdsWorkOrderLine.joinMode(JoinMode::ExistsJoin);
+        
+                    qbdsWorkOrderTable = qbdsWorkOrderLine.addDataSource(tableNum(WPPWorkOrderTable));
+                    qbdsWorkOrderTable.relations(true);
+                    qbdsWorkOrderTable.joinMode(JoinMode::ExistsJoin);
+        
+                    qbdsSalesLine = qbdsWorkOrderTable.addDataSource(tableNum(SalesLine));
+                    qbdsSalesLine.relations(true);
+                    qbdsSalesLine.joinMode(JoinMode::ExistsJoin);
+                }
+        
+                switch (callerBuffer.TableId)
+                {
+                    case tableNum(SalesLine):
+                        qbdsSalesLine.addRange(fieldNum(SalesLine, RecId)).value(SysQuery::value(callerBuffer.RecId));
+                        break;
+        
+                    case tableNum(SalesParmLine):
+                        qbdsSalesParmLine = qbdsSalesLine.addDataSource(tableNum(SalesParmLine));
+                        qbdsSalesParmLine.relations(true);
+                        qbdsSalesParmLine.joinMode(JoinMode::ExistsJoin);
+                        qbdsSalesParmLine.addRange(fieldNum(SalesParmLine, RecId)).value(SysQuery::value(callerBuffer.RecId));
+                        break;
+        
+                    case tableNum(ProjInvoiceItem):
+                        callerProjInvoiceItem = callerBuffer as ProjInvoiceItem;
+                        qbdsSalesLine.addRange(fieldNum(SalesLine, InventTransId)).value(SysQuery::value(callerProjInvoiceItem.InventTransId));
+                        break;
+
+                    case tableNum(ProjProposalItem):
+                        callerProjProposalItem = callerBuffer as ProjProposalItem;
+                        qbdsSalesLine.addRange(fieldNum(SalesLine, InventTransId)).value(SysQuery::value(callerProjProposalItem.InventTransId));
+                        break;
+ 
+                    default:
+                        break;
+                }
+            }
+            else
+            {
+                qbdsProjEmplTrans.addRange(fieldNum(ProjEmplTrans, RecId)).value(SysQuery::valueEmptyString());
+            }
+        
+            this.query(query);
+        
+            super();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+		</DataSources>
+		<DataControls xmlns="">
+			<Control>
+				<Name>MarkForCrediting</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.setPeriodStatus(true);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>ReverseMarkForCrediting</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.setPeriodStatus(false);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>AmountBreakDown</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+
+            if (invoiceCalculatorParm.InvoiceCalcResultListPacked)
+            {
+                Set chargedValuesSet = invoiceCalculatorParm.getChargedValuesPerEngine();
+
+                if (chargedValuesSet)
+                {
+                    SetEnumerator enumerator = chargedValuesSet.getEnumerator();
+
+                    while (enumerator.moveNext())
+                    {
+                        FINRentalAccountType    accountType;
+                        AmountCur               amount;
+                        Description             description;
+                        boolean                 isCredit;
+                        FINRentalAccountType    creditAccountType;
+                        Counter                 idx;
+
+                        [accountType, amount, description, isCredit, creditAccountType, idx] = enumerator.current();
+                        info(strFmt("@DNR:TypeAmountDescription", accountType, amount, description));
+                    }
+                }
+            }
+            else
+            {
+                warning("@DNR:NothingToDisplay");
+            }
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources>
+		<AxFormDataSource xmlns="">
+			<Name>InvoicePeriod</Name>
+			<Table>FINJournalizedInvoicePeriod</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>DataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DiscAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvPeriodQtyPhysicalRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LineAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NumOfCalendarPeriods</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NumOfChargeablePeriods</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PeriodEndDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PeriodStartDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>QtyInvoiced</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SourceRefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>ProjEmplTrans</Name>
+			<Table>ProjEmplTrans</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>ActivityNumber</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>AdjRefTransId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CategoryId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>createdBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>createdDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CurrencyId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>dataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DefaultDimension</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DEL_Worker</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DEL_WorkerLegalEntity</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FromTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsCorrection</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LinePropertyId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>modifiedBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>modifiedDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PackedExtensions</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ProjId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PSAContractLineNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PSAIndirectComponentGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PSAPercentCompl</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PSAProjOrigTransId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PSAWrkCtrId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Qty</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Resource</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ResourceCategory</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ResourceLegalEntity</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RORBothRentalSubRental</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxItemGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TotalCostAmountCur</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TotalSalesAmountCur</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ToTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransactionOrigin</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransIdRef</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Txt</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VoucherJournal</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>WPPBreakQty</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>WPPInvoiceId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>WPPWrkCtrId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AutoQuery>No</AutoQuery>
+			<AutoSearch>No</AutoSearch>
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<InsertAtEnd>No</InsertAtEnd>
+			<InsertIfEmpty>No</InsertIfEmpty>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>InvoicePeriodLink</Name>
+			<Table>FINJournalizedInvoicePeriodLink</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>DataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceTransRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceTransTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>JournalizedPeriodRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<JoinSource>InvoicePeriod</JoinSource>
+			<LinkType>ExistJoin</LinkType>
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+	</DataSources>
+	<Design>
+		<Caption xmlns="">@DNR6060</Caption>
+		<Pattern xmlns="">SimpleDetails-FastTabsContainer</Pattern>
+		<PatternVersion xmlns="">1.4</PatternVersion>
+		<TitleDataSource xmlns="">InvoicePeriod</TitleDataSource>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormActionPaneControl">
+				<Name>ActionPane</Name>
+				<ElementPosition>536870911</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Type>ActionPane</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormActionPaneTabControl">
+						<Name>ActionPaneTab</Name>
+						<ElementPosition>1431655764</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>ActionPaneTab</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonGroupControl">
+								<Name>ButtonGroup</Name>
+								<ElementPosition>1431655764</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>ButtonGroup</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>Auto</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormButtonControl">
+										<Name>MarkForCrediting</Name>
+										<Type>Button</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Text>Mark for credit</Text>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormButtonControl">
+										<Name>ReverseMarkForCrediting</Name>
+										<Type>Button</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Text>Unmark for credit</Text>
+									</AxFormControl>
+								</Controls>
+								<ArrangeMethod>Vertical</ArrangeMethod>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonGroupControl">
+								<Name>InfoLog</Name>
+								<Type>ButtonGroup</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormButtonControl">
+										<Name>AmountBreakDown</Name>
+										<Type>Button</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Text>Amount breakdown</Text>
+									</AxFormControl>
+								</Controls>
+								<Caption>Additional info</Caption>
+							</AxFormControl>
+						</Controls>
+						<AlignChild>No</AlignChild>
+						<AlignChildren>No</AlignChildren>
+						<ArrangeMethod>Vertical</ArrangeMethod>
+						<Caption>@DNR6060</Caption>
+					</AxFormControl>
+				</Controls>
+				<AlignChild>No</AlignChild>
+				<AlignChildren>No</AlignChildren>
+				<ArrangeMethod>Vertical</ArrangeMethod>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormTabControl">
+				<Name>Tab</Name>
+				<AlignControl>No</AlignControl>
+				<ElementPosition>1073741823</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Type>Tab</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>InvoicePeriods</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>613566756</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>SizeToAvailable</HeightMode>
+						<Pattern>Custom</Pattern>
+						<Type>TabPage</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>GeneralGroup</Name>
+								<Pattern>FieldsFieldGroups</Pattern>
+								<PatternVersion>1.1</PatternVersion>
+								<Type>Group</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormComboBoxControl">
+										<Name>displayPeriodStatus</Name>
+										<Type>ComboBox</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataMethod>displayPeriodStatus</DataMethod>
+										<DataSource>InvoicePeriod</DataSource>
+										<Items />
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>displayInvoiceId</Name>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<DataMethod>displayInvoiceId</DataMethod>
+										<DataSource>InvoicePeriod</DataSource>
+									</AxFormControl>
+								</Controls>
+								<ColumnsMode>Fill</ColumnsMode>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>GridContainer</Name>
+								<ElementPosition>1431655764</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>SizeToAvailable</HeightMode>
+								<Type>Group</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGridControl">
+										<Name>Grid</Name>
+										<ElementPosition>1431655764</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Grid</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>Grid_PeriodStartDateTime</Name>
+												<Type>DateTime</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>PeriodStartDateTime</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>Grid_PeriodEndDateTime</Name>
+												<Type>DateTime</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>PeriodEndDateTime</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormIntegerControl">
+												<Name>Grid_NumOfChargeablePeriods</Name>
+												<Type>Integer</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>NumOfChargeablePeriods</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormIntegerControl">
+												<Name>Grid_NumOfCalendarPeriods</Name>
+												<Type>Integer</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>NumOfCalendarPeriods</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>Grid_displayLineAmount</Name>
+												<Type>Real</Type>
+												<Visible>No</Visible>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>displayLineAmount</DataMethod>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>Grid_displayDiscAmount</Name>
+												<Type>Real</Type>
+												<Visible>No</Visible>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>displayDiscAmount</DataMethod>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>Grid_InvoiceId</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InvoiceId</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+										</Controls>
+										<AlternateRowShading>No</AlternateRowShading>
+										<DataSource>InvoicePeriod</DataSource>
+										<MultiSelect>No</MultiSelect>
+										<ShowRowLabels>No</ShowRowLabels>
+										<VisibleRows>9</VisibleRows>
+										<VisibleRowsMode>Fixed</VisibleRowsMode>
+									</AxFormControl>
+								</Controls>
+							</AxFormControl>
+						</Controls>
+						<HideIfEmpty>No</HideIfEmpty>
+						<Caption>@DNR6060</Caption>
+						<Scrollbars>Auto</Scrollbars>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>HourTransactions</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>1994091957</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Pattern>ToolbarList</Pattern>
+						<PatternVersion>1.2</PatternVersion>
+						<Type>TabPage</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormGridControl">
+								<Name>GridHourTransactions</Name>
+								<ElementPosition>1431655764</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>Grid</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateControl">
+										<Name>ProjEmplTrans_TransDate</Name>
+										<ElementPosition>390451572</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Date</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>TransDate</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormTimeControl">
+										<Name>ProjEmplTrans_FromTime</Name>
+										<ElementPosition>585677358</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Time</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>FromTime</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormTimeControl">
+										<Name>ProjEmplTrans_ToTime</Name>
+										<ElementPosition>780903144</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Time</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ToTime</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormRealControl">
+										<Name>ProjEmplTrans_WPPBreakQty</Name>
+										<ElementPosition>976128930</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Real</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>WPPBreakQty</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+										<NoOfDecimals>-1</NoOfDecimals>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormRealControl">
+										<Name>ProjEmplTrans_Qty</Name>
+										<ElementPosition>1171354716</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Real</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>Qty</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+										<NoOfDecimals>-1</NoOfDecimals>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ProjEmplTrans_ProjId</Name>
+										<ElementPosition>1366580502</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ProjId</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ProjEmplTrans_WPPResourceId</Name>
+										<ElementPosition>1561806288</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>WPPResourceId</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>ProjEmplTrans_WPPWrkCtrId</Name>
+										<ConfigurationKey>DNRDeletedObjects72</ConfigurationKey>
+										<ElementPosition>1561806288</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<Visible>No</Visible>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>WPPWrkCtrId</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormRealControl">
+										<Name>ProjEmplTrans_TotalCostAmountCur</Name>
+										<ElementPosition>1757032074</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Real</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>TotalCostAmountCur</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+										<NoOfDecimals>-1</NoOfDecimals>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormRealControl">
+										<Name>ProjEmplTrans_TotalSalesAmountCur</Name>
+										<ElementPosition>1952257860</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Real</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>TotalSalesAmountCur</DataField>
+										<DataSource>ProjEmplTrans</DataSource>
+										<NoOfDecimals>-1</NoOfDecimals>
+									</AxFormControl>
+								</Controls>
+								<DataSource>ProjEmplTrans</DataSource>
+							</AxFormControl>
+						</Controls>
+						<Caption>@SYS1151</Caption>
+						<Scrollbars>Auto</Scrollbars>
+					</AxFormControl>
+				</Controls>
+				<AlignChild>No</AlignChild>
+				<ArrangeMethod>Vertical</ArrangeMethod>
+				<Style>FastTabs</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

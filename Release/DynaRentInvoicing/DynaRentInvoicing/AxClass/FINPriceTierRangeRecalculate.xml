@@ -1,0 +1,335 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINPriceTierRangeRecalculate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINPriceTierRangeRecalculate
+{
+    boolean     isManualRecalculation;
+    RORRentalLine rentalLine;
+    Common callerCommon;
+    //SalesLine   salesLine;
+    FINRentalInvoiceProfile invoiceProfile;
+    Map         rangeTiersMapFromContract;
+    Map         changesMapSales;
+    TransDateTime rentalStartDateTime;
+    TransDateTime rentalEndDateTime;
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        FINPriceTierRangeRecalculate    priceTierRangeRecalculate;
+        RORRentalLine rentalLine;
+        Common common;
+        FINRentalInvoiceProfile invoiceProfile;
+
+        if (_args.dataset() == tableNum(SalesLine)
+        ||  _args.dataset() == tableNum(SalesQuotationLine)
+        ||  _args.dataset() == tableNum(PurchLine))
+        {
+            rentalLine = _args.record();
+            common = _args.record();
+            invoiceProfile = FINRentalInvoiceProfile::find(rentalLine.INVInvoiceProfileId);
+        }
+
+        if (rentalLine && invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::RangeCalendar
+            && Box::yesNoCancel("@DNR:RangeTierRecalculation", DialogButton::Yes))
+        {
+            priceTierRangeRecalculate = new FINPriceTierRangeRecalculate();
+            priceTierRangeRecalculate.parmIsManualRecalculation(true);
+            priceTierRangeRecalculate.run(_args.record());
+        }
+        else if (rentalLine && invoiceProfile.PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating
+        && Box::yesNoCancel("@DNR:OnCreationTierRecalculation", DialogButton::Yes))
+        {
+            INVRateMultiplierTier rateMultiplier = FINPeriodSpecificationManager::getTierMultiplierOnCreation(common);
+            
+            if (!rateMultiplier)
+            {
+                rateMultiplier = 1;
+            }
+
+            if (rateMultiplier)
+            {
+                INVRateMultiplierTier previousRateMultiplier;
+
+                ttsbegin;
+                switch (common.TableId)
+                {
+                    case tableNum(SalesLine) :
+                        SalesLine salesLine = common;
+                        salesLine.selectForUpdate(true);
+                        previousRateMultiplier = salesLine.INVRateMultiplierTier;
+                        salesLine.INVRateMultiplierTier = rateMultiplier;
+                        
+                        if (previousRateMultiplier && previousRateMultiplier != rateMultiplier)
+                        {
+                            salesLine.RORRentalGrossAmount = salesLine.RORRentalGrossAmount * rateMultiplier / previousRateMultiplier;
+                            salesLine.RORRentalLine::modifiedGrossAmount();
+                        }
+                        salesLine.update();
+                        break;
+
+                    case tableNum(SalesQuotationLine) :
+                        SalesQuotationLine salesQuotationLine = common;
+                        salesQuotationLine.selectForUpdate(true);
+                        previousRateMultiplier = salesQuotationLine.INVRateMultiplierTier;
+                        salesQuotationLine.INVRateMultiplierTier = rateMultiplier;
+                        
+                        if (previousRateMultiplier && previousRateMultiplier != rateMultiplier)
+                        {
+                            salesQuotationLine.RORRentalGrossAmount = salesQuotationLine.RORRentalGrossAmount * rateMultiplier / previousRateMultiplier;
+                            salesQuotationLine.RORRentalLine::modifiedGrossAmount();
+                        }
+                        salesQuotationLine.update();
+                        break;
+
+                    case tableNum(PurchLine) :
+                        PurchLine purchLine = common;
+                        purchLine.selectForUpdate(true);
+                        previousRateMultiplier = purchLine.INVRateMultiplierTier;
+                        purchLine.INVRateMultiplierTier = rateMultiplier;
+                        
+                        if (previousRateMultiplier && previousRateMultiplier != rateMultiplier)
+                        {
+                            purchLine.RORRentalGrossAmount = purchLine.RORRentalGrossAmount * rateMultiplier / previousRateMultiplier;
+                            purchLine.RORRentalLine::modifiedGrossAmount();
+                        }
+                        purchLine.update();
+                        break;
+                }
+                ttscommit;
+            }
+            
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmIsManualRecalculation</Name>
+				<Source><![CDATA[
+    public boolean parmIsManualRecalculation(boolean _isManualRecalculation = isManualRecalculation)
+    {
+        isManualRecalculation = _isManualRecalculation;
+        return isManualRecalculation;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public static Name description()
+    {
+        return "@DNR8351";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run(Common _common)
+    {
+        callerCommon = _common;
+        rentalLine = callerCommon;
+        invoiceProfile = FINRentalInvoiceProfile::find(rentalLine.INVInvoiceProfileId);
+
+        if (this.validate())
+        {
+            this.deletePreviousPriceAmendment();
+            this.recalculate();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>recalculate</Name>
+				<Source><![CDATA[
+    protected void recalculate()
+    {
+        INVChargePeriodCalendarPeriods calendarPeriods;
+
+        RORRentalDateTimes  rentalDateTimes = rentalLine.RORRentalDateTimes();
+        TransDate           calculationDate = endMth(DateTimeUtil::date(rentalDateTimes.getOffRentDateTime(true)));
+
+        rentalStartDateTime = rentalDateTimes.OnRentDateTime;
+
+        if (invoiceProfile.isMonthlyInvoicing() && invoiceProfile.CalculationMethod == INVCalculationMethod::AlwaysInvoiceEntirePeriod)
+        {
+            TransDate monthStartDate = str2DateDMY(strFmt("1-%1-%2", mthOfYr(DateTimeUtil::date(rentalStartDateTime)), year(DateTimeUtil::date(rentalStartDateTime))));
+
+            rentalStartDateTime = DateTimeUtil::newDateTime(monthStartDate, 0, rentalLine.RORRentalLine::FINTimeZoneOrder());
+        }
+
+        rentalEndDateTime = DateTimeUtil::newDateTime(calculationDate+1, 1);
+
+        calendarPeriods = DateTimeUtil::date(rentalEndDateTime) - DateTimeUtil::date(rentalStartDateTime);
+
+        this.getTiersMapForOrderLine(calendarPeriods);
+        this.updatePriceAmendment();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deletePreviousPriceAmendment</Name>
+				<Source><![CDATA[
+    protected void deletePreviousPriceAmendment()
+    {
+        FINInvoicePeriodAmendment invoicePeriodAmendment;
+
+        ttsbegin;
+
+        delete_from invoicePeriodAmendment
+        where invoicePeriodAmendment.RefTableId == callerCommon.TableId
+        &&    invoicePeriodAmendment.RefRecId == callerCommon.RecId
+        &&    (invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::RentalPrice || invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::RentalPriceNet)
+        &&    (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed);
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateWithMidnightCutOffTime</Name>
+				<Source><![CDATA[
+    private TransDateTime updateWithMidnightCutOffTime(TransDateTime _startDateTime)
+    {
+        TimeOfDay defaultDaysSplit;
+
+        TransDateTime   startDateTime   = _startDateTime;
+        Timezone        callerTimeZone  = rentalLine.RORRentalLine::FINTimeZoneOrder();
+        TransDate       startDate       = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(startDateTime, callerTimeZone));
+
+        if (invoiceProfile.MidnightCutOffType == INVInvoicingMidnightCutOffType::Fixed)
+        {
+            defaultDaysSplit = invoiceProfile.MidnightCutOffTime;
+        }
+        else if (invoiceProfile.MidnightCutOffType == INVInvoicingMidnightCutOffType::LinkedToDelivery)
+        {
+            // calculate 24 hours from delivery
+            TransDateTime deliveryDatetime = DateTimeUtil::applyTimeZoneOffset(startDateTime, callerTimeZone);
+
+            defaultDaysSplit = DateTimeUtil::time(deliveryDatetime);
+        }
+        else
+        {
+            // By default day ends at 23:59:59
+            defaultDaysSplit = 0;
+        }
+
+        startDateTime = DateTimeUtil::newDateTime(startDate, defaultDaysSplit, callerTimeZone);
+
+        return startDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTiersMapForOrderLine</Name>
+				<Source><![CDATA[
+    protected void getTiersMapForOrderLine(INVChargePeriodCalendarPeriods _calendarPeriods)
+    {
+        MapEnumerator enumerator = rangeTiersMapFromContract.getEnumerator();
+        TransDateTime modifiedRentalStartDateTime = this.updateWithMidnightCutOffTime(rentalStartDateTime);
+        TransDateTime startDateTime = modifiedRentalStartDateTime;
+        TransDateTime endDateTime;
+        int numOfPeriodsPrevious;
+        real multiplierPrevious;
+        boolean stopCalculation;
+
+        changesMapSales = new Map(Types::Container, Types::Container);
+        
+        while (enumerator.moveNext())
+        {
+            int numOfPeriods = enumerator.currentKey();
+            real multiplier = enumerator.currentValue();
+
+            if (numOfPeriods > _calendarPeriods)
+            {
+                stopCalculation = true;
+                // still need to run the last loop here if numOfPeriods is higher than available days otherwise changesMapSales will get a value outside the"while loop.
+            }
+
+            if (numOfPeriods != 1 && numOfPeriodsPrevious)
+            {
+                Price rentalPrice = rentalLine.Price * multiplierPrevious;
+
+                endDateTime = DateTimeUtil::addDays(modifiedRentalStartDateTime, numOfPeriods);
+                changesMapSales.insert([startDateTime, endDateTime, 'RentalPrice'], [rentalPrice]);
+                startDateTime = endDateTime;
+            }
+            
+            numOfPeriodsPrevious = numOfPeriods;
+            multiplierPrevious = multiplier;
+
+            if (stopCalculation)
+            {
+                break;
+            }
+        }  
+      
+        if (numOfPeriodsPrevious && !stopCalculation)
+        {
+            Price rentalPrice = rentalLine.Price * multiplierPrevious;
+
+            changesMapSales.insert([startDateTime, rentalEndDateTime, 'RentalPrice'], [rentalPrice]);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePriceAmendment</Name>
+				<Source><![CDATA[
+    protected void updatePriceAmendment()
+    {
+        INVinvoicePeriodHost invoicePeriodHost = callerCommon;
+        ROROrderAmendmentDialogType::runFinancialChanges(invoicePeriodHost, changesMapSales);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    protected boolean validate()
+    {
+        boolean ret;
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(INVInvoicePeriod))
+        && rentalLine.TradeType != RORTradeType::SalesPurch)
+        {
+            if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::RangeCalendar)
+            {
+                RAGContractDataParm contractDataParm;
+                contractDataParm.initFromRentalLine(rentalLine);
+                
+                RAGContractData contractData = new RAGContractData();
+                contractData.parmDataParm(contractDataParm);
+                contractData.populateData();
+
+                rangeTiersMapFromContract = contractData.getRangeTiersMap(rentalLine.BOBRentalTypeId(), RAGAgreementType::PriceTier);
+
+                ret = (rangeTiersMapFromContract && !rangeTiersMapFromContract.empty());
+            }
+        }
+
+        return ret;
+
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

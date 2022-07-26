@@ -1,0 +1,266 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRAssetProposalDepreciationClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(AssetProposalDepreciation))]
+public final class DNRAssetProposalDepreciationClass_Extension
+{
+    private Map BOBAssetIdToLastGeneratedTransMap = new Map(Types::String, Types::Record);
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    void run()
+    {
+        using (DNRAssetProposalDepreciationDisposableContext context = DNRAssetProposalDepreciationDisposableContext::findOrCreate())
+        {
+            boolean mustModifyTransactions = true;
+
+            Map prevTransactionsMap;
+            int numOfPrevTransactions;
+
+            if (this.parmBatchEnabled())
+            {
+                mustModifyTransactions = false;
+            }
+
+            if (mustModifyTransactions)
+            {
+                prevTransactionsMap     = this.BOBGetTransactionsMap();
+                numOfPrevTransactions   = prevTransactionsMap.elements();
+            }
+
+            ttsbegin;
+
+            next run(); // execute the standard Microsoft code
+
+            if (mustModifyTransactions)
+            {
+                Map currentTransactionsMap      = this.BOBGetTransactionsMap();
+                int numOfCurrentTransactions    = currentTransactionsMap.elements();
+                int numOfNewTransactions        = numOfCurrentTransactions - numOfPrevTransactions;
+
+                Map newTransactionsMap = new Map(Types::Integer, Types::Record);
+
+                // Obtain a map with the records that have been (newly) added in the proposal run.
+                for (Counter counter = 1; counter < numOfNewTransactions + 1; counter++)
+                {
+                    newTransactionsMap.insert(counter, currentTransactionsMap.lookup(numOfPrevTransactions + counter));
+                }
+
+                if (!newTransactionsMap.empty())
+                {
+                    this.BOBModifyNewTransactions(newTransactionsMap);
+                }
+            }
+
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDeleteTransactions</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private void BOBDeleteTransactions(Set _recIdsTransactionsToDeleteSet)
+    {
+        LedgerJournalTrans  ledgerJournalTrans;
+        SetEnumerator       enumerator = _recIdsTransactionsToDeleteSet.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            // LedgerJournalTrans has overridden the delete() method, so no need for set-based DML.
+            ledgerJournalTrans = LedgerJournalTrans::findRecId(enumerator.current(), true);
+            ledgerJournalTrans.delete();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBGetDepreciationProfile</Name>
+				<Source><![CDATA[
+    private AssetDepreciationProfile BOBGetDepreciationProfile(AssetTable _assetTable)
+    {
+        AssetBook assetBook = _assetTable.assetBookCurrent(); // TODO: Check if this returns the right asset book.
+        //AssetBook assetBook = assetTable.book();
+        return assetBook.depreciationProfile();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBGetTransactionsMap</Name>
+				<Source><![CDATA[
+    private Map BOBGetTransactionsMap()
+    {
+        LedgerJournalTrans          ledgerJournalTrans;
+        LedgerJournalTrans_Asset    ledgerJournalTransAsset;
+        Map                         transactionsMap = new Map(Types::Integer, Types::Record);
+
+        // We want to process the records in the same order as they are displayed in the journal (i.e., ordered by asset id and transaction date).
+        // The records are stored in the database in the same order as they are displayed in the journal, so there is no need for an 'order by' clause.
+        // In fact, an order by clause would cause problems if you run a proposal for the same fixed asset twice, and there are overlapping transaction dates.
+        while select ledgerJournalTrans
+        where ledgerJournalTrans.JournalNum == journalNum
+        {
+            transactionsMap.insert(transactionsMap.elements() + 1, ledgerJournalTrans);
+        }
+
+        return transactionsMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBModifyNewTransactions</Name>
+				<Source><![CDATA[
+    private void BOBModifyNewTransactions(Map _newTransactionsMap)
+    {
+        LedgerJournalTrans          prevTrans, currentTrans;
+        AssetId                     prevAssetId, currentAssetId;
+        AssetTable                  assetTable;
+        AssetDepreciationProfile    depreciationProfile;
+        AssetDepreciationMethod     depreciationMethod;
+        AssetTableInterval          deprInterval;
+        BOBDepreciateUntil          depreciateUntil;
+        TransDate                   transDate;
+
+        Set                         recIdsTransactionsToDeleteSet   = new Set(Types::Int64);
+        Set                         transactionsToUpdateSet         = new Set(Types::Record);
+
+        for (Counter counter = 1; counter < _newTransactionsMap.elements() + 1; counter++)
+        {
+            prevTrans       = currentTrans;
+            prevAssetId     = currentAssetId;
+
+            currentTrans    = _newTransactionsMap.lookup(counter);
+            currentAssetId  = currentTrans.getAssetId();
+            transDate       = currentTrans.TransDate;
+
+            // We are dealing with a new fixed asset.
+            if (prevAssetId != currentAssetId)
+            {
+                if (prevAssetId)
+                {
+                    BOBAssetIdToLastGeneratedTransMap.insert(prevAssetId, prevTrans);
+                }
+
+                assetTable          = AssetTable::find(currentAssetId);
+                depreciationProfile = this.BOBGetDepreciationProfile(assetTable);
+                depreciationMethod  = depreciationProfile.Method;
+                deprInterval        = AssetTableInterval::construct(depreciationProfile);
+                depreciateUntil     = assetTable.BOBDepreciateUntil;
+            }
+
+            // If the depreciation profile method is different from 'Straight line service life' and 'Straight line life remaining', then we don't want to do anything,
+            // even if a 'depreciate until' date has been set (for now).
+            if ((depreciationMethod == AssetDepreciationMethod::StraightLine || depreciationMethod == AssetDepreciationMethod::StraightLineLifeRemaining) && depreciateUntil)
+            {
+                AssetTransDate periodStartDate   = deprInterval.startOfPeriod(transDate);
+                AssetTransDate periodEndDate     = deprInterval.endPeriod(transDate);
+
+                // If depreciateUntil is before the starting date of the period associated with the current transaction, then de transaction must be deleted.
+                if (depreciateUntil < periodStartDate)
+                {
+                    recIdsTransactionsToDeleteSet.add(currentTrans.RecId);
+                }
+                // If depreciateUntil is in the period associated with the current transaction, then the transaction must be updated.
+                else if (depreciateUntil >= periodStartDate && depreciateUntil <= periodEndDate)
+                {
+                    transactionsToUpdateSet.add(currentTrans);
+                }
+            }
+        }
+
+        // Don't forget the last fixed asset!
+        BOBAssetIdToLastGeneratedTransMap.insert(currentAssetId, currentTrans);
+
+        this.BOBUpdateTransactions(transactionsToUpdateSet);
+        this.BOBDeleteTransactions(recIdsTransactionsToDeleteSet);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateTransactions</Name>
+				<Source><![CDATA[
+    private void BOBUpdateTransactions(Set _transactionsToUpdateSet)
+    {
+        LedgerJournalTrans          ledgerJournalTrans, currentTrans, lastGeneratedTrans;
+        AssetId                     assetId;
+        TransDate                   transDate;
+        AssetTable                  assetTable;
+        AssetBook                   assetBook;
+        AssetDepreciationProfile    depreciationProfile;
+        AssetTableInterval          deprInterval;
+        TransDate                   periodStartDateCurrTrans, periodStartDateLastTrans;
+        TransDate                   periodEndDateCurrTrans, periodEndDateLastTrans;
+        BOBDepreciateUntil          depreciateUntil;
+
+        SetEnumerator               enumerator = _transactionsToUpdateSet.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            currentTrans                = enumerator.current();
+            assetId                     = currentTrans.getAssetId();
+            // The map 'BOBAssetIdToLastGeneratedTransMap' contains 'assetId' as a key, so there is no need to check if it exists.
+            lastGeneratedTrans          = BOBAssetIdToLastGeneratedTransMap.lookup(assetId);
+
+            assetTable                  = AssetTable::find(assetId);
+            depreciationProfile         = this.BOBGetDepreciationProfile(assetTable);
+            deprInterval                = AssetTableInterval::construct(depreciationProfile);
+
+            periodStartDateCurrTrans    = deprInterval.startOfPeriod(currentTrans.TransDate);
+            periodEndDateCurrTrans      = deprInterval.endPeriod(currentTrans.TransDate);
+            periodStartDateLastTrans    = deprInterval.startOfPeriod(lastGeneratedTrans.TransDate);
+            periodEndDateLastTrans      = deprInterval.endPeriod(lastGeneratedTrans.TransDate);
+            
+            depreciateUntil             = assetTable.BOBDepreciateUntil;
+            
+            DNRAssetProposalDepreciationDisposableContext context = DNRAssetProposalDepreciationDisposableContext::current();
+
+            if (context)
+            {
+                AssetDepreciationTime periodsRemaining = context.getRemainingPeriodsForAsset(assetId);
+
+                // Scenario 1: The 'depreciate until' date is in the last depreciation period. In that case, only change the transaction date of the relevant transaction.
+                // Scenario 2: The 'depreciate until' date is not in the last depreciation period. In that case, update the amount to depreciate and the transaction date of the relevant transaction.
+                // We don't take other scenarios into account (for now).
+
+                boolean depreciateUntilIsInLastPeriod   = ((periodsRemaining < 1 && depreciateUntil >= periodStartDateLastTrans && depreciateUntil <= periodEndDateLastTrans)
+                                                          // Edge case 
+                                                          || (periodsRemaining == 1 && periodStartDateCurrTrans >= periodStartDateLastTrans && periodEndDateCurrTrans <= periodEndDateLastTrans));
+                Days    daysInCurrPeriod                = (periodEndDateCurrTrans - periodStartDateCurrTrans + 1);
+
+                while select forupdate ledgerJournalTrans
+                where ledgerJournalTrans.RecId == currentTrans.RecId
+                {
+                    ledgerJournalTrans.TransDate = depreciateUntil;
+
+                    if (!depreciateUntilIsInLastPeriod && daysInCurrPeriod)
+                    {
+                        AmountCurCredit adjustedAmountCur = ((depreciateUntil - periodStartDateCurrTrans + 1) / daysInCurrPeriod) * currentTrans.AmountCurCredit;
+                        ledgerJournalTrans.AmountCurCredit  = adjustedAmountCur;
+                    }
+
+                    ledgerJournalTrans.update();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

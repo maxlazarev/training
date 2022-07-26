@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>PersonSearch_DNREventHandler</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// The <c>PersonSearch_DNREventHandler</c> class provides event handlers for person search form functionality extensions.
+/// </summary>
+public final class PersonSearch_DNREventHandler
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>PersonSearchProcessor_onFindPartyLink</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Create person search results for DynaRent artifacts from the set of Global Address Book party numbers
+    /// harvested during all searches.
+    /// </summary>
+    /// <param name = "_taskId">The person search task id.</param>
+    [SubscribesTo(classStr(PersonSearchProcessor), delegateStr(PersonSearchProcessor, onFindPartyLink))]
+    public static void PersonSearchProcessor_onFindPartyLink(PersonSearchTaskId _taskId)
+    {
+        PersonSearch personSearch = PersonSearch::find(_taskId);
+
+        if (!personSearch)
+        {
+            return;
+        }
+
+        // 1) Find resources for which the resource category is 'Human resource'.
+
+        WPPResourceTable            resourceTable;
+        HcmWorker                   hcmWorker;
+        DirPartyTable               dirPartyTable;
+        PersonSearchPartyNumberTmp  personSearchPartyNumberTmp;
+
+        while select RecId, TableId from resourceTable
+        where resourceTable.ResourceCategory == WPPResourceCategory::HumanResource
+            // For resources for which the resource category is 'Human resource', the relation account is mandatory, so use an 'inner join' instead
+            // of an 'outer join' (even though the related table cardinality is 'ZeroOne'). Furthermore, to find a resource for which the resource
+            // category is 'Human resource' based on a party number, the relation account must be populated.
+            join TableId from hcmWorker
+            where hcmWorker.PersonnelNumber == resourceTable.RelationAccount
+                join PartyNumber from dirPartyTable
+                where dirPartyTable.RecId == hcmWorker.Person
+                    exists join personSearchPartyNumberTmp
+                    where dirPartyTable.PartyNumber         == personSearchPartyNumberTmp.PartyNumber
+                    &&    personSearchPartyNumberTmp.TaskId == personSearch.TaskId
+        {
+            PersonSearchResult::findOrCreateResult(
+                _taskId,
+                PersonSearchResultCategory::WPPResource,
+                resourceTable.RecId,
+                resourceTable.TableId,
+                '',
+                dirPartyTable.PartyNumber);
+        }
+
+        // 2) Find resources for which the resource category is 'Vendor'.
+
+        while select RecId, TableId from resourceTable
+        where resourceTable.ResourceCategory == WPPResourceCategory::Vendor
+            // For resources for which the resource category is 'Vendor', the relation account is not mandatory. However, to find a resource for
+            // which the resource category is 'Vendor' based on a party number, the relation account must be populated. Therefore, use an 'inner
+            // join' instead of an 'outer join' (even though the related table cardinality is 'ZeroOne').
+            join PartyNumber from dirPartyTable
+            where dirPartyTable.PartyNumber == resourceTable.RelationAccount
+                exists join personSearchPartyNumberTmp
+                where dirPartyTable.PartyNumber         == personSearchPartyNumberTmp.PartyNumber
+                &&    personSearchPartyNumberTmp.TaskId == personSearch.TaskId
+        {
+            PersonSearchResult::findOrCreateResult(
+                _taskId,
+                PersonSearchResultCategory::WPPResource,
+                resourceTable.RecId,
+                resourceTable.TableId,
+                '',
+                dirPartyTable.PartyNumber);
+        }
+
+        // 3) Find work locations that are linked to a worker.
+        
+        RORVenueTable venueTable;
+
+        while select crosscompany RecId, TableId, DataAreaId from venueTable
+            // The field 'HcmWorkerRecId' is not mandatroy. However, to find a work location that is linked to a worker, the field 'HcmWorkerRecId'
+            // must be populated. Therefore, use an 'inner join' instead of an 'outer join' (even though the related table cardinality is 'ZeroOne').
+            join TableId from hcmWorker
+            where hcmWorker.RecId == venueTable.HcmWorkerRecId
+                join PartyNumber from dirPartyTable
+                where dirPartyTable.RecId == hcmWorker.Person
+                    exists join personSearchPartyNumberTmp
+                    where dirPartyTable.PartyNumber         == personSearchPartyNumberTmp.PartyNumber
+                    &&    personSearchPartyNumberTmp.TaskId == personSearch.TaskId
+        {
+            PersonSearchResult::findOrCreateResult(
+                _taskId,
+                PersonSearchResultCategory::RORVenue,
+                venueTable.RecId,
+                venueTable.TableId,
+                venueTable.DataAreaId,
+                dirPartyTable.PartyNumber);
+        }
+
+        // 4) Find work locations that are linked to a prospect.
+
+        smmBusRelTable smmBusRelTable;
+
+        while select crosscompany RecId, TableId, DataAreaId from venueTable
+            join TableId from smmBusRelTable
+            where smmBusRelTable.BusRelAccount == venueTable.smmBusRelAccount
+                // The field 'Party' is not mandatory. However, to find a work location that is linked to a prospect, the field 'Party' must be
+                // populated. Therefore, use an 'inner join' instead of an 'outer join' (even though the related table cardinality is 'ZeroOne').
+                join PartyNumber from dirPartyTable
+                where dirPartyTable.RecId == smmBusRelTable.Party
+                    exists join personSearchPartyNumberTmp
+                    where dirPartyTable.PartyNumber         == personSearchPartyNumberTmp.PartyNumber
+                    &&    personSearchPartyNumberTmp.TaskId == personSearch.TaskId
+        {
+            PersonSearchResult::findOrCreateResult(
+                _taskId,
+                PersonSearchResultCategory::RORVenue,
+                venueTable.RecId,
+                venueTable.TableId,
+                venueTable.DataAreaId,
+                dirPartyTable.PartyNumber);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>PersonSearchResultWPPResourceView_OnInitialized</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Override the DynaRent resource jump reference
+    /// </summary>
+    /// <param name="_sender">The form data source containing the field for jumpRef.</param>
+    /// <param name="_e">The form data source event context.</param>
+    [FormDataSourceEventHandler(formDataSourceStr(PersonSearch, PersonSearchResultWPPResourceView), FormDataSourceEventType::Initialized)]
+    public static void PersonSearchResultWPPResourceView_OnInitialized(FormDataSource _sender, FormDataSourceEventArgs _e)
+    {
+        PersonSearch_DNRJumpRefHelper jumpRefHelper = PersonSearch_DNRJumpRefHelper::construct(_sender.formRun());
+
+        FormDataObject formDataObject = _sender.object(fieldNum(PersonSearchResultWPPResourceView, ResourceId));
+
+        formDataObject.registerOverrideMethod(methodStr(FormStringControl, jumpRef), methodStr(PersonSearch_DNRJumpRefHelper, jumpRef), jumpRefHelper);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>PersonSearchResultRORVenueView_OnInitialized</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Override the DynaRent work location jump reference to change company context depending on the legal entity of the result record.
+    /// </summary>
+    /// <param name="_sender">The form data source containing the field for jumpRef.</param>
+    /// <param name="_e">The form data source event context.</param>
+    [FormDataSourceEventHandler(formDataSourceStr(PersonSearch, PersonSearchResultRORVenueView), FormDataSourceEventType::Initialized)]
+    public static void PersonSearchResultRORVenueView_OnInitialized(FormDataSource _sender, FormDataSourceEventArgs _e)
+    {
+        PersonSearch_DNRJumpRefHelper jumpRefHelper = PersonSearch_DNRJumpRefHelper::construct(_sender.formRun());
+
+        FormDataObject formDataObject = _sender.object(fieldNum(PersonSearchResultRORVenueView, VenueCode));
+
+        formDataObject.registerOverrideMethod(methodStr(FormStringControl, jumpRef), methodStr(PersonSearch_DNRJumpRefHelper, jumpRef), jumpRefHelper);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>PersonSearchResultWPPResourceView_OnQueryExecuted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Update the DynaRent resource result tab page with a count of record results.
+    /// </summary>
+    /// <param name="_sender">The data source sender.</param>
+    /// <param name="_e">The event arguments.</param>
+    [FormDataSourceEventHandler(formDataSourceStr(PersonSearch, PersonSearchResultWPPResourceView), FormDataSourceEventType::QueryExecuted)]
+    public static void PersonSearchResultWPPResourceView_OnQueryExecuted(FormDataSource _sender, FormDataSourceEventArgs _e)
+    {
+        FormRun formRun = _sender.formRun();
+
+        FormTabPageControl tabPage = formRun.design().controlName(formControlStr(PersonSearch, ResultWPPResourceTabPage)) as FormTabPageControl;
+
+        if (tabPage && formRun is PersonSearchIMarkResult)
+        {
+            formRun.setResultCountOnGridCaption(tabPage, _sender, "@DNR:WPPResourceSearchResults"); 
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>PersonSearchResultRORVenueView_OnQueryExecuted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Update the DynaRent work location results tab page with a count of record results.
+    /// </summary>
+    /// <param name="_sender">The data source sender.</param>
+    /// <param name="_e">The event arguments.</param>
+    [FormDataSourceEventHandler(formDataSourceStr(PersonSearch, PersonSearchResultRORVenueView), FormDataSourceEventType::QueryExecuted)]
+    public static void PersonSearchResultRORVenueView_OnQueryExecuted(FormDataSource _sender, FormDataSourceEventArgs _e)
+    {
+        FormRun formRun = _sender.formRun();
+
+        FormTabPageControl tabPage = formRun.design().controlName(formControlStr(PersonSearch, ResultRORVenueTabPage)) as FormTabPageControl;
+
+        if (tabPage && formRun is PersonSearchIMarkResult)
+        {
+            formRun.setResultCountOnGridCaption(tabPage, _sender, "@DNR:RORVenueSearchResults");
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

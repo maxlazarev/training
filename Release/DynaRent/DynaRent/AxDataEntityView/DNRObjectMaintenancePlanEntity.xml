@@ -1,0 +1,500 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxDataEntityView xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRObjectMaintenancePlanEntity</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class DNRObjectMaintenancePlanEntity extends common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>postLoad</Name>
+				<Source><![CDATA[
+    public void postLoad()
+    {
+        BOBDefaultMaintenancePlan   defaultMaintenancePlan;
+        BOBMaintenanceLog           maintenanceLog;
+        WPPWorkOrderTable           workOrderTable;
+        BOBObjectMaintenancePlan    objectMaintenancePlan;
+
+        super();
+    
+        defaultMaintenancePlan      = BOBDefaultMaintenancePlan::findByRecId(this.DefaultPlanRecId);
+        
+        if (defaultMaintenancePlan.PlanType == BOBMaintenancePlanType::TimeAndConsumptionBased)
+        {
+            select firstOnly WPPWorkOrderId from maintenanceLog
+                order by CreatedDateTime desc
+                where (maintenanceLog.MeterTableRecId == this.MeterTableRecId || !maintenanceLog.MeterTableRecId)
+                &&    maintenanceLog.ObjectId == this.ObjectId
+                &&    maintenanceLog.PlanCode == defaultMaintenancePlan.PlanCode
+                &&   !maintenanceLog.CompletedBy
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId == maintenanceLog.WPPWorkOrderId;
+        }
+        else if (defaultMaintenancePlan.PlanType == BOBMaintenancePlanType::ConsumptionBased)
+        {
+            if (this.MeterTableRecId)
+            {
+                select firstOnly WPPWorkOrderId from maintenanceLog
+                where maintenanceLog.MeterTableRecId == this.MeterTableRecId
+                &&    maintenanceLog.ObjectId == this.ObjectId
+                &&    maintenanceLog.PlanCode == defaultMaintenancePlan.PlanCode
+                &&   !maintenanceLog.CompletedBy
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId == maintenanceLog.WPPWorkOrderId;
+            }
+        }
+        else
+        {
+            select firstOnly WPPWorkOrderId from maintenanceLog
+            where maintenanceLog.PlanCode == defaultMaintenancePlan.PlanCode
+            &&    maintenanceLog.ObjectId == this.ObjectId
+            &&   !maintenanceLog.CompletedBy
+                exists join workOrderTable
+                where workOrderTable.WorkOrderId == maintenanceLog.WPPWorkOrderId;
+        }
+
+        select objectMaintenancePlan where objectMaintenancePlan.RecId == this.RecId;
+
+        this.FleetNumber   = BOBObjectTable::findObjectId(this.ObjectId).FleetNumber;
+        this.OpenWorkOrder = maintenanceLog.WPPWorkOrderId;
+        this.InternalNote  = DNRAdditionalNoteTable::editNote(objectMaintenancePlan, fieldNum(DNRAdditionalNoteTable, InternalNote), NoYes::No , this.InternalNote);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setRecurrenceData</Name>
+				<Source><![CDATA[
+    public SysRecurrenceData setRecurrenceData(SysRecurrenceData _sysRecurrenceData)
+    {
+        SysRecurrenceData  sysRecurrenceData = _sysRecurrenceData;
+
+        switch (this.RecurrenceUnitType)
+        {
+            case (SysRecurrenceUnit::Day):
+                sysRecurrenceData = conpoke(sysRecurrenceData, 8, [1, this.RecurrenceFrequency]);
+                break;
+
+            case (SysRecurrenceUnit::Week):
+                sysRecurrenceData = conpoke(sysRecurrenceData, 8, [this.RecurrenceFrequency, 1]);
+                break;
+
+            case (SysRecurrenceUnit::Month):
+                sysRecurrenceData = conpoke(sysRecurrenceData, 8, [1, this.RecurrenceFrequency, 1, 1, 1, 1]);
+                break;
+
+            case (SysRecurrenceUnit::Year):
+                sysRecurrenceData = conpoke(sysRecurrenceData, 8, [1, 1, 1, 1]);
+                break;
+        }
+
+        return sysRecurrenceData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mapEntityToDataSource</Name>
+				<Source><![CDATA[
+    public void mapEntityToDataSource(DataEntityRuntimeContext _entityCtx, DataEntityDataSourceRuntimeContext _dataSourceCtx)
+    {
+        
+        if (_dataSourceCtx.name() == dataEntityDataSourceStr(DNRObjectMaintenancePlanEntity, BOBObjectMaintenancePlan))
+        {
+            BOBMaintenancePlanType planType = BOBDefaultMaintenancePlan::findByRecId(this.DefaultPlanRecId).PlanType;
+
+            if (this.OverrideRecurrence && (planType == BOBMaintenancePlanType::TimeBased || planType == BOBMaintenancePlanType::TimeAndConsumptionBased))
+            {
+                FromDateTime recurrenceStartDT = this.RecurrenceStartDateTime ? this.RecurrenceStartDateTime : DateTimeUtil::getSystemDateTime();
+
+                this.RecurrenceData = SysRecurrence::defaultRecurrence();
+                this.RecurrenceData = SysRecurrence::setRecurrenceNoEnd(this.RecurrenceData);
+                this.RecurrenceData = SysRecurrence::setRecurrenceStartDateTime(this.RecurrenceData, recurrenceStartDT);
+                this.RecurrenceData = SysRecurrence::setRecurrenceUnit(this.RecurrenceData, this.RecurrenceUnitType, this.RecurrenceFrequency);
+
+                this.RecurrenceData = this.setRecurrenceData(this.RecurrenceData);
+                
+                if (this.RecurrenceEndAfter)
+                {
+                    this.RecurrenceData = SysRecurrence::setRecurrenceEndAfter(this.RecurrenceData, this.RecurrenceEndAfter);
+                }
+                else if (this.RecurrenceEndDate)
+                {
+                    this.RecurrenceData = SysRecurrence::setRecurrenceEndAfterDate(this.RecurrenceData, this.RecurrenceEndDate);
+                }
+            }
+            else
+            {
+                this.RecurrenceData = BOBDefaultMaintenancePlan::find(this.BOBDefaultMaintenancePlan_PlanCode).RecurrenceData;
+            }
+        }
+
+        super(_entityCtx, _dataSourceCtx);
+
+        if (this.InternalNote && _dataSourceCtx.name() == dataEntityDataSourceStr(DNRObjectMaintenancePlanEntity, BOBObjectMaintenancePlan))
+        {
+            BOBObjectMaintenancePlan    objectMaintenancePlan;
+
+            select objectMaintenancePlan where objectMaintenancePlan.RecId == this.RecId;
+            DNRAdditionalNoteTable::editNote(objectMaintenancePlan, fieldNum(DNRAdditionalNoteTable, InternalNote), NoYes::Yes , this.InternalNote);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>persistEntity</Name>
+				<Source><![CDATA[
+    public void persistEntity(DataEntityRuntimeContext _entityCtx)
+    {
+        this.skipDataSourceValidateField(fieldNum(BOBObjectMaintenancePlan, DefaultPlanRecId), true);
+        this.skipDataSourceValidateField(fieldNum(BOBObjectMaintenancePlan, MeterTableRecId),  true);
+        this.skipDataSourceValidateField(fieldNum(BOBObjectMaintenancePlan, RecurrenceUnit),   true);
+
+        super(_entityCtx);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR:BOMainPlansDoc</DeveloperDocumentation>
+	<Label>@DNR6981</Label>
+	<SubscriberAccessLevel>
+		<Read>Allow</Read>
+	</SubscriberAccessLevel>
+	<DataManagementEnabled>Yes</DataManagementEnabled>
+	<DataManagementStagingTable>DNRObjectMaintenancePlanStaging</DataManagementStagingTable>
+	<IsPublic>Yes</IsPublic>
+	<PrimaryKey>EntityKey</PrimaryKey>
+	<PublicCollectionName>DNRObjectMaintenancePlans</PublicCollectionName>
+	<PublicEntityName>DNRObjectMaintenancePlan</PublicEntityName>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>AdvanceMargin</Name>
+			<DataField>AdvanceMargin</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>CreationMethod</Name>
+			<DataField>CreationMethod</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DefaultPlanRecId</Name>
+			<AccessModifier>Internal</AccessModifier>
+			<Mandatory>No</Mandatory>
+			<DataField>DefaultPlanRecId</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>EnableWarning</Name>
+			<DataField>EnableWarning</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>MeterTableRecId</Name>
+			<AccessModifier>Internal</AccessModifier>
+			<DataField>MeterTableRecId</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>NextConsumption</Name>
+			<DataField>NextConsumption</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>NextDate</Name>
+			<DataField>NextDate</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>ObjectId</Name>
+			<DataField>ObjectId</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>RecurrenceData</Name>
+			<AccessModifier>Internal</AccessModifier>
+			<DataField>RecurrenceData</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>RecurrenceUnit</Name>
+			<AccessModifier>Internal</AccessModifier>
+			<DataField>RecurrenceUnit</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>RecurrenceValue</Name>
+			<DataField>RecurrenceValue</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>Reset</Name>
+			<DataField>Reset</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>WPPExternalTaskId</Name>
+			<DataField>WPPExternalTaskId</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>WPPMainTaskId</Name>
+			<DataField>WPPMainTaskId</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>WPPTemplateId</Name>
+			<DataField>WPPTemplateId</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>ReferenceType</Name>
+			<DataField>ReferenceType</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>ReferenceId</Name>
+			<DataField>ReferenceId</DataField>
+			<DataSource>BOBObjectMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>BOBDefaultMaintenancePlan_PlanCode</Name>
+			<Mandatory>No</Mandatory>
+			<DataField>PlanCode</DataField>
+			<DataSource>BOBDefaultMaintenancePlan</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>BOBMeterTable_MeterId</Name>
+			<Mandatory>No</Mandatory>
+			<DataField>MeterId</DataField>
+			<DataSource>BOBMeterTable</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>UnitOfMeasure_Symbol</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<Label>@SYS70583</Label>
+			<Mandatory>No</Mandatory>
+			<DataField>Symbol</DataField>
+			<DataSource>UnitOfMeasure</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldString">
+			<Name>FleetNumber</Name>
+			<IsComputedField>No</IsComputedField>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldString">
+			<Name>OpenWorkOrder</Name>
+			<IsComputedField>No</IsComputedField>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldString">
+			<Name>InternalNote</Name>
+			<ExtendedDataType>DNRAdditionalNote</ExtendedDataType>
+			<IsComputedField>No</IsComputedField>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldInt">
+			<Name>RecurrenceFrequency</Name>
+			<IsComputedField>No</IsComputedField>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldEnum">
+			<Name>RecurrenceUnitType</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<Label>@DNR:DataMgmtObjMntPlanEntity</Label>
+			<Mandatory>No</Mandatory>
+			<IsComputedField>No</IsComputedField>
+			<EnumType>SysRecurrenceUnit</EnumType>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldInt">
+			<Name>RecurrenceEndAfter</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<Label>@DNR:DataMgmtRecEndAfter</Label>
+			<Mandatory>No</Mandatory>
+			<IsComputedField>No</IsComputedField>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldDate">
+			<Name>RecurrenceEndDate</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<Label>@DNR:DataMgmtRecEndAfterDt</Label>
+			<Mandatory>No</Mandatory>
+			<ExtendedDataType>TransDate</ExtendedDataType>
+			<IsComputedField>No</IsComputedField>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldEnum">
+			<Name>OverrideRecurrence</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<Label>@DNR:DataMgmtOverrideRecurrence</Label>
+			<Mandatory>No</Mandatory>
+			<IsComputedField>No</IsComputedField>
+			<EnumType>NoYes</EnumType>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldUtcDateTime">
+			<Name>RecurrenceStartDateTime</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<Label>@DNR:DataMgmtRecurrenceStartDT</Label>
+			<Mandatory>No</Mandatory>
+			<ExtendedDataType>FromDateTime</ExtendedDataType>
+			<IsComputedField>No</IsComputedField>
+		</AxDataEntityViewField>
+	</Fields>
+	<Keys>
+		<AxDataEntityViewKey>
+			<Name>EntityKey</Name>
+			<Fields>
+				<AxDataEntityViewKeyField>
+					<DataField>ObjectId</DataField>
+				</AxDataEntityViewKeyField>
+				<AxDataEntityViewKeyField>
+					<DataField>BOBDefaultMaintenancePlan_PlanCode</DataField>
+				</AxDataEntityViewKeyField>
+			</Fields>
+		</AxDataEntityViewKey>
+	</Keys>
+	<Mappings />
+	<Ranges />
+	<Relations />
+	<StateMachines />
+	<ViewMetadata>
+		<Name>Metadata</Name>
+		<SourceCode>
+			<Methods>
+				<Method>
+					<Name>classDeclaration</Name>
+					<Source><![CDATA[
+[Query]
+public class Metadata extends QueryRun
+{
+}
+]]></Source>
+				</Method>
+			</Methods>
+		</SourceCode>
+		<DataSources>
+			<AxQuerySimpleRootDataSource>
+				<Name>BOBObjectMaintenancePlan</Name>
+				<DynamicFields>Yes</DynamicFields>
+				<Table>BOBObjectMaintenancePlan</Table>
+				<DataSources>
+					<AxQuerySimpleEmbeddedDataSource>
+						<Name>BOBDefaultMaintenancePlan</Name>
+						<DynamicFields>Yes</DynamicFields>
+						<IsReadOnly>Yes</IsReadOnly>
+						<Table>BOBDefaultMaintenancePlan</Table>
+						<DataSources />
+						<DerivedDataSources />
+						<Fields />
+						<Ranges />
+						<Relations>
+							<AxQuerySimpleDataSourceRelation>
+								<Name>BOBDefaultMaintenancePlan</Name>
+								<JoinRelationName>BOBDefaultMaintenancePlan</JoinRelationName>
+							</AxQuerySimpleDataSourceRelation>
+						</Relations>
+					</AxQuerySimpleEmbeddedDataSource>
+					<AxQuerySimpleEmbeddedDataSource>
+						<Name>BOBMeterTable</Name>
+						<DynamicFields>Yes</DynamicFields>
+						<IsReadOnly>Yes</IsReadOnly>
+						<Table>BOBMeterTable</Table>
+						<DataSources />
+						<DerivedDataSources />
+						<Fields />
+						<Ranges />
+						<JoinMode>OuterJoin</JoinMode>
+						<Relations>
+							<AxQuerySimpleDataSourceRelation>
+								<Name>BOBMeterTable</Name>
+								<JoinRelationName>BOBMeterTable</JoinRelationName>
+							</AxQuerySimpleDataSourceRelation>
+						</Relations>
+					</AxQuerySimpleEmbeddedDataSource>
+					<AxQuerySimpleEmbeddedDataSource>
+						<Name>UnitOfMeasure</Name>
+						<DynamicFields>Yes</DynamicFields>
+						<IsReadOnly>Yes</IsReadOnly>
+						<Table>UnitOfMeasure</Table>
+						<DataSources />
+						<DerivedDataSources />
+						<Fields />
+						<Ranges />
+						<JoinMode>OuterJoin</JoinMode>
+						<Relations>
+							<AxQuerySimpleDataSourceRelation>
+								<Name>UnitOfMeasure</Name>
+								<JoinRelationName>UnitOfMeasure</JoinRelationName>
+							</AxQuerySimpleDataSourceRelation>
+						</Relations>
+					</AxQuerySimpleEmbeddedDataSource>
+				</DataSources>
+				<DerivedDataSources />
+				<Fields />
+				<Ranges />
+				<GroupBy />
+				<Having />
+				<OrderBy />
+			</AxQuerySimpleRootDataSource>
+		</DataSources>
+	</ViewMetadata>
+</AxDataEntityView>

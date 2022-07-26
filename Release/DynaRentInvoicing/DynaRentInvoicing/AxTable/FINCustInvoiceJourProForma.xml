@@ -1,0 +1,3794 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCustInvoiceJourProForma</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class FINCustInvoiceJourProForma extends common
+{    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>calculateTotalProposalForForm</Name>
+				<Source><![CDATA[
+    public static container calculateTotalProposalForForm(FormDataSource _custInvoiceJourProFormaDS, CurrencyCode _currencyCode = '')
+    {
+        AmountCur totalProposalAmount;
+        AmountCur totalProposalAmountMST;
+        CurrencyCode totalProposalCurrencyCode;
+        boolean forceCurrencyCode;
+        // If possible show total amount in common currency of the invoice proposals. If proposals have different currencies then show total amount in MST.
+        boolean useCompanyCurrency = false;
+        CurrencyCode companyCurrencyCode = Ledger::accountingCurrency();
+
+        if (_currencyCode)
+        {
+            totalProposalCurrencyCode = _currencyCode;
+            // It is possible to force recalculation of amount to a specific currency
+            forceCurrencyCode = true;
+        }
+
+        if (_custInvoiceJourProFormaDS)
+        {
+            QueryRun                    queryRun = new QueryRun(_custInvoiceJourProFormaDS.query());
+            FINCustInvoiceJourProForma  custInvoiceJourProForma = queryRun.get(tableNum(FINCustInvoiceJourProForma));
+            AmountCur                   proposalAmount;
+            AmountCur                   proposalAmountMST;
+            CurrencyCode                proposalCurrencyCode;
+
+            [proposalAmount, proposalAmountMST, proposalCurrencyCode] = custInvoiceJourProForma.getProposalAmounts();
+
+            if (!totalProposalCurrencyCode)
+            {
+                totalProposalCurrencyCode = proposalCurrencyCode;
+            }
+
+            if (forceCurrencyCode && totalProposalCurrencyCode != proposalCurrencyCode)
+            {
+                proposalAmount = CurrencyExchangeHelper::curAmount2CurAmount(proposalAmount, proposalCurrencyCode, totalProposalCurrencyCode, custInvoiceJourProForma.InvoiceDate);
+            }
+
+            totalProposalAmount += proposalAmount;
+            totalProposalAmountMST += proposalAmountMST;
+
+            while (queryRun.next())
+            {                
+                if (queryRun.changed(tableNum(FINCustInvoiceJourProForma)))
+                {
+                    custInvoiceJourProForma = queryRun.get(tableNum(FINCustInvoiceJourProForma));
+
+                    [proposalAmount, proposalAmountMST, proposalCurrencyCode] = custInvoiceJourProForma.getProposalAmounts();
+                                      
+                    // If summed up proposals have different curriencies then use MST unless the amount needs to be displayed in a specific currency.
+                    if (!forceCurrencyCode && totalProposalCurrencyCode != proposalCurrencyCode)
+                    {
+                        useCompanyCurrency = true;
+                    }
+
+                    if (!useCompanyCurrency && forceCurrencyCode && totalProposalCurrencyCode != proposalCurrencyCode)
+                    {
+                        proposalAmount = CurrencyExchangeHelper::curAmount2CurAmount(proposalAmount, proposalCurrencyCode, totalProposalCurrencyCode, custInvoiceJourProForma.InvoiceDate);
+                    }
+
+                    totalProposalAmount += proposalAmount;
+                    totalProposalAmountMST += proposalAmountMST;
+                }
+            }
+        }
+
+        if (useCompanyCurrency)
+        {
+            totalProposalAmount = totalProposalAmountMST;
+            totalProposalCurrencyCode = companyCurrencyCode;
+        }
+
+        return [totalProposalAmount, totalProposalCurrencyCode];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProposalAmounts</Name>
+				<Source><![CDATA[
+    private container getProposalAmounts()
+    {
+        return [this.InvoiceAmount, this.InvoiceAmountMST, this.CurrencyCode];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyFromToProforma</Name>
+				<Source><![CDATA[
+    public static Common copyFromToProforma(Common _commonFrom, Common _commonTo)
+    {
+        SysDictTable    dictTable = new SysDictTable(_commonTo.TableId);
+        SysDictField    dictField;
+        FieldId         fieldId = dictTable.fieldNext(0);
+        
+        while (fieldId)
+        {
+            dictField = dictTable.fieldObject(fieldId);
+
+            if (dictField.isSql() && !dictField.isSystem())
+            {
+                FieldName fieldName = dictField.name();
+                FieldId fieldIdFrom = fieldName2Id(_commonFrom.TableId, fieldName);
+
+                if (fieldIdFrom)
+                {
+                    _commonTo.(dictField.id()) = _commonFrom.(fieldIdFrom);
+                }
+            }
+
+            fieldId = dictTable.fieldNext(fieldId);
+        }
+
+        return _commonTo;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>approveCurrentVersion</Name>
+				<Source><![CDATA[
+    public void approveCurrentVersion() 
+    {
+        // Increments current version number to match correction if there is any.
+        Version proformaVersion = FINManualPriceComponentProforma::getHighestVersionNumber(this.InvoiceId, this.SalesId);
+
+        if (this.ProFormaInvoiceVersion <  proformaVersion)
+        {
+            ttsbegin;
+            
+            this.approveManualPriceToCharges();
+
+            this.selectForUpdate(true);
+            this.ProFormaInvoiceVersion = proformaVersion;
+            this.update();
+
+            FINCustInvoiceTransProForma custInvoiceTransProForma;
+
+            update_recordset custInvoiceTransProForma
+            setting ProFormaInvoiceVersion = proformaVersion
+            where custInvoiceTransProForma.InvoiceId == this.InvoiceId
+            &&    custInvoiceTransProForma.InvoiceDate == this.InvoiceDate
+            &&    custInvoiceTransProForma.NumberSequenceGroup == this.NumberSequenceGroup
+            &&    custInvoiceTransProForma.SalesId == this.SalesId;
+
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isInvoicePosted</Name>
+				<Source><![CDATA[
+    public boolean isInvoicePosted()
+    {
+        boolean ret = false;
+        CustInvoiceJour custInvoiceJour;
+
+        select firstonly RecId from custInvoiceJour
+        where  custInvoiceJour.InvoiceAccount == this.InvoiceAccount
+        &&     custInvoiceJour.InvoiceId == this.InvoiceId
+        &&     custInvoiceJour.LedgerVoucher == this.LedgerVoucher;
+
+        if (custInvoiceJour)
+        {
+            ret = true;
+        }
+            
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>custTrans</Name>
+				<Source><![CDATA[
+    public CustTrans custTrans()
+    {
+        CustTrans custTrans;
+        
+        select firstonly custTrans
+        where custTrans.AccountNum  == this.InvoiceAccount
+        &&    custTrans.TransDate   == this.InvoiceDate
+        &&    custTrans.Invoice     == this.InvoiceId
+        &&    custTrans.Voucher     == this.LedgerVoucher;
+        
+        return custTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>invoiceName</Name>
+				<Source><![CDATA[
+    display CustName invoiceName()
+    {
+        return this.custTable_InvoiceAccount().name();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>custTable_InvoiceAccount</Name>
+				<Source><![CDATA[
+    public CustTable custTable_InvoiceAccount(boolean update = false)
+    {
+        return CustTable::find(this.InvoiceAccount, update);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>custTable_OrderAccount</Name>
+				<Source><![CDATA[
+    public CustTable custTable_OrderAccount(boolean update = false)
+    {
+        return CustTable::find(this.OrderAccount, update);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>billingClassification</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display BillingClassification billingClassification()
+    {
+        return CustBillingClassification::find(CustTrans::findFromInvoice(this.InvoiceId).CustBillingClassification).BillingClassification;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>contributionMargin</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display SalesContributionMargin contributionMargin()
+    {
+        SalesContributionMargin contributionMargin;
+        FINCustInvoiceTransProForma custInvoiceTrans;
+        boolean linesFound = false;
+        
+        while select custInvoiceTrans
+        index hint InvoiceIdx
+        where custInvoiceTrans.SalesId == this.SalesId
+        &&    custInvoiceTrans.InvoiceDate == this.InvoiceDate
+        &&    custInvoiceTrans.InvoiceId == this.InvoiceId
+        &&    custInvoiceTrans.NumberSequenceGroup == this.NumberSequenceGroup
+        {
+            contributionMargin += custInvoiceTrans.calcContributionMargin(this); 
+            linesFound = true;
+        }
+        
+        if (!linesFound)
+        {
+            contributionMargin = this.SalesBalance;
+        }
+        
+        return contributionMargin;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>companyInfo</Name>
+				<Source><![CDATA[
+    public CompanyInfo companyInfo()
+    {
+        return CompanyInfo::findDataArea(this.company());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>contactPersonName</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display ContactPersonName contactPersonName()
+    {
+        return ContactPerson::name(this.ContactPersonId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>contributionMarginMST</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display SalesContributionMarginMST contributionMarginMST()
+    {
+        SalesContributionMarginMST contributionMargin;
+        CustInvoiceTrans custInvoiceTrans;
+        boolean linesFound;
+        
+        while select custInvoiceTrans
+        index hint InvoiceIdx
+        where custInvoiceTrans.SalesId == this.SalesId
+        &&    custInvoiceTrans.InvoiceDate == this.InvoiceDate
+        &&    custInvoiceTrans.InvoiceId == this.InvoiceId
+        &&    custInvoiceTrans.NumberSequenceGroup == this.NumberSequenceGroup
+        {
+            contributionMargin += custInvoiceTrans.contributionMarginMST();
+            linesFound = true;
+        }
+        
+        if (!linesFound)
+        {
+            contributionMargin = this.SalesBalanceMST;
+        }
+        
+        return contributionMargin;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>contributionRatio</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display SalesContributionRatio contributionRatio()
+    {
+        if (this.SalesBalance)
+        {
+            return (this.contributionMargin() / this.SalesBalance) * 100;
+        }
+        
+        return 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deliveryAddress</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display LogisticsAddressing deliveryAddress()
+    {
+        return DirUtility::replaceAddressTokenLanguage(LogisticsPostalAddress::findRecId(this.DeliveryPostalAddress), this.LanguageId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>salesTable</Name>
+				<Source><![CDATA[
+    public SalesTable salesTable(boolean _update = false)
+    {
+        SalesTable salesTable;
+                
+        if (this.SalesId)
+        {
+            salesTable = SalesTable::find(this.SalesId, _update);
+        }
+        
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateMultiSelectPosting</Name>
+				<Source><![CDATA[
+    public boolean validateMultiSelectPosting(FINCustInvoiceJournalProformaAction _action)
+    {
+        boolean ret = true;
+        boolean isInvoicePosted = this.IsProFormaInvoiceActive && this.isInvoicePosted();
+        boolean isActiveNotPosted = this.IsProFormaInvoiceActive && !isInvoicePosted;
+        boolean isActiveNotApproved = isActiveNotPosted && this.ProFormaInvoiceVersion < FINManualPriceComponentProforma::getHighestVersionNumber(this.InvoiceId, this.SalesId);
+
+        if (isInvoicePosted)
+        {
+            ret = checkFailed(strFmt("@DNR:Placeholder12",
+                                     strFmt("@DNR:FailedToProcessRentalInvoiceProposalX", this.InvoiceId),
+                                     "@DNR:InvoiceProposalAlreadyPosted"));
+        }
+
+        if (ret && !this.IsProFormaInvoiceActive)
+        {
+            ret = checkFailed(strFmt("@DNR:Placeholder12",
+                                     strFmt("@DNR:FailedToProcessRentalInvoiceProposalX", this.InvoiceId),
+                                     "@DNR:InvoiceProposalNotActive"));
+        }
+
+        if (ret && _action == FINCustInvoiceJournalProformaAction::Post && isActiveNotApproved)
+        {
+            ret = checkFailed(strFmt("@DNR:Placeholder12",
+                                     strFmt("@DNR:FailedToProcessRentalInvoiceProposalX", this.InvoiceId),
+                                     "@DNR:InvoiceProposalNotApproved"));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findRecId</Name>
+				<Source><![CDATA[
+    public static FINCustInvoiceJourProForma findRecId(RecId    _recId, boolean  _forUpdate = false)
+    {
+        FINCustInvoiceJourProForma custInvoiceJourProForma;
+
+        if (_recId)
+        {
+            custInvoiceJourProForma.selectForUpdate(_forUpdate);
+
+            select firstonly custInvoiceJourProForma
+            where custInvoiceJourProForma.RecId == _recId;
+        }
+
+        return custInvoiceJourProForma;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>restoreMarkupForSalesOrder</Name>
+				<Source><![CDATA[
+    public static Set restoreMarkupForSalesOrder(RefRecId _parmProformaInvoiceJourRecId, SalesTable _salesTable)
+    {
+        Set RecIdSet = new Set(Types::Int64);
+
+        FINCustInvoiceJourProforma  custInvoiceJourProForma = FINCustInvoiceJourProforma::findRecId(_parmProformaInvoiceJourRecId);
+        FINCustInvoiceTransProforma custInvoiceTransProforma;
+        MarkupTrans markupTrans;
+        SalesLine   salesLine;
+
+        if (custInvoiceJourProForma)
+        {
+            while select markupTrans
+            where markupTrans.TransRecId   == custInvoiceJourProForma.RecId
+            &&    markupTrans.TransTableId == custInvoiceJourProForma.TableId
+            &&    markupTrans.OrigTableId  == _salesTable.TableId
+            &&    markupTrans.OrigRecId    == _salesTable.RecId
+            &&    markupTrans.Keep         == NoYes::No
+            &&   !markupTrans.IsDeleted
+            {
+                markupTrans.LineNum = MarkupTrans::lastLineNum(_salesTable.TableId, _salesTable.RecId) + 1;
+
+                RecId recId = Markup::copySingleMarkupTrans(false, markupTrans, _salesTable.CurrencyCode, custInvoiceJourProForma, _salesTable, false, markupTrans).RecId;
+                recIdSet.add(recId);
+            }
+
+            while select custInvoiceTransProforma
+            where custInvoiceTransProForma.InvoiceId        == custInvoiceJourProForma.InvoiceId
+            && custInvoiceTransProForma.InvoiceDate         == custInvoiceJourProForma.InvoiceDate
+            && custInvoiceTransProForma.NumberSequenceGroup == custInvoiceJourProForma.NumberSequenceGroup
+            && custInvoiceTransProForma.SalesId             == custInvoiceJourProForma.SalesId
+                join SalesId from salesLine
+                where salesLine.inventTransId == custInvoiceTransProForma.inventTransId
+                    join markupTrans
+                    where markupTrans.TransRecId   == custInvoiceTransProForma.RecId
+                    &&    markupTrans.TransTableId == custInvoiceTransProForma.TableId
+                    &&    markupTrans.OrigTableId  == salesLine.TableId
+                    &&    markupTrans.OrigRecId    == salesLine.RecId
+                    &&    markupTrans.Keep         == NoYes::No
+                    &&   !markupTrans.IsDeleted
+        
+            {
+                markupTrans.LineNum = MarkupTrans::lastLineNum(salesLine.TableId, salesLine.RecId) + 1;
+
+                RecId recId = Markup::copySingleMarkupTrans(false, markupTrans, _salesTable.CurrencyCode, custInvoiceTransProForma, salesLine, false, markupTrans).RecId;
+                recIdSet.add(recId);
+            }
+        }
+
+        return RecIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>approveManualPriceToCharges</Name>
+				<Source><![CDATA[
+    public void approveManualPriceToCharges()
+    {
+        FINInvoiceCalcResult            calcResult;
+        FINCustInvoiceTransProForma     custInvoiceTransProForma;
+        FINManualPriceComponentProforma manualPriceComponentProforma;
+        SalesTable                      salesTable;
+        salesLine                       salesLine;
+        MarkupTrans                     markupTrans;
+        container                       cacheCon;
+        RecordInsertList                insertList = new RecordInsertList(tableNum(MarkupTrans));
+        Set                             recIdSet   = new Set(Types::Int64);
+        Map                             lineNumMap = new Map(Types::Int64, Types::Real);
+
+        // Add Manual Price component(correction) to the list of Charges of Invoice Proposal line
+        while select RecId from custInvoiceTransProForma
+        where custInvoiceTransProForma.InvoiceId           == this.InvoiceId
+        &&    custInvoiceTransProForma.InvoiceDate         == this.InvoiceDate
+        &&    custInvoiceTransProForma.NumberSequenceGroup == this.NumberSequenceGroup
+        &&    custInvoiceTransProForma.SalesId             == this.SalesId
+            join FINRentalConceptCode from salesTable
+            where salesTable.SalesId == custInvoiceTransProForma.SalesId
+                join salesLine
+                where salesLine.InventTransid == custInvoiceTransProForma.InventTransId
+                    join  AmountCur from manualPriceComponentProforma
+                    where manualPriceComponentProforma.TransTableId             == custInvoiceTransProForma.TableId
+                    &&    manualPriceComponentProforma.TransRecId               == custInvoiceTransProForma.RecId
+                    &&    manualPriceComponentProforma.ProFormaInvoiceVersion   >  this.ProFormaInvoiceVersion
+                    
+        {
+            cacheCon   = FINInvoicePosting::getMarkupCodeCached(salesLine, FINRentalAccountType::Manual, salesTable.FINRentalConceptCode);
+            calcResult = FINInvoiceCalcResult::construct(FINRentalAccountType::Manual, manualPriceComponentProforma.AmountCur);
+            calcResult.initFromCacheContainer(cacheCon);
+                
+            markupTrans.clear();
+            markupTrans.TransTableId = custInvoiceTransProForma.TableId;
+            markupTrans.TransRecId   = custInvoiceTransProForma.RecId;
+                
+            if (lineNumMap.exists(markupTrans.TransRecId))
+            {
+                markupTrans.LineNum = lineNumMap.lookup(markupTrans.TransRecId) + 1;
+            }
+            else
+            {
+                markupTrans.LineNum = MarkupTrans::lastLineNum(markupTrans.TransTableId, markupTrans.TransRecId) + 1;
+            }
+            lineNumMap.insert(markupTrans.TransRecId, markupTrans.LineNum);
+
+            markupTrans.FINInitFromInvoiceCalcResult(calcResult);
+            markupTrans.FINInitFromRentalLine(salesLine);
+
+            if (calcResult.isReversal && calcResult.markupTransRecId)
+            {
+                MarkupTrans markupTransInvoiced = markupTrans::findRecId(calcResult.markupTransRecId);
+                markupTrans.TaxGroup = markupTransInvoiced.TaxGroup;
+                markupTrans.TaxItemGroup = markupTransInvoiced.TaxItemGroup;
+            }
+                                
+            insertList.add(markupTrans);
+        }
+
+        if (insertList.insertDatabase() > 0)  // in case of any Manual Price component transfered we need to recalculate totals
+        {
+            while select custInvoiceTransProForma
+            where custInvoiceTransProForma.InvoiceId           == this.InvoiceId
+            &&    custInvoiceTransProForma.InvoiceDate         == this.InvoiceDate
+            &&    custInvoiceTransProForma.NumberSequenceGroup == this.NumberSequenceGroup
+            &&    custInvoiceTransProForma.SalesId             == this.SalesId
+                join salesLine
+                where salesLine.InventTransid == custInvoiceTransProForma.InventTransId
+            {
+                recIdSet = Set::union(recIdSet, this.copyMarkupTransForCustInvoiceTrans(salesLine, custInvoiceTransProForma));
+            }
+        
+            SalesParmTable salesParmTable;
+
+            select salesParmTable where salesParmTable.parmId == this.ParmId 
+                && salesParmTable.SalesId == this.SalesId;
+
+            SalesParmUpdate salesParmUpdate = salesParmTable.salesParmUpdate();
+
+            SalesTotals salesTotals = SalesTotals::construct(salesParmTable, salesParmUpdate.SpecQty, AccountOrder::None, salesParmTable.ParmId, '', salesParmTable.Ordering);
+            salesTotals.calc();
+
+            this.initFromSalesTotals(salesTotals);
+            this.calcMSTAmounts();
+            this.update();
+
+            FINMarkupTransGenerator::deleteMarkupTransForSet(recIdSet);
+        }
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromSalesTotals</Name>
+				<Source><![CDATA[
+    void initFromSalesTotals(SalesTotals _salesTotals, AmountCur _cashDiscAmount = 0, boolean _installmentEligible = false)
+    {
+        this.Qty    = _salesTotals.totalQty();
+        this.Weight = _salesTotals.totalWeight();
+        this.Volume = _salesTotals.totalVolume();
+        this.SalesBalance = _salesTotals.totalBalance();
+        this.EndDisc = _salesTotals.totalEndDisc();
+        
+        if (TaxParameters::find().CashDiscOnInvoice)
+        {
+            GlobalizationInstrumentationHelper::featureRun(GlobalizationConstants::FeatureReferenceES00021, funcName());
+            this.CashDisc = _cashDiscAmount;
+        }
+        else
+        {
+            this.CashDisc = _salesTotals.totalCashDisc();
+        }
+        
+        this.SumMarkup = _salesTotals.totalMarkup();
+        this.SumTax = _salesTotals.totalTaxAmount();
+        this.SumLineDisc = _salesTotals.totalLineDisc();
+        this.InvoiceRoundOff = _salesTotals.totalRoundOff();
+        this.InvoiceAmount = _salesTotals.totalAmount();
+        this.ReverseChargeAmount = _salesTotals.totalTaxReverseCharge();
+        
+        SalesTable salesTable = this.salesTable();
+        if (RetailMCRChannelTable::mcrEnableOrderCompletion(salesTable))
+        {
+            AmountCur markupinstallment = _salesTotals.mcrReturnInstallmentEligibleMarkUpTotal();
+            
+            if (this.SumMarkup == markupinstallment
+                && !_installmentEligible)
+            {
+                MCRSalesOrderType mcrSalesOrderType = salesTable.mcrEvalSalesOrderType(); 
+                
+                if (mcrSalesOrderType == MCRSalesOrderType::InstallmentOnly
+                    || mcrSalesOrderType == MCRSalesOrderType::OrderAndInstallment)
+                {
+                    this.InvoiceAmount = this.InvoiceAmount - markupinstallment;
+                }
+            }
+        }
+        
+        if (!TaxSolutionScopeIntegrationUtil::isCompanyEnabled() && TaxParameters::isCustomsEnable_IN())
+        {
+            this.InvoiceAmount = this.InvoiceAmount + _salesTotals.tax().getCustomsDuty_IN();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>amountMST</Name>
+				<Source><![CDATA[
+    AmountMST amountMST(AmountCur amountCur)
+    {
+        return CurrencyExchangeHelper::mstAmount(amountCur, this.CurrencyCode, this.InvoiceDate, Currency::noYes2UnknownNoYes(this.Triangulation), this.ExchRate, this.ExchRateSecondary);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcMSTAmounts</Name>
+				<Source><![CDATA[
+    public void calcMSTAmounts()
+    {
+        this.InvoiceAmountMST = this.amountMST(this.InvoiceAmount);
+        this.InvoiceRoundOffMST = this.amountMST(this.InvoiceRoundOff);
+        this.SumMarkupMST = this.amountMST(this.SumMarkup);
+        this.SumLineDiscMST = this.amountMST(this.SumLineDisc);
+        this.EndDiscMST = this.amountMST(this.EndDisc);
+        this.SalesBalanceMST = this.amountMST(this.SalesBalance);
+        this.SumTaxMST = this.amountMST(this.SumTax);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyMarkupTransForCustInvoiceTrans</Name>
+				<Source><![CDATA[
+    public Set copyMarkupTransForCustInvoiceTrans(SalesLine _salesLine, FinCustInvoiceTransProForma _custInvoiceTransProForma)
+    {
+        MarkupTrans     oldMarkupTrans;
+        Set RecIdSet = new Set(Types::Int64);
+
+        while select oldMarkupTrans
+        where oldMarkupTrans.TransTableId == _custInvoiceTransProForma.TableId &&
+              oldMarkupTrans.TransRecId   == _custInvoiceTransProForma.RecId   &&
+              !oldMarkupTrans.IsDeleted
+        {
+            recIdSet.add(Markup::copySingleMarkupTrans(false, oldMarkupTrans, _custInvoiceTransProForma.CurrencyCode, _custInvoiceTransProForma, _salesLine, false, oldMarkupTrans).RecId);
+        }
+
+        return recIdSet;
+
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<ConfigurationKey>LedgerBasic</ConfigurationKey>
+	<DeveloperDocumentation>@DNR:FINCustInvoiceJourProFormaDevDoc</DeveloperDocumentation>
+	<FormRef>CustInvoiceJournal</FormRef>
+	<Label>@SYS1557</Label>
+	<TableGroup>Transaction</TableGroup>
+	<TitleField1>InvoiceId</TitleField1>
+	<TitleField2>InvoiceAccount</TitleField2>
+	<CacheLookup>NotInTTS</CacheLookup>
+	<CreatedBy>Yes</CreatedBy>
+	<CreatedDateTime>Yes</CreatedDateTime>
+	<ModifiedDateTime>Yes</ModifiedDateTime>
+	<DeleteActions>
+		<AxTableDeleteAction>
+			<Name>CustInvoiceTrans</Name>
+			<DeleteAction>Cascade</DeleteAction>
+			<Relation></Relation>
+			<Table>FINCustInvoiceTransProForma</Table>
+		</AxTableDeleteAction>
+	</DeleteActions>
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OrderAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LedgerVoucher</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CurrencyCode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmount</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LedgerVoucher</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CurrencyCode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmount</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Amount</Name>
+			<Label>@SYS12227</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceRoundOff</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SumMarkup</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OnAccountAmount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SumLineDisc</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EndDisc</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesBalance</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SumTax</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AmountInDefaultCurrency</Name>
+			<Label>@SYS84859</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmountMST</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceRoundOffMST</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SumMarkupMST</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SumLineDiscMST</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EndDiscMST</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesBalanceMST</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SumTaxMST</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Balance</Name>
+			<Label>@SYS343995</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>SalesBalance</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>BankLCExportGroup</Name>
+			<Label>@SYS316286</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>BankLCExportLine</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>BillOfLading</Name>
+			<Label>@SYS50700</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>BillOfLadingId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>CountryRegion</Name>
+			<Label>@SYS7437</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>LanguageId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CurrencyCode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExchRate</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Currency</Name>
+			<Label>@SYS7572</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>CurrencyCode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExchRate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExchRateSecondary</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Triangulation</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Customer</Name>
+			<Label>@SYS302</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OrderAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OneTimeCustomer</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CustGroup</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LanguageId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PostingProfile</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>numberSequenceGroup</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CustomerRef</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ContactPersonId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Data</Name>
+			<Label>@SYS7403</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>Qty</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Volume</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Weight</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Delivery</Name>
+			<Label>@SYS4508</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>DeliveryName</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>DeliveryAddress</Name>
+			<Label>@SYS7924</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>DeliveryName</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>deliveryAddress</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Dimension</Name>
+			<Label>@SYS14926</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>DefaultDimension</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Document</Name>
+			<Label>@SYS101280</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>DocumentNum</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>DocumentDate</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>EInvoice</Name>
+			<Label>@SYS100769</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>EInvoiceLineSpecific</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EInvoiceAccountCode</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>ForeignTrade</Name>
+			<Label>@SYS27650</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>IntrastatDispatch</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Listcode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>IntrastatFulfillmentDate_HU</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Intercompany</Name>
+			<Label>@SYS74106</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InterCompanyCompanyId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InterCompanyPurchId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InterCompanyPosted</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Invoice</Name>
+			<Label>@SYS12128</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>DueDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CashDiscDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CashDisc</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>InvoiceAddress</Name>
+			<Label>@SYS58074</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoicingName</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoicePostalAddress</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>InvoiceAmount</Name>
+			<Label>@SYS9458</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmount</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Ledger</Name>
+			<Label>@SYS13356</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>LedgerVoucher</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Log</Name>
+			<Label>@SYS2515</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>Log</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>OLAP</Name>
+			<Label>@SYS25984</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OLAPCostValue</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Other</Name>
+			<Label>@SYS30289</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>MCRDueAmount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>MCREmail</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>MCRPaymAmount</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Overview</Name>
+			<Label>@SYS9039</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LedgerVoucher</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CurrencyCode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmount</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Payment</Name>
+			<Label>@SYS828</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>Payment</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PaymDayId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>FixedDueDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CashDiscCode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CashDiscPercent</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PaymId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>DirectDebitMandate</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>PaymentSchedule</Name>
+			<Label>@SYS23027</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>PaymentSched</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>PrintingSpecifications</Name>
+			<Label>@SYS28138</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>Updated</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TaxSpecifyByLine</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TaxPrintOnInvoice</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>GiroType</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>PrintManagement</Name>
+			<Label>@SYS54502</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>Proforma</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PrintedOriginals</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>PrintSite</Name>
+			<Label>@SYS110380</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>PrintMgmtSiteId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>ReasonCode_W</Name>
+			<Label>@SYS114719</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ReasonTableRef</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Reference</Name>
+			<Label>@SYS15217</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>RefNum</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CovStatus</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ParmId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Reversal</Name>
+			<Label>@SYS8776</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ReversedRecId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>ReverseCharge</Name>
+			<Label>@SYS118818</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>RCSalesList_UK</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ReverseChargeAmount</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>SalesInvoices</Name>
+			<Label>@SYS9954</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>DeliveryName</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>contactPersonName</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmount</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>SalesOrder</Name>
+			<Label>@SYS9694</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>SalesId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>WorkerSalesTaker</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PurchaseOrder</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Backorder</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ReturnItemNum</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesType</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EUSalesList</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InclTax</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesOriginId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>SalesTax</Name>
+			<Label>@SYS5878</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>TaxGroup</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TaxItemGroup</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>VATNum</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EnterpriseNumber</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TaxInvoiceSalesId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>SourceDocumentHeader</Name>
+			<Label>@SYS127863</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>SourceDocumentHeader</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SourceDocumentLine</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>TermsOfDelivery</Name>
+			<Label>@SYS6576</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>DlvTerm</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>DlvMode</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Warehouse</Name>
+			<Label>@SYS6437</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>inventLocationId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>WebOverviewLeft</Name>
+			<Label>@SYS12128</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>billingClassification</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LedgerVoucher</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PurchaseOrder</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>WebOverviewRight</Name>
+			<Label>@SYS62786</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>CurrencyCode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SumMarkup</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SumTax</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EndDisc</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Return</Name>
+			<Label>@SYS101133</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ReturnReasonCodeId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ReturnStatus</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>CFDI</Name>
+			<Label>@Mexico:EInvoice_CustInvoiceJour_CFDITableGroup</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LedgerVoucher</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceAmount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>ProvisionalAssessment_IN</Name>
+			<Label>@TaxGST:ProvisionalAssessment</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ProvisionalAssessment_IN</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Proforma</Name>
+			<Label>@Proj:Proforma</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ProFormaInvoiceVersion</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>IsProFormaInvoiceActive</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ApprovalStatus</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ApprovalExpiryDate</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>OrderAccount</Name>
+			<AssetClassification>Customer Content </AssetClassification>
+			<ExtendedDataType>CustAccount</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InvoiceId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustInvoiceId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Backorder</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<Label>@SYS14224</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>BankLCExportLine</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>BankLCLineRefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>BillOfLadingId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>WMSBillOfLadingId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>CashDisc</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustCashDiscAmount</ExtendedDataType>
+			<Label>@SYS4376</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>CashDiscBaseDate</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CashDiscBaseDate</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>CashDiscCode</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustCashDiscCode</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>CashDiscDate</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustCashDiscDate</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>CashDiscPercent</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<CountryRegionCodes>ES</CountryRegionCodes>
+			<ExtendedDataType>DiscPct</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ContactPersonId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>ContactPersonId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>CovStatus</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CovStatus</ExtendedDataType>
+			<Label>@SYS5727</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>CurrencyCode</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustCurrencyCode</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>CustGroup</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustGroupId</ExtendedDataType>
+			<Label>@SYS3815</Label>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>CustomerRef</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustRef</ExtendedDataType>
+			<Label>@SYS12056</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>DefaultDimension</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>DimensionDefault</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>DeliveryName</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustName</ExtendedDataType>
+			<GroupPrompt>@SYS7399</GroupPrompt>
+			<Label>@SYS22058</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>DeliveryPostalAddress</Name>
+			<AllowEdit>No</AllowEdit>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>LogisticsPostalAddressRecId</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>DirectDebitMandate</Name>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>CustDirectDebitMandateRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>DlvMode</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustDlvModeId</ExtendedDataType>
+			<GroupPrompt>@SYS8722</GroupPrompt>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>DlvTerm</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustDlvTermId</ExtendedDataType>
+			<GroupPrompt>@SYS5280</GroupPrompt>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>DocumentDate</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>DocumentDate</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>DocumentNum</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>DocumentNum</ExtendedDataType>
+			<Label>@SYS8434</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>DueDate</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>DueDate</ExtendedDataType>
+			<Label>@SYS14021</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>EInvoiceAccountCode</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>EInvoiceAccountCode</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>EInvoiceLineSpecific</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>EInvoiceLineSpecific</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>EndDisc</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesEndDiscAmount</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>EndDiscMST</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesEndDiscAmountMST</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>EnterpriseNumber</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxEnterpriseNumber</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>EUSalesList</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>ListDispatchId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>ExchRate</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustExchRate</ExtendedDataType>
+			<Label>@SYS4193</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>ExchRateSecondary</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>ExchrateSecondary</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>FixedDueDate</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesFixedDueDate</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>GiroType</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>PaymentStubInvoiceId</ExtendedDataType>
+			<EnumType>PaymentStub</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>InclTax</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>InclTax</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InterCompanyCompanyId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>InterCompanyCompanyId</ExtendedDataType>
+			<Label>@SYS75317</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>InterCompanyPosted</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>InterCompanyPosted</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InterCompanyPurchId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>InterCompanyPurchId</ExtendedDataType>
+			<Label>@SYS75319</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>IntrastatDispatch</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>IntrastatDispatchId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>IntrastatFulfillmentDate_HU</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>IntrastatFulfillmentDate_HU</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>inventLocationId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesInventLocationId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InvoiceAccount</Name>
+			<AssetClassification>Customer Content </AssetClassification>
+			<ExtendedDataType>CustInvoiceAccount</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>InvoiceAmount</Name>
+			<AssetClassification>Customer Content </AssetClassification>
+			<ExtendedDataType>AmountCur</ExtendedDataType>
+			<Label>@SYS9458</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>InvoiceAmountMST</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>AmountMST</ExtendedDataType>
+			<Label>@SYS71013</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>InvoiceDate</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TransDate</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>InvoicePostalAddress</Name>
+			<AllowEdit>No</AllowEdit>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>LogisticsPostalAddressRecId</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>InvoiceRoundOff</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>RoundOff</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>InvoiceRoundOffMST</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>RoundOffMST</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InvoicingName</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustName</ExtendedDataType>
+			<Label>@SYS58518</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>IsCorrection</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<Label>@SYS6054</Label>
+			<Visible>No</Visible>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>LanguageId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustLanguageId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>LedgerVoucher</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>Voucher</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Listcode</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>ListcodeId</ExtendedDataType>
+			<EnumType>Listcode</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>Log</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>LogText</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>MCRDueAmount</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>AmountCur</ExtendedDataType>
+			<Label>@MCR11275</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>MCREmail</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>Email</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>MCRPaymAmount</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>AmountCur</ExtendedDataType>
+			<Label>@SYS15658</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>numberSequenceGroup</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>NumberSequenceGroupId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>OLAPCostValue</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesCostValue</ExtendedDataType>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>OnAccountAmount</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>AmountCur</ExtendedDataType>
+			<Label>@SYS7659</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>OneTimeCustomer</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>OneTimeCustomer</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldContainer">
+			<Name>PackedExtensions</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SysExtensionSerializerPackedContainer</ExtendedDataType>
+			<SaveContents>No</SaveContents>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ParmId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>ParmId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>PaymDayId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustPaymDayId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>Payment</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustPaymTermId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>PaymentSched</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>PaymSchedId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>PaymId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>PaymId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>PostingProfile</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustPostingProfile</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Prepayment</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustVendPrepayment</ExtendedDataType>
+			<Visible>No</Visible>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>PrintedOriginals</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>PrintedOriginals</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>PrintMgmtSiteId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>InventSiteId</ExtendedDataType>
+			<Label>@SYS110380</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Proforma</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustVendProforma</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>PurchaseOrder</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>CustPurchaseOrder</ExtendedDataType>
+			<Label>@SYS9452</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>Qty</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ConfigurationKey>LogisticsBasic</ConfigurationKey>
+			<ExtendedDataType>SalesQty</ExtendedDataType>
+			<Label>@SYS14578</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>RCSalesList_UK</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<CountryRegionCodes>GB</CountryRegionCodes>
+			<ExtendedDataType>RCListDispatchId_UK</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>ReasonTableRef</Name>
+			<AllowEdit>No</AllowEdit>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>ReasonTableRefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>ReceiptDateConfirmed_ES</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<CountryRegionCodes>ES,HU</CountryRegionCodes>
+			<ExtendedDataType>SalesReceiptDateConfirmed</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>RefNum</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<Label>@SYS1201</Label>
+			<EnumType>RefNum</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ReturnItemNum</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>ReturnItemNum</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ReturnReasonCodeId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>ReturnReasonCodeId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>ReturnStatus</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<EnumType>ReturnStatusHeader</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>ReverseChargeAmount</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+			<Label>@Tax:RCAmount</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>ReversedRecId</Name>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+			<Label>@SYS330317</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SalesBalance</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>AmountCur</ExtendedDataType>
+			<Label>@SYS464</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SalesBalanceMST</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>AmountMST</ExtendedDataType>
+			<Label>@SYS71021</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>SalesId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesIdBase</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>SalesOriginId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesOriginId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>SalesType</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<EnumType>SalesType</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>ShipCarrierBlindShipment</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>ShipCarrierBlindShipment</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>SourceDocumentHeader</Name>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+			<Label>@SYS127863</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>SourceDocumentLine</Name>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+			<Label>@SYS319494</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SumLineDisc</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesSumLineDiscAmount</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SumLineDiscMST</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesSumLineDiscAmountMST</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SumMarkup</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>MarkupSumSales</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SumMarkupMST</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>MarkupSumMSTSales</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SumTax</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+			<Label>@SYS5878</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SumTaxMST</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxAmount</ExtendedDataType>
+			<Label>@SYS71022</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>TaxGroup</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxGroup</ExtendedDataType>
+			<GroupPrompt>@SYS3815</GroupPrompt>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>TaxInvoiceSalesId</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxInvoiceSalesId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>TaxItemGroup</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxItemGroup</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>TaxPrintOnInvoice</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxPrintOnInvoice</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>TaxSpecifyByLine</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>TaxSpecifyLine</ExtendedDataType>
+			<Label>@SYS19934</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>TransportationDocument</Name>
+			<AssetClassification>System Metadata</AssetClassification>
+			<ExtendedDataType>TransportationDocumentRecId</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Triangulation</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>EUROTriangulation</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Updated</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<Label>@SYS439</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>VATNum</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>VATNumJournal</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>Volume</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ConfigurationKey>LogisticsBasic</ConfigurationKey>
+			<ExtendedDataType>Volume</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>Weight</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ConfigurationKey>LogisticsBasic</ConfigurationKey>
+			<ExtendedDataType>Weight</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>WorkerSalesTaker</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ExtendedDataType>SalesTaker</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>SentElectronically</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<Label>@SYS4004070</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>ReverseCharge_UK</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<ConfigurationKey>SysDeletedObjects72</ConfigurationKey>
+			<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>ProvisionalAssessment_IN</Name>
+			<AssetClassification>Customer Content</AssetClassification>
+			<CountryRegionCodes>IN</CountryRegionCodes>
+			<ExtendedDataType>NoYesId</ExtendedDataType>
+			<HelpText>@TaxGST:HelpTextOfProvisionalAssessment</HelpText>
+			<Label>@TaxGST:ProvisionalAssessment</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>ProFormaInvoiceVersion</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>Version</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>IsProFormaInvoiceActive</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>ProcessActive</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>ApprovalStatus</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<EnumType>FINCustInvoiceJourProformaStatus</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>ApprovalExpiryDate</Name>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RORRentalDateTime</ExtendedDataType>
+			<Label>@DNR:ConfirmationExpirationDate</Label>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>SalesIdDateIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>SalesId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>RefNum</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>InvoiceNumIdx</Name>
+			<AlternateKey>Yes</AlternateKey>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>InvoiceId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>numberSequenceGroup</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>RecId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>ParmIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>ParmId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>DefaultDimensionIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>DefaultDimension</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>InvoiceAccountIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>InvoiceAccount</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>LedgerVoucher</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvoiceId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>VATNumIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>VATNum</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>OrderAccountIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>OrderAccount</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>SalesId</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>WorkerSalesTakerIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>WorkerSalesTaker</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>SourceDocumentHeaderIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>SourceDocumentHeader</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>Partition</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>dataAreaId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>InvoiceDateSalesIdIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>InvoiceDate</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>SalesId</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>SourceDocumentLineIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>SourceDocumentLine</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>Partition</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>dataAreaId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>CustDirectDebitMandateIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>DirectDebitMandate</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>RefNumIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>RefNum</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>EndDisc</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvoiceAmount</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>SalesBalance</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>SumMarkup</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>SumTax</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvoiceId</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvoiceDate</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>SalesId</DataField>
+					<IncludedColumn>Yes</IncludedColumn>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings>
+		<AxTableMapping>
+			<MappingTable>CurrencyCodeMap</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>CurrencyCode</MapField>
+					<MapFieldTo>CurrencyCode</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>CustVendAccountMap</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>Account</MapField>
+					<MapFieldTo>InvoiceAccount</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Num</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>CustVendInvoiceAddressMap_TH</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>InvoicePostalAddress</MapField>
+					<MapFieldTo>InvoicePostalAddress</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>CustVendInvoiceJour</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>AttorneyDate_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>AttorneyId_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>AttorneyIssuedName_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CashDisc</MapField>
+					<MapFieldTo>CashDisc</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CashDiscBaseDate</MapField>
+					<MapFieldTo>CashDiscBaseDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CashDiscCode</MapField>
+					<MapFieldTo>CashDiscCode</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CashDiscDate</MapField>
+					<MapFieldTo>CashDiscDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>ConsigneeAccount_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>ConsignorAccount_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>ConsInvoice_JP</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CorrectedInvoiceDate_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CorrectedInvoiceId_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Correct_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CurrencyCode</MapField>
+					<MapFieldTo>CurrencyCode</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DefaultDimension</MapField>
+					<MapFieldTo>DefaultDimension</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DeliveryDate_ES</MapField>
+					<MapFieldTo>ReceiptDateConfirmed_ES</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DeliveryName_RU</MapField>
+					<MapFieldTo>DeliveryName</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DeliveryPostalAddress_RU</MapField>
+					<MapFieldTo>DeliveryPostalAddress</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DocumentDate</MapField>
+					<MapFieldTo>DocumentDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DocumentNum</MapField>
+					<MapFieldTo>DocumentNum</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DueDate</MapField>
+					<MapFieldTo>DueDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>EndDisc</MapField>
+					<MapFieldTo>EndDisc</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>EndDisc_RU</MapField>
+					<MapFieldTo>EndDisc</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>ExchRate</MapField>
+					<MapFieldTo>ExchRate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>ExchRateSecondary</MapField>
+					<MapFieldTo>ExchRateSecondary</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>FacturedFully_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>FactureId</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>FactureModule_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>FixedDueDate</MapField>
+					<MapFieldTo>FixedDueDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>GroupId</MapField>
+					<MapFieldTo>CustGroup</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InclTax</MapField>
+					<MapFieldTo>InclTax</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>IntrastatFulfillmentDate_HU</MapField>
+					<MapFieldTo>IntrastatFulfillmentDate_HU</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InventOwnerId_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InventProfileType_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceAccount</MapField>
+					<MapFieldTo>InvoiceAccount</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceAmount</MapField>
+					<MapFieldTo>InvoiceAmount</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceAmountMST_JP</MapField>
+					<MapFieldTo>InvoiceAmountMST</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceAmountMST_RU</MapField>
+					<MapFieldTo>InvoiceAmountMST</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceDate</MapField>
+					<MapFieldTo>InvoiceDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceId</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceNum</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceRegister_LT</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceStatus_LT</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>LanguageId</MapField>
+					<MapFieldTo>LanguageId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>LedgerVoucher</MapField>
+					<MapFieldTo>LedgerVoucher</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>MCRPaymOrderID</MapField>
+					<MapFieldTo>SalesId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>NonRealRevenue_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Num</MapField>
+					<MapFieldTo>SalesId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>NumberSequenceCode_LT</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>NumberSequenceGroupId</MapField>
+					<MapFieldTo>numberSequenceGroup</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>OffSessionId_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>OneTimeAccount</MapField>
+					<MapFieldTo>OneTimeCustomer</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>OrderAccount</MapField>
+					<MapFieldTo>OrderAccount</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PaymDayId</MapField>
+					<MapFieldTo>PaymDayId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Payment</MapField>
+					<MapFieldTo>Payment</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PaymentSched</MapField>
+					<MapFieldTo>PaymentSched</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PaymId</MapField>
+					<MapFieldTo>PaymId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PostingProfile</MapField>
+					<MapFieldTo>PostingProfile</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Prepayment</MapField>
+					<MapFieldTo>Prepayment</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PrintCopies_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PrintOriginals_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PrintStandardCurrency_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Proforma</MapField>
+					<MapFieldTo>Proforma</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PurchInternalInvoiceId_RU</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>RoundOff_W</MapField>
+					<MapFieldTo>InvoiceRoundOff</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SalesInvoicePostingType_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SalesOrderbalance</MapField>
+					<MapFieldTo>SalesBalance</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SourceDocumentHeader_RU</MapField>
+					<MapFieldTo>SourceDocumentHeader</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SumTax</MapField>
+					<MapFieldTo>SumTax</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>TaxGroup</MapField>
+					<MapFieldTo>TaxGroup</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Triangulation</MapField>
+					<MapFieldTo>Triangulation</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>UnitedVATInvoice</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Updated</MapField>
+					<MapFieldTo>Updated</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>VATNum</MapField>
+					<MapFieldTo>VATNum</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>VATOnPayment_RU</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>VendPaymentGroup</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>WhoIsAuthor_LT</MapField>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>DimensionDefaultMap</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>DefaultDimension</MapField>
+					<MapFieldTo>DefaultDimension</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>FormletterJournal</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>CurrencyCode</MapField>
+					<MapFieldTo>CurrencyCode</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DefaultDimension</MapField>
+					<MapFieldTo>DefaultDimension</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>EndDisc</MapField>
+					<MapFieldTo>EndDisc</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>ExchRate</MapField>
+					<MapFieldTo>ExchRate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>ExchrateSecondary</MapField>
+					<MapFieldTo>ExchRateSecondary</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InternalJournalId</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>JournalId</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>NumberSequenceGroup</MapField>
+					<MapFieldTo>numberSequenceGroup</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>OrderId</MapField>
+					<MapFieldTo>SalesId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>ParmId</MapField>
+					<MapFieldTo>ParmId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>RoundOff</MapField>
+					<MapFieldTo>InvoiceRoundOff</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>TransDate</MapField>
+					<MapFieldTo>InvoiceDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Triangulation</MapField>
+					<MapFieldTo>Triangulation</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>InterCompanyJour</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>DocumentDate</MapField>
+					<MapFieldTo>InvoiceDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DocumentNum</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InterCompanyCompanyId</MapField>
+					<MapFieldTo>InterCompanyCompanyId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InterCompanyId</MapField>
+					<MapFieldTo>InterCompanyPurchId</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>InventTrackingCustJournalTable</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>ContactPersonId</MapField>
+					<MapFieldTo>ContactPersonId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CustAccount</MapField>
+					<MapFieldTo>OrderAccount</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>CustomerRef</MapField>
+					<MapFieldTo>CustomerRef</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>DeliveryPostalAddress</MapField>
+					<MapFieldTo>DeliveryPostalAddress</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>JournalId</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PostingDate</MapField>
+					<MapFieldTo>InvoiceDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SalesId</MapField>
+					<MapFieldTo>SalesId</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>PlFiscalDocument</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>InvoiceAccount</MapField>
+					<MapFieldTo>InvoiceAccount</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceAmount</MapField>
+					<MapFieldTo>InvoiceAmount</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceId</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>OrderAccount</MapField>
+					<MapFieldTo>OrderAccount</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>SourceDocumentHeaderImplementation</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>SourceDocumentHeader</MapField>
+					<MapFieldTo>SourceDocumentHeader</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>SourceDocumentLineImplementation</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>SourceDocumentLine</MapField>
+					<MapFieldTo>SourceDocumentLine</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>SysExtensionSerializerMap</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>PackedExtensions</MapField>
+					<MapFieldTo>PackedExtensions</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>PackedPrioritizedIdList</MapField>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>TaxIntgrExportDocumentSourceMap_CN</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>CurrencyCode</MapField>
+					<MapFieldTo>CurrencyCode</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceAccount</MapField>
+					<MapFieldTo>InvoiceAccount</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceDate</MapField>
+					<MapFieldTo>InvoiceDate</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>InvoiceId</MapField>
+					<MapFieldTo>InvoiceId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>LedgerVoucher</MapField>
+					<MapFieldTo>LedgerVoucher</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SourceRecId</MapField>
+					<MapFieldTo>RecId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SourceRelationType</MapField>
+					<MapFieldTo>TableId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>TransactionCurrencyAmount</MapField>
+					<MapFieldTo>InvoiceAmount</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+		<AxTableMapping>
+			<MappingTable>SalesPurchJournalTable</MappingTable>
+			<Connections>
+				<AxTableMappingConnection>
+					<MapField>InclTax</MapField>
+					<MapFieldTo>InclTax</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>Posted</MapField>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SourceRecId</MapField>
+					<MapFieldTo>RecId</MapFieldTo>
+				</AxTableMappingConnection>
+				<AxTableMappingConnection>
+					<MapField>SourceTableId</MapField>
+					<MapFieldTo>TableId</MapFieldTo>
+				</AxTableMappingConnection>
+			</Connections>
+		</AxTableMapping>
+	</Mappings>
+	<Relations>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>BankLCExportLine</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>BankLCExportLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>BankLCExportLine</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>BankLCExportLine_CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>BankLCExportLine</Name>
+					<Field>BankLCExportLine</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>CashDisc</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CashDisc</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>CashDiscCode</Name>
+					<SourceEDT>CustCashDiscCode</SourceEDT>
+					<Field>CashDiscCode</Field>
+					<RelatedField>CashDiscCode</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>CodeIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>ContactPerson</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>ContactPerson</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ContactPersonId</Name>
+					<SourceEDT>ContactPersonId</SourceEDT>
+					<Field>ContactPersonId</Field>
+					<RelatedField>ContactPersonId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>ContactPersonId</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>Currency</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>Currency</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Aggregation</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>CurrencyCode</Name>
+					<SourceEDT>CustCurrencyCode</SourceEDT>
+					<Field>CurrencyCode</Field>
+					<RelatedField>CurrencyCode</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>CurrencyCodeIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustDirectDebitMandate</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustDirectDebitMandate</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>DirectDebitMandate</Name>
+					<Field>DirectDebitMandate</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>CustGroup</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustGroup</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Aggregation</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>CustGroup</Name>
+					<SourceEDT>CustGroupId</SourceEDT>
+					<Field>CustGroup</Field>
+					<RelatedField>CustGroup</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>GroupIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustInvoiceJour</Name>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustInvoiceJour</RelatedTable>
+			<RelatedTableRole>CustInvoiceJour</RelatedTableRole>
+			<RelationshipType>Link</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InvoiceId</Name>
+					<Field>InvoiceId</Field>
+					<RelatedField>InvoiceId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustInvoiceJour_Reversal</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustInvoiceJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>CustInvoiceJour_Reversal</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ReversedRecId</Name>
+					<Field>ReversedRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustInvoiceTable</Name>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustInvoiceTable</RelatedTable>
+			<RelatedTableRole>CustInvoiceTable_1</RelatedTableRole>
+			<RelationshipType>Link</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Validate>No</Validate>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InvoiceId</Name>
+					<Field>InvoiceId</Field>
+					<RelatedField>InvoiceId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InvoiceDate</Name>
+					<Field>InvoiceDate</Field>
+					<RelatedField>InvoiceDate</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>numberSequenceGroup</Name>
+					<Field>numberSequenceGroup</Field>
+					<RelatedField>numberSequenceGroup</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>CustLedger</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustLedger</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>PostingProfile</Name>
+					<SourceEDT>CustPostingProfile</SourceEDT>
+					<Field>PostingProfile</Field>
+					<RelatedField>PostingProfile</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>PostingIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>CustTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Aggregation</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>OrderAccount</Name>
+					<SourceEDT>CustAccount</SourceEDT>
+					<Field>OrderAccount</Field>
+					<RelatedField>AccountNum</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>AccountIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>CustTable_CustInvoiceJour_InvoiceAccount</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelatedTableRole>CustTable_CustInvoiceJour_InvoiceAccount</RelatedTableRole>
+			<RelationshipType>Aggregation</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InvoiceAccount</Name>
+					<SourceEDT>CustInvoiceAccount</SourceEDT>
+					<Field>InvoiceAccount</Field>
+					<RelatedField>AccountNum</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>AccountIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>DataArea</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>DataArea</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InterCompanyCompanyId</Name>
+					<SourceEDT>InterCompanyCompanyId</SourceEDT>
+					<Field>InterCompanyCompanyId</Field>
+					<RelatedField>id</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintRelatedFixed">
+					<Name>isVirtual_Extern</Name>
+					<SourceEDT>InterCompanyCompanyId</SourceEDT>
+					<RelatedField>isVirtual</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>DefaultDimension</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>DimensionAttributeValueSet</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>DefaultDimension</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>DefaultDimension</Name>
+					<Field>DefaultDimension</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>DeliveryPostalAddress_FK</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>LogisticsPostalAddress</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>DeliveryPostalAddress_FK</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>DeliveryPostalAddress</Name>
+					<Field>DeliveryPostalAddress</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>DlvMode</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>DlvMode</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>DlvMode</Name>
+					<SourceEDT>CustDlvModeId</SourceEDT>
+					<Field>DlvMode</Field>
+					<RelatedField>Code</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>CodeIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>DlvTerm</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>DlvTerm</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>DlvTerm</Name>
+					<SourceEDT>CustDlvTermId</SourceEDT>
+					<Field>DlvTerm</Field>
+					<RelatedField>Code</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>CodeIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>FreeTxtInvoice</Name>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustInvoiceJour</RelatedTable>
+			<RelatedTableRole>FreeTxtInvoice</RelatedTableRole>
+			<RelationshipType>Link</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Validate>No</Validate>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RecId</Name>
+					<Field>RecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>InventLocation</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>InventLocation</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>inventLocationId</Name>
+					<SourceEDT>SalesInventLocationId</SourceEDT>
+					<Field>inventLocationId</Field>
+					<RelatedField>InventLocationId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>InventLocationIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>InventSite</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>InventSite</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>PrintMgmtSiteId</Name>
+					<SourceEDT>InventSiteId</SourceEDT>
+					<Field>PrintMgmtSiteId</Field>
+					<RelatedField>SiteId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>SiteIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>InvoicePostalAddress_FK</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>LogisticsPostalAddress</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>InvoicePostalAddress_FK</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InvoicePostalAddress</Name>
+					<Field>InvoicePostalAddress</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>LanguageTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>LanguageTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Aggregation</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>LanguageId</Name>
+					<SourceEDT>CustLanguageId</SourceEDT>
+					<Field>LanguageId</Field>
+					<RelatedField>LanguageId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintRelatedFixed">
+					<Name>LabelFile_Extern</Name>
+					<SourceEDT>CustLanguageId</SourceEDT>
+					<RelatedField>LabelFile</RelatedField>
+					<Value>1</Value>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>NumberSequenceGroup</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>NumberSequenceGroup</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>numberSequenceGroup</Name>
+					<SourceEDT>NumberSequenceGroupId</SourceEDT>
+					<Field>numberSequenceGroup</Field>
+					<RelatedField>numberSequenceGroupId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>groupId</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>PaymDay</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>PaymDay</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>PaymDayId</Name>
+					<SourceEDT>CustPaymDayId</SourceEDT>
+					<Field>PaymDayId</Field>
+					<RelatedField>PaymDayId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>PaymDayIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>PaymentSched</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>PaymSched</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>PaymentSched</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>PaymentSched</Name>
+					<SourceEDT>PaymSchedId</SourceEDT>
+					<Field>PaymentSched</Field>
+					<RelatedField>Name</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>PaymTerm</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>PaymTerm</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>Payment</Name>
+					<SourceEDT>CustPaymTermId</SourceEDT>
+					<Field>Payment</Field>
+					<RelatedField>PaymTermId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>TermIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>ReasonTableRef</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>ReasonTableRef</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ReasonTableRef</Name>
+					<Field>ReasonTableRef</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>ReturnReasonCode</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>ReturnReasonCode</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ReturnReasonCodeId</Name>
+					<SourceEDT>ReturnReasonCodeId</SourceEDT>
+					<Field>ReturnReasonCodeId</Field>
+					<RelatedField>ReasonCodeId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>ReturnReasonCodeIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>SalesOrigin</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>SalesOrigin</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>SalesOriginId</Name>
+					<SourceEDT>SalesOriginId</SourceEDT>
+					<Field>SalesOriginId</Field>
+					<RelatedField>OriginId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>SalesOriginIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>SalesTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>SalesTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>SalesId</Name>
+					<SourceEDT>SalesIdBase</SourceEDT>
+					<Field>SalesId</Field>
+					<RelatedField>SalesId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>SalesIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>SourceDocumentHeader</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>SourceDocumentHeader</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>SourceDocumentHeader</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>SourceDocumentHeader_CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Validate>No</Validate>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>SourceDocumentHeader</Name>
+					<Field>SourceDocumentHeader</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>SourceDocumentLine</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>SourceDocumentLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>SourceDocumentLine</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>SourceDocumentLine_CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Validate>No</Validate>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>SourceDocumentLine</Name>
+					<Field>SourceDocumentLine</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>TaxGroupHeading</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>TaxGroupHeading</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>TaxGroup</Name>
+					<SourceEDT>TaxGroup</SourceEDT>
+					<Field>TaxGroup</Field>
+					<RelatedField>TaxGroup</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>TaxGroupIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>TaxItemGroupHeading</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>TaxItemGroupHeading</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>TaxItemGroup</Name>
+					<SourceEDT>TaxItemGroup</SourceEDT>
+					<Field>TaxItemGroup</Field>
+					<RelatedField>TaxItemGroup</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>TaxItemGroupIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>TransportationDocument</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>TransportationDocument</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>TransportationDocument</Name>
+					<Field>TransportationDocument</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>WMSBillOfLading</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>WMSBillOfLading</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>BillOfLadingId</Name>
+					<SourceEDT>WMSBillOfLadingId</SourceEDT>
+					<Field>BillOfLadingId</Field>
+					<RelatedField>billOfLadingId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>IdIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>WorkerSalesTaker_FK</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>HcmWorker</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>HcmWorker</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>WorkerSalesTaker_CustInvoiceJour</Role>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>WorkerSalesTaker</Name>
+					<Field>WorkerSalesTaker</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>FINCustInvoiceJourProForma</Name>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>FINCustInvoiceJourProForma</RelatedTable>
+			<RelatedTableRole>CustInvoiceJour</RelatedTableRole>
+			<RelationshipType>Link</RelationshipType>
+			<Role>CustInvoiceJour</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InvoiceId</Name>
+					<Field>InvoiceId</Field>
+					<RelatedField>InvoiceId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

@@ -1,0 +1,2473 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>FINVendEditInvoiceTotals</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class FINVendEditInvoiceTotals extends FormRun 
+// Copy of VendEditInvoiceTotal except linkActive() and init()
+// Also filter control was added
+{
+    PurchTotals purchTotals;
+    VendIInvoiceTotals vendIInvoiceTotals;
+    FINPurchTotals finPurchTotals;
+    PurchLine callerPurchLine;
+
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcTotals</Name>
+				<Source><![CDATA[
+    public void calcTotals(boolean _updateTable = false, boolean _keepEndDisc = false)
+    {       
+
+        //miscChargesBtn.visible(false);
+        resetButton.visible(false);
+
+        // <GBR>
+        if (BrazilParameters::isEnabled() && vendInvoiceInfoTable.isForeignerVendor_BR())
+        {
+            additionButton_BR.visible(true);
+        }
+        else
+        {
+            additionButton_BR.visible(false);
+        }
+        // </GBR>
+        
+        if (!vendInvoiceInfoTable && finPurchTotals.getParmTable())
+        {
+            vendInvoiceInfoTable = finPurchTotals.getParmTable();
+        }
+
+        if (vendInvoiceInfoTable)
+        {
+            // If user is modifying amounts, remove taxes so they get recalculated
+            if (_updateTable)
+            {
+                TaxUncommitted::deleteForDocumentHeader(vendInvoiceInfoTable.TableId, vendInvoiceInfoTable.RecId);
+            }
+
+            using (DNRTradeTotalsDisposableContext context = new DNRTradeTotalsDisposableContext())
+            {
+                context.DNRParmCalledFromForm(true); // The value is used in /Classes/DNRPurchTotalsClass_Extension/Methods/construct
+            
+                purchTotals = PurchTotals::newParmTable(vendInvoiceInfoTable, vendIInvoiceTotals.specQty(), vendInvoiceInfoTable.ParmId, '', vendInvoiceInfoTable.Ordering);
+            }
+
+            if (_keepEndDisc || VendInvoiceInfoTable.InvoiceType == PurchInvoiceType::VendorAdvance)
+            {
+                purchTotals.parmKeepEndDisc(true);
+            }
+            purchTotals.calc();
+
+            if (purchTotals.allowEdit())
+            {
+                vendInvoiceInfoTable_ds.allowEdit(true);
+                miscChargesBtn.visible(true);
+                resetButton.visible(true);
+
+                if (vendInvoiceInfoTable.Ordering == DocumentStatus::ApproveJournal)
+                {
+                    purchParmTable_CashDisc.allowEdit(false);
+                    cashDiscDate.allowEdit(false);
+                }
+
+                vendInvoiceInfoTable.checkMarkupTrans();
+            }
+            else
+            {
+                vendInvoiceInfoTable_ds.allowEdit(false);
+            }
+
+            element.setDisplayFields(_updateTable);
+        }        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>disableFieldsWhenAdvance</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Disables the discount and miscellaneous charges fields when <c>VendInvoiceInfoTable</c> table has <c>InvoiceType</c> field with
+    /// <c>PurchInvoiceType::VendorAdvance</c> enum value.
+    /// </summary>
+    public void disableFieldsWhenAdvance()
+    {
+        cashDiscDate.allowEdit(false);
+        purchParmTable_CashDisc.allowEdit(false);
+        endDisc.allowEdit(false);
+        markup.allowEdit(false);
+        miscChargesBtn.enabled(false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        vendIInvoiceTotals = element.args().caller() as VendIInvoiceTotals;
+        if (vendIInvoiceTotals && vendIInvoiceTotals is FINPurchTotals)
+        {
+            finPurchTotals = vendIInvoiceTotals;
+        }        
+
+        super();   
+     
+        UpdateSelection.enumType(enumNum(PurchUpdate));
+        
+        if (finPurchTotals)
+        {
+            UpdateSelection.selection(enum2int(finPurchTotals.specQty()));
+            element.initCalc();
+            resetButton.visible(false);
+            element.disableFieldsWhenAdvance();
+            miscChargesBtn.enabled(true);
+            cashDiscountAmount.allowEdit(false); 
+            RoundOff.allowEdit(false);
+        }
+        else
+        {
+            UpdateSelection.visible(false);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCalc</Name>
+				<Source><![CDATA[
+    public void initCalc()
+    {
+        element.calcTotals(false); // Calc totals to display, but do not udpdate the table until changes are made by the user
+        /*
+        // Hide title when there are no records
+        mainInstructionStaticText.visible(vendInvoiceInfoTable_ds.numberOfRowsLoaded() > 0);
+
+        // Set static texts
+        // <Invoice Number> : <Invoice Account Name>
+        str textSeparator = !vendInvoiceInfoTable.Num || vendInvoiceInfoTable.Num == "" || !vendInvoiceInfoTable.PurchName || vendInvoiceInfoTable.PurchName == "" ? "" : " : ";
+        mainInstructionStaticText.text(strFmt("%1%2%3", vendInvoiceInfoTable.Num, textSeparator, vendInvoiceInfoTable.PurchName));
+        */
+        if (vendInvoiceInfoTable.isAdvance())
+        {
+            element.disableFieldsWhenAdvance();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDisplayFields</Name>
+				<Source><![CDATA[
+    public void setDisplayFields(boolean _updateTable = false)
+    {
+        ExchangeRateHelper exchangeRateHelper;
+        container displayFields = purchTotals.displayFields([PurchTotals::posCurrency(),
+                                                              PurchTotals::posExchRate(),
+                                                              PurchTotals::posLineDisc(),
+                                                              PurchTotals::posBalance(),
+                                                              PurchTotals::posMarkup(),
+                                                              PurchTotals::posTaxTotal(),
+                                                              PurchTotals::posTotalAmount(),
+                                                              PurchTotals::posPreAppliedAmount()]);
+    
+
+        // <GBR>
+        if (BrazilParameters::isEnabled())
+        {
+            displayFields = purchTotals.displayFields([PurchTotals::posCurrency(),
+                                                       PurchTotals::posExchRate(),
+                                                       PurchTotals::posLineDisc(),
+                                                       PurchTotals::posBalance(),
+                                                       PurchTotals::posMarkup(),
+                                                       PurchTotals::posTaxTotal(),
+                                                       PurchTotals::posTotalAmount(),
+                                                       PurchTotals::posSalesTaxCurrency_BR(),
+                                                       PurchTotals::posICMSTotal_BR(),
+                                                       PurchTotals::posICMSSTTotal_BR(),
+                                                       PurchTotals::posIPITotal_BR(),
+                                                       PurchTotals::posPISTotal_BR(),
+                                                       PurchTotals::posCOFINSTotal_BR(),
+                                                       PurchTotals::posICMSDiffTotal_BR(),
+                                                       PurchTotals::posImportTaxTotal_BR(),
+                                                       PurchTotals::posISSTotal_BR(),
+                                                       PurchTotals::posINSSTotal_BR(),
+                                                       PurchTotals::posIRRFTotal_BR(),
+                                                       PurchTotals::posCSLLTotal_BR(),
+                                                       PurchTotals::posRetainedINSSTotal_BR(),
+                                                       PurchTotals::posMarkupFreight_BR(),
+                                                       PurchTotals::posMarkupInsurance_BR(),
+                                                       PurchTotals::posMarkupOther_BR(),
+                                                       PurchTotals::posMarkupSiscomex_BR()]);
+        }
+        // </GBR>
+    
+        if (_updateTable)
+        {
+            element.setTableFields();
+            vendInvoiceInfoTable_ds.write();
+        }
+    
+        currencyCode.text (conpeek(displayFields, PurchTotals::posCurrency()));
+    
+        exchangeRateHelper = ExchangeRateHelper::newCurrency(Ledger::primaryLedger(CompanyInfo::findDataArea(curext()).RecId), currencyCode.text());
+    
+        exchRate.realValue (exchangeRateHelper.displayStoredExchangeRate(conpeek(displayFields, PurchTotals::posExchRate())));
+        lineDisc.realValue (conpeek(displayFields, PurchTotals::posLineDisc()));
+        purchBalance.realValue (conpeek(displayFields, PurchTotals::posBalance()));
+        markup.realValue (conpeek(displayFields, PurchTotals::posMarkup()));
+        tax.realValue (conpeek(displayFields, PurchTotals::posTaxTotal()));
+        invoiceAmount.realValue (conpeek(displayFields, PurchTotals::posTotalAmount()));
+        preAppliedAmount.realValue (conpeek(displayFields, PurchTotals::posPreAppliedAmount()));
+    
+
+        // <GBR>
+        if (BrazilParameters::isEnabled())
+        {
+            salesTaxCurrencyCode.text (conpeek(displayFields, PurchTotals::posSalesTaxCurrency_BR()));
+            icmsAmount.realValue (conpeek(displayFields, PurchTotals::posICMSTotal_BR()));
+            icmsStAmount.realValue (conpeek(displayFields, PurchTotals::posICMSSTTotal_BR()));
+            ipiAmount.realValue (conpeek(displayFields, PurchTotals::posIPITotal_BR()));
+            pisAmount.realValue (conpeek(displayFields, PurchTotals::posPISTotal_BR()));
+            cofinsAmount.realValue (conpeek(displayFields, PurchTotals::posCOFINSTotal_BR()));
+            ICMSDiffAmount.realValue (conpeek(displayFields, PurchTotals::posICMSDiffTotal_BR()));
+            importTaxAmount.realValue (conpeek(displayFields, PurchTotals::posImportTaxTotal_BR()));
+            issAmount.realValue (conpeek(displayFields, PurchTotals::posISSTotal_BR()));
+            inssAmount.realValue (conpeek(displayFields, PurchTotals::posINSSTotal_BR()));
+            irrfAmount.realValue (conpeek(displayFields, PurchTotals::posIRRFTotal_BR()));
+            csllAmount.realValue (conpeek(displayFields, PurchTotals::posCSLLTotal_BR()));
+            inssRetainedAmount.realValue(conpeek(displayFields, PurchTotals::posRetainedINSSTotal_BR()));
+            freightAmount.realValue (conpeek(displayFields, PurchTotals::posMarkupFreight_BR()));
+            insuranceAmount.realValue (conpeek(displayFields, PurchTotals::posMarkupInsurance_BR()));
+            otherChargesAmount.realValue(conpeek(displayFields, PurchTotals::posMarkupOther_BR()));
+            siscomexAmount.realValue (conpeek(displayFields, PurchTotals::posMarkupSiscomex_BR()));
+        }
+        // </GBR>
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setTableFields</Name>
+				<Source><![CDATA[
+    public void setTableFields()
+    {
+        container displayFields = purchTotals.displayFields([PurchTotals::posCashDisc(),
+                                                              PurchTotals::posCashDiscDate(),
+                                                              PurchTotals::posEndDisc(),
+                                                              PurchTotals::posTaxRoundOff(),
+                                                              PurchTotals::posRoundOff()]);
+
+        vendInvoiceInfoTable.CashDisc = conPeek(displayFields, PurchTotals::posCashDisc());
+        vendInvoiceInfoTable.CashDiscDate = conPeek(displayFields, PurchTotals::posCashDiscDate());
+        vendInvoiceInfoTable.EndDisc = conPeek(displayFields, PurchTotals::posEndDisc());
+        vendInvoiceInfoTable.TaxRoundOff = conPeek(displayFields, PurchTotals::posTaxRoundOff());
+        vendInvoiceInfoTable.InvoiceRoundOff = conPeek(displayFields, PurchTotals::posRoundOff());
+
+        vendInvoiceInfoTable.ReCalculate = NoYes::No;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>close</Name>
+				<Source><![CDATA[
+    public void close()
+    {
+        super();
+
+        if (finPurchTotals)
+        {
+            finPurchTotals.cleanupPrecalculatedData();
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="">
+			<DataSource>
+				<Name>VendInvoiceInfoTable</Name>
+				<Methods>
+					<Method>
+						<Name>editInvoiceRoundOff</Name>
+						<Source><![CDATA[
+        public edit RoundOff editInvoiceRoundOff(boolean set, VendInvoiceInfoTable _vendInvoiceInfoTable, RoundOff _invoiceRoundOff)
+        {
+            if (set)
+            {
+                element.setTableFields();
+                _vendInvoiceInfoTable.InvoiceRoundOff = _invoiceRoundOff;
+                _vendInvoiceInfoTable.modifiedField(fieldnum(VendInvoiceInfoTable, InvoiceRoundOff));
+
+                element.calcTotals(true); // Calc totals and udpdate the table with changes made by the user
+            }
+
+            if (purchTotals)
+            {
+                return purchTotals.purchRoundOff();
+            }
+
+            return 0.0;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>editCashDiscDate</Name>
+						<Source><![CDATA[
+        public edit VendCashDiscDate editCashDiscDate(boolean set, VendInvoiceInfoTable _vendInvoiceInfoTable, VendCashDiscDate _cashDiscDate)
+        {
+            if (set)
+            {
+                element.setTableFields();
+                _vendInvoiceInfoTable.CashDiscDate = _cashDiscDate;
+                _vendInvoiceInfoTable.modifiedField(fieldnum(VendInvoiceInfoTable, CashDiscDate));
+
+                element.calcTotals(true); // Calc totals and udpdate the table with changes made by the user
+            }
+
+            if (purchTotals)
+            {
+                return purchTotals.purchCashDiscDate();
+            }
+
+            return dateNull();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>editCashDisc</Name>
+						<Source><![CDATA[
+        public edit VendCashDiscAmount editCashDisc(boolean set, VendInvoiceInfoTable _vendInvoiceInfoTable, VendCashDiscAmount _cashDisc)
+        {
+            if (set)
+            {
+                element.setTableFields();
+                _vendInvoiceInfoTable.CashDisc = _cashDisc;
+                _vendInvoiceInfoTable.modifiedField(fieldnum(VendInvoiceInfoTable, CashDisc));
+
+                element.calcTotals(true); // Calc totals and udpdate the table with changes made by the user
+            }
+
+            if (purchTotals)
+            {
+                return purchTotals.purchCashDisc();
+            }
+
+            return 0.0;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>editEndDisc</Name>
+						<Source><![CDATA[
+        public edit PurchEndDiscAmount editEndDisc(boolean set, VendInvoiceInfoTable _vendInvoiceInfoTable, PurchEndDiscAmount _endDisc)
+        {
+            if (set)
+            {
+                // User has changed the total discount
+                _vendInvoiceInfoTable.EndDisc = _endDisc;
+
+                // Set recalculate flag to Yes, since we want the other editable values to default from PO when endDisc changes
+                // The recalculate flag will be set to No after totals are calculated (setDisplayFields)
+                _vendInvoiceInfoTable.ReCalculate = NoYes::Yes;
+                _vendInvoiceInfoTable.modifiedField(fieldnum(VendInvoiceInfoTable, EndDisc));
+
+                element.calcTotals(true, true); // Calc totals, udpdate the table with changes made by the user, and keep this field's value
+            }
+
+            if (purchTotals)
+            {
+                return purchTotals.purchEndDisc();
+            }
+
+            return 0.0;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>write</Name>
+						<Source><![CDATA[
+        void write()
+        {
+            FormDataSource purchParmTable_dataSource;
+
+            super();
+
+            // call on calcTotals as the super() may have deleted the TaxUncommitteds.
+            element.calcTotals();
+
+            // Refresh data on parent form
+            if (element.args() && element.args().record() && FormDataUtil::getFormDataSource(element.args().record()))
+            {
+                purchParmTable_dataSource = FormDataUtil::getFormDataSource(element.args().record());
+                purchParmTable_dataSource.reread();
+                purchParmTable_dataSource.refresh();
+            }
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>linkActive</Name>
+						<Source><![CDATA[
+        void linkActive()
+        {
+            super();
+            
+            element.initCalc();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>modifiedField</Name>
+						<Source><![CDATA[
+        /// <summary>
+        /// Checks for data specific situations when a field value in the <c>VendInvoiceInfoTable</c> Form Data Source changes.
+        /// </summary>
+        /// <param name="_fieldId">
+        /// The field identifier of the field being modified.
+        /// </param>
+        /// <param name="_unapprove">
+        /// true if the approveVariance should be called; otherwise false.
+        /// </param>
+        void modifiedField(fieldId _fieldId, boolean _unapprove)
+        {
+            // Changes to total fields should only unapprove if using total matching
+            if (_unapprove && VendParameters::find().UseTotalPriceMatching == NoYes::Yes)
+            {
+                vendInvoiceInfoTable.approveVariance(false);
+            }
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        /// <summary>
+        ///
+        /// </summary>
+        public void init()
+        {
+            super();
+
+            if (finPurchTotals)
+            {
+                VendInvoiceInfoTable_ds.executeQuery();
+            }
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>executeQuery</Name>
+						<Source><![CDATA[
+        /// <summary>
+        ///
+        /// </summary>
+        public void executeQuery()
+        {
+            super();
+
+            if (finPurchTotals)
+            {
+                QueryBuildDataSource qbds = VendInvoiceInfoTable_ds.query().dataSourceTable(tableNum(VendInvoiceInfoTable));// (element.args().record()
+                SysQuery::findOrCreateRange(qbds, fieldNum(VendInvoiceInfoTable, RecId)).value(SysQuery::value(finPurchTotals.getParmTable().RecId));                
+            }
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+		</DataSources>
+		<DataControls xmlns="">
+			<Control>
+				<Name>UpdateSelection</Name>
+				<Type>ComboBox</Type>
+				<Methods>
+					<Method>
+						<Name>selectionChange</Name>
+						<Source><![CDATA[
+        int  selectionChange()
+        {
+            int  ret;
+    
+            ret = super();
+    
+            if (finPurchTotals)
+            {
+                finPurchTotals.specQty(updateselection.selection());
+                // remove previously calculated data
+                finPurchTotals.cleanupPrecalculatedData();
+                finPurchTotals.prepareDataForTotals();
+                VendInvoiceInfoTable_ds.executeQuery();
+                element.calcTotals();
+            }
+    
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>ResetButton</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        void clicked()
+        {
+            NoYes originalRecalcValue = vendInvoiceInfoTable.ReCalculate;
+
+            super();
+
+            vendInvoiceInfoTable.initInvoiceTotals();
+
+            vendInvoiceInfoTable_ds.write();
+
+            element.calcTotals(false); // Calc totals to display, but do not udpdate the table until changes are made by the user
+
+            // If the user had made changes, unapprove the invoice
+            if (originalRecalcValue == NoYes::No)
+            {
+                vendInvoiceInfoTable_ds.modifiedField(0, true);
+            }
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>MiscChargesBtn</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        void clicked()
+        {
+            MenuFunction menuFunction;
+            Args args = new Args();
+
+            super();
+
+            args.caller(element);
+            args.record(finPurchTotals.getParmTable());//element.args().record());
+
+            menuFunction = new MenuFunction(menuitemDisplayStr(MarkupTransInquiry), MenuItemType::Display);
+            menuFunction.run(args);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>AdditionButton_BR</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        void clicked()
+        {
+            MenuFunction menuFunction;
+            Args args = new Args();
+    
+            super();
+    
+            args.caller(element);
+            args.record(element.args().record());
+            args.parmObject(purchTotals);
+    
+            menuFunction = new MenuFunction(menuitemDisplayStr(VendEditInvoiceTotalsAddition_BR), MenuItemType::Display);
+            menuFunction.run(args);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources>
+		<AxFormDataSource xmlns="">
+			<Name>VendInvoiceInfoTable</Name>
+			<Table>VendInvoiceInfoTable</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>AccountingDistributionTemplate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Approved</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Approver</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BankLCImportLine</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BatchAdministration</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CashDisc</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CashDiscCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CashDiscDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CashDiscPercent</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CountyOrigDest</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>createdBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>createdDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CurrencyCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>dataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DefaultDimension</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DeliveryName</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DeliveryPostalAddress</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Description</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DocumentDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DocumentNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DocumentOrigin</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EndDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EndDisc</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EnterpriseNumber</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ErrorInvalidDistribution</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EUROTriangulation</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExchRate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExchRateSecondary</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FixedDueDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FixedExchRate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Hold</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IgnoreCalculatedSalesTax</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InclTax</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventLocationId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventSiteId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceAccount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceReleaseDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceRoundOff</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LastMatchVariance</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ListCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Log</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LogisticsElectronicAddress</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MarkupGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MatchStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Num</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NumberSequenceGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OrderAccount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Ordering</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PackedExtensions</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ParmId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ParmJobStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Payment</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PaymentSched</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PaymId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PaymMode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PaymSpec</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PoolRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Port</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PostingProfile</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchAgreementHeader_PSN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchName</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReCalculate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReleaseDateComment</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RemittanceLocation</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SettleVoucher</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SourceDocumentHeader</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SourceDocumentLine</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StartDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StatProcId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Storno</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableRefId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxRoundOff</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransactionCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Transport</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransportationDocument</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VarianceApproved</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VarianceApprovedDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VarianceApprover</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VarianceComment</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VATNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VendBankAccountID</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VendInvoiceGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VendInvoiceSaveStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VendorRequestedWorkerEmail</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VendPaymentGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BOBRentalSubStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BOBTransTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>INVNotesLine</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>INVParmId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>INVPurchaseType</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+	</DataSources>
+	<Design>
+		<Caption xmlns="">@DNR8409</Caption>
+		<DialogSize xmlns="">Medium</DialogSize>
+		<HeightMode xmlns="">SizeToContent</HeightMode>
+		<Pattern xmlns="">DialogTabs</Pattern>
+		<PatternVersion xmlns="">1.3</PatternVersion>
+		<StatusBarStyle xmlns="">Simple</StatusBarStyle>
+		<Style xmlns="">Dialog</Style>
+		<TitleDataSource xmlns="">VendInvoiceInfoTable</TitleDataSource>
+		<ViewEditMode xmlns="">Edit</ViewEditMode>
+		<WidthMode xmlns="">SizeToAvailable</WidthMode>
+		<WindowType xmlns="">Slider</WindowType>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormTabControl">
+				<Name>TabControl</Name>
+				<Type>Tab</Type>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>QuantitySelection</Name>
+						<Pattern>FieldsFieldGroups</Pattern>
+						<PatternVersion>1.1</PatternVersion>
+						<Type>TabPage</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormComboBoxControl">
+								<Name>UpdateSelection</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1431655764</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>ComboBox</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<FastTabSummary>Yes</FastTabSummary>
+								<Label>@SYS59973</Label>
+								<Items />
+							</AxFormControl>
+						</Controls>
+						<ColumnsMode>Fill</ColumnsMode>
+						<Caption>@SYS35499</Caption>
+						<Style>DetailsFormDetails</Style>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>OverviewTab</Name>
+						<Pattern>ToolbarFields</Pattern>
+						<PatternVersion>1.1</PatternVersion>
+						<Type>TabPage</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormActionPaneControl">
+								<Name>ActionPane</Name>
+								<ElementPosition>536870911</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>ActionPane</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormButtonGroupControl">
+										<Name>ButtonGroup</Name>
+										<ElementPosition>1431655764</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<LeftMode>AutoRight</LeftMode>
+										<Top>0</Top>
+										<TopMode>BottomEdge</TopMode>
+										<Type>ButtonGroup</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormButtonControl">
+												<Name>ResetButton</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Type>Button</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ButtonDisplay>TextOnly</ButtonDisplay>
+												<Text>@SYS137324</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormButtonControl">
+												<Name>MiscChargesBtn</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ConfigurationKey>Markup</ConfigurationKey>
+												<ElementPosition>1610612734</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Type>Button</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS117449</Text>
+											</AxFormControl>
+										</Controls>
+										<ArrangeMethod>Vertical</ArrangeMethod>
+									</AxFormControl>
+								</Controls>
+								<AlignChild>No</AlignChild>
+								<AlignChildren>No</AlignChildren>
+								<ArrangeMethod>Vertical</ArrangeMethod>
+								<Style>Strip</Style>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>TopTabularGroup</Name>
+								<ExtendedStyle>tabularFields</ExtendedStyle>
+								<Pattern>TabularFields</Pattern>
+								<PatternVersion>1.1</PatternVersion>
+								<Type>Group</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>CaptionGroup</Name>
+										<ExtendedStyle>tabularFields_title</ExtendedStyle>
+										<HeightMode>SizeToAvailable</HeightMode>
+										<Type>Group</Type>
+										<WidthMode>SizeToAvailable</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>RowHeader</Name>
+										<ExtendedStyle>tabularFields_rowHeader</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>Currency</Name>
+										<ElementPosition>1073741823</ElementPosition>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>CurrencyRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS7572</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>ExchRate</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>VendExchRate</ExtendedDataType>
+												<Label>@SYS7572</Label>
+												<MinNoOfDecimals>4</MinNoOfDecimals>
+												<MinNoOfDecimalsMode>Fixed</MinNoOfDecimalsMode>
+												<NoOfDecimals>4</NoOfDecimals>
+												<NoOfDecimalsMode>Fixed</NoOfDecimalsMode>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>CurrencyCode</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1610612734</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>VendCurrencyCode</ExtendedDataType>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>LineDiscount</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>LineDiscountRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS9913</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>LineDisc</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>PurchSumLineDiscAmount</ExtendedDataType>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>SubtotalAmount</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>SubtotalAmountRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_SubtotalAmountRowLabel</HelpText>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS343995</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>PurchBalance</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1610612734</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_PurchBalance</HelpText>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>AmountCur</ExtendedDataType>
+												<Label>@SYS343995</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>DiscMarkup</Name>
+										<ElementPosition>1879048190</ElementPosition>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>TotalDiscountRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_TotalDiscountRowLabel</HelpText>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS6465</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>EndDisc</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_EndDisc</HelpText>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>editEndDisc</DataMethod>
+												<DataSource>VendInvoiceInfoTable</DataSource>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>MiscCharges</Name>
+										<ElementPosition>2013265918</ElementPosition>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>MiscChargesRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_MiscChargesRowLabel</HelpText>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS116804</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>Markup</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741822</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_Markup</HelpText>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>MarkupSumPurch</ExtendedDataType>
+												<Label>@SYS116804</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<Columnspace>0</Columnspace>
+										<ColumnspaceMode>Fixed</ColumnspaceMode>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>GroupTax</Name>
+										<ElementPosition>2080374782</ElementPosition>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>GroupTaxRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS5878</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>Tax</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@SYS5878</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>RoundOff</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>RoundOffRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_RoundOffRowLabel</HelpText>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS8172</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>InvoiceRoundOff</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_InvoiceRoundOff</HelpText>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>editInvoiceRoundoff</DataMethod>
+												<DataSource>VendInvoiceInfoTable</DataSource>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>Invoice</Name>
+										<ElementPosition>2113929214</ElementPosition>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>InvoiceRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_InvoiceRowLabel</HelpText>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS9458</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>InvoiceAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1610612734</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_InvoiceAmount</HelpText>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>AmountCur</ExtendedDataType>
+												<Label>@SYS9458</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>CashDiscountAmount</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<ElementPosition>2130706430</ElementPosition>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>CashDiscountRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS10946</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>PurchParmTable_CashDisc</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>editCashDisc</DataMethod>
+												<DataSource>VendInvoiceInfoTable</DataSource>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>CashDiscountDate</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>CashDiscountDateRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS179633</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateControl">
+												<Name>CashDiscDate</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1610612734</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Type>Date</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>editCashDiscDate</DataMethod>
+												<DataSource>VendInvoiceInfoTable</DataSource>
+												<Label>@SYS179633</Label>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>Advance</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>AdvanceRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@AccountsPayable:AppliedPrepaymentAmount</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>preAppliedAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<Type>Real</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>AmountCur</ExtendedDataType>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>FooterGroup</Name>
+										<ExtendedStyle>tabularFields_rowFooter</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+								</Controls>
+								<AllowUserSetup>Restricted</AllowUserSetup>
+								<ArrangeMethod>None</ArrangeMethod>
+								<FrameType>None</FrameType>
+								<Style>DialogContent</Style>
+							</AxFormControl>
+						</Controls>
+						<Caption>Overview</Caption>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>SalesTaxTab</Name>
+						<CountryRegionCodes>BR</CountryRegionCodes>
+						<Pattern>ToolbarFields</Pattern>
+						<PatternVersion>1.1</PatternVersion>
+						<Type>TabPage</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormActionPaneControl">
+								<Name>ActionPane_BR</Name>
+								<ElementPosition>536870911</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>ActionPane</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormButtonGroupControl">
+										<Name>ButtonGroup_BR</Name>
+										<ElementPosition>1431655764</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<LeftMode>AutoRight</LeftMode>
+										<Top>0</Top>
+										<TopMode>BottomEdge</TopMode>
+										<Type>ButtonGroup</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormButtonControl">
+												<Name>AdditionButton_BR</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1610612734</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<NeededPermission>Read</NeededPermission>
+												<Type>Button</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ButtonDisplay>TextOnly</ButtonDisplay>
+												<Text>@SYS4081650</Text>
+											</AxFormControl>
+										</Controls>
+										<ArrangeMethod>Vertical</ArrangeMethod>
+									</AxFormControl>
+								</Controls>
+								<AlignChild>No</AlignChild>
+								<AlignChildren>No</AlignChildren>
+								<ArrangeMethod>Vertical</ArrangeMethod>
+								<Style>Strip</Style>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>SalesTaxGroup_BR</Name>
+								<CountryRegionCodes>BR</CountryRegionCodes>
+								<ExtendedStyle>tabularFields</ExtendedStyle>
+								<Pattern>TabularFields</Pattern>
+								<PatternVersion>1.1</PatternVersion>
+								<Type>Group</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>SalesTaxLeftCaption</Name>
+										<ExtendedStyle>tabularFields_title</ExtendedStyle>
+										<HeightMode>SizeToAvailable</HeightMode>
+										<Type>Group</Type>
+										<WidthMode>SizeToAvailable</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>SalesTaxLeftRowHeader</Name>
+										<ExtendedStyle>tabularFields_rowHeader</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>salesTaxCurrency</Name>
+										<ElementPosition>1073741823</ElementPosition>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>salesTaxCurrencyLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS7572</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>salesTaxCurrencyCode</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1610612734</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>VendCurrencyCode</ExtendedDataType>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>ICMSGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>ICMSRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS893</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>ICMSAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>357913940</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS893</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>ICMSST</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>ICMSSTRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS4000763</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>ICMSSTAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@SYS4000763</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>IPIGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>IPIRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS894</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>IPIAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>536870910</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS894</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>PISGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>PISRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS939</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>PISAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>715827880</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS939</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>CONFINSGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>COFINSRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS940</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>COFINSAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>894784850</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS940</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>ICMSDiffGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>ICMSDiffRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS4000762</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>ICMSDiffAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>894784850</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS940</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>ImportTaxGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>ImportTaxRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS57</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>ImportTaxAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741820</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS57</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>RetainedINSSGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>INSSRetainedRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS71</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>INSSRetainedAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1968526670</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS71</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>CSLLGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>CSLLRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS60347</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>CSLLAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1789569700</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS60347</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>ISSGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>ISSRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS941</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>ISSAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1610612730</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS941</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>INSSGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>INSSRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS942</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>INSSAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1431655760</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS942</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>IRRFGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>IRRFRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS722</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>IRRFAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1252698790</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>TaxAmountCur</ExtendedDataType>
+												<Label>@GLS722</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>SalesTaxRightTableRowFooter</Name>
+										<ExtendedStyle>tabularFields_rowFooter</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+								</Controls>
+								<AllowUserSetup>Restricted</AllowUserSetup>
+								<ArrangeMethod>None</ArrangeMethod>
+								<FrameType>None</FrameType>
+								<Style>DialogContent</Style>
+							</AxFormControl>
+						</Controls>
+						<Caption>@SYS114610</Caption>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabPageControl">
+						<Name>ChargesTab</Name>
+						<CountryRegionCodes>BR</CountryRegionCodes>
+						<HelpText>@FieldDescriptions_AccountsPayable:VendEditInvoiceTotals_ChargesTab</HelpText>
+						<Pattern>TabPageTabularFields</Pattern>
+						<PatternVersion>1.0</PatternVersion>
+						<Type>TabPage</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>MiscChargesGroup_BR</Name>
+								<CountryRegionCodes>BR</CountryRegionCodes>
+								<ExtendedStyle>tabularFields</ExtendedStyle>
+								<Type>Group</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>MiscChargesCaption</Name>
+										<ExtendedStyle>tabularFields_title</ExtendedStyle>
+										<HeightMode>SizeToAvailable</HeightMode>
+										<Type>Group</Type>
+										<WidthMode>SizeToAvailable</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>MiscChargesRowHeader</Name>
+										<ExtendedStyle>tabularFields_rowHeader</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>FreightGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>FreightRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS1655</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>FreightAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>715827882</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>MarkupAmount</ExtendedDataType>
+												<Label>@SYS1655</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>InsuranceGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>InsuranceRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@SYS67403</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>InsuranceAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>MarkupAmount</ExtendedDataType>
+												<Label>@SYS67403</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>OtherChargesGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>OtherChargesRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS242</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>OtherChargesAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1431655764</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>MarkupAmount</ExtendedDataType>
+												<Label>@GLS242</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>SiscomexGroup</Name>
+										<ExtendedStyle>tabularFields_row</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStaticTextControl">
+												<Name>SiscomexRowLabel</Name>
+												<AllowEdit>No</AllowEdit>
+												<ExtendedStyle>tabularFields_rowLabel</ExtendedStyle>
+												<Type>StaticText</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Text>@GLS63647</Text>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>SiscomexAmount</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1789569705</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<Skip>Yes</Skip>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<ExtendedDataType>MarkupAmount</ExtendedDataType>
+												<Label>@GLS63647</Label>
+												<NoOfDecimals>-1</NoOfDecimals>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+										</Controls>
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>MiscChargesTableRowFooter</Name>
+										<ExtendedStyle>tabularFields_rowFooter</ExtendedStyle>
+										<Type>Group</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls />
+										<AllowUserSetup>No</AllowUserSetup>
+										<ArrangeMethod>None</ArrangeMethod>
+										<FrameType>None</FrameType>
+									</AxFormControl>
+								</Controls>
+								<AllowUserSetup>Restricted</AllowUserSetup>
+								<ArrangeMethod>None</ArrangeMethod>
+								<FrameType>None</FrameType>
+							</AxFormControl>
+						</Controls>
+						<ColumnsMode>Fill</ColumnsMode>
+						<Caption>@SYS8371</Caption>
+					</AxFormControl>
+				</Controls>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormButtonGroupControl">
+				<Name>CommitButtonGroup</Name>
+				<Type>ButtonGroup</Type>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>FormCommandButtonControl2</Name>
+						<Type>CommandButton</Type>
+						<Visible>No</Visible>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>OK</Command>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>Close</Name>
+						<Type>CommandButton</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>CloseForm</Command>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>FormCommandButtonControl1</Name>
+						<Type>CommandButton</Type>
+						<Visible>No</Visible>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>Cancel</Command>
+						<SaveRecord>No</SaveRecord>
+					</AxFormControl>
+				</Controls>
+				<ArrangeMethod>HorizontalRight</ArrangeMethod>
+				<Style>DialogCommitContainer</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

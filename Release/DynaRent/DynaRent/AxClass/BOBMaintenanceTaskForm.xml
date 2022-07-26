@@ -1,0 +1,301 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBMaintenanceTaskForm</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBMaintenanceTaskForm
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>deleteObsoleteRecords</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void deleteObsoleteRecords(WPPWorkOrderId _workOrderId, Line _lineNumber, ProjId _projId)
+    {
+        WPPWorkOrderTable   workOrderTable;
+        WPPWorkOrderLine    workOrderLine;
+        InventJournalTable  inventJournalTable;
+        InventJournalTrans  inventJournalTrans;
+        ProjTable           projTable;
+    
+        // When multiple lines exist then only delete the line that is moved
+        if (WPPWorkOrderTable::numberOfLines(_workOrderId) > 1)
+        {
+            delete_from workOrderLine
+            where workOrderLine.WorkOrderId == _workOrderId
+            &&    workOrderLine.LineNumber  == _lineNumber;
+        }
+        // Otherwise delete the whole work order
+        else
+        {
+            delete_from workOrderTable
+            where workOrderTable.WorkOrderId == _workOrderId;
+        }
+    
+        if (_projId)
+        {
+            delete_from inventJournalTrans
+            where inventJournalTrans.ProjId == _projId;
+    
+            delete_from inventJournalTable
+            where inventJournalTable.WPPProjId == _projId;
+    
+            delete_from projTable
+            where projTable.ProjId == _projId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mergeAdditionalNotes_Header</Name>
+				<Source><![CDATA[
+    private void mergeAdditionalNotes_Header(WPPWorkOrderId _workOrderId, RefRecId _refRecId)
+    {
+        DNRAdditionalNoteTable  additionalNoteTableSource, additionalNoteTableTarget;
+        WPPWorkOrderTable       workOrderTable;
+    
+        select firstOnly OrderNote, InternalNote, InvoiceNote from additionalNoteTableSource
+            exists join workOrderTable
+            where workOrderTable.WorkOrderId == _workOrderId
+            &&    workOrderTable.TableId     == additionalNoteTableSource.RefTableId
+            &&    workOrderTable.RecId       == additionalNoteTableSource.RefRecId;
+    
+        additionalNoteTableTarget = DNRAdditionalNoteTable::find(tableNum(WPPWorkOrderTable), _refRecId, true);
+    
+        additionalNoteTableTarget.RefTableId   = tableNum(WPPWorkOrderTable);
+        additionalNoteTableTarget.RefRecId     = _refRecId;
+        additionalNoteTableTarget.OrderNote    += additionalNoteTableTarget.OrderNote    ? '\n' + additionalNoteTableSource.OrderNote    : additionalNoteTableSource.OrderNote;
+        additionalNoteTableTarget.InternalNote += additionalNoteTableTarget.InternalNote ? '\n' + additionalNoteTableSource.InternalNote : additionalNoteTableSource.InternalNote;
+        additionalNoteTableTarget.InvoiceNote  += additionalNoteTableTarget.InvoiceNote  ? '\n' + additionalNoteTableSource.InvoiceNote  : additionalNoteTableSource.InvoiceNote;
+    
+        if (additionalNoteTableTarget)
+        {
+            additionalNoteTableTarget.update();
+        }
+        else
+        {
+            additionalNoteTableTarget.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mergeAdditionalNotes_Lines</Name>
+				<Source><![CDATA[
+    private void mergeAdditionalNotes_Lines(WPPWorkOrderId _workOrderId, Line _lineNumber, RefRecId _refRecId)
+    {
+        DNRAdditionalNoteTable  additionalNoteTableSource, additionalNoteTableTarget;
+        WPPWorkOrderLine        workOrderLine;
+    
+        select firstOnly OrderNote, InternalNote, InvoiceNote from additionalNoteTableSource
+            exists join workOrderLine
+            where workOrderLine.WorkOrderId == _workOrderId
+            &&    workOrderLine.LineNumber  == _lineNumber
+            &&    workOrderLine.TableId     == additionalNoteTableSource.RefTableId
+            &&    workOrderLine.RecId       == additionalNoteTableSource.RefRecId;
+    
+        additionalNoteTableTarget = DNRAdditionalNoteTable::find(tableNum(WPPWorkOrderLine), _refRecId, true);
+    
+        additionalNoteTableTarget.RefTableId   = tableNum(WPPWorkOrderLine);
+        additionalNoteTableTarget.RefRecId     = _refRecId;
+        additionalNoteTableTarget.OrderNote    += additionalNoteTableTarget.OrderNote    ? '\n' + additionalNoteTableSource.OrderNote    : additionalNoteTableSource.OrderNote;
+        additionalNoteTableTarget.InternalNote += additionalNoteTableTarget.InternalNote ? '\n' + additionalNoteTableSource.InternalNote : additionalNoteTableSource.InternalNote;
+        additionalNoteTableTarget.InvoiceNote  += additionalNoteTableTarget.InvoiceNote  ? '\n' + additionalNoteTableSource.InvoiceNote  : additionalNoteTableSource.InvoiceNote;
+    
+        if (additionalNoteTableTarget)
+        {
+            additionalNoteTableTarget.update();
+        }
+        else
+        {
+            additionalNoteTableTarget.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mergeDelayedMaintenance</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInsertMethodInLoop", "workOrderLineTmp.setTmp(); has been set as a Tmp table" )] 
+    public void mergeDelayedMaintenance(FormDataSource _formDataSource, WPPWorkOrderId _workOrderId)
+    {
+        BOBMaintenanceTaskView  maintenanceTaskView;
+        WPPWorkOrderLine        workOrderLineTmp, workOrderLineTarget;
+        WPPWorkOrderTable       workOrderTable;
+        ProjTable               projTable;
+        ProjGroup               projGroup;
+        WPPWorkOrderTaskId      taskIdPrev;
+        WPPWorkOrderId          workOrderIdPrev;
+        Line                    newLineNumber;
+        TransDateTime           dateTime;
+        boolean                 mergeAdditionalNotesHeader;
+        TransDateTime           nullDateTime = DateTimeUtil::addDays(utcDateTimeNull(), 1);
+    
+        workOrderTable = WPPWorkOrderTable::find(_workOrderId);
+        newLineNumber = WPPWorkOrderLine::lastLineNumber(_workOrderId);
+    
+        mergeAdditionalNotesHeader = true;
+    
+        ttsBegin;
+        // BP Deviation documented
+        workOrderLineTmp.setTmp();
+    
+        // Put all the selected records in a temporary buffer
+        for (maintenanceTaskView = _formDataSource.getFirst(true) ? _formDataSource.getFirst(true) : _formDataSource.cursor();
+             maintenanceTaskView;
+             maintenanceTaskView = _formDataSource.getNext())
+        {
+            workOrderLineTmp.data(WPPWorkOrderLine::findRecId(maintenanceTaskView.RecId));
+            workOrderLineTmp.doInsert(); // since this is a temporary table we don't want to execute all logic in the insert method
+        }
+    
+        // Loop through the temporary buffer and sort by Task en Start date/time
+        while select workOrderLineTmp
+        order by TaskId, RequestedStartDateTime asc
+        {
+            mergeAdditionalNotesHeader = workOrderIdPrev != workOrderLineTmp.WorkOrderId;
+    
+            if (workOrderLineTmp.TaskId != taskIdPrev)
+            {
+                workOrderLineTarget = WPPWorkOrderLine::findTaskId(workOrderTable.WorkOrderId, workOrderLineTmp.TaskId, true);
+    
+                if (!workOrderLineTarget)
+                {
+                    projGroup = workOrderTable.projGroup();
+                    projTable = smmProjectCreate::createProjectGroup(projGroup.projType,
+                                                                     projGroup.ProjGroupId,
+                                                                     '',
+                                                                     false,
+                                                                     workOrderTable.ProjInvoiceProjId,
+                                                                     '',
+                                                                     workOrderTable.custVendAccount(),
+                                                                     '',
+                                                                     '',
+                                                                     true);
+    
+                    newLineNumber++;
+    
+                    workOrderLineTarget.data(workOrderLineTmp);
+    
+                    dateTime = DateTimeUtil::applyTimeZoneOffset(workOrderLineTmp.RequestedStartDateTime, DateTimeUtil::getOriginatingTimeZone(workOrderLineTmp.RequestedStartDateTime));
+                    workOrderLineTarget.RequestedStartDateTime = DateTimeUtil::newDateTime(workOrderTable.StartDate, DateTimeUtil::time(dateTime), DateTimeUtil::getUserPreferredTimeZone());
+    
+                    dateTime = DateTimeUtil::applyTimeZoneOffset(workOrderLineTmp.RequestedEndDateTime, DateTimeUtil::getOriginatingTimeZone(workOrderLineTmp.RequestedEndDateTime));
+                    workOrderLineTarget.RequestedEndDateTime = DateTimeUtil::newDateTime(workOrderTable.EndDate, DateTimeUtil::time(dateTime), DateTimeUtil::getUserPreferredTimeZone());
+    
+                    if (workOrderLineTarget.RequestedEndDateTime >= nullDateTime && workOrderLineTarget.RequestedEndDateTime < workOrderLineTarget.RequestedStartDateTime)
+                    {
+                        workOrderLineTarget.RequestedEndDateTime = DateTimeUtil::minValue();
+                    }
+    
+                    workOrderLineTarget.WorkOrderId = _workOrderId;
+                    workOrderLineTarget.LineNumber  = newLineNumber;
+                    workOrderLineTarget.initFromProjTable(projTable);
+                    workOrderLineTarget.insert();
+                }
+            }
+    
+            if (mergeAdditionalNotesHeader)
+            {
+                this.mergeAdditionalNotes_Header(workOrderLineTmp.WorkOrderId, workOrderTable.RecId);
+            }
+            this.mergeAdditionalNotes_Lines(workOrderLineTmp.WorkOrderId, workOrderLineTmp.LineNumber, workOrderLineTarget.RecId);
+            this.mergeInventJournalTrans(workOrderLineTmp.ProjId, workOrderLineTarget.ProjId);
+            this.deleteObsoleteRecords(workOrderLineTmp.WorkOrderId, workOrderLineTmp.LineNumber, workOrderLineTmp.ProjId);
+    
+            taskIdPrev = workOrderLineTmp.TaskId;
+            workOrderIdPrev = workOrderLineTmp.WorkOrderId;
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mergeInventJournalTrans</Name>
+				<Source><![CDATA[
+    private void mergeInventJournalTrans(ProjId _projIdOrig, ProjId _projIdNew)
+    {
+        InventJournalTable      inventJournalTableSource, inventJournalTableTarget;
+        InventJournalTrans      inventJournalTransSource, inventJournalTransTarget;
+        RecordInsertList        inventJournalTableInsertList, inventJournalTransInsertList;
+        InventJournalId         inventJournalIdPrev;
+        InventJournalTableData  inventJournalTableData;
+        InventJournalTransData  inventJournalTransData;
+        Voucher                 voucher_last;
+        boolean                 insertInsertList;
+    
+        inventJournalTableInsertList = new RecordInsertList(tableNum(InventJournalTable));
+        inventJournalTransInsertList = new RecordInsertList(tableNum(InventJournalTrans));
+    
+        if (_projIdOrig && _projIdNew)
+        {
+            while select inventJournalTableSource
+            where inventJournalTableSource.WPPProjId == _projIdOrig
+                join inventJournalTransSource
+                where inventJournalTransSource.JournalId == inventJournalTableSource.JournalId
+            {
+                if (inventJournalTableSource.JournalId != inventJournalIdPrev)
+                {
+                    inventJournalTableTarget.data(inventJournalTableSource);
+                    inventJournalTableTarget.JournalId = JournalTableData::newTable(inventJournalTableTarget).nextJournalId();
+                    inventJournalTableTarget.WPPProjId = _projIdNew;
+    
+                    inventJournalTableData = JournalTableData::newTable(inventJournalTableTarget);
+    
+                    inventJournalTableInsertList.add(inventJournalTableTarget);
+                }
+    
+                inventJournalTransData = inventJournalTableData.journalStatic().newJournalTransData(inventJournalTransTarget, inventJournalTableData);
+    
+                inventJournalTransTarget.initFromInventJournalTable(inventJournalTableTarget);
+                inventJournalTransTarget.initFromInventJournalTrans(inventJournalTransSource);
+                inventJournalTransTarget.initFromProjTable(ProjTable::find(_projIdNew));
+                inventJournalTransTarget.JournalId           = inventJournalTableTarget.JournalId;
+                inventJournalTransTarget.ProjId              = _projIdNew;
+                inventJournalTransTarget.Voucher             = '';
+    
+                if (inventJournalTableTarget.VoucherDraw == JournalVoucherDraw::Entering)
+                {
+                    inventJournalTransData.initVoucher(voucher_last, false);               // Voucher is assigned
+                }
+    
+                inventJournalTransData.addJournalTransVoucher();
+    
+                inventJournalTransInsertList.add(inventJournalTransTarget);
+    
+                voucher_last = inventJournalTransTarget.Voucher;
+                inventJournalIdPrev = inventJournalTableSource.JournalId;
+    
+                insertInsertList = true;
+            }
+    
+            if (insertInsertList)
+            {
+                inventJournalTableInsertList.insertDatabase();
+                inventJournalTransInsertList.insertDatabase();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static BOBMaintenanceTaskForm construct()
+    {
+        return new BOBMaintenanceTaskForm();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

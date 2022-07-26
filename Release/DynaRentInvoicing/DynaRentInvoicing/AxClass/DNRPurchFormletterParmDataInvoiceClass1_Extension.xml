@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchFormletterParmDataInvoiceClass1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchFormletterParmDataInvoice))]
+public final class DNRPurchFormletterParmDataInvoiceClass1_Extension
+{       
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>insertRecordLists</Name>
+				<Source><![CDATA[
+    [SysObsolete("DNRDeletedObjects01_2021. The logic of this method have been moved to /Classes/DNRPurchFormletterParmDataInvoiceClass1_Extension/Methods/FINPerformRentalInvoiceCalculation", false)]
+    protected void insertRecordLists()
+    {
+        next insertRecordLists();       
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createData</Name>
+				<Source><![CDATA[
+    public void createData(boolean _append)
+    {
+        next createData(_append);
+        this.FINPerformRentalInvoiceCalculation();
+
+        if (this.parmDNRDocumentStatus() != DocumentStatus::Confirmation)
+        {
+            this.FINCleanVendInvoiceMarkupTrans();
+            this.FINCreateVendInvoiceMarkupTrans();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reSelect_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(FormletterParmData),  methodStr(FormletterParmData, reSelect))]
+    public static void reSelect_post(XppPrePostArgs _args)
+    {
+        if (_args.getThis() is PurchFormletterParmDataInvoice)
+        {
+            PurchFormletterParmDataInvoice hostObject = _args.getThis();
+
+            hostObject.FINPerformRentalInvoiceCalculation();
+            hostObject.FINCreateVendInvoiceMarkupTrans();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanupChooseLines</Name>
+				<Source><![CDATA[
+    protected void cleanupChooseLines()
+    {
+        next cleanupChooseLines();
+
+        ParmId                              parmId = this.parmParmId();
+        PurchLine                           purchLine;
+        VendInvoiceInfoLine                 vendInvoiceInfoLine;
+        VendInvoiceInfoTable                vendInvoiceInfoTable;
+
+        select firstonly FINSavedInvoice from vendInvoiceInfoTable where vendInvoiceInfoTable.ParmId == parmId;
+
+        if (!vendInvoiceInfoTable.FINSavedInvoice)
+        {
+            while select vendInvoiceInfoLine
+            where vendInvoiceInfoLine.ParmId == parmId
+                join purchLine
+                where purchLine.RecId == vendInvoiceInfoLine.PurchLineRecId
+            {
+                FINMarkupTransGenerator::createVendDraftMarkupTrans(vendInvoiceInfoLine.parmId, purchLine, vendInvoiceInfoLine);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>moveFromSavedToActive</Name>
+				<Source><![CDATA[
+    protected boolean moveFromSavedToActive(VendInvoiceInfoTable _savedVendInvoiceInfoTable)
+    {
+        boolean ret = next moveFromSavedToActive(_savedVendInvoiceInfoTable);
+
+        if (_savedVendInvoiceInfoTable
+        &&  _savedVendInvoiceInfoTable.FINSavedInvoice
+        &&  _savedVendInvoiceInfoTable.purchTable().PurchaseType == PurchaseType::RORSubRental)
+        {
+            if (! purchParmUpdate.selectForUpdate())
+            {
+                purchParmUpdate = PurchParmUpdate::find(purchParmUpdate.ParmId, true);
+            }
+
+            purchParmUpdate.INVCalculationDateTime    = _savedVendInvoiceInfoTable.INVCalculationDateTime;
+            purchParmUpdate.INVIncludeCredits         = _savedVendInvoiceInfoTable.INVIncludeCredits;
+            purchParmUpdate.INVIncludeUninvoiced      = _savedVendInvoiceInfoTable.INVIncludeUninvoiced;
+            purchParmUpdate.FINForceInvoiceUntilPoint = _savedVendInvoiceInfoTable.FINForceInvoiceUntilPoint;
+            purchParmUpdate.update();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateInvoiceMatchingLines</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    private void FINUpdateInvoiceMatchingLines()
+    {
+        if (VendParameters::find().editUseInvoiceMatching(false) == NoYes::Yes)
+        {
+            VendInvoiceMatchingLine vendInvoiceMatchingLine;
+            VendInvoiceInfoLine     vendInvoiceInfoLine;
+            PurchLine               purchLineLocal;
+
+            update_recordset vendInvoiceMatchingLine
+            setting ExtendedPriceToleranceAmount = 0, PriceTolerancePercentage = 0
+            where vendInvoiceMatchingLine.RefTableId == tableNum(VendInvoiceInfoLine)
+                exists join vendInvoiceInfoLine
+                where vendInvoiceMatchingLine.RefRecId == vendInvoiceInfoLine.RecId
+                &&    vendInvoiceInfoLine.ParmId == this.parmId()
+                    exists join purchLineLocal
+                    where purchLineLocal.InventTransId == vendInvoiceInfoLine.InventTransId
+                    &&    purchLineLocal.RORTradeType  != RORTradeType::SalesPurch;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINPerformRentalInvoiceCalculation</Name>
+				<Source><![CDATA[
+    private void FINPerformRentalInvoiceCalculation()
+    {
+        ttsbegin;
+
+        if (this is PurchFormletterParmDataInvoice && this.FINIsSubRentalPosting())
+        {
+            using (FINInvoiceServiceController_SubRentalInvoice invoiceServiceController = FINInvoiceServiceController_SubRentalInvoice::construct(this.parmParmUpdate()))
+            {
+                PurchFormLetterContract formLetterContract = this.INVParmFormLetterContract();
+
+                if (formLetterContract)
+                {
+                    invoiceServiceController.setCalcEstimation(formLetterContract.FINParmIsEstimation());
+                    invoiceServiceController.setCreditJourRefRecId(formLetterContract.FINParmInvoiceJourRecId());
+                }
+
+                invoiceServiceController.init();
+                invoiceServiceController.run();
+            }
+        }
+
+        this.FINUpdateInvoiceMatchingLines();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINIsSubRentalPosting</Name>
+				<Source><![CDATA[
+    private boolean FINIsSubRentalPosting()
+    {
+        PurchFormLetterContract purchFormLetterContract = this.INVParmFormLetterContract();
+        VendInvoiceInfoTable pendingVendInvoiceInfoTable;
+
+        select firstonly pendingVendInvoiceInfoTable
+        where pendingVendInvoiceInfoTable.ParmId == parmId;
+
+        purchFormLetterContract.FINparmPendingVendInvoiceInfoTable(pendingVendInvoiceInfoTable);
+
+        return purchFormLetterContract.RORIsSubRentalPosting();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCleanVendInvoiceMarkupTrans</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void FINCleanVendInvoiceMarkupTrans()
+    {
+        MarkupTrans         markupTrans;
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+        ParmId              parmId = this.parmParmId();
+        
+        delete_from markupTrans
+        where markupTrans.FINMarkupAccountType  != FINMarkupAccountType::None
+            && markupTrans.FINMarkupAccountType != FINMarkupAccountType::Variance
+            exists join vendInvoiceInfoLine
+            where markupTrans.TransTableId == vendInvoiceInfoLine.TableId
+            &&    markupTrans.TransRecId == vendInvoiceInfoLine.RecId
+            &&    vendInvoiceInfoLine.ParmId == parmId;
+
+        SysTransactionScopeCache::clear(tableStr(MarkupTrans));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCreateVendInvoiceMarkupTrans</Name>
+				<Source><![CDATA[
+    public void FINCreateVendInvoiceMarkupTrans()
+    {
+        VendInvoiceInfoLine vendInvoiceInfoLine;
+        PurchLine           purchLine;
+        ParmId              parmId = this.parmParmId();
+
+        while select vendInvoiceInfoLine
+        where vendInvoiceInfoLine.ParmId == parmId
+            join purchLine
+            where purchLine.RecId == vendInvoiceInfoLine.PurchLineRecId
+        {
+            FINMarkupTransGenerator::createVendDraftMarkupTrans(vendInvoiceInfoLine.parmId, purchLine, vendInvoiceInfoLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

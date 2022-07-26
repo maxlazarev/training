@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>PurchRORReturnNoteJournalCreate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class PurchRORReturnNoteJournalCreate extends FormletterJournalCreate
+{
+    VendRORReturnNoteJour       returnNoteJour;
+    VendRORReturnNoteTrans      returnNoteTrans;
+
+    PurchTable                  purchTable;
+    PurchParmTable              purchParmTable;
+    PurchParmUpdate             purchParmUpdate;
+
+    PurchTotals                 purchTotals;
+    RecordSortedList            recordListPurchParmLine;
+    NoYes                       creditNote;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>allocateNumAndVoucher</Name>
+				<Source><![CDATA[
+    protected NumberSeq allocateNumAndVoucher()
+    {
+        NumberSequenceDatatype  numberDatatype = NumberSequenceDatatype::find(RORParameters::numRefReturnNote_SubRental().NumberSequenceDatatype);
+        NumberSequenceDatatype  voucherDatatype = NumberSequenceDatatype::find(RORParameters::numRefReturnNoteVoucher_SubRental().NumberSequenceDatatype);
+        RefRecId                scopeId = NumberSeqScopeFactory::createDefaultScope().getId();
+        RefRecId                returnNoteNumber;
+        RefRecId                returnNoteVoucher;
+    
+        boolean                 voucherEqualsNumber;
+    
+        if (purchTable.NumberSequenceGroup)
+        {
+            returnNoteNumber = NumberSequenceGroupRef::findNaturalKey(numberDatatype.RecId, scopeId, purchTable.NumberSequenceGroup).NumberSequenceId;
+    
+            if (!returnNoteNumber)
+            {
+                returnNoteNumber = RORParameters::numRefReturnNote_SubRental().NumberSequenceId;
+            }
+    
+            if (RORParameters::numRefReturnNoteVoucher_SubRental().AllowSameAs)
+            {
+                voucherEqualsNumber = true;
+                returnNoteVoucher   = returnNoteNumber;
+            }
+            else
+            {
+                returnNoteVoucher = NumberSequenceGroupRef::findNaturalKey(voucherDatatype.RecId, scopeId, purchTable.NumberSequenceGroup).NumberSequenceId;
+    
+                if (!returnNoteVoucher)
+                {
+                    returnNoteVoucher = RORParameters::numRefReturnNoteVoucher_SubRental().NumberSequenceId;
+                }
+            }
+    
+            return NumberSeq::newGetNumAndVoucherFromId(returnNoteNumber, returnNoteVoucher, voucherEqualsNumber);
+        }
+    
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalHeader</Name>
+				<Source><![CDATA[
+    protected void createJournalHeader()
+    {
+        returnNoteJour.initValue();
+    
+        returnNoteJour.ReturnNoteId         = this.getJournalNumber();
+        returnNoteJour.LedgerVoucher        = this.getVoucher();
+        returnNoteJour.ReturnDate           = purchParmTable.Transdate;
+        returnNoteJour.DocumentDate         = purchParmTable.DocumentDate;
+        returnNoteJour.setDocNum(purchTable);
+        returnNoteJour.initFromPurchTable(purchTable);
+    
+        this.setDeliveryFields();
+    
+        returnNoteJour.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Creates a journal line.
+    /// </summary>
+    /// <param name="_parmLine">
+    ///   The record to base the journal line upon.
+    /// </param>
+    protected void  createJournalLine(Common _parmLine)
+    {
+        PurchParmLine          purchParmLine = _parmLine as PurchParmLine;
+    
+        this.initJournalLine(purchParmLine);
+    
+        returnNoteTrans.Qty                    = purchParmLine.ReceiveNow;
+        returnNoteTrans.InventQty              = purchParmLine.InventNow;
+        returnNoteTrans.Remain                 = purchParmLine.RemainAfter;
+        returnNoteTrans.RemainInvent           = purchParmLine.RemainAfterInvent;
+        returnNoteTrans.ReasonTableRef         = purchParmLine.ReasonTableRef;
+        returnNoteTrans.ValueMST               = purchParmLine.lineAmountExclTax(returnNoteTrans.ReturnDate);
+    
+        if (returnNoteTrans.isCategoryBased())
+        {
+            // if the foregin trade fields have been updated, then they should also take effect in a correction.
+            returnNoteTrans.initFrompurchLineForeignTradeCategory(PurchLineForeignTradeCategory::findpurchLine(purchParmLine.purchLine()));
+        }
+    
+        returnNoteTrans.ValueMST = CurrencyExchangeHelper::mstAmount(returnNoteTrans.ValueMST, purchParmLine.CurrencyCode,returnNoteTrans.ReturnDate);
+    
+        this.insertJournalLine(returnNoteTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalLink</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Creates a journal link.
+    /// </summary>
+    /// <param name="_purchParmLine">
+    /// The record on which to base the journal link.
+    /// </param>
+    protected void createJournalLink(Common _purchParmLine)
+    {
+        PurchParmLine               purchParmLine = _purchParmLine as PurchParmLine;
+        VendRORReturnNotePurchLink  returnNotePurchLink;
+    
+        returnNotePurchLink.initFromPurchParmLine  (purchParmLine);
+        returnNotePurchLink.initFromVendRORReturnNoteJour(returnNoteJour);
+        this.insertJournalLink(returnNotePurchLink);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>formletterType</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Determines the form letter type.
+    /// </summary>
+    /// <returns>
+    /// A <c>FormletterType</c> enumeration value.
+    /// </returns>
+    protected FormletterType formletterType()
+    {
+        return FormletterType::Purchase;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getJournal</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Gets the current journal header.
+    /// </summary>
+    /// <returns>
+    ///   A journal header record.
+    /// </returns>
+    public Common getJournal()
+    {
+        return returnNoteJour;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initJournalHeader</Name>
+				<Source><![CDATA[
+    protected void initJournalHeader()
+    {
+        returnNoteJour.clear();
+    
+        returnNoteJour.ParmId = purchParmUpdate.ParmId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initJournalLine</Name>
+				<Source><![CDATA[
+    public Common initJournalLine(Common _parmLine)
+    {
+        PurchParmLine           purchParmLine = _parmLine as PurchParmLine;
+        PurchLine               purchLine = purchParmLine.purchLine();
+    
+        returnNoteTrans.initFromPurchLine(purchLine);
+        returnNoteTrans.initFromPurchParmTable(purchParmTable);
+        returnNoteTrans.initFromVendRORReturnNoteJour(returnNoteJour);
+        returnNoteTrans.setLinenum(this.getLineNum());
+        returnNoteTrans.CostLedgerVoucher  = NumberSeq::newGetVoucher(NumberSeqReference::findReference(extendedTypeNum(RORReturnNoteVoucher_SubRental))).voucher();
+        returnNoteTrans.AccountingDate     = purchLine.DeliveryDate;
+    
+        if (purchLine.isCategoryBased())
+        {
+            returnNoteTrans.initFrompurchLineForeignTradeCategory(PurchLineForeignTradeCategory::findpurchLine(purchLine));
+        }
+    
+        return returnNoteTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSourceTable</Name>
+				<Source><![CDATA[
+    protected void initSourceTable()
+    {
+        purchTable = purchParmTable.purchTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initTotals</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Initializes the total calculation.
+    /// </summary>
+    protected void initTotals()
+    {
+        purchTotals = PurchTotals::newParmTable(purchParmTable, purchParmUpdate.SpecQty, purchParmUpdate.ParmId, purchParmUpdate.SumPurchId, DocumentStatus::RORReturnNote);
+        purchTotals.calc();
+        this.parmTax(purchTotals.tax());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalLineTableId</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Gets the table ID for the journal line table.
+    /// </summary>
+    /// <returns>
+    ///   The table ID for the journal line table.
+    /// </returns>
+    protected TableId journalLineTableId()
+    {
+        return tableNum(VendRORReturnNoteTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linksTableId</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Gets the table ID for the journal link table.
+    /// </summary>
+    /// <returns>
+    ///   The table ID for the journal link table.
+    /// </returns>
+    protected TableId linksTableId()
+    {
+        return tableNum(VendRORReturnNotePurchLink);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>numberSequenceReferenceNum</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Gets the <c>NumberSequenceReference</c> object for the journal number.
+    /// </summary>
+    /// <returns>
+    ///   A <c>NumberSequenceReference</c> object.
+    /// </returns>
+    protected NumberSequenceReference numberSequenceReferenceNum()
+    {
+        return RORParameters::numRefReturnNote_SubRental();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>numberSequenceReferenceVoucher</Name>
+				<Source><![CDATA[
+    protected NumberSequenceReference numberSequenceReferenceVoucher()
+    {
+        return RORParameters::numRefReturnNoteVoucher_SubRental();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmParmTable</Name>
+				<Source><![CDATA[
+    public Common parmParmTable(Common _parmTable = purchParmTable)
+    {
+        purchParmTable = _parmTable as PurchParmTable;
+        return purchParmTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmParmUpdate</Name>
+				<Source><![CDATA[
+    public Common parmParmUpdate(Common _parmUpdate = purchParmUpdate)
+    {
+        purchParmUpdate = _parmUpdate as PurchParmUpdate;
+        return purchParmUpdate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>proforma</Name>
+				<Source><![CDATA[
+    protected boolean proforma()
+    {
+        return purchParmUpdate.Proforma;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>recordListParmLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Gets a <c>RecordSortedList</c> object with all posting parameter line records.
+    /// </summary>
+    /// <returns>
+    ///   A <c>RecordSortedList</c> object.
+    /// </returns>
+    protected RecordSortedList recordListParmLine()
+    {
+        return purchTotals.recordSortedListLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDeliveryFields</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Sets the delivery related fields on the packing slip journal header.
+    /// </summary>
+    protected void setDeliveryFields()
+    {
+        PurchLine           localPurchLine;
+        PurchParmLine       purchParmLine;
+    
+        select firstonly purchParmLine
+        where purchParmLine.ParmId     == purchParmTable.ParmId
+        &&    purchParmLine.TableRefId == purchParmTable.TableRefId;
+    
+        localPurchLine = purchParmLine.purchLine();
+    
+        returnNoteJour.DeliveryPostalAddress     = purchParmTable.DeliveryPostalAddress ? purchParmTable.DeliveryPostalAddress
+                                                                     : localPurchLine.DeliveryPostalAddress;
+        returnNoteJour.DeliveryName              = purchParmTable.DeliveryName    ? purchParmTable.DeliveryName
+                                                                     : localPurchLine.DeliveryName;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>sourceTable</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Gets the source table for the journal.
+    /// </summary>
+    /// <returns>
+    ///   A record.
+    /// </returns>
+    protected Common sourceTable()
+    {
+        return purchTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>totals</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Gets the total object.
+    /// </summary>
+    /// <returns>
+    ///   A total object.
+    /// </returns>
+    protected Object totals()
+    {
+        return purchTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>typeParmLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///   Gets the type of the posting parameter line table.
+    /// </summary>
+    /// <returns>
+    ///   A record.
+    /// </returns>
+    protected Common typeParmLine()
+    {
+        PurchParmLine   purchParmLine;
+    
+        return purchParmLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static PurchRORReturnNoteJournalCreate construct()
+    {
+        return new PurchRORReturnNoteJournalCreate();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,709 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBObjectAssignmentEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class BOBObjectAssignmentEngine extends RunBase
+{
+    RORRentalLine       rentalLine;
+    InventSerialId      currentSerialNum, newSerialNum;
+
+    RORRentalDateTimes  parmRentalDateTimes;
+
+    boolean             forceSkipValidation;
+    boolean             wasSubRentalCreated;
+    boolean             calledFromAssignmentService;
+
+    Query               query;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>assign</Name>
+				<Source><![CDATA[
+    protected abstract void assign()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkExistSerialNum</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Checks whether the serial number to be assigned already exists in any company and is associated with a rental item.
+    /// </summary>
+    /// <param name="_inventSerialId">The serial number to validate.</param>
+    /// <returns>True in case the serial number exists in any company and is associated with a rental item; otherwise, false.</returns>
+    protected static boolean checkExistSerialNum(InventSerialId _inventSerialId)
+    {
+        InventTable     inventTable;
+        EcoResProduct   ecoResProduct;
+        InventSerial    inventSerial;
+
+        select firstonly crosscompany RecId from inventSerial
+        where inventSerial.InventSerialId == _inventSerialId
+            exists join inventTable
+            where inventTable.ItemId == inventSerial.ItemId
+            &&    inventTable.DataAreaId == inventSerial.DataAreaId
+                join TableId from ecoResProduct
+                where ecoResProduct.RecId == inventTable.Product
+                &&    ecoResProduct.BOBRentalTypeId;
+
+        return (inventSerial.RecId != 0);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOnOffRentDateTimeFromInventTransferLine</Name>
+				<Source><![CDATA[
+    protected container getOnOffRentDateTimeFromInventTransferLine(RORRentalLine _rentalLine)
+    {
+        ROROnRentDateTime   onRentDateTime;
+        ROROffRentDateTime  offRentDateTime;
+        Common              common;
+        InventTransferLine  inventTransferLine;
+
+        common = _rentalLine;
+        inventTransferLine = common;
+    
+        onRentDateTime = DateTimeUtil::newDateTime(inventTransferLine.ShipDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+        offRentDateTime = DateTimeUtil::newDateTime(inventTransferLine.ReceiveDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+
+        return [onRentDateTime, offRentDateTime];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOnRentOffRentDateTimes</Name>
+				<Source><![CDATA[
+    protected container getOnRentOffRentDateTimes()
+    {
+        RORRentalDateTimes  rentalDateTimes;
+        ROROnRentDateTime   onRentDateTime;
+        ROROffRentDateTime  offRentDateTime;
+
+        if (rentalLine.TableId == tableNum(InventTransferLine))
+        {
+            [onRentDateTime, offRentDateTime] = this.getOnOffRentDateTimeFromInventTransferLine(rentalLine);
+        }
+        else
+        {
+            if (parmRentalDateTimes)
+            {
+                rentalDateTimes.data(parmRentalDateTimes);
+            }
+            else
+            {
+                rentalDateTimes = (rentalLine.RecId ?
+                                   rentalLine.RORRentalDateTimesHost::rentalDateTimes() :
+                                   rentalLine.RORGetHeader().RORRentalDateTimesHost::rentalDateTimes());
+            }
+    
+            onRentDateTime  =  rentalDateTimes.getOnRentDateTime();
+            offRentDateTime = (DateTimeUtil::date(rentalDateTimes.getOffRentDateTime()) > dateNull() ?
+                               rentalDateTimes.getOffRentDateTime() :
+                               rentalDateTimes.ExpectedOffRentDateTime);
+        }
+
+        return [onRentDateTime, offRentDateTime];
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkObjectAvailability</Name>
+				<Source><![CDATA[
+    public boolean checkObjectAvailability()
+    {
+        RORRentalDateTimes  rentalDateTimes;
+        ROROnRentDateTime   onRentDateTime;
+        ROROffRentDateTime  offRentDateTime;
+        BOBObjectView       objectView;
+        BOBRentalTrans      rentalTrans;
+        InventTransOrigin   inventTransOrigin;
+        boolean             ret = true;
+        SalesQuotationLine  salesQuotationLine;
+        SalesLine           salesLine;
+    
+        select firstOnly ObjectId, InventSerialId, PhysicalOwner, FirstOnRentDate, RentalTypeId, LastOnRentDate from objectView
+        where objectView.InventSerialId == newSerialNum;
+    
+        if(objectView.PhysicalOwner != curext())
+        {
+            ret = checkFailed(strFmt("@DNR6001", objectView.ObjectId, objectView.InventSerialId, strLwr("@SYS32340"), curext()));
+        }
+        else
+        {
+            if(!objectView.FirstOnRentDate)
+            {
+                ret = checkFailed(strFmt("@DNR6414", objectView.ObjectId, objectView.InventSerialId, curext(), "@DNR3769"));
+            }
+            else
+            {
+                [onRentDateTime, offRentDateTime] = this.getOnRentOffRentDateTimes();
+                
+                if (DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(onRentDateTime, DateTimeUtil::getUserPreferredTimeZone())) < objectView.FirstOnRentDate
+                || (objectView.LastOnRentDate && DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(offRentDateTime, DateTimeUtil::getUserPreferredTimeZone())) > objectView.LastOnRentDate))
+                {
+                    ret = checkFailed(strFmt("@DNR6378",
+                                             objectView.ObjectId,
+                                             objectView.InventSerialId,
+                                             curext(),
+                                             objectView.FirstOnRentDate,
+                                             objectView.LastOnRentDate));
+                }
+                else if (BOBPostingPolicy::findRecId(BOBRentalType::find(objectView.RentalTypeId).PostingPolicyRecId).AllowObjectAssignOverlap == NoYes::No)
+                {
+                    select firstOnly FromDateTime, ToDateTime, TransType from rentalTrans
+                    where rentalTrans.ObjectId  == objectView.ObjectId
+                    &&   ((rentalTrans.TransType == BOBRentalTransType::Rental && rentalTrans.SubStatus >= BOBRentalSubStatus::Ordered &&
+                            rentalTrans.SubStatus != BOBRentalSubStatus::Returned && rentalTrans.SubStatus != BOBRentalSubStatus::ReturnInspected && rentalTrans.SubStatus != BOBRentalSubStatus::Invoiced 
+                    ||    (rentalTrans.TransType == BOBRentalTransType::RentalQuotation && rentalTrans.Active != BOBRentalTransActive::Closed && rentalTrans.SubStatus >= BOBRentalSubStatus::Quotation)))
+                    &&  ((rentalTrans.CertaintyTo == BOBDateTimeCertainty::Tentative && rentalTrans.FromDateTime <= offRentDateTime) ||
+                        ((rentalTrans.FromDateTime <= onRentDateTime  && rentalTrans.ToDateTime >  onRentDateTime)  ||
+                            (rentalTrans.FromDateTime <  offRentDateTime && rentalTrans.ToDateTime >= offRentDateTime) ||
+                            (rentalTrans.FromDateTime >= onRentDateTime  && rentalTrans.ToDateTime <= offRentDateTime) ||
+                            (rentalTrans.FromDateTime <= onRentDateTime  && rentalTrans.ToDateTime >= offRentDateTime)))
+                        join ReferenceId, ReferenceCategory from inventTransOrigin
+                        where inventTransOrigin.RecId         == rentalTrans.InventTransOrigin
+                        &&    inventTransOrigin.InventTransId != rentalLine.InventTransId
+                            outer join salesQuotationLine
+                            where salesQuotationLine.InventTransId == inventTransOrigin.InventTransId;
+    
+                    if(rentalTrans
+                    && (!salesQuotationLine ||
+                        inventTransOrigin.ReferenceCategory != InventTransType::SalesQuotation ||
+                        !salesLine ||
+                        salesLine.projId != salesQuotationLine.projId()))
+                    {
+                        if (rentalTrans.TransType == BOBRentalTransType::Rental)
+                        {
+                            ret = checkFailed(strFmt("@DNR6377",
+                                                        objectView.ObjectId,
+                                                        objectView.InventSerialId,
+                                                        inventTransOrigin.ReferenceId,
+                                                        DateTimeUtil::date(rentalTrans.FromDateTime),
+                                                        DateTimeUtil::date(rentalTrans.ToDateTime)));
+                        }
+                        else
+                        {
+                            ret = checkFailed(strFmt("@DNR7941",
+                                                        objectView.ObjectId,
+                                                        objectView.InventSerialId,
+                                                        inventTransOrigin.ReferenceId,
+                                                        DateTimeUtil::date(rentalTrans.FromDateTime),
+                                                        DateTimeUtil::date(rentalTrans.ToDateTime)));
+                        }
+                    }
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkRefreshCaller</Name>
+				<Source><![CDATA[
+    private void checkRefreshCaller()
+    {
+        FormDataSource dataSource;
+    
+        if(FormDataUtil::isFormDataSource(rentalLine))
+        {
+            dataSource = FormDataUtil::getFormDataSource(rentalLine);
+            dataSource.reread();
+            dataSource.research(rentalLine.TableId != tableNum(InventTransferLine));
+    
+            if(currentSerialNum)
+            {
+                // for some inexplicable reason the focus
+                // jumps to the next line after unassigning
+                dataSource.prev();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        return Dialog::newFormnameRunbase(formStr(BOBObjectAssignDialog), this);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCalledFromAssignmentService</Name>
+				<Source><![CDATA[
+    public boolean parmCalledFromAssignmentService(boolean _calledFromAssignmentService = calledFromAssignmentService)
+    {
+        calledFromAssignmentService = _calledFromAssignmentService;
+    
+        return calledFromAssignmentService;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmForceSkipValidation</Name>
+				<Source><![CDATA[
+    public boolean parmForceSkipValidation(boolean _forceSkipValidation = forceSkipValidation)
+    {
+        if (!prmisDefault(_forceSkipValidation))
+        {
+            forceSkipValidation = _forceSkipValidation;
+        }
+    
+        return forceSkipValidation;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmRentalDateTimes</Name>
+				<Source><![CDATA[
+    public RORRentalDateTimes parmRentalDateTimes(RORRentalDateTimes _parmRentalDateTimes = parmRentalDateTimes)
+    {
+        parmRentalDateTimes.data(_parmRentalDateTimes);
+    
+        return parmRentalDateTimes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine parmRentalLine(RORRentalLine _rentalLine = rentalLine)
+    {
+        if(!prmisDefault(_rentalLine))
+        {
+            rentalLine = _rentalLine;
+            this.setRentalLine(_rentalLine);
+            currentSerialNum = InventDim::find(_rentalLine.InventDimId).InventSerialId;
+        }
+    
+        return rentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmWasSubRentalCreated</Name>
+				<Source><![CDATA[
+    public boolean parmWasSubRentalCreated(boolean _wasSubRentalCreated = wasSubRentalCreated)
+    {
+        wasSubRentalCreated = _wasSubRentalCreated;
+        return wasSubRentalCreated;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>refreshFinancialDimensions</Name>
+				<Source><![CDATA[
+    protected void refreshFinancialDimensions()
+    {
+        RORRentalLine rentalLineRelated;
+    
+        if(rentalLine.ParentLineRecId && BOBRentalType::findFromItemId(rentalLine.ItemId).RORIsMainComponent)
+        {
+            rentalLineRelated = rentalLine.RORLineBuffer();
+    
+            while select rentalLineRelated
+            where rentalLineRelated.HeaderId == rentalLine.HeaderId
+            {
+                FINDimValueController::eventUpdate(rentalLineRelated);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        #OCCRetryCount
+    
+        if(this.validate())
+        {
+            try
+            {
+                ttsbegin;
+    
+                if(currentSerialNum)
+                {
+                    this.unassign();
+    
+                    if (newSerialNum)
+                    {
+                        this.assign();
+                    }
+                }
+                else
+                {
+                    this.assign();
+                }
+    
+                this.refreshFinancialDimensions();
+    
+                ttscommit;
+    
+                this.checkRefreshCaller();
+            }
+            catch(Exception::Deadlock)
+            {
+                retry;
+            }
+            catch(Exception::UpdateConflict)
+            {
+                if(appl.ttsLevel() == 0)
+                {
+                    if (xSession::currentRetryCount() >= #RetryNum)
+                    {
+                        throw Exception::UpdateConflictNotRecovered;
+                    }
+                    else
+                    {
+                        retry;
+                    }
+                }
+                else
+                {
+                    throw Exception::UpdateConflict;
+                }
+            }
+            catch
+            {
+                throw error("@SYS319214");
+            }
+        }
+        else
+        {
+            throw error("@SYS319214");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setMenuItemLabel</Name>
+				<Source><![CDATA[
+    public void setMenuItemLabel(FormFunctionButtonControl _ctrl)
+    {
+        _ctrl.text(currentSerialNum ? "@DNR1748" : "@DNR3392");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setNewSerialNum</Name>
+				<Source><![CDATA[
+    public void setNewSerialNum(InventSerialId _inventSerialId)
+    {
+        newSerialNum = _inventSerialId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setRentalLine</Name>
+				<Source><![CDATA[
+    protected void setRentalLine(RORRentalLine _rentalLine)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unassign</Name>
+				<Source><![CDATA[
+    protected abstract void unassign()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedValues)
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventory</Name>
+				<Source><![CDATA[
+    protected void updateInventory()
+    {
+        InventMovement movement;
+        InventUpd_Estimated estimated;
+        InventTransOriginId originId;
+    
+        // compensating movement
+        movement = InventMovement::construct(rentalLine, InventMovSubType::BOBCompensatingTrans);
+        estimated = InventUpd_Estimated::newInventMovement(movement);
+        estimated.BOBParmIsCompensatingTrans(true);
+        estimated.BOBParmForceInventUpdate(true);
+        estimated.updateNow();
+        originId = movement.inventTransOriginId();
+    
+        // normal movement -- reuse InventTransOriginId so we don't end up with duplicates in table InventTransOrigin
+        movement = InventMovement::construct(rentalLine, InventMovSubType::None);
+        movement.inventTransOriginId(originId);
+    
+        estimated = InventUpd_Estimated::newInventMovement(movement);
+        estimated.BOBParmForceInventUpdate(true);
+        estimated.updateNow();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean                         ret;
+        BOBObjectTable                  objectTable;
+        DNRWorkerDefaults               workerDefaults;
+        BOBObjectView                   objectView;
+        PurchLine                       purchLine;
+        InventDim                       inventDim;
+        InterCompanyPurchSalesReference interCompanyPurchSalesReference;
+        PurchParameters                 purchParameters;
+        PurchTable                      purchTable;
+    
+        // used in intercompany process
+        if (forceSkipValidation)
+        {
+            return true;
+        }
+    
+        ret = super(_calledFrom);
+    
+        if(ret)
+        {
+            if(!rentalLine.RecId)
+            {
+                ret = checkFailed(strFmt("@DNR6720", "@SYS22920"));
+            }
+    
+            if(ret && rentalLine.TradeType == RORTradeType::SalesPurch)
+            {
+                ret = checkFailed(strFmt("@DNR6371", rentalLine.TradeType));
+            }
+    
+            if(ret && newSerialNum) // validate assign
+            {
+                if (BOBObjectAssignmentEngine::checkExistSerialNum(newSerialNum))
+                {
+                    objectTable = BOBObjectTable::findInventSerialId(newSerialNum);
+    
+                    if(!objectTable)
+                    {
+                        ret = checkFailed(strFmt("@DNR6375", newSerialNum));
+                    }
+
+                    if(ret
+                    && objectTable.Category != BOBObjectCategory::Rental
+                    && objectTable.Category != BOBObjectCategory::SubRental)
+                    {
+                        ret = checkFailed(strFmt("@DNR6376", BOBObjectCategory::Rental, BOBObjectCategory::SubRental));
+                    }
+    
+                    if (ret)
+                    {
+                        InventTable inventTable = InventTable::BOBFindFromRentalType(objectTable.RentalTypeId);
+
+                        //Item is not yet released in the current company
+                        if(!inventTable)
+                        {
+                            ret = checkFailed(strFmt("@DNR10161", objectTable.RentalTypeId, curExt()));
+                        }
+                        else if(!inventTable.BOBIsSerializedRentalItem())
+                        {
+                            ret = checkFailed(strFmt("@DNR6076", inventTable.ItemId));
+                        }
+                    }
+    
+                    if (ret)
+                    {
+                        workerDefaults = DNRWorkerDefaults::findByUserId();
+
+                        select firstOnly Depot from objectView
+                        where objectView.ObjectId == objectTable.ObjectId;
+
+                        if (workerDefaults.LocalAssignmentOnly && workerDefaults.InventLocationId != objectView.Depot)
+                        {
+                            if (rentalLine.TableId == tableNum(SalesLine))
+                            {
+                                select firstOnly PurchId from interCompanyPurchSalesReference
+                                where interCompanyPurchSalesReference.SalesId == rentalLine.HeaderId
+                                    exists join purchLine
+                                    where purchLine.PurchId == interCompanyPurchSalesReference.PurchId
+                                        exists join inventDim
+                                        where inventDim.inventDimId == purchLine.InventDimId
+                                        &&    inventDim.inventSerialId == newSerialNum;
+                            }
+    
+                            if (!interCompanyPurchSalesReference)
+                            {
+                                ret = checkFailed(strFmt("@DNR7081", workerDefaults.InventLocationId));
+                            }
+                        }
+                    }
+    
+                    // Check for workflow:
+                    // When workflow is enabled then the sub rental order must be either approved
+                    // or the sub rental order line must be linked to the rental order line
+                    purchParameters = PurchParameters::find();
+
+                    if (purchParameters.ChangeRequestEnabled || purchParameters.ChangeRequestAllowOverride)
+                    {
+                        if (rentalLine.TableId == tableNum(SalesLine))
+                        {
+                            select firstOnly DocumentState, RecId from purchTable
+                                exists join purchLine
+                                where purchLine.PurchId == purchTable.PurchId
+                                    join TableId from inventDim
+                                    where inventDim.inventDimId    == purchLine.InventDimId
+                                    &&    inventDim.inventSerialId == newSerialNum;
+    
+                            if (purchTable.RecId && purchTable.DocumentState < VersioningDocumentState::Approved)
+                            {
+                                select firstOnly RecId from purchLine
+                                where purchLine.InventRefId      == rentalLine.HeaderId
+                                &&    purchLine.InventRefTransId == rentalLine.InventTransId
+                                &&    purchLine.ItemRefType      == InventRefType::Sales
+                                    exists join inventDim
+                                    where inventDim.InventDimId    == purchLine.InventDimId
+                                    &&    inventDim.inventSerialId == newSerialNum;
+    
+                                if (!purchLine.RecId)
+                                {
+                                    ret = checkFailed("@DNR8210");
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    ret = checkFailed(strFmt("@DNR6398", newSerialNum));
+                }
+
+                ret = ret && this.checkObjectAvailability();
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static BOBObjectAssignmentEngine construct(RORRentalLine _rentalLine, InventSerialId _newSerialNum = '')
+    {
+        BOBObjectAssignmentEngine ret;
+    
+        switch(_rentalLine.TableId)
+        {
+            case tableNum(SalesLine):
+                ret = new BOBObjectAssignmentEngine_Rental();
+                break;
+    
+            case tableNum(SalesQuotationLine):
+                ret = new BOBObjectAssignmentEngine_Quotation();
+                break;
+    
+            default:
+                ret = BOBObjectAssignmentEngine::constructExtensionForOtherBuffer(_rentalLine, _newSerialNum);
+        }
+
+        if (!ret)
+        {
+            throw error(strFmt("@SYS31187", tableId2name(_rentalLine.TableId)));
+        }
+    
+        ret.parmRentalLine(_rentalLine);
+        ret.setNewSerialNum(_newSerialNum);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>constructExtensionForOtherBuffer</Name>
+				<Source><![CDATA[
+    public static BOBObjectAssignmentEngine constructExtensionForOtherBuffer(RORRentalLine _rentalLine, InventSerialId _newSerialNum = '')
+    {
+        BOBObjectAssignmentEngine ret;
+        // Object assignment can be implemented for various buffer types in other models, for instance Rental Transportation
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        BOBObjectAssignmentEngine engine;
+    
+        if(_args && _args.record())
+        {
+            engine = BOBObjectAssignmentEngine::construct(_args.record());
+    
+            if(engine.prompt())
+            {
+                engine.runOperation();
+            }
+        }
+        else
+        {
+            throw error(Error::missingRecord(classStr(BOBObjectAssignmentEngine)));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prompt</Name>
+				<Source><![CDATA[
+    public boolean prompt()
+    {
+        if(currentSerialNum) // unassign
+        {
+            return (Box::okCancel(strFmt("@DNR6374", currentSerialNum), DialogButton::Cancel, "@DNR1748") == DialogButton::Ok);
+        }
+        else // assign
+        {
+            return super();
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

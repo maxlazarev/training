@@ -1,0 +1,337 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINSalesQuotationTotals</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINSalesQuotationTotals
+{
+    SalesQuotationParmTable  parmTable;
+    Common  callerBuffer;
+    SalesUpdate specQty = SalesUpdate::All;
+    TransDate transDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+    INVCalculationDateTime calculationDateTime = DateTimeUtil::getSystemDateTime();
+    ParmId parmId;
+    SalesQuotationTable salesQuotationTable;
+    SalesQuotationLine  salesQuotationLine;
+    Set recIdSet = new Set(Types::Int64);
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>recIdSet</Name>
+				<Source><![CDATA[
+    public Set recIdSet()
+    {
+        return recIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>specQty</Name>
+				<Source><![CDATA[
+    SalesUpdate specQty(SalesUpdate _specQty = specQty)
+    {
+        specQty = _specQty;
+
+        return specQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transDate</Name>
+				<Source><![CDATA[
+    TransDate transDate(TransDate _transDate = transDate)
+    {
+        transDate = _transDate;
+
+        return transDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculationDateTime</Name>
+				<Source><![CDATA[
+    INVCalculationDateTime calculationDateTime(INVCalculationDateTime _calculationDateTime = calculationDateTime)
+    {
+        calculationDateTime = _calculationDateTime;
+
+        return calculationDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerBuffer</Name>
+				<Source><![CDATA[
+    public Common parmCallerBuffer(Common _callerBuffer = callerBuffer)
+    {
+        callerBuffer = _callerBuffer;
+        return callerBuffer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getParmTable</Name>
+				<Source><![CDATA[
+    public SalesQuotationParmTable getParmTable()
+    {
+        return parmTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareDataForTotals</Name>
+				<Source><![CDATA[
+    public void prepareDataForTotals()
+    {
+        this.prepareForecastData();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanupPrecalculatedData</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void cleanupPrecalculatedData()
+    {
+        ttsbegin;
+        if (parmTable)
+        {
+            parmId = parmTable.ParmId;
+
+            parmTable.selectForUpdate(true);
+            parmTable.delete();
+
+            FINMarkupWorkTrans  markupWorkTrans;
+
+            delete_from markupWorkTrans
+            where markupWorkTrans.ParmId == parmId;
+
+            FINInvoiceCalculatorParm    invoiceCalcParm;
+
+            delete_from invoiceCalcParm
+            where invoiceCalcParm.ParmId == parmId;
+        }
+
+        if (recIdSet && !recIdSet.empty())
+        {
+            SetEnumerator enumerator = recIdSet.getEnumerator();
+            
+            while (enumerator.moveNext())
+            {
+                RecId deletedRecId = enumerator.current();
+                MarkupTrans markupTrans;
+
+                delete_from markupTrans
+                where markupTrans.RecId == deletedRecId;
+            }
+        }
+        ttscommit;
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareForecastData</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void prepareForecastData()
+    {
+        if (callerBuffer.TableId == tableNum(SalesQuotationTable))
+        {
+            salesQuotationTable = callerBuffer as SalesQuotationTable;
+        }
+        else if (callerBuffer.TableId == tableNum(SalesQuotationLine))
+        {
+            salesQuotationLine = callerBuffer as SalesQuotationLine;
+        }
+
+        SalesQuotationParmLine parmLine;
+            
+        if (salesQuotationLine)
+        {
+            salesQuotationTable = SalesQuotationTable::find(salesQuotationLine.QuotationId);
+        }
+
+        #define.Rental('Rental')
+        #define.RentalProject('Rental project')
+
+        str parmSalesProj = (salesQuotationTable.QuotationType == QuotationType::RORProjRental ? #RentalProject : #Rental);
+
+        SalesQuotationEditLinesForm salesQuotationEditLinesForm = SalesQuotationEditLinesForm::construct(DocumentStatus::Quotation, parmSalesProj, true);
+
+        parmId = salesQuotationEditLinesForm.parmId();
+        salesQuotationEditLinesForm.initParmSalesQuotationTable(salesQuotationTable);
+        salesQuotationEditLinesForm.callerModuleAxapta(SalesQuotationEditLinesForm::getCallerModuleFromParm(parmSalesProj));
+        salesQuotationEditLinesForm.multiForm(true);
+        salesQuotationEditLinesForm.parmId(parmId);
+        salesQuotationEditLinesForm.parmTransDate(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+        salesQuotationEditLinesForm.skipQueryStatusFilter(true);
+        //salesQuotationEditLinesForm.RORparmRentalSubStatus(BOBRentalSubStatus::None);
+        salesQuotationEditLinesForm.initLinesQuery();
+        //TODO: set values on SalesQuotationParmUpdate when it is created?
+
+        SalesQuotationParmUpdate salesQuotationParmUpdate;
+        salesQuotationParmUpdate.ParmId = parmId;
+        this.runCalculationEngines(salesQuotationParmUpdate);
+
+        FINMarkupTransGenerator::createMarkupWorkTrans(parmId);
+
+        if (salesQuotationLine && parmId)
+        {
+            delete_from parmLine
+                where parmLine.ParmId == parmId
+                &&    parmLine.SalesQuotationLineRecId != salesQuotationLine.RecId;
+        }
+        else
+        {
+            // create temporary markupTrans linked to salesQuotationLine
+            FINMarkupWorkTrans  markupWorkTrans;
+            MarkupTable markupTable;
+                                
+            ttsbegin;
+            while select markupWorkTrans
+            where markupWorkTrans.ParmId == parmId
+                join salesQuotationLine
+                where salesQuotationLine.TableId == markupWorkTrans.RefTableId
+                &&    salesQuotationLine.RecId == markupWorkTrans.RefRecId
+                    exists join markupTable
+                    where markupTable.MarkupCode == markupWorkTrans.MarkupCode
+                    &&    markupTable.ModuleType == MarkupModuleType::Cust
+                    // Do not add to header totals internal charges like rental cost
+                    && (markupTable.CustType == MarkupType::CustVend ||
+                        markupTable.VendType == MarkupType::CustVend)
+            {
+                RecId recId = FINMarkupWorkTrans::createMarkupTransFromMarkupWorkTrans(markupWorkTrans, salesQuotationLine);
+                recIdSet.add(recId);
+            }
+            ttscommit;
+        }
+
+        select firstonly parmTable where parmTable.parmId == parmId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runCalculationEngines</Name>
+				<Source><![CDATA[
+    protected void runCalculationEngines(SalesQuotationParmUpdate _parmUpdate)
+    {
+        using(FINInvoiceServiceController_SalesQuotationTable invoiceServiceController = FINInvoiceServiceController_SalesQuotationTable::construct(_parmUpdate))
+        {
+            SalesQuotationParmLine parmLine;
+            FINInvoiceCalculatorParm calcParm;
+
+            // method might be caled few times even if no new salesParmLine were inserted
+            select firstonly RecId from parmLine
+            where parmLine.ParmId == _parmUpdate.ParmId
+                notexists join calcParm
+                where calcParm.ParmLineTableId == parmLine.TableId
+                &&    calcParm.ParmLineRecId == parmLine.RecId
+                &&    calcParm.ParmId == parmLine.ParmId;
+
+            if (parmLine)
+            {
+                invoiceServiceController.init();
+                invoiceServiceController.setCalcEstimation(true);
+                invoiceServiceController.run();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void main(Args _args)
+    {
+        if (_args && _args.record()
+        && (_args.dataSet() == tableNum(SalesQuotationTable) || _args.dataSet() == tableNum(SalesQuotationLine)))
+        {
+            FINSalesQuotationTotals  finSalesQuotationTotals = new FINSalesQuotationTotals();
+
+            finSalesQuotationTotals.parmCallerBuffer(_args.record());
+            finSalesQuotationTotals.prepareDataForTotals();
+                   
+            if (finSalesQuotationTotals.getParmTable())
+            {
+                FormRun formRun;
+                Args args = new Args();
+                SalesQuotationLine salesQuotationLine;
+                Set recIdSet = finSalesQuotationTotals.recIdSet();
+
+                args.caller(finSalesQuotationTotals);
+                if (_args.dataSet() == tableNum(SalesQuotationTable))
+                {
+                    SalesQuotationParmTable salesQuotationParmTableLocal = finSalesQuotationTotals.getParmTable();
+                    args.record(salesQuotationParmTableLocal);
+                    args.name(formStr(FINSalesQuotationTotals));
+                }
+                else
+                {
+                    salesQuotationLine = _args.record();
+                    SalesQuotationParmTable salesQuotationParmTable = finSalesQuotationTotals.getParmTable();
+                    SalesQuotationParmLine salesQuotationParmLine;
+                    
+                    if (salesQuotationLine.RORTradeType == RORTradeType::SalesPurch)
+                    {
+                        delete_from salesQuotationParmLine
+                        where salesQuotationParmLine.InventTransId != salesQuotationLine.InventTransId
+                        &&    salesQuotationParmLine.ParmId == salesQuotationParmTable.ParmId;
+
+                        args.record(salesQuotationParmTable);
+                        args.name(formStr(FINSalesQuotationTotals));
+                    }
+                    else
+                    {
+                        select firstonly salesQuotationParmLine
+                        where salesQuotationParmLine.InventTransId == salesQuotationLine.InventTransId
+                        &&    salesQuotationParmLine.ParmId == salesQuotationParmTable.ParmId;
+                        args.record(salesQuotationParmLine);
+                        args.parm('invoiced');
+                        args.name(formStr(FINRentalInvoiceDetail));
+                    }
+                }
+
+                formRun = classfactory.formRunClass(args);
+                formRun.init();
+                formRun.run();
+              
+                if (recIdSet && !recIdSet.empty())
+                {
+                    SetEnumerator enumerator = recIdSet.getEnumerator();
+                    ttsbegin;
+                    while (enumerator.moveNext())
+                    {
+                        RecId deletedRecId = enumerator.current();
+                        MarkupTrans markupTrans;
+
+                        delete_from markupTrans
+                            where markupTrans.RecId == deletedRecId;
+                    }
+                    ttscommit;
+                }
+                                                             
+                ttsbegin;
+                FINMarkupWorkTrans::deleteParmId(finSalesQuotationTotals.getParmTable().ParmId);
+                ttscommit;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

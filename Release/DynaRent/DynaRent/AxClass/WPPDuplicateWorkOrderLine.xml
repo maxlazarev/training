@@ -1,0 +1,351 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPDuplicateWorkOrderLine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPDuplicateWorkOrderLine
+{
+    WPPWorkOrderLine        workOrderLine;
+    WPPWorkOrderLine        workOrderLineNew;
+    WPPWorkOrderTable       workOrderTable;
+    boolean                 duplicateAdditionalNotes;
+    boolean                 duplicateResourcePlanning;
+    boolean                 changeResource;
+    boolean                 changeDate;
+    WrkCtrGroupWrkCtr       newResourceType;
+    WPPResourceId           newResource;
+    FromDateTime            newFromDateTime;
+    ToDateTime              newToDateTime;
+    WPPWorkOrderLineStatus  newWorkOrderLineStatus;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createHourJournal</Name>
+				<Source><![CDATA[
+    private void createHourJournal()
+    {
+        WPPWorkOrderLineResource    workOrderLineResource;
+        WPPResourceTable            resourceTable;
+        WPPResourceType             resourceType;
+    
+        if (workOrderLine.ProjId && WPPParameters::find().AutoGenerateJourTrans)
+        {
+            while select workOrderLineResource
+            where workOrderLineResource.WorkOrderLineRecId == workOrderLineNew.RecId
+            &&    workOrderLineResource.ResourceType == WrkCtrGroupWrkCtr::WrkCtr
+                exists join resourceTable
+                where resourceTable.ResourceId == workOrderLineResource.ResourceId
+                &&    resourceTable.AutoGenerateJourTrans
+                    join TableId from resourceType
+                    where resourceType.ResourceTypeId == resourceTable.ResourceTypeId
+                    &&   !resourceType.BlockRegistration
+            {
+                Args args = new Args();
+                args.record(workOrderLineResource);
+                args.parmEnumType(enumNum(WPPIncludeJournalLines));
+                args.parmEnum(WPPIncludeJournalLines::Yes);
+    
+                WPPManageHourJournal manageHourJournal = WPPManageHourJournal::construct(args);
+                manageHourJournal.init(true);
+                manageHourJournal.run();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>duplicateAdditionalNotes</Name>
+				<Source><![CDATA[
+    private void duplicateAdditionalNotes()
+    {
+        if (duplicateAdditionalNotes)
+        {
+            DNRAdditionalNoteTable additionalNoteTable, additionalNoteTableNew;
+
+            additionalNoteTable = DNRAdditionalNoteTable::find(workOrderLine.TableId, workOrderLine.RecId);
+    
+            additionalNoteTableNew.data(additionalNoteTable);
+            additionalNoteTableNew.RefRecId = workOrderLineNew.RecId;
+            additionalNoteTableNew.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>duplicateResourcePlanning</Name>
+				<Source><![CDATA[
+    private void duplicateResourcePlanning()
+    {
+        WPPWorkOrderLineResource workOrderLineResource, workOrderLineResourceNew;
+    
+        if (duplicateResourcePlanning)
+        {
+            RecordInsertList recordInsertList = new RecordInsertList(tableNum(WPPWorkOrderLineResource));
+    
+            while select workOrderLineResource
+            where workOrderLineResource.WorkOrderLineRecId == workOrderLine.RecId
+            {
+                workOrderLineResourceNew.data(workOrderLineResource);
+                workOrderLineResourceNew.WorkOrderLineRecId = workOrderLineNew.RecId;
+    
+                if (changeDate)
+                {
+                    workOrderLineResourceNew.PlannedFromDateTime = workOrderLineNew.RequestedStartDateTime;
+                    workOrderLineResourceNew.PlannedToDateTime   = workOrderLineNew.RequestedEndDateTime;
+    
+                    // DOn't leave 'old' actual dates because it will cause confusion during copying of hour journal lines
+                    if (workOrderLineResourceNew.ActualFromDateTime || workOrderLineResourceNew.ActualToDateTime)
+                    {
+                        workOrderLineResourceNew.ActualFromDateTime = workOrderLineNew.RequestedStartDateTime;
+                        workOrderLineResourceNew.ActualToDateTime   = workOrderLineNew.RequestedEndDateTime;
+                    }
+                }
+    
+                if (changeResource)
+                {
+                    workOrderLineResourceNew.ResourceType   = newResourceType;
+                    workOrderLineResourceNew.ResourceId     = newResource;
+                }
+    
+                recordInsertList.add(workOrderLineResourceNew);
+            }
+    
+            recordInsertList.insertDatabase();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(WPPWorkOrderLine _workOrderLine)
+    {
+        workOrderLine = _workOrderLine;
+        workOrderTable = workOrderLine.workOrderTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>duplicateWorkOrderLine</Name>
+				<Source><![CDATA[
+    private void duplicateWorkOrderLine()
+    {
+        ProjTable           projTable;
+        ProjTable           projTableNew;
+        RORVenueTable       venueTable;
+    
+        if (workOrderLine.ProjId)
+        {
+            select crosscompany : [workOrderLine.ProjCompanyId] projTable
+            where projTable.ProjId == workOrderLine.ProjId;
+        }
+    
+        workOrderLineNew.data(workOrderLine);
+        workOrderLineNew.LineNumber = WPPWorkOrderLine::lastLineNumber(workOrderLineNew.WorkOrderId) + 1;
+    
+        if (projTable)
+        {
+            select firstOnly WPPIsRentalProject from  venueTable
+            where venueTable.VenueCode == workOrderTable.RORVenueCode;
+    
+            if (!venueTable.WPPIsRentalProject)
+            {
+                CustTable custTable = (projTable.DataAreaId == curExt() ? CustTable::find(projTable.CustAccount) : CustTable::findByPartyRecId(workOrderTable.OrganizationParty));
+                projTableNew = workOrderLineNew.projCreateFromProject(projTable, custTable, workOrderTable);
+    
+                if (projTableNew.CustAccount
+                &&  (projTableNew.Type == ProjType::Internal    ||
+                     projTableNew.Type == ProjType::Investment  ||
+                     projTableNew.Type == ProjType::Cost        ||
+                     projTableNew.Type == ProjType::Time))
+                {
+                    projTableNew.initFromCustTable(CustTable::find(projTableNew.CustAccount));
+                }
+    
+                projTableNew.ValidateProjCategory = NoYes::No;
+    
+                if (projTableNew)
+                {
+                    projTableNew.update(true);
+                    workOrderLineNew.initFromProjTable(projTableNew);
+                }
+            }
+        }
+    
+        if (changeDate)
+        {
+            workOrderLineNew.RequestedStartDateTime = DateTimeUtil::removeTimeZoneOffset(newFromDateTime, DateTimeUtil::getUserPreferredTimeZone());
+            workOrderLineNew.RequestedEndDateTime   = DateTimeUtil::removeTimeZoneOffset(newToDateTime, DateTimeUtil::getUserPreferredTimeZone());
+        }
+    
+        if (duplicateResourcePlanning)
+        {
+            workOrderLineNew.Status = WPPWorkOrderLineStatus::Planned;
+        }
+        else if (newWorkOrderLineStatus != workOrderLine.Status)
+        {
+            workOrderLineNew.Status = newWorkOrderLineStatus;
+        }
+    
+        workOrderLineNew.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmChangeDate</Name>
+				<Source><![CDATA[
+    public boolean parmChangeDate(boolean _changeDate = changeDate)
+    {
+        changeDate = _changeDate;
+    
+        return changeDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmChangeResource</Name>
+				<Source><![CDATA[
+    public boolean parmChangeResource(boolean _changeResource = changeResource)
+    {
+        changeResource = _changeResource;
+    
+        return changeResource;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDuplicateAdditionalNotes</Name>
+				<Source><![CDATA[
+    public boolean parmDuplicateAdditionalNotes(boolean _duplicateAdditionalNotes = duplicateAdditionalNotes)
+    {
+        duplicateAdditionalNotes = _duplicateAdditionalNotes;
+    
+        return duplicateAdditionalNotes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDuplicateResourcePlanning</Name>
+				<Source><![CDATA[
+    public boolean parmDuplicateResourcePlanning(boolean _duplicateResourcePlanning = duplicateResourcePlanning)
+    {
+        duplicateResourcePlanning = _duplicateResourcePlanning;
+    
+        return duplicateResourcePlanning;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmNewFromDateTime</Name>
+				<Source><![CDATA[
+    public FromDateTime parmNewFromDateTime(FromDateTime _newFromDateTime = newFromDateTime)
+    {
+        newFromDateTime = _newFromDateTime;
+    
+        return newFromDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmNewResource</Name>
+				<Source><![CDATA[
+    public WPPResourceId parmNewResource(WPPResourceId _newResource = newResource)
+    {
+        newResource = _newResource;
+    
+        return newResource;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmNewResourceType</Name>
+				<Source><![CDATA[
+    public WrkCtrGroupWrkCtr parmNewResourceType(WrkCtrGroupWrkCtr _newResourceType = newResourceType)
+    {
+        newResourceType = _newResourceType;
+    
+        return newResourceType;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmNewToDateTime</Name>
+				<Source><![CDATA[
+    public ToDateTime parmNewToDateTime(ToDateTime _newToDateTime = newToDateTime)
+    {
+        newToDateTime = _newToDateTime;
+    
+        return newToDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmNewWorkOrderLineStatus</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderLineStatus parmNewWorkOrderLineStatus(WPPWorkOrderLineStatus _newWorkOrderLineStatus = workOrderLine.Status)
+    {
+        newWorkOrderLineStatus = _newWorkOrderLineStatus;
+    
+        return newWorkOrderLineStatus;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if (this.validate())
+        {
+            ttsBegin;
+            this.duplicateWorkOrderLine();
+            this.duplicateAdditionalNotes();
+            this.duplicateResourcePlanning();
+            this.createHourJournal();
+            ttsCommit;
+        }
+
+        if (workOrderLineNew.RecId)
+        {
+            info("@DNR6915");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    private boolean validate()
+    {
+        boolean ret = true;
+
+        if (workOrderTable.CompanyId != curExt() && !CustTable::findByPartyRecId(workOrderTable.OrganizationParty).RecId)
+        {
+            ret = checkFailed("The selected Work order Organization party is not released as a Customer in the current company");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

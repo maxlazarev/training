@@ -1,0 +1,2606 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>FINCreditAddEditDialog</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class FINCreditAddEditDialog extends FormRun
+{    
+    FINCreditForm           creditFormClass;
+    FINCreditManager        creditManager;
+    Object                  callerFormRun;
+    Common                  callerBuffer;
+    FINCreditLineDetails    callerCreditParmLineDetails;
+    CustInvoiceJour         callerCustInvoiceJour;
+    VendInvoiceJour         callerVendInvoiceJour;
+    DirPartyRecId           party;
+
+    TmpFrmVirtual           tmpFrmVirtualLines;
+
+    AddUpdate               openMode;
+
+    QueryBuildRange         rangeInventTransId;
+    QueryBuildRange         rangeJourTableId;
+    QueryBuildRange         rangeJourRecId;
+    QueryBuildRange         qbrInvoicePeriodLinkTableId;
+    QueryBuildRange         qbrInvoicePeriodLinkRecId;
+    QueryBuildRange         qbrMarkupTransTableId;
+    QueryBuildRange         qbrMarkupTransRecId;
+    QueryBuildRange         qbrRentalDateTimesTableId;
+    QueryBuildRange         qbrRentalDateTimesRecId;
+
+    Set                     excludedLines = new Set(Types::Int64);
+
+    [FormObservable]
+    FINInvoiceTransPeriodStatus invoiceTransPeriodStatus;
+    [FormObservable]
+    InvoiceId                   invoiceTransInvoiceId;
+
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canClose</Name>
+				<Source><![CDATA[
+    public boolean canClose()
+    {
+        boolean ret;
+    
+        ret = super();
+    
+        if (element.closedOk())
+        {
+            ret = ret && creditFormClass.validateCreditParmLineDetails(tmpFrmVirtualLines);            
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>close</Name>
+				<Source><![CDATA[
+    public void close()
+    {
+        if (element.closedOk())
+        {
+            ttsbegin;
+
+            if (CreditParmLineDetails.validateWrite())
+            {
+                Object callerObject = element.args().parmObject();
+                if (callerObject is FINCheckCreateCreditLineDetails)
+                {
+                    callerObject.setMarkedCreditLineDetailsMap(creditFormClass.markedCreditLineDetailsMap);
+                    creditFormClass.markedCreditLineDetailsMap = null;
+                }
+
+                CreditParmLineDetails.write();
+
+                if (openMode == AddUpdate::Update)
+                {
+                    // Delete everything related to previous version of CreditParmLineDetails. It will be recreated.
+                    FINCreditPendingChangesReference::deleteForCreditParmLineDetails(CreditParmLineDetails.RecId);
+                }
+
+                creditFormClass.confirmPendingParmLine(tmpFrmVirtualLines);
+            }
+            ttscommit;
+        }
+        else
+        {
+            creditFormClass.deletePendingParmLine(tmpFrmVirtualLines);            
+        }
+    
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyAdditionalInfo</Name>
+				<Source><![CDATA[
+    public void copyAdditionalInfo(FINCreditLineDetails _creditParmLineDetails, RecId _specificRecordRecId = 0)
+    {
+        FINCreditLine           creditParmLineLocal;
+        FINCreditLineDetails    creditParmLineDetailsLocal;
+    
+        if (_creditParmLineDetails)
+        {
+            while select creditParmLineLocal
+            where creditParmLineLocal.JourRefTableId == creditParmLine.JourRefTableId
+            && creditParmLineLocal.JourRefRecId == creditParmLine.JourRefRecId
+                join forUpdate creditParmLineDetailsLocal
+                where creditParmLineDetailsLocal.CreditLineRefRecId == creditParmLineLocal.RecId
+                && creditParmLineDetailsLocal.RecId != _creditParmLineDetails.RecId
+                && (!_specificRecordRecId || creditParmLineDetailsLocal.RecId == _specificRecordRecId)
+            {
+                if (element.editCopy(false, creditParmLineLocal, CustInvoiceTrans::findRecId(creditParmLineLocal.RefRecId).InvoiceId, NoYes::No) == NoYes::Yes)
+                {
+                    creditParmLineDetailsLocal.DNRReasonCode    = _creditParmLineDetails.DNRReasonCode;
+                    creditParmLineDetailsLocal.ReasonText       = _creditParmLineDetails.ReasonText;
+                    creditParmLineDetailsLocal.ContactPersonId  = _creditParmLineDetails.ContactPersonId;
+                    creditParmLineDetailsLocal.ExternalNotes    = _creditParmLineDetails.ExternalNotes;
+                    creditParmLineDetailsLocal.update();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>editCopy</Name>
+				<Source><![CDATA[
+    NoYes editCopy(boolean _set, Common _line, Num _id, NoYes _copy)
+    {
+        NoYes  copy;
+        
+        element.findTmpFrmVirtual(tmpFrmVirtualLines, _line.TableId, _line.RecId);
+    
+        if (tmpFrmVirtualLines)
+        {
+            copy = NoYes::Yes;
+        }
+    
+        if (_set)
+        {
+            if (_copy)
+            {
+                element.writeTmpFrmVirtual(tmpFrmVirtualLines, _line.TableId, _line.RecId, _id);
+                copy = NoYes::Yes;                   
+                
+            }
+            else
+            {
+                tmpFrmVirtualLines.delete();
+                copy = NoYes::No;                
+            }
+        }
+    
+        return copy;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>editReInvoiceAll</Name>
+				<Source><![CDATA[
+    edit NoYes editReInvoiceAll(boolean _set, NoYes _reInvoice)
+    {        
+        FINCreditLine creditParmLineLocal;
+    
+        if (_set)
+        {
+            creditFormClass.parmReInvoiceAll(_reInvoice);
+    
+            while select creditParmLineLocal
+            where creditParmLineLocal.JourRefTableId == creditParmLine.JourRefTableId
+            &&    creditParmLineLocal.JourRefRecId   == creditParmLine.JourRefRecId
+            {
+                CreditParmLine_ds.copy(_set, creditParmLineLocal, _reInvoice);
+            }
+    
+            CreditParmLine_ds.research();
+            CreditParmLineDetails_ds.research();
+            element.updateDesign();
+        }
+    
+        return creditFormClass.parmReInvoiceAll();        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>effectivityTypeChanged</Name>
+				<Source><![CDATA[
+    public void effectivityTypeChanged(FINCreditDateRangeType _dateRangeType)
+    {
+        CreditParmLineDetails.DateRangeType = _dateRangeType;
+        if (CreditParmLineDetails.validateField(fieldNum(FINCreditLineDetails, DateRangeType)))
+        {
+            CreditParmLineDetails.modifiedField(fieldNum(FINCreditLineDetails, DateRangeType));
+            creditFormClass.creditTypeChanged(CreditParmLineDetails.CreditType, GroupType_AmountCurCredit, GroupType_RentalModeId);
+            CreditParmLineDetails_ds.refresh();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findAdditionalInfo</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "update happend in the method copyAdditionalInfo")]
+    public FINCreditLineDetails findAdditionalInfo(FINCreditLineDetails _creditParmLineDetails)
+    {
+        FINCreditLine           creditParmLineLocal;
+        FINCreditLineDetails    creditParmLineDetailsLocal, creditParmLineDetailsFound;
+        CustInvoiceTrans        custInvoiceTrans;
+
+        while select forupdate creditParmLineLocal
+        where creditParmLineLocal.JourRefTableId == creditParmLine.JourRefTableId
+        && creditParmLineLocal.JourRefRecId == creditParmLine.JourRefRecId
+            join creditParmLineDetailsLocal
+            where creditParmLineDetailsLocal.CreditLineRefRecId == creditParmLineLocal.RecId
+            && creditParmLineDetailsLocal.RecId != _creditParmLineDetails.RecId
+            && (creditParmLineDetailsLocal.DNRReasonCode ||
+                creditParmLineDetailsLocal.ReasonText ||
+                creditParmLineDetailsLocal.ContactPersonId)
+                outer join InvoiceId from custInvoiceTrans
+                where custInvoiceTrans.RecId == creditParmLineLocal.RefRecId
+        {
+            if (element.editCopy(false, creditParmLineLocal, custInvoiceTrans.InvoiceId, NoYes::No) == NoYes::Yes)
+            {
+                creditParmLineDetailsFound = creditParmLineDetailsLocal;
+                break;
+            }
+        }
+
+        return creditParmLineDetailsFound;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findTmpFrmVirtual</Name>
+				<Source><![CDATA[
+    void findTmpFrmVirtual(TmpFrmVirtual _tmpFrmVirtual, TableId _tableId, RecId _recId)
+    {
+        select firstonly _tmpFrmVirtual
+        where _tmpFrmVirtual.TableNum   == _tableId
+        && _tmpFrmVirtual.RecordNo      == _recId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInvalidInitFormMethodWarning", "Validation of caller must be performed before invoking super()")]
+    public void init()
+    {
+        Object formRunObject;
+        Common callerRecord;
+        ;
+
+        if(element.args())
+        {
+            formRunObject = element.args().caller();
+
+            if(formRunObject)
+            {
+                callerRecord = element.args().record();
+                creditFormClass = formRunObject.getCreditFormClass();
+            }
+        }
+
+        if(creditFormClass && (callerRecord is CustInvoiceJour || callerRecord is VendInvoiceJour || callerRecord is FINCreditLineDetails))
+        {
+            callerFormRun = element.args().caller();
+            element.initCallerBuffer(callerRecord);
+            
+            creditManager = FINCreditManager::construct(creditFormClass.salesPurch());
+
+            openMode = element.args().parmEnum();
+            creditFormClass.parmOpenMode(openMode);
+            creditFormClass.initCallerBuffer(callerBuffer);
+
+            if (creditFormClass.isLockedForEdition())
+            {
+                throw error("@DNR:RecordLockedForCreditByAnotherUser");
+            }
+            else
+            {
+                if (openMode == AddUpdate::Add)
+                {
+                    // Do not show salesPurch lines that are already credited
+                    excludedLines = creditFormClass.excludedLines();
+                }
+
+                creditFormClass.populateParmLine();                        
+
+                element.markForEditCallerBuffer();
+
+                super();
+
+                if (formHasMethod(formRunObject, identifierStr(getCallerBuffer)))
+                {
+                    FINRentalOrderTimezoneCheck::check(formRunObject.getCallerBuffer(), FINTimezoneCheckProcess::RentalCredit);
+                }
+            }
+        }
+        else
+        {
+            throw error(strFmt("@SYS29104", classStr(FINCreditForm)));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCallerBuffer</Name>
+				<Source><![CDATA[
+    private void initCallerBuffer(Common _common)
+    {
+        callerBuffer = _common;
+
+        switch (callerBuffer.TableId)
+        {
+            case tableNum(FINCreditLineDetails) :
+               callerCreditParmLineDetails = callerBuffer;
+               break;
+            
+           case tableNum(CustInvoiceJour) :
+                callerCustInvoiceJour = callerBuffer;
+                break;
+            
+            case tableNum(VendInvoiceJour) :
+                callerVendInvoiceJour = callerBuffer;
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>markForEditCallerBuffer</Name>
+				<Source><![CDATA[
+    private void markForEditCallerBuffer()
+    {
+        if (callerCreditParmLineDetails)
+        {
+            // lock for edition
+            FINCreditLine creditParmLineLocal = callerCreditParmLineDetails.creditLine(true);
+
+            if (creditParmLineLocal)
+            {
+                element.editCopy(true, creditParmLineLocal, CustInvoiceTrans::findRecId(creditParmLineLocal.RefRecId).InvoiceId, true);                    
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateDesign</Name>
+				<Source><![CDATA[
+    public void updateDesign()
+    {
+        boolean allowEdit = (CreditParmLine.TradeType != RORTradeType::SalesPurch && CreditParmLine_ds.copy(false, CreditParmLine, NoYes::No));
+
+        editReInvoiceAll.enabled(openMode == AddUpdate::Add);
+        GroupEffectivity.enabled(allowEdit);
+
+        CreditParmLineDetails_ds.object(fieldNum(FINCreditLineDetails, CreditType)).allowEdit(allowEdit);
+        CreditParmLineDetails_ds.object(fieldNum(FINCreditLineDetails, DateRangeType)).allowEdit(allowEdit);
+        CreditParmLineDetails_ds.object(fieldNum(FINCreditLineDetails, FromDate)).allowEdit(allowEdit);
+        CreditParmLineDetails_ds.object(fieldNum(FINCreditLineDetails, FromDateTime)).allowEdit(allowEdit);
+        CreditParmLineDetails_ds.object(fieldNum(FINCreditLineDetails, ToDateTime)).allowEdit(allowEdit);
+        
+        boolean enableCredit = (CreditParmLineDetails.CreditType != FINCreditType::RentalMode && CreditParmLineDetails.CreditType != FINCreditType::Days);
+        CreditParmLineDetails_ds.object(fieldNum(FINCreditLineDetails, AmountCurCredit)).allowEdit(allowEdit && enableCredit);
+        creditFormClass.creditTypeChanged(CreditParmLineDetails.CreditType, GroupType_AmountCurCredit, GroupType_RentalModeId);
+
+        CreditParmLineDetails_ds.object(fieldNum(FINCreditLineDetails, RentalModeId)).allowEdit(allowEdit && CreditParmLineDetails.CreditType == FINCreditType::RentalMode);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>writeTmpFrmVirtual</Name>
+				<Source><![CDATA[
+    void writeTmpFrmVirtual(
+    TmpFrmVirtual   _tmpFrmVirtual,
+    TableId         _tableId,
+    RecId           _recId,
+    Num             _id)
+    {
+        _tmpFrmVirtual.TableNum     = _tableId;
+        _tmpFrmVirtual.RecordNo     = _recId;
+        _tmpFrmVirtual.Id           = _id;
+
+        _tmpFrmVirtual.LineNum      = 0;
+        _tmpFrmVirtual.TransDate    = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+        _tmpFrmVirtual.Qty          = 0;
+        _tmpFrmVirtual.RORCreditReasonCodeId = '';
+
+        _tmpFrmVirtual.write();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>selectControl</Name>
+				<Source><![CDATA[
+    public boolean selectControl(FormControl _control)
+    {
+        #define.buttonCancel('CancelButton')
+        boolean ret;
+    
+        if (_control && _control.name() == #buttonCancel)
+        {
+            CreditParmLineDetails.clear();
+        }
+
+        ret = super(_control);
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="">
+			<DataSource>
+				<Name>CreditParmLine</Name>
+				<Methods>
+					<Method>
+						<Name>active</Name>
+						<Source><![CDATA[
+        public int active()
+        {
+            int ret = super();
+        
+            TabPageRentalDates.visible(CreditParmLine.TradeType != RORTradeType::SalesPurch);
+            TabPagePeriods.visible(CreditParmLine.TradeType != RORTradeType::SalesPurch);
+
+            element.updateDesign();
+            this.updateInvoiceTransLink();
+        
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>updateInvoiceTransLink</Name>
+						<Source><![CDATA[
+        protected void updateInvoiceTransLink()
+        {
+            if (CreditParmLine.RefTableId == tableNum(CustInvoiceTrans))
+            {
+                FINCustInvoiceTrans finCustInvoiceTrans;
+                CustInvoiceTrans custInvoiceTrans = CustInvoiceTrans::findRecId(CreditParmLine.RefRecId);
+
+                invoiceTransInvoiceId = custInvoiceTrans.InvoiceId;
+
+                select firstonly finCustInvoiceTrans where finCustInvoiceTrans.CustInvoiceTransRecId == custInvoiceTrans.RecId;
+                invoiceTransPeriodStatus = finCustInvoiceTrans.PeriodStatus;
+            }
+            else if (CreditParmLine.RefTableId == tableNum(VendInvoiceTrans))
+            {
+                FINVendInvoiceTrans finVendInvoiceTrans;
+                VendInvoiceTrans vendInvoiceTrans = VendInvoiceTrans::findRecId(CreditParmLine.RefRecId);
+
+                invoiceTransInvoiceId = vendInvoiceTrans.InvoiceId;
+
+                select firstonly finVendInvoiceTrans where finVendInvoiceTrans.VendInvoiceTransRecId == vendInvoiceTrans.RecId;
+                invoiceTransPeriodStatus = finVendInvoiceTrans.PeriodStatus;
+            }
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>executeQuery</Name>
+						<Source><![CDATA[
+        public void executeQuery()
+        {
+            switch (callerBuffer.TableId)
+            {
+                case tableNum(FINCreditLineDetails) :
+                    InventTransId inventTransId = callerCreditParmLineDetails.creditLine().InventTransId;
+                    if (inventTransId)
+                    {
+                        rangeInventTransId.value(SysQuery::value(inventTransId));
+                    }
+                    break;
+            
+                case tableNum(CustInvoiceJour) :
+                case tableNum(VendInvoiceJour) :
+                    rangeJourTableId.value(SysQuery::value(callerBuffer.TableId));
+                    rangeJourRecId.value(SysQuery::value(callerBuffer.RecId));
+                    break;
+            }
+
+            super();
+
+            element.updateDesign();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            super();
+        
+            QueryBuildDataSource queryBuildDataSource = this.queryBuildDataSource();
+            queryBuildDataSource.clearDynalinks();
+        
+            rangeInventTransId = queryBuildDataSource.addRange(fieldNum(FINCreditLine, InventTransId));
+            rangeJourTableId = queryBuildDataSource.addRange(fieldNum(FINCreditLine, JourRefTableId));
+            rangeJourRecId = queryBuildDataSource.addRange(fieldNum(FINCreditLine, JourRefRecId));
+        
+            creditFormClass.extendQuery(queryBuildDataSource);
+
+            queryBuildDataSource.addRange(fieldNum(FINCreditLine, DocumentState)).value(SysQuery::valueNot(VersioningDocumentState::Rejected));
+
+            if (callerCreditParmLineDetails)
+            {
+                queryBuildDataSource.addRange(fieldNum(FINCreditLine, DocumentState)).value(SysQuery::value(VersioningDocumentState::Draft));
+            }
+
+            if (excludedLines && !excludedLines.empty())
+            {
+                SetEnumerator enumerator = excludedLines.getEnumerator(); 
+
+                while (enumerator.moveNext())
+                {
+                    queryBuildDataSource.addRange(fieldNum(FINCreditLine, RecId)).value(SysQuery::valueNot(enumerator.current()));
+                }
+            }
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>copy</Name>
+						<Source><![CDATA[
+        edit NoYes copy(boolean _set, FINCreditLine _creditParmLine, NoYes _copy)
+        {
+            NoYes       ret;
+            InvoiceId   invoiceId;
+        
+            if (_set)
+            {
+                if (_creditParmLine.RefTableId == tableNum(CustInvoiceTrans))
+                {
+                    invoiceId = CustInvoiceTrans::findRecId(_creditParmLine.RefRecId).InvoiceId;
+                }
+                else if (_creditParmLine.RefTableId == tableNum(VendInvoiceTrans))
+                {
+                    invoiceId = VendInvoiceTrans::findRecId(_creditParmLine.RefRecId).InvoiceId;
+                }
+            }
+        
+            ret = element.editCopy(_set, _creditParmLine, invoiceId, _copy);
+        
+            if (_set)
+            {
+                if (_copy)
+                {
+                    ttsBegin;
+                    
+                    callerCreditParmLineDetails = FINCreditLineDetails::findRecId(callerCreditParmLineDetails.RecId);
+
+                    if (!callerCreditParmLineDetails || callerCreditParmLineDetails.CreditLineRefRecId != _creditParmLine.RecId)
+                    {
+                        CreditParmLineDetails_ds.positionToRecord(creditFormClass.newCreditParmLineDetails(_creditParmLine, true));
+                        element.copyAdditionalInfo(element.findAdditionalInfo(CreditParmLineDetails), CreditParmLineDetails.RecId);
+                    }
+
+                    switch (_creditParmLine.TradeType)
+                    {
+                        case RORTradeType::SalesPurch:
+                            if (FINCreditLineDetails::findRecId(CreditParmLineDetails.RecId).ContactPersonId)
+                            {
+                                CreditParmLineDetails_ds.research(true);
+                            }
+                            DateRange.optionValue(0);
+                            OneDay.optionValue(0);
+                            EntirePeriod.optionValue(1);
+                            GroupEffectivity.allowEdit(false);
+                            if (FINCreditLineDetails::findRecId(CreditParmLineDetails.RecId).ContactPersonId)
+                            {
+                                element.effectivityTypeChanged(FINCreditDateRangeType::EntirePeriod);
+                            }
+                            else
+                            {
+                                // default enables credit amount field
+                                creditFormClass.creditTypeChanged(CreditParmLineDetails.CreditType, GroupType_AmountCurCredit, GroupType_RentalModeId);
+                            }
+                            break;
+        
+                        default:
+                            GroupEffectivity.allowEdit(true);
+                            break;
+                    }
+                    ttsCommit;
+        
+                    CreditParmLineDetails_ContactPersonId.setFocus();
+                }
+                else
+                {
+                    creditFormClass.deleteCreditParmLineDetailsForCreditLine(_creditParmLine);
+                }
+        
+                CreditParmLineDetails_ds.research();
+            }
+       
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+			<DataSource>
+				<Name>CreditParmLineDetails</Name>
+				<Methods>
+					<Method>
+						<Name>write</Name>
+						<Source><![CDATA[
+        public void write()
+        {
+            boolean copyAdditionalInfo;
+                    
+            if (CreditParmLineDetails.DNRReasonCode     != CreditParmLineDetails.orig().DNRReasonCode
+            ||  CreditParmLineDetails.ReasonText        != CreditParmLineDetails.orig().ReasonText
+            ||  CreditParmLineDetails.ContactPersonId   != CreditParmLineDetails.orig().ContactPersonId)
+            {
+                copyAdditionalInfo = true;
+            }
+        
+            super();
+        
+            if (copyAdditionalInfo)
+            {
+                ttsBegin;
+                element.copyAdditionalInfo(CreditParmLineDetails);
+                ttsCommit;
+        
+                CreditParmLine_ds.research(true);
+            }
+        
+            element.updateDesign();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>editContactPersonName</Name>
+						<Source><![CDATA[
+        edit ContactPersonName editContactPersonName(
+            boolean                     _set,
+            FINCreditLineDetails    _creditParmLineDetails,
+            ContactPersonName           _name)
+        {
+            ContactPersonName   name = _name;            
+            ContactPerson       contactPerson;
+            DirPartyTable       partyTable;
+        
+            if (_set)
+            {
+                if (name)
+                {
+                    contactPerson = ContactPerson::find(_name);
+                    _creditParmLineDetails.ContactPersonId = contactPerson.ContactPersonId;
+        
+                    if (_creditParmLineDetails.ContactPersonId)
+                    {
+                        name = contactPerson.personName();
+                    }
+                    else
+                    {
+                        select firstonly contactPerson
+                        where contactPerson.ContactForParty == _creditParmLineDetails.findDirPartyRecId()
+                            join Name from partyTable
+                            where partyTable.RecId   == contactPerson.Party
+                            &&    partyTable.Name == name;
+        
+                        if (contactPerson)
+                        {
+                            _creditParmLineDetails.ContactPersonId = contactPerson.ContactPersonId;
+                            name = partyTable.Name;
+                        }
+                    }
+                }
+                else
+                {
+                    _creditParmLineDetails.ContactPersonId = '';
+                }
+            }
+            else
+            {
+                name = ContactPerson::name(_creditParmLineDetails.ContactPersonId);
+            }
+        
+            return name;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>active</Name>
+						<Source><![CDATA[
+        public int active()
+        {
+            int ret = super();
+
+            DateRange.optionValue(CreditParmLineDetails.DateRangeType ==  FINCreditDateRangeType::DateRange);
+            OneDay.optionValue(CreditParmLineDetails.DateRangeType ==  FINCreditDateRangeType::SingleDay);
+            EntirePeriod.optionValue(CreditParmLineDetails.DateRangeType ==  FINCreditDateRangeType::EntirePeriod);
+
+            element.updateDesign();
+                    
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            super();
+
+            if (openMode == AddUpdate::Add)
+            {
+                this.queryBuildDataSource().addSortField(fieldNum(FINCreditLineDetails, CreatedDateTime), SortOrder::Descending);
+            }
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields>
+					<Field>
+						<DataField>CreditType</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            public void modified()
+            {
+                super();
+
+                creditFormClass.creditTypeChanged(CreditParmLineDetails.CreditType, GroupType_AmountCurCredit, GroupType_RentalModeId);
+
+                element.updateDesign();
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+				</Fields>
+			</DataSource>
+			<DataSource>
+				<Name>RORRentalDateTimes</Name>
+				<Methods>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            super();
+
+            QueryBuildDataSource rentalDateTimesQBDS = this.queryBuildDataSource();
+            
+            qbrRentalDateTimesTableId = rentalDateTimesQBDS.addRange(fieldNum(RORRentalDateTimes, RefTableId));
+            qbrRentalDateTimesTableId.status(RangeStatus::Hidden);
+            qbrRentalDateTimesRecId = rentalDateTimesQBDS.addRange(fieldNum(RORRentalDateTimes, RefRecId));
+            qbrRentalDateTimesRecId.status(RangeStatus::Hidden);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>executeQuery</Name>
+						<Source><![CDATA[
+        public void executeQuery()
+        {
+            qbrRentalDateTimesTableId.value(SysQuery::value(CreditParmLine.RefTableId));
+            qbrRentalDateTimesRecId.value(SysQuery::value(CreditParmLine.RefRecId));
+
+            super();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+			<DataSource>
+				<Name>MarkupTrans</Name>
+				<Methods>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            super();
+
+            QueryBuildDataSource markupTransQBDS = this.queryBuildDataSource();
+
+            qbrMarkupTransTableId = markupTransQBDS.addRange(fieldNum(MarkupTrans, TransTableId));
+            qbrMarkupTransTableId.status(RangeStatus::Hidden);
+            qbrMarkupTransRecId = markupTransQBDS.addRange(fieldNum(MarkupTrans, TransRecId));
+            qbrMarkupTransRecId.status(RangeStatus::Hidden);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>executeQuery</Name>
+						<Source><![CDATA[
+        public void executeQuery()
+        {
+            qbrMarkupTransTableId.value(SysQuery::value(CreditParmLine.RefTableId));
+            qbrMarkupTransRecId.value(SysQuery::value(CreditParmLine.RefRecId));
+
+            super();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+			<DataSource>
+				<Name>InvoicePeriod</Name>
+				<Methods>
+					<Method>
+						<Name>executeQuery</Name>
+						<Source><![CDATA[
+        public void executeQuery()
+        {
+            InvoicePeriodLink_ds.executeQuery();
+
+            super();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayPeriodStatus</Name>
+						<Source><![CDATA[
+        display FINInvoiceTransPeriodStatus displayPeriodStatus()
+        {
+            return invoiceTransPeriodStatus;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayInvoiceId</Name>
+						<Source><![CDATA[
+        display InvoiceId displayInvoiceId()
+        {
+            return invoiceTransInvoiceId;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayLineAmount</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display INVLineAmountInvoiced displayLineAmount(FINJournalizedInvoicePeriod _invoicePeriod)
+        {
+            return (invoiceTransInvoiceId == _invoicePeriod.InvoiceId ? _invoicePeriod.LineAmount : - _invoicePeriod.LineAmount);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayDiscAmount</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display INVDiscAmountInvoiced displayDiscAmount(FINJournalizedInvoicePeriod _invoicePeriod)
+        {
+            return (invoiceTransInvoiceId == _invoicePeriod.InvoiceId ? _invoicePeriod.DiscAmount : - _invoicePeriod.DiscAmount);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+			<DataSource>
+				<Name>InvoicePeriodLink</Name>
+				<Methods>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            super();
+
+            QueryBuildDataSource periodLinkQBDS = this.queryBuildDataSource();
+                      
+            qbrInvoicePeriodLinkTableId = periodLinkQBDS.addRange(fieldNum(FINJournalizedInvoicePeriodLink, InvoiceTransTableId));
+            qbrInvoicePeriodLinkTableId.status(RangeStatus::Hidden);
+            qbrInvoicePeriodLinkRecId = periodLinkQBDS.addRange(fieldNum(FINJournalizedInvoicePeriodLink, InvoiceTransRecId));
+            qbrInvoicePeriodLinkRecId.status(RangeStatus::Hidden);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>executeQuery</Name>
+						<Source><![CDATA[
+        public void executeQuery()
+        {
+            qbrInvoicePeriodLinkTableId.value(SysQuery::value(CreditParmLine.RefTableId));
+            qbrInvoicePeriodLinkRecId.value(SysQuery::value(CreditParmLine.RefRecId));
+
+            super();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+		</DataSources>
+		<DataControls xmlns="">
+			<Control>
+				<Name>DateRange</Name>
+				<Type>Group</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+        
+            element.effectivityTypeChanged(FINCreditDateRangeType::DateRange);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>OneDay</Name>
+				<Type>Group</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+        
+            element.effectivityTypeChanged(FINCreditDateRangeType::SingleDay);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>EntirePeriod</Name>
+				<Type>Group</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+        
+            element.effectivityTypeChanged(FINCreditDateRangeType::EntirePeriod);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>editContactPersonName</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>jumpRef</Name>
+						<Source><![CDATA[
+        public void jumpRef()
+        {
+            CreditParmLineDetails_ds.object(fieldNum(FINCreditLineDetails, ContactPersonId)).jumpRef();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>lookup</Name>
+						<Source><![CDATA[
+        void lookup()
+        {
+            if (!party)
+            {
+                party = CreditParmLineDetails.findDirPartyRecId();
+            }
+
+            ContactPerson::lookupDirContactPerson(CreditParmLineDetails_ContactPersonId,
+                                                  party,
+                                                  editContactPersonName,
+                                                  CreditParmLineDetails.ContactPersonId);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources>
+		<AxFormDataSource xmlns="">
+			<Name>CreditParmLine</Name>
+			<Table>FINCreditLine</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>CalendarId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreatedBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreatedDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreditAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CurrencyCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DocumentState</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>HeaderId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventTransId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoicedAmount</DataField>
+					<Visible>No</Visible>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceProfileId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ItemId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ItemName</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>JourRefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>JourRefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>KitComponentType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LineDisc</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LinePercent</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LineRefNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Price</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PriceTimeUnit</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RateMultiplierTier</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReInvoice</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalModeId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentQty</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SessionId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TradeType</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>CreditParmLineDetails</Name>
+			<Table>FINCreditLineDetails</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>ContactPersonId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreatedBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreatedDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreditLineRefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreditType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DateRangeType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Description</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DNRReasonCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExternalNotes</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FromDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FromDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OrderId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReasonText</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalModeId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ToDateTime</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<JoinSource>CreditParmLine</JoinSource>
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<StartPosition>Last</StartPosition>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>RORRentalDateTimes</Name>
+			<Table>RORRentalDateTimes</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>BuildDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BuildDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BuildTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>dataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EventEndDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EventEndDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EventEndTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EventStartDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EventStartDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EventStartTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExpectedOffRentDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExpectedOffRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExpectedOffRentTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InboundDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InboundDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InboundTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InspectionDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InspectionDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InspectionTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OffRentDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OffRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OffRentTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OnRentDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OnRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OnRentTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OutboundDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OutboundDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OutboundTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ParentRentalDateTimes</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PreparationDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PreparationDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PreparationTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestedDeliveryDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestedDeliveryDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestedDeliveryTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestedPickupDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestedPickupDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestedPickupTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StrikeDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StrikeDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StrikeTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SynchronizeFromParent</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<JoinSource>CreditParmLine</JoinSource>
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>MarkupTrans</Name>
+			<Table>MarkupTrans</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>BankLCImportChargeAllocation_SA</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CalculatedAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CalculatedAmountMST_W</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CorrectedMarkupTrans</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreatedBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CreatedDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CurrencyCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CustInvoiceLineIdRef</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CustInvoiceLineTemplate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CustomsAssessableValue_IN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CustVendPosted_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DocumentStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExchrateSecond_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExchRate_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FacturedAmount_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FINIgnoreTaxMatrix</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FromAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>GoodsInRouteId_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>GoodsInRouteToDelivery_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyCompanyId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyInvoiceId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyMarkupUseValue</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyMarkupValue</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyRefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanySkipUpdate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsAutoCharge</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsDeleted</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsModified</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsTieredCharge</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ItemPosted_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Keep</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LineNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MarkUpAllocateAfter_IN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MarkupCategory</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MarkupClassification_BR</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MarkupCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRBrokerContractFee</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRCouponMarkup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRInstallmentEligible</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRMarkupTransCreatedBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRMiscChargeOverride</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCROriginalMiscChargeValue</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRReasonCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRRetailInfocodeId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRSavedRecID</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRSavedTableID</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ModifiedBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ModifiedDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ModuleCategory</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ModuleType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NotionalCharges_IN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NotionalPct_IN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OrigRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OrigTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PackedExtensions</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Posted</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SourceDocumentLine</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxAmountExciseMST_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxAmountExcise_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxAmountMST_W</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxAmountVATMST_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxAmountVAT_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxAutogenerated</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxItemGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxValueVAT_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxVATType_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxWriteCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ToAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Txt</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Value</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VATDocumentType_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Voucher</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<JoinSource>CreditParmLine</JoinSource>
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>InvoicePeriod</Name>
+			<Table>FINJournalizedInvoicePeriod</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>DataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DiscAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvPeriodQtyPhysicalRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LineAmount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NumOfCalendarPeriods</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NumOfChargeablePeriods</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PeriodEndDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PeriodStartDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>QtyInvoiced</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SourceRefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<JoinSource>CreditParmLine</JoinSource>
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>InvoicePeriodLink</Name>
+			<Table>FINJournalizedInvoicePeriodLink</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>DataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceTransRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceTransTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>JournalizedPeriodRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<JoinSource>InvoicePeriod</JoinSource>
+			<LinkType>ExistJoin</LinkType>
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+	</DataSources>
+	<Design>
+		<Caption xmlns="">@DNR7429</Caption>
+		<DialogSize xmlns="">Large</DialogSize>
+		<Pattern xmlns="">Dialog</Pattern>
+		<PatternVersion xmlns="">1.2</PatternVersion>
+		<Style xmlns="">Dialog</Style>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormGroupControl">
+				<Name>HeaderGroup</Name>
+				<AutoDeclaration>Yes</AutoDeclaration>
+				<ElementPosition>1073741823</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Pattern>Custom</Pattern>
+				<Type>Group</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabControl">
+						<Name>Tab</Name>
+						<AlignControl>No</AlignControl>
+						<ElementPosition>1431655764</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>Tab</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPage</Name>
+								<ElementPosition>858993458</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>SizeToAvailable</HeightMode>
+								<Type>TabPage</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormCheckBoxControl">
+										<Name>editReInvoiceAll</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<ElementPosition>954437176</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>CheckBox</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataMethod>editReInvoiceAll</DataMethod>
+										<Label>@SYS4082903</Label>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGridControl">
+										<Name>Grid</Name>
+										<ElementPosition>1431655764</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Grid</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormCheckBoxControl">
+												<Name>CreditParmLine_Copy</Name>
+												<ElementPosition>477218588</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>SizeToAvailable</HeightMode>
+												<HelpText>@SYS69426</HelpText>
+												<Type>CheckBox</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>SizeToAvailable</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<BackgroundColor>WindowBackground</BackgroundColor>
+												<DataMethod>Copy</DataMethod>
+												<DataSource>CreditParmLine</DataSource>
+												<Label>@SYS19120</Label>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>CreditParmLine_LineRefNum</Name>
+												<ElementPosition>596523235</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>SizeToAvailable</HeightMode>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>SizeToAvailable</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>LineRefNum</DataField>
+												<DataSource>CreditParmLine</DataSource>
+												<NoOfDecimals>2</NoOfDecimals>
+												<NoOfDecimalsMode>Fixed</NoOfDecimalsMode>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>CreditParmLine_ItemId</Name>
+												<ElementPosition>715827882</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>SizeToAvailable</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>SizeToAvailable</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>ItemId</DataField>
+												<DataSource>CreditParmLine</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>CreditParmLine_ItemName</Name>
+												<ElementPosition>954437176</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>SizeToAvailable</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>SizeToAvailable</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>ItemName</DataField>
+												<DataSource>CreditParmLine</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>CreditParmLine_InvoicedAmount</Name>
+												<ElementPosition>1193046470</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>SizeToAvailable</HeightMode>
+												<Type>Real</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>SizeToAvailable</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InvoicedAmount</DataField>
+												<DataSource>CreditParmLine</DataSource>
+												<NoOfDecimals>-1</NoOfDecimals>
+											</AxFormControl>
+										</Controls>
+										<DataSource>CreditParmLine</DataSource>
+										<MultiSelect>No</MultiSelect>
+										<ShowRowLabels>No</ShowRowLabels>
+									</AxFormControl>
+								</Controls>
+								<ArrangeMethod>Auto</ArrangeMethod>
+								<Caption>@SYS15451</Caption>
+								<Scrollbars>Auto</Scrollbars>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPageRentalDates</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1288490187</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>SizeToAvailable</HeightMode>
+								<Type>TabPage</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>LinePreRentalDates</Name>
+										<ElementPosition>1073741822</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePreRentalDates_PreparationDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>PreparationDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePreRentalDates_OutboundDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>OutboundDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePreRentalDates_RequestedDeliveryDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>RequestedDeliveryDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePreRentalDates_OnRentDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>OnRentDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePreRentalDates_BuildDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>BuildDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePreRentalDates_EventStartDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>EventStartDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+										</Controls>
+										<DataGroup>PreRentalDateTimes</DataGroup>
+										<DataSource>RORRentalDateTimes</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>LinePostRentalDates</Name>
+										<ElementPosition>1610612733</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePostRentalDates_EventEndDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>EventEndDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePostRentalDates_StrikeDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>StrikeDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePostRentalDates_ExpectedOffRentDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>ExpectedOffRentDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePostRentalDates_OffRentDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>OffRentDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePostRentalDates_RequestedPickupDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>RequestedPickupDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePostRentalDates_InboundDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InboundDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>LinePostRentalDates_InspectionDateTime</Name>
+												<FilterExpression>%1</FilterExpression>
+												<Type>DateTime</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InspectionDateTime</DataField>
+												<DataSource>RORRentalDateTimes</DataSource>
+											</AxFormControl>
+										</Controls>
+										<DataGroup>PostRentalDateTimes</DataGroup>
+										<DataSource>RORRentalDateTimes</DataSource>
+									</AxFormControl>
+								</Controls>
+								<ColumnsMode>Fill</ColumnsMode>
+								<BackgroundColor>WindowBackground</BackgroundColor>
+								<Caption>@DNR6</Caption>
+								<Scrollbars>Auto</Scrollbars>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPagePeriods</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1717986916</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>SizeToAvailable</HeightMode>
+								<Type>TabPage</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormButtonControl">
+										<Name>MoveRangeButton</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<ElementPosition>1073741822</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<HelpText>@DNR7502</HelpText>
+										<Skip>Yes</Skip>
+										<Type>Button</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<Visible>No</Visible>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<MultiSelect>Yes</MultiSelect>
+										<Text>@DNR7430</Text>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGridControl">
+										<Name>PeriodsGrid</Name>
+										<ElementPosition>1431655764</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Grid</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>Grid_PeriodStartDateTime</Name>
+												<Type>DateTime</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>PeriodStartDateTime</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateTimeControl">
+												<Name>Grid_PeriodEndDateTime</Name>
+												<Type>DateTime</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>PeriodEndDateTime</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormIntegerControl">
+												<Name>Grid_NumOfChargeablePeriods</Name>
+												<Type>Integer</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>NumOfChargeablePeriods</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormIntegerControl">
+												<Name>Grid_NumOfCalendarPeriods</Name>
+												<Type>Integer</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>NumOfCalendarPeriods</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>Grid_displayLineAmount</Name>
+												<Type>Real</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>displayLineAmount</DataMethod>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>Grid_displayDiscAmount</Name>
+												<Type>Real</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>displayDiscAmount</DataMethod>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>Grid_InvoiceId</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InvoiceId</DataField>
+												<DataSource>InvoicePeriod</DataSource>
+											</AxFormControl>
+										</Controls>
+										<AlternateRowShading>No</AlternateRowShading>
+										<DataSource>InvoicePeriod</DataSource>
+										<MultiSelect>No</MultiSelect>
+										<ShowRowLabels>No</ShowRowLabels>
+										<VisibleRows>9</VisibleRows>
+										<VisibleRowsMode>Fixed</VisibleRowsMode>
+									</AxFormControl>
+								</Controls>
+								<ArrangeMethod>Auto</ArrangeMethod>
+								<Caption>@DNR999</Caption>
+								<Scrollbars>Auto</Scrollbars>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPageMarkupTrans</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<Type>TabPage</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGridControl">
+										<Name>MarkupTransGrid</Name>
+										<Type>Grid</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>MarkupTransGrid_LineNum</Name>
+												<Type>Real</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>LineNum</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>MarkupTransGrid_MarkupCode</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>MarkupCode</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>MarkupTransGrid_CurrencyCode</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>CurrencyCode</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>MarkupTransGrid_Value</Name>
+												<Type>Real</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>Value</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormRealControl">
+												<Name>MarkupTransGrid_TaxAmount</Name>
+												<Type>Real</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>TaxAmount</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>MarkupTransGrid_Voucher</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>Voucher</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>MarkupTransGrid_Txt</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>Txt</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>MarkupTransGrid_TaxGroup</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>TaxGroup</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>MarkupTransGrid_TaxItemGroup</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>TaxItemGroup</DataField>
+												<DataSource>MarkupTrans</DataSource>
+											</AxFormControl>
+										</Controls>
+										<DataGroup>AutoReport</DataGroup>
+										<DataSource>MarkupTrans</DataSource>
+									</AxFormControl>
+								</Controls>
+								<ArrangeMethod>Auto</ArrangeMethod>
+								<Caption>@AccountsPayable:Charges</Caption>
+							</AxFormControl>
+						</Controls>
+						<AlignChild>No</AlignChild>
+						<ArrangeMethod>Vertical</ArrangeMethod>
+					</AxFormControl>
+				</Controls>
+				<DataSource>CreditParmLine</DataSource>
+				<Style>DialogContent</Style>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormGroupControl">
+				<Name>GroupDetails</Name>
+				<ElementPosition>1789569705</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<HeightMode>SizeToAvailable</HeightMode>
+				<Pattern>Custom</Pattern>
+				<Type>Group</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormGroupControl">
+						<Name>GroupEffectivity</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>1431655764</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>Group</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>DateRange</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>858993458</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>Group</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateTimeControl">
+										<Name>INVCreditParmLineDetails_FromDateTime</Name>
+										<ElementPosition>1073741822</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<Type>DateTime</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>FromDateTime</DataField>
+										<DataSource>CreditParmLineDetails</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateTimeControl">
+										<Name>INVCreditParmLineDetails_ToDateTime</Name>
+										<ElementPosition>1610612733</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<Type>DateTime</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ToDateTime</DataField>
+										<DataSource>CreditParmLineDetails</DataSource>
+									</AxFormControl>
+								</Controls>
+								<Caption>@SYS41297</Caption>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<FrameOptionButton>Radio</FrameOptionButton>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>OneDay</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1288490187</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>Group</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormDateControl">
+										<Name>INVCreditParmLineDetails_FromDate</Name>
+										<ElementPosition>1431655764</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<Type>Date</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>FromDate</DataField>
+										<DataSource>CreditParmLineDetails</DataSource>
+									</AxFormControl>
+								</Controls>
+								<Caption>@DNR6937</Caption>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<FrameOptionButton>Radio</FrameOptionButton>
+								<OptionValue>0</OptionValue>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>EntirePeriod</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1717986916</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>Group</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls />
+								<HideIfEmpty>No</HideIfEmpty>
+								<Caption>@DNR6938</Caption>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<FrameOptionButton>Radio</FrameOptionButton>
+								<OptionValue>0</OptionValue>
+							</AxFormControl>
+						</Controls>
+						<Caption>@DNR6336</Caption>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormGroupControl">
+						<Name>GroupType</Name>
+						<ElementPosition>1073741822</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>Group</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormComboBoxControl">
+								<Name>GroupType_CreditType</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>858993458</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>ComboBox</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<DataField>CreditType</DataField>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<Items />
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormRealControl">
+								<Name>GroupType_AmountCurCredit</Name>
+								<AllowEdit>No</AllowEdit>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1288490187</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>Real</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<DataField>AmountCurCredit</DataField>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<NoOfDecimals>-1</NoOfDecimals>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>GroupType_RentalModeId</Name>
+								<AllowEdit>No</AllowEdit>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1717986916</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<DataField>RentalModeId</DataField>
+								<DataSource>CreditParmLineDetails</DataSource>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>GroupType_ExternalNotes</Name>
+								<ElementPosition>1932735281</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<DataField>ExternalNotes</DataField>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<MultiLine>Yes</MultiLine>
+							</AxFormControl>
+						</Controls>
+						<DataGroup>CreditType</DataGroup>
+						<DataSource>CreditParmLineDetails</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormGroupControl">
+						<Name>GroupReason</Name>
+						<ElementPosition>1431655764</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>Group</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>CreditParmLineDetails_ContactPersonId</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>858993458</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<Visible>No</Visible>
+								<FormControlExtension
+									i:nil="true" />
+								<DataField>ContactPersonId</DataField>
+								<DataSource>CreditParmLineDetails</DataSource>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>editContactPersonName</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1288490187</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<DataMethod>editContactPersonName</DataMethod>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<LookupButton>Always</LookupButton>
+								<Mandatory>Yes</Mandatory>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>CreditParm_DNRReasonCode</Name>
+								<ElementPosition>1610612734</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<DataField>DNRReasonCode</DataField>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<Mandatory>Yes</Mandatory>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>CreditParmLineDetails_ReasonText</Name>
+								<ElementPosition>1932735281</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<FormControlExtension
+									i:nil="true" />
+								<DataField>ReasonText</DataField>
+								<DataSource>CreditParmLineDetails</DataSource>
+								<DisplayLength>36</DisplayLength>
+								<DisplayLengthMode>Fixed</DisplayLengthMode>
+							</AxFormControl>
+						</Controls>
+						<Caption>@SYS60385</Caption>
+						<DataSource>CreditParmLineDetails</DataSource>
+					</AxFormControl>
+				</Controls>
+				<ArrangeMethod>Auto</ArrangeMethod>
+				<ColumnsMode>Fill</ColumnsMode>
+				<DataSource>CreditParmLineDetails</DataSource>
+				<FrameType>None</FrameType>
+				<Style>DialogContent</Style>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormButtonGroupControl">
+				<Name>ButtonGroup</Name>
+				<ElementPosition>1073741822</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Type>ButtonGroup</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>OKButton</Name>
+						<ElementPosition>1610612733</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<HelpText>@DNR7501</HelpText>
+						<Skip>Yes</Skip>
+						<Type>CommandButton</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>OK</Command>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>CancelButton</Name>
+						<ElementPosition>1288490187</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Skip>Yes</Skip>
+						<Type>CommandButton</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>Cancel</Command>
+						<DefaultButton>Yes</DefaultButton>
+						<SaveRecord>No</SaveRecord>
+					</AxFormControl>
+				</Controls>
+				<ArrangeMethod>HorizontalRight</ArrangeMethod>
+				<Style>DialogCommitContainer</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

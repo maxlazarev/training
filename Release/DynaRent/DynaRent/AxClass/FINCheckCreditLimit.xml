@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCheckCreditLimit</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINCheckCreditLimit
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkCreditLimit_Sales</Name>
+				<Source><![CDATA[
+    public static client server boolean checkCreditLimit_Sales(SalesTable _salesTable,
+                                                               boolean    _onlyWarning = true,
+                                                               boolean    _showMsg = true)
+    {
+        boolean     ret = true;
+        CustTable   custTable;
+        AmountMST   openBalanceMST;
+        Amount      creditLimit;
+    
+        if (CustParameters::find().FINCustCreditCheckType == FINCustCreditCheckType::Balance)
+        {
+            if (!FINCheckCreditLimit::hasCreditLimitException(_salesTable.CustAccount, FINModule::SalesOrder, _salesTable.SalesId))
+            {
+                if (!FINCheckCreditLimit::hasMaxCreditLimit(_salesTable.CustAccount))
+                {
+                    ret = _showMsg ? checkFailed(strFmt("@DNR5815", _salesTable.CustAccount, _salesTable.SalesId)) : false;
+                }
+                else
+                {
+                    custTable      = _salesTable.custTable_InvoiceAccount();
+                    openBalanceMST = custTable.openBalanceMST();
+                    creditLimit    = FINCheckCreditLimit::maxCreditLimit(custTable.AccountNum);
+    
+                    if (openBalanceMST >= creditLimit)
+                    {
+                        ret = _showMsg ? checkFailed(strFmt("@DNR5786", _salesTable.CustAccount, _salesTable.SalesId)) : false;
+                    }
+                }
+            }
+        }
+        else
+        if (_salesTable.FINCreditCheckStatus != FINCreditCheckStatus::NoWarnings)
+        {
+            if (_showMsg)
+            {
+                if (_onlyWarning)
+                {
+                    warning(strfmt("@DNR2197", _salesTable.FINCreditCheckStatus));
+                }
+                else
+                {
+                    error(strfmt("@DNR2197", _salesTable.FINCreditCheckStatus));
+                    ret = false;
+                }
+            }
+            else
+            {
+                // If msg is not shown then is difficult to see if it's warning or error
+                // therefore method should return false.
+                ret = false;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkCreditLimit_WPP</Name>
+				<Source><![CDATA[
+    public static client server boolean checkCreditLimit_WPP(WPPWorkOrderTable _workOrderTable, boolean _onlyWarning = true, boolean _showMsg = true)
+    {
+        boolean ret = true;
+    
+        // Only check for customers
+        if (_workOrderTable.CustVendAccountType == CustVendACType::Cust)
+        {
+            if (_workOrderTable.projGroup().FINCustCreditCheckType == FINCustCreditCheckType::Balance)
+            {
+                CustTable custTable = CustTable::findByPartyRecId(_workOrderTable.OrganizationParty);
+
+                if (!FINCheckCreditLimit::hasCreditLimitException(custTable.AccountNum, FINModule::WPPWorkOrder, _workOrderTable.WorkOrderId))
+                {
+                    if (!FINCheckCreditLimit::hasMaxCreditLimit(custTable.AccountNum))
+                    {
+                        ret = checkFailed(strFmt("@DNR5823", custTable.AccountNum, _workOrderTable.WorkOrderId));
+                    }
+                    else
+                    {
+                        AmountMST   openBalanceMST = custTable.openBalanceMST();
+                        Amount      creditLimit    = FINCheckCreditLimit::maxCreditLimit(custTable.AccountNum);
+    
+                        if (openBalanceMST >= creditLimit)
+                        {
+                            ret = checkFailed(strFmt("@DNR5787", custTable.AccountNum));
+                        }
+                    }
+                }
+            }
+            else
+            if (_workOrderTable.FINCreditCheckStatus != FINCreditCheckStatus::NoWarnings)
+            {
+                if (_showMsg)
+                {
+                    if (_onlyWarning)
+                    {
+                        warning(strfmt("@DNR2197", _workOrderTable.FINCreditCheckStatus));
+                    }
+                    else
+                    {
+                        error(strfmt("@DNR2197", _workOrderTable.FINCreditCheckStatus));
+                        ret = false;
+                    }
+                }
+                else
+                {
+                    // if msg is not shown then is difficult to see if it's warning or error
+                    // therefore method should return false.
+                    ret = false;
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>creditMaxOk</Name>
+				<Source><![CDATA[
+    public static boolean creditMaxOk(boolean _ret, SalesTable _salesTable, SalesParmTable _salesParmTable)
+    {
+        boolean ret = _ret;
+        CustTable custTable = _salesTable.custTable_CustAccount();
+
+        //1. Check if there is credit limit at all
+        //2. Check if amount outstanding invoices is within limit
+        if (!FINCheckCreditLimit::hasCreditLimitException(_salesTable.CustAccount, FINModule::SalesOrder, _salesTable.SalesId))
+        {
+            if (!FINCheckCreditLimit::hasMaxCreditLimit(_salesTable.CustAccount, _salesParmTable.Transdate))
+            {
+                ret = checkFailed(strFmt("@DNR5810", _salesTable.SalesId, "@DNR5811"));
+            }
+            else
+            {
+                AmountMST   openBalanceMST = custTable.openBalanceMST();
+                Amount      creditLimit    = FINCheckCreditLimit::maxCreditLimit(_salesTable.CustAccount);
+    
+                if (openBalanceMST >= creditLimit)
+                {
+                    CurrencyCode currencyCode = CompanyInfoHelper::standardCurrency();
+    
+                    ret = checkFailed(strFmt("@DNR5786", _salesTable.CustAccount, _salesTable.SalesId) + strFmt("@DNR5814", creditLimit, currencyCode, openBalanceMST, currencyCode));
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasCreditLimitException</Name>
+				<Source><![CDATA[
+    public static client server boolean hasCreditLimitException(CustAccount _custAccount, FINModule _module, AccountNum _accountNum)
+    {
+        SmmBusRelAccount busRelAccount = smmBusRelTable::findCust(_custAccount).BusRelAccount;
+    
+        // if there is exception then ingnore max credit limit setup
+        return (select firstonly RecId from FINCreditLimitException
+                where FINCreditLimitException.smmBusRelAccount == busRelAccount
+                &&    FINCreditLimitException.Module           == _module
+                &&    FINCreditLimitException.AccountNum       == _accountNum).RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasMaxCreditLimit</Name>
+				<Source><![CDATA[
+    public static client server boolean hasMaxCreditLimit(CustAccount _custAccount, TransDate _transDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))
+    {
+        SmmBusRelAccount busRelAccount = smmBusRelTable::findCust(_custAccount).BusRelAccount;
+    
+        return (select firstonly RecId from FINCreditInsurancePeriodTable
+                where FINCreditInsurancePeriodTable.smmBusRelAccount == busRelAccount
+                &&    FINCreditInsurancePeriodTable.IsActive         == NoYes::Yes
+                &&    FINCreditInsurancePeriodTable.ValidFrom        <= _transDate
+                &&    FINCreditInsurancePeriodTable.ValidTo          >= _transDate
+                &&    FINCreditInsurancePeriodTable.InsuranceAmount).RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>maxCreditLimit</Name>
+				<Source><![CDATA[
+    public static client server Amount maxCreditLimit(CustAccount _custAccount, Date _transDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))
+    {
+        SmmBusRelAccount busRelAccount = smmBusRelTable::findCust(_custAccount).BusRelAccount;
+    
+        return (select firstonly InsuranceAmount from FINCreditInsurancePeriodTable
+                where FINCreditInsurancePeriodTable.smmBusRelAccount == busRelAccount
+                &&    FINCreditInsurancePeriodTable.IsActive         == NoYes::Yes
+                &&    FINCreditInsurancePeriodTable.ValidFrom        <= _transDate
+                &&    FINCreditInsurancePeriodTable.ValidTo          >= _transDate
+                &&    FINCreditInsurancePeriodTable.InsuranceAmount).InsuranceAmount;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

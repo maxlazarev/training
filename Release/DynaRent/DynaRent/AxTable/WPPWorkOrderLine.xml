@@ -1,0 +1,3039 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPWorkOrderLine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class WPPWorkOrderLine extends Common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>BOBAssignObject</Name>
+				<Source><![CDATA[
+    public boolean BOBAssignObject(BOBObjectId          _objectId = '',
+                                   boolean              _calledFromAssignmentService = false,
+                                   RORRentalDateTimes   _rentalDateTimes = null)
+    {
+        boolean                     ret;
+        BOBObjectAssignmentEngine   objectAssignmentEngine;
+        WPPWorkOrderTable           workOrderTable;
+        SalesLine                   salesLine;
+        InventDim                   inventDim;
+        BOBObjectTable              objectTable;
+    
+        ttsBegin;
+        workOrderTable = this.workOrderTable(true);
+        if (_objectId)
+        {
+            objectTable = BOBObjectTable::findObjectId(_objectId);
+        }
+    
+        if (workOrderTable.OrderTableId == tableNum(SalesLine))
+        {
+            salesLine = SalesLine::findRecId(workOrderTable.OrderRecId);
+    
+            if (objectTable)
+            {
+                inventDim.inventSerialId = objectTable.InventSerialId;
+            }
+    
+            if (salesLine)
+            {
+                if ((!_objectId || salesLine.BOBValidateObjectAssignment(inventDim.inventSerialId, null, _rentalDateTimes))
+                &&  (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental)
+                &&   InventDim::find(salesLine.InventDimId).inventSerialId != inventDim.inventSerialId)
+                {
+                    objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, inventDim.InventSerialId);
+                    objectAssignmentEngine.parmRentalDateTimes(_rentalDateTimes);
+                    objectAssignmentEngine.parmCalledFromAssignmentService(_calledFromAssignmentService);
+    
+                    if (objectAssignmentEngine)
+                    {
+                        objectAssignmentEngine.runOperation();
+                        ret = true;
+                    }
+                }
+            }
+        }
+        else
+        if (!workOrderTable.OrderTableId)
+        {
+            if (objectTable)
+            {
+                workOrderTable.BOBObjectTableRecId = objectTable.RecId;
+                workOrderTable.update();
+                ret = true;
+            }
+        }
+        ttsCommit;
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCheckTransactionsExist</Name>
+				<Source><![CDATA[
+    public boolean canCheckTransactionsExist()
+    {
+        boolean ret = true;
+    
+        if (this.ProjId)
+        {
+            ret = !this.isLinkedToFixedProject() && this.workOrderTable().canCheckTransactionsExist();
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkObjectQty</Name>
+				<Source><![CDATA[
+    private boolean checkObjectQty()
+    {
+        boolean ret;
+    
+        ret = this.workOrderTable().checkObjectQty(this.ObjectQty);
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkParentWorkOrderLine</Name>
+				<Source><![CDATA[
+    private boolean checkParentWorkOrderLine()
+    {
+        boolean ret;
+    
+        // Work order line must exist
+        ret = WPPWorkOrderLine::existRecId(this.ParentLineRecId);
+    
+        if (ret)
+        {
+            // Work order line cannot be the same as the parent Work order line
+            ret = this.ParentLineRecId != this.RecId;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createItemReq</Name>
+				<Source><![CDATA[
+    public server void createItemReq(boolean _showInfolog = false)
+    {
+        BOBMaintenanceItemReq           tmpItemReq;
+        BOBMaintenanceItemReqData       itemReqData;
+        WPPWorkOrderTable               workOrderTable;
+        ProjTable                       projTable;
+        SalesTableForm_ProjectSalesItem salesTableForm;
+        SalesLine                       salesLine;
+        InventTable                     inventTable;
+        InventJournalTable              inventJournalTable;
+        InventJournalTrans              inventJournalTrans;
+        Counter                         counter;
+    
+        workOrderTable  = this.workOrderTable();
+        projTable       = this.projTable();
+        itemReqData     = new BOBMaintenanceItemReqData(this);
+    
+        // BP Deviation documented
+        tmpItemReq.setTmp();
+        tmpItemReq.setTmpData(itemReqData.populateTmpData());
+    
+        ttsBegin;
+        while select sum(Qty) from tmpItemReq
+        group by ItemId, UnitOfMeasure, ItemSetupType
+        where tmpItemReq.WPPTaskId == this.TaskId
+        {
+            // Seperate selection of the InventTable. The Qty from the tmpItemReq is summed
+            // therefore the InventTable cannot be selected in the same select statement
+            inventTable = inventTable::find(tmpItemReq.ItemId);
+    
+            if (tmpItemReq.ItemSetupType == SMAItemSetupType::ItemRequirement
+            &&  workOrderTable.CustVendAccountType == CustVendACType::Cust   // necessary?
+            &&  workOrderTable.OrganizationParty                             // necessary?
+            &&  this.ProjId
+            &&  tmpItemReq.Qty > 0)
+            {
+                salesTableForm = SalesTableForm::construct(SalesTableFormId::ProjectSalesItem, projTable);
+    
+                salesLine.clear();
+                salesLine.SalesType = SalesType::ItemReq;
+                salesLine.CustAccount = workOrderTable.custVendAccount();
+                salesLine.initFromCustTable();
+    
+                salesTableForm.salesLine_initValue(salesLine);
+    
+                salesLine.initFromProjTable(projTable);
+    
+                salesTableForm.resetSalesLine(salesLine);
+    
+                if (workOrderTable.StartDate > DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))
+                {
+                    salesLine.ConfirmedDlv          = workOrderTable.StartDate;
+                    salesLine.ReceiptDateRequested  = workOrderTable.StartDate;
+                    salesLine.ShippingDateRequested = workOrderTable.StartDate;
+                }
+    
+                salesLine.ItemId = tmpItemReq.ItemId;
+                salesLine.itemIdChanged();
+                salesLine.SalesUnit = tmpItemReq.unitOfMeasureSymbol();
+                salesLine.QtyOrdered = tmpItemReq.Qty;
+                salesLine.SalesQty = tmpItemReq.Qty;
+                salesLine.ProjCategoryId = (inventTable.projCategoryId ? inventTable.projCategoryId : ProjParameters::find().ItemCategory);
+                salesLine.setProjLinePropertyId();
+                salesLine.LineNum = SalesLine::lastLineNum(salesLine.SalesId) + 1;
+    
+                // Check whether an alternative item exists and replace the current item
+                salesLine.DNRSkipDialogBox = true;
+                if (salesLine.createAlternativeItem(salesLine.inventDim(), salesLine))
+                {
+                    info(strFmt("@DNR8593", tmpItemReq.ItemId, salesLine.ItemId));
+                }
+                SalesLine.DNRSkipDialogBox = false;
+
+                if (workOrderTable.InventLocationId)
+                {
+                    InventDim   inventDimSalesLine;
+                    inventDimSalesLine.clear();
+                    inventDimSalesLine.initValue();
+                    inventDimSalesLine.InventLocationId = workOrderTable.InventLocationId;
+                    inventDimSalesLine.InventSiteId     = InventLocation::find(workOrderTable.InventLocationId).InventSiteId;
+
+                    salesLine.InventDimId = InventDim::findOrCreate(inventDimSalesLine).inventDimId;
+                }
+    
+                salesTableForm.salesLine_Write(salesLine);
+    
+                if (salesLine.validateWrite())
+                {
+                    salesLine.write();
+    
+                    counter++;
+                }
+                else
+                {
+                    error(strFmt("@DNR8492", tableId2pname(tableNum(SalesLine)), this.WorkOrderId, this.LineNumber));
+                }
+            }
+            else
+            {
+                if (!inventJournalTable)
+                {
+                    inventJournalTable.JournalId = JournalTableData::newTable(inventJournalTable).nextJournalId();
+                    inventJournalTable.WPPinitFromWorkOrderLine(this);
+    
+                    if (inventJournalTable.validateWrite())
+                    {
+                        inventJournalTable.insert();
+                    }
+                }
+    
+                if (inventJournalTable)
+                {
+                    inventJournalTrans.clear();
+                    inventJournalTrans.initValue();
+                    inventJournalTrans.initFromInventJournalTable(inventJournalTable);
+                    inventJournalTrans.TransDate = workOrderTable.StartDate;
+                    inventJournalTrans.ProjId = this.ProjId;
+                    inventJournalTrans.initFromProjTable(projTable);
+                    inventJournalTrans.ItemId = tmpItemReq.ItemId;
+                    inventJournalTrans.initFromInventTable(inventTable);
+                    inventJournalTrans.Qty = tmpItemReq.Qty;
+                    inventJournalTrans.ProjUnitID = tmpItemReq.unitOfMeasureSymbol();
+
+                    if (!inventJournalTrans.ProjCategoryId)
+                    {
+                        inventJournalTrans.ProjCategoryId = ProjParameters::find().ItemCategory;
+                        inventJournalTrans.ProjLinePropertyId     = ProjLinePropertySetup::findLinePropertyId(inventJournalTrans.ProjId,inventJournalTrans.ProjCategoryId);
+                    }
+
+                    if (inventJournalTrans.ProjId)
+                    {
+                        inventJournalTrans.ProjTaxItemGroupId = ProjParameters::taxItemGroupItem(inventJournalTrans.ProjCategoryId, inventJournalTrans.ItemId);
+                    }
+    
+                    if (inventJournalTrans.validateWrite())
+                    {
+                        inventJournalTrans.insert();
+    
+                        counter++;
+                    }
+                }
+    
+                if (!inventJournalTable || !inventJournalTrans)
+                {
+                    error(strFmt("@DNR8492", tableId2pname(tableNum(InventJournalTrans)), this.WorkOrderId, this.LineNumber));
+                }
+            }
+        }
+    
+        if (inventJournalTable)
+        {
+            InventJournalTable::initTotal(inventJournalTable);
+            inventJournalTable.update();
+        }
+    
+        // Always update the "Item requirements added" checkbox so the work order line is not processed twice
+        this.ItemReqAdded = NoYes::Yes;
+        this.selectForUpdate(true);
+        this.update();
+        ttsCommit;
+    
+        if (_showInfolog)
+        {
+            info(strFmt("@DNR8400", counter, this.TaskId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createProjectStructure</Name>
+				<Source><![CDATA[
+    public ProjTable createProjectStructure()
+    {
+        WPPWorkOrderTable           workOrderTable;
+        ProjGroup                   projGroup;
+        ProjTable                   projTable;
+        ProjInvoiceProjId           projInvoiceProjId;
+        smmProjCreateInvoiceProj    projCreateInvoiceProj;
+        boolean                     isCustomer;
+    
+        workOrderTable    = this.workOrderTable();
+        projInvoiceProjId = workOrderTable.ProjInvoiceProjId;
+        projGroup         = workOrderTable.projGroup();
+        isCustomer        = workOrderTable.CustVendAccountType == CustVendACType::Cust;
+    
+        if (isCustomer
+        &&  !projInvoiceProjId
+        &&  projGroup.projType != ProjType::Internal
+        &&  projGroup.projType != ProjType::Investment
+        &&  projGroup.projType != ProjType::Cost
+        &&  projGroup.projType != ProjType::Time)
+        {
+            projCreateInvoiceProj = NoYes::Yes;
+            projInvoiceProjId     = NumberSeq::newGetNum(ProjParameters::numRefProjInvoiceProjId()).num();
+        }
+    
+        if (projInvoiceProjId)
+        {
+            projTable = smmProjectCreate::createProjectGroup(projGroup.projType,
+                                                             projGroup.ProjGroupId,
+                                                             '',
+                                                             projCreateInvoiceProj,
+                                                             projInvoiceProjId,
+                                                             '',
+                                                             isCustomer ? workOrderTable.custVendAccount() : '',
+                                                             '',
+                                                             projGroup.projLinePropertyId(false, projGroup, ''),
+                                                             true);
+    
+            if (projTable.RecId)
+            {
+                projTable.ValidateProjCategory = NoYes::No;
+                projTable.update(true);
+            }
+        }
+    
+        return projTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSubTasks</Name>
+				<Source><![CDATA[
+    public server void createSubTasks()
+    {
+        WPPSubTaskDefault       tmpSubTaskDefault;
+        WPPSubTaskDefaultData   subTaskDefaultData;
+        WPPWorkOrderLineSubTask workOrderLineSubTask;
+        RecordInsertList        recordInsertList;
+        Set                     set;
+    
+        recordInsertList = new RecordInsertList(tableNum(WPPWorkOrderLineSubTask));
+        set = new Set(Types::Container);
+    
+        subTaskDefaultData = WPPSubTaskDefaultData::construct(this);
+    
+        // BP Deviation documented
+        tmpSubTaskDefault.setTmp();
+        tmpSubTaskDefault.setTmpData(subTaskDefaultData.populateTmpData(this.TaskId));
+    
+        ttsBegin;
+        delete_from workOrderLineSubTask
+        where workOrderLineSubTask.WorkOrderLineRecId == this.RecId;
+    
+        while select SubTaskId, GroupId from tmpSubTaskDefault
+        where tmpSubTaskDefault.TaskId == this.TaskId
+        {
+            if (!set.in([this.RecId, tmpSubTaskDefault.GroupId, tmpSubTaskDefault.SubTaskId]))
+            {
+                workOrderLineSubTask.WorkOrderLineRecId = this.RecId;
+                workOrderLineSubTask.SubTaskId          = tmpSubTaskDefault.SubTaskId;
+                workOrderLineSubTask.GroupId            = tmpSubTaskDefault.GroupId;
+                workOrderLineSubTask.SequenceNumber     = tmpSubTaskDefault.SequenceNumber;
+                recordInsertList.add(workOrderLineSubTask);
+    
+                set.add([this.RecId, tmpSubTaskDefault.GroupId, tmpSubTaskDefault.SubTaskId]);
+            }
+        }
+    
+        recordInsertList.insertDatabase();
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>delete</Name>
+				<Source><![CDATA[
+    public void delete()
+    {
+        this.updateRootLineRecId(DNRObjectAction::Delete);
+        this.updateParentLineRecId();
+        this.deleteRelatedProject();
+    
+        super();
+    
+        this.setMaintenanceDateExpected();
+        BOBRentalTransManager::newWorkOrder(this).deleteWorkOrderLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>allowDeleteProject</Name>
+				<Source><![CDATA[
+    protected boolean allowDeleteProject()
+    {
+        boolean             ret = false;
+        RORVenueTable       venueTable;
+        WPPWorkOrderTable   workOrderTable;
+
+        select firstonly WPPProjId from venueTable
+            exists join workOrderTable
+                where workOrderTable.WorkOrderId == this.WorkOrderId
+                &&    venueTable.VenueCode == workOrderTable.RORVenueCode;
+    
+        //When the work location on the header is linked to a project which is
+        //the same as the project that’s linked to the work order line,
+        //the project that’s linked to the work order line should not be deleted
+        if (this.ProjId != venueTable.WPPProjId)
+        {
+            ret = true;
+        }
+
+        // check if project is not linked to (sub)rental order or other work order
+        if (ret)
+        {
+           
+            SalesTable  salesTable;
+
+            select firstonly RecId from salesTable
+                where salesTable.ProjId == this.ProjId;
+
+            if (salesTable.RecId)
+            {
+                ret = false;
+            }
+        }
+
+        if (ret)
+        {
+           
+            PurchTable  purchTable;
+
+            select firstonly RecId from purchTable
+                where purchTable.ProjId == this.ProjId;
+
+            if (purchTable.RecId)
+            {
+                ret = false;
+            }
+        }
+
+        if (ret)
+        {
+            WPPWorkOrderLine   workOrderLine;
+
+            select firstonly RecId from workOrderLine
+                where workOrderLine.ProjId == this.ProjId
+                &&    workOrderLine.WorkOrderId != this.WorkOrderId;
+                    
+            if (workOrderLine.RecId)
+            {
+                ret = false;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteRelatedProject</Name>
+				<Source><![CDATA[
+    private void deleteRelatedProject()
+    {
+        ProjTable projTable = this.projTable();
+            
+        if(projTable)
+        {
+            if (this.allowDeleteProject())
+            {
+                projTable.selectForUpdate(true);
+                projTable.delete();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>determineRootLine</Name>
+				<Source><![CDATA[
+    private WPPLineParent determineRootLine(WPPWorkOrderLine _workOrderLineOrig)
+    {
+        WPPWorkOrderLine workOrderLineParent;
+        WPPLineParent rootLine;
+    
+        // When the current parent is different than the original parent
+        // then determine the new root
+        if (!_workOrderLineOrig
+        ||   _workOrderLineOrig.ParentLineRecId != this.ParentLineRecId)
+        {
+            workOrderLineParent = WPPWorkOrderLine::findRecId(this.ParentLineRecId);
+    
+            if (!workOrderLineParent.RootLineRecId && workOrderLineParent.ParentLineRecId)
+            {
+                while (workOrderLineParent)
+                {
+                    if (workOrderLineParent.ParentLineRecId)
+                    {
+                        workOrderLineParent = WPPWorkOrderLine::findRecId(workOrderLineParent.ParentLineRecId);
+                    }
+                    else
+                    {
+                        rootLine = workOrderLineParent.RecId;
+                        workOrderLineParent = null;
+                    }
+                }
+            }
+            else
+            {
+                rootLine = workOrderLineParent.RootLineRecId ? workOrderLineParent.RootLineRecId : workOrderLineParent.RecId;
+            }
+        }
+    
+        return rootLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromProjTable</Name>
+				<Source><![CDATA[
+    public void initFromProjTable(ProjTable _projTable)
+    {
+        this.ProjId         = _projTable.ProjId;
+        this.ProjCompanyId  = _projTable.DataAreaId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromSalesPurchLine</Name>
+				<Source><![CDATA[
+    public void initFromSalesPurchLine(SalesPurchLine _salesPurchLine)
+    {
+        SalesPurchLineInterface salesPurchLineInterface = _salesPurchLine.salesPurchLineInterface();
+
+        this.ObjectQty      = salesPurchLineInterface.parmInventQty();
+        this.ResourceQty    = any2Int(roundUp(salesPurchLineInterface.parmQty() * this.TemplateLineResourceQty, 1));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromWorkOrderTable</Name>
+				<Source><![CDATA[
+    public void initFromWorkOrderTable(WPPWorkOrderTable _workOrderTable)
+    {
+        this.WorkOrderId = _workOrderTable.WorkOrderId;
+    
+        if (!this.ObjectQty && _workOrderTable.ObjectQty)
+        {
+            this.ObjectQty = _workOrderTable.ObjectQty;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromWorkOrderTemplateLine</Name>
+				<Source><![CDATA[
+    public void initFromWorkOrderTemplateLine(WPPWorkOrderTemplateLine _workOrderTemplateLine)
+    {
+        this.ExecutionGroupId           = _workOrderTemplateLine.ExecutionGroupId;
+        this.TaskId                     = _workOrderTemplateLine.TaskId;
+        this.TemplateLineResourceQty    = _workOrderTemplateLine.ResourceQty;
+        this.ResourceQty                = _workOrderTemplateLine.ResourceQty;
+
+        if (_workOrderTemplateLine.ProjCategoryIdDefault
+        && ProjCategory::find(_workOrderTemplateLine.ProjCategoryIdDefault).CategoryType == ProjCategoryType::Hour)
+        {
+            this.ProjCategoryIdDefault = _workOrderTemplateLine.ProjCategoryIdDefault;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    public void initValue()
+    {
+        super();
+    
+        this.Status = WPPWorkOrderLineStatus::Created;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insert</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void insert(boolean _manualCreated = true)
+    {
+        ProjTable projTable;
+        WPPWorkOrderTable workOrderTable;
+    
+        ttsBegin;
+        if (_manualCreated
+        &&  this.TaskId
+        && !this.ProjId
+        &&  WPPWorkOrderStatusRegistration::registrationAllowed(this.workOrderTaskTable().WorkOrderStatusGroupId))
+        {
+            // Create the project structure
+            projTable = this.createProjectStructure();
+    
+            if (projTable)
+            {
+                this.initFromProjTable(projTable);
+    
+                // Update header
+                update_recordSet workOrderTable
+                setting ProjInvoiceProjId = projTable.ProjInvoiceProjId,
+                        ProjGroupId = projTable.ProjGroupId
+                where workOrderTable.WorkOrderId == this.WorkOrderId;
+            }
+        }
+    
+        this.updateRootLineRecId(DNRObjectAction::Insert);
+    
+        super();
+    
+        BOBRentalTransManager::newWorkOrder(this).synchronize();
+    
+        this.setMaintenanceDateExpected();
+        this.createSubTasks();
+        if (WPPParameters::find().AutoCreateMaintenanceItemRequirement)
+        {
+            this.createItemReq();
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isLinkedToFixedProject</Name>
+				<Source><![CDATA[
+    public boolean isLinkedToFixedProject()
+    {
+        RORVenueTable venueTable;
+        WPPWorkOrderTable workOrderTable;
+    
+        select firstOnly WPPIsRentalProject from  venueTable
+            exists join workOrderTable
+            where workOrderTable.RORVenueCode == venueTable.VenueCode
+            &&    workOrderTable.WorkOrderId == this.WorkOrderId;
+    
+        return venueTable.WPPIsRentalProject;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>meetsCriterion</Name>
+				<Source><![CDATA[
+    public boolean meetsCriterion(WPPWorkOrderLineCriterion _criterion)
+    {
+        DNRAdditionalNoteTable noteTable;
+        WPPWorkOrderTable workOrderTable, otherWorkOrderTable;
+        WPPWorkOrderLine workOrderLine, otherWorkOrderLine;
+        WPPWorkOrderTaskTable workOrderTaskTable;
+        BOBObjectTable objectTable;
+        BOBObjectAvailabilityLog availabilityLog;
+        BOBObjectView objectView;
+        BOBRentalType rentalType;
+        VendPurchOrderJour confirmation;
+        PurchTable purchTable;
+        PurchLine purchLine;
+        SalesLine salesLine, salesLineRelated;
+        InventDim inventDim;
+        InventTable inventTable;
+        ProjGroup projGroup;
+        BOBObjectMaintenanceWarningView objectMaintenanceWarningView;
+        boolean ret;
+        BOBObjectTableRecId objectTableRecId;
+        EcoResProduct   ecoResProduct;
+    
+        ret = false;
+    
+        switch(_criterion)
+        {
+            case WPPWorkOrderLineCriterion::PurchNotConfirmed:
+                if(this.ProjId)
+                {
+                    select firstOnly RecId from purchTable
+                    where purchTable.ProjId == this.ProjId
+                        notExists join confirmation
+                        where confirmation.PurchId == purchTable.PurchId;
+    
+                    ret = (purchTable.RecId != 0);
+                }
+                break;
+    
+            case WPPWorkOrderLineCriterion::PurchNotReceived:
+                if(this.ProjId)
+                {
+                    select firstOnly RecId from purchLine
+                    where purchLine.RemainPurchPhysical
+                        exists join purchTable
+                        where purchTable.PurchId == purchLine.PurchId
+                        &&    purchTable.ProjId == this.ProjId;
+    
+                    ret = (purchLine.RecId != 0);
+                }
+                break;
+    
+            case WPPWorkOrderLineCriterion::ObjectNotAvailable:
+                select firstOnly TableId from workOrderTable
+                order by availabilityLog.createdDateTime desc
+                where workOrderTable.WorkOrderId == this.WorkOrderId
+                    outer join RecId from objectTable
+                    where objectTable.RecId == workOrderTable.BOBObjectTableRecId
+                        outer join RecId, IsAvailable from availabilityLog
+                        where availabilityLog.ObjectId == objectTable.ObjectId;
+    
+                ret = (objectTable && availabilityLog && !availabilityLog.IsAvailable);
+                break;
+    
+            case WPPWorkOrderLineCriterion::HasInternalNote:
+                select firstOnly RecId from noteTable
+                where noteTable.RefTableId == this.TableId
+                &&    noteTable.RefRecId == this.RecId
+                &&    noteTable.InternalNote != '';
+    
+                ret = (noteTable.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::PassedRequestedDateTime:
+                ret = this.RequestedStartDateTime < DateTimeUtil::getSystemDateTime();
+                break;
+    
+            case WPPWorkOrderLineCriterion::RelatedToTechnicalExchange:
+                select RecId from salesLine
+                where salesLine.RORRecIdExchanged
+                &&    salesLine.RORAmendmentExchangeType == RORAmendmentExchangeType::Technical
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId    == this.WorkOrderId
+                    && workOrderTable.OrderTableId      == salesLine.TableId
+                    && workOrderTable.OrderRecId        == salesLine.RecId;
+    
+                ret = (salesLine.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::RelatedToCommercialExchange:
+                select firstOnly RecId from salesLine
+                where salesLine.RORRecIdExchanged
+                &&    salesLine.RORAmendmentExchangeType == RORAmendmentExchangeType::Commercial
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId    == this.WorkOrderId
+                    && workOrderTable.OrderTableId      == salesLine.TableId
+                    && workOrderTable.OrderRecId        == salesLine.RecId;
+    
+                ret = (salesLine.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::LastOnRentDateObjectFilled:
+                select firstonly RecId from objectView
+                where objectView.LastOnRentDate
+                    exists join objectTable
+                    where objectTable.ObjectId == objectView.ObjectId
+                        join TableId from workOrderTable
+                        where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        &&    workOrderTable.WorkOrderId         == this.WorkOrderId;
+    
+                ret = (objectView.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::HasBusinessObjectNote:
+                select firstOnly RecId from noteTable
+                where noteTable.ObjectNote != ''
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId    == this.WorkOrderId
+                    &&    workOrderTable.OrderTableId   == noteTable.RefTableId
+                    &&    workOrderTable.OrderRecId     == noteTable.RefRecId
+                    &&    workOrderTable.OrderRecId;
+    
+                ret = (noteTable.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::HasRouteLocationNote:
+                select firstOnly RecId from noteTable
+                where (noteTable.RouteNote   != ''
+                ||    noteTable.LocationNote != '')
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId    == this.WorkOrderId
+                    &&    workOrderTable.OrderTableId   == noteTable.RefTableId
+                    &&    workOrderTable.OrderRecId     == noteTable.RefRecId
+                    &&    workOrderTable.OrderRecId;
+    
+                ret = (noteTable.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::HasTerminationNote:
+                select firstOnly RecId from noteTable
+                where noteTable.TerminationNote != ''
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId    == this.WorkOrderId
+                    &&    workOrderTable.OrderTableId   == noteTable.RefTableId
+                    &&    workOrderTable.OrderRecId     == noteTable.RefRecId
+                    &&    workOrderTable.OrderRecId;
+    
+                ret = (noteTable.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::ObjectIsAssignedToCreatedDeliveryTask:
+                objectTableRecId = this.workOrderTable().BOBObjectTableRecId;
+                if (objectTableRecId)
+                {
+                    select firstOnly RecId from workOrderTaskTable
+                    where workOrderTaskTable.TaskType == WPPTaskType::Delivery
+                        join RecId from workOrderLine
+                        where workOrderLine.TaskId      == workOrderTaskTable.TaskId
+                        &&    workOrderLine.Status      == WPPWorkOrderLineStatus::Created
+                        &&    workOrderLine.WorkOrderId != this.WorkOrderId
+                            exists join workOrderTable
+                            where workOrderTable.WorkOrderId         == workOrderLine.WorkOrderId
+                            &&    workOrderTable.BOBObjectTableRecId == objectTableRecId;
+    
+                    ret = (workOrderLine.RecId != 0);
+                }
+                break;
+    
+            case WPPWorkOrderLineCriterion::ObjectMaintenanceWithinXDays:
+                objectTableRecId = this.workOrderTable().BOBObjectTableRecId;
+    
+                if (objectTableRecId)
+                {
+                    select firstOnly RecId from objectMaintenanceWarningView
+                    where objectMaintenanceWarningView.ObjectTableRecId == objectTableRecId
+                    &&    objectMaintenanceWarningView.MustWarn;
+                }
+    
+                ret = objectMaintenanceWarningView.RecId != 0;
+                break;
+    
+            case WPPWorkOrderLineCriterion::ObjectIsSubRental:
+                select firstOnly RecId from objectTable
+                where objectTable.Category == BOBObjectCategory::SubRental
+                    exists join workOrderTable
+                    where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                    &&    workOrderTable.WorkOrderId         == this.WorkOrderId;
+    
+                ret = (objectTable.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::ObjectOnMaintenanceWorkOrder:
+                select firstOnly TableId from workOrderTable
+                where workOrderTable.WorkOrderId == this.WorkOrderId
+                &&    workOrderTable.BOBObjectTableRecId
+                    join RecId from otherWorkOrderTable
+                    where otherWorkOrderTable.BOBObjectTableRecId == workOrderTable.BOBObjectTableRecId
+                        exists join otherWorkOrderLine
+                        where otherWorkOrderLine.WorkOrderId == otherWorkOrderTable.WorkOrderId
+                        &&    otherWorkOrderLine.Status == WPPWorkOrderLineStatus::Created
+                            join TableId from projGroup
+                            where projGroup.ProjGroupId == otherWorkOrderTable.ProjGroupId
+                            &&    projGroup.WPPWorkOrderType == WPPWorkOrderType::Maintenance;
+    
+                ret = (otherWorkOrderTable.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::ObjectOnDamageWorkOrder:
+                select firstOnly TableId from workOrderTable
+                where workOrderTable.WorkOrderId == this.WorkOrderId
+                &&    workOrderTable.BOBObjectTableRecId
+                    join RecId from otherWorkOrderTable
+                    where otherWorkOrderTable.BOBObjectTableRecId == workOrderTable.BOBObjectTableRecId
+                        exists join otherWorkOrderLine
+                        where otherWorkOrderLine.WorkOrderId == otherWorkOrderTable.WorkOrderId
+                        &&    otherWorkOrderLine.Status == WPPWorkOrderLineStatus::Created
+                            join TableId from projGroup
+                            where projGroup.ProjGroupId == otherWorkOrderTable.ProjGroupId
+                            &&    projGroup.WPPWorkOrderType == WPPWorkOrderType::Damage;
+    
+                ret = (otherWorkOrderTable.RecId != 0);
+                break;
+    
+            case WPPWorkOrderLineCriterion::WorkOrderFullyInvoiced:
+                ret = (this.workOrderTable().displayInvoiceStatus() == WPPInvoiceStatus::FullyCharged);
+                break;
+    
+            case WPPWorkOrderLineCriterion::AnotherNotCompletedWorkOrderLineExists:
+                select firstOnly RecId from workOrderLine
+                where workOrderLine.WorkOrderId == this.WorkOrderId
+                &&    workOrderLine.RecId       != this.RecId
+                &&    workOrderLine.Status      <  WPPWorkOrderLineStatus::Completed;
+    
+                ret = workOrderLine.RecId;
+                break;
+    
+            case WPPWorkOrderLineCriterion::ObjectOutOfWarranty:
+                select firstOnly RecId, WarrantyToDate from objectTable
+                where objectTable.WarrantyToDate
+                    exists join workOrderTable
+                    where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                    &&    workOrderTable.WorkOrderId         == this.WorkOrderId;
+    
+                ret = (objectTable.RecId != 0 && objectTable.WarrantyToDate <= DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                break;
+    
+            case WPPWorkOrderLineCriterion::ObjectWithinWarranty:
+                select firstOnly RecId, WarrantyToDate from objectTable
+                where objectTable.WarrantyToDate
+                    exists join workOrderTable
+                    where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                    &&    workOrderTable.WorkOrderId         == this.WorkOrderId;
+    
+                ret = (objectTable.RecId != 0 && objectTable.WarrantyToDate > DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                break;
+    
+            case WPPWorkOrderLineCriterion::OrderLineWithoutSerialNumberExists:
+                select firstOnly RecId from salesLine
+                    join TableId from inventTable
+                    where inventTable.ItemId == salesLine.ItemId
+                        join TableId from ecoResProduct
+                        where ecoResProduct.RecId == inventTable.Product
+                            join RORKitStandalone from rentalType
+                            where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                                exists join workOrderTable
+                                where workOrderTable.OrderTableId == salesLine.TableId
+                                &&    workOrderTable.OrderRecId   == salesLine.RecId
+                                &&    workOrderTable.WorkOrderId  == this.WorkOrderId;
+    
+                if (rentalType.RORKitStandalone == RORKitStandalone::Kit)
+                {
+                    ret = !salesLine.RORIsSerialNumberAssigned(salesLine.RecId);
+                }
+                break;
+    
+            case WPPWorkOrderLineCriterion::OtherRelatedTasksNotScheduled:
+                if (this.Status >= WPPWorkOrderLineStatus::Planned)
+                {
+                    // Check if there is an unplanned related task
+                    select firstOnly RecId from workOrderLine
+                    // Compare: two child lines, or the parent of the current line or the child of the current line
+                    where ((this.RootLineRecId && (workOrderLine.RootLineRecId == this.RootLineRecId || workOrderLine.RecId == this.RootLineRecId))
+                    ||     workOrderLine.RootLineRecId == this.RecId)
+                    &&     workOrderLine.RecId         != this.RecId
+                    &&     workOrderLine.Status         < WPPWorkOrderLineStatus::Planned;
+    
+                    ret = workOrderLine.RecId;
+                }
+                else
+                {
+                    // Check if there is a planned related task
+                    select firstOnly RecId from workOrderLine
+                    // Compare: two child lines, or the parent of the current line or the child of the current line
+                    where ((this.RootLineRecId && (workOrderLine.RootLineRecId == this.RootLineRecId || workOrderLine.RecId == this.RootLineRecId))
+                    ||     workOrderLine.RootLineRecId == this.RecId)
+                    &&     workOrderLine.RecId         != this.RecId
+                    &&     workOrderLine.Status        >= WPPWorkOrderLineStatus::Planned;
+    
+                    ret = workOrderLine.RecId;
+                }
+                break;
+    
+            case WPPWorkOrderLineCriterion::ChildLinesWithoutSerialNumberExists:
+                select firstOnly RecId from salesLine
+                    exists join workOrderTable
+                    where workOrderTable.OrderTableId == salesLine.TableId
+                    &&    workOrderTable.OrderRecId   == salesLine.RecId
+                    &&    workOrderTable.WorkOrderId  == this.WorkOrderId
+                        join TableId from salesLineRelated
+                        // Find: related roots or when no root is available then find the child
+                        where ((salesLine.RORRootLineRecId && salesLineRelated.RORRootLineRecId == salesLine.RORRootLineRecId)
+                        ||      salesLineRelated.RORRootLineRecId == salesLine.RecId)
+                        &&      salesLineRelated.RecId != salesLine.RecId
+                            join TableId from inventDim
+                            where inventDim.inventDimId == salesLineRelated.inventDimId
+                            &&   !inventDim.inventSerialId
+                                join TableId from inventTable
+                                where inventTable.ItemId == salesLineRelated.ItemId
+                                    join TableId from ecoResProduct
+                                    where ecoResProduct.RecId == inventTable.Product
+                                        join TableId from rentalType
+                                        where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                                        &&    rentalType.Classification == BOBRentalTypeClassification::Serialized
+                                        &&    rentalType.RORKitStandalone != RORKitStandalone::Kit;
+    
+                ret = salesLine.RecId;
+                break;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    public void modifiedField(FieldId _fieldId)
+    {
+        WPPWorkOrderLine workOrderLineOrig = this.orig();
+    
+        super(_fieldId);
+    
+        switch (_fieldId)
+        {
+            case fieldNum(WPPWorkOrderLine, RequestedEndDateTime),
+                 fieldNum(WPPWorkOrderLine, Status):
+                this.setMaintenanceDateExpected();
+                break;
+    
+            case fieldNum(WPPWorkOrderLine, ParentLineRecId):
+                this.updateRootLineRecId(DNRObjectAction::ModifiedField, workOrderLineOrig);
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postedItemTransactionExists</Name>
+				<Source><![CDATA[
+    public boolean postedItemTransactionExists()
+    {
+        InventJournalTrans inventJournalTrans;
+        InventJournalTable inventJournalTable;
+    
+        if (this.ProjId)
+        {
+            select firstOnly RecId from inventJournalTrans
+            where inventJournalTrans.ProjId == this.ProjId
+                exists join inventJournalTable
+                where inventJournalTable.JournalId == inventJournalTrans.JournalId
+                &&    inventJournalTable.Posted;
+        }
+    
+        return inventJournalTrans.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>projCreateFromProject</Name>
+				<Source><![CDATA[
+    public ProjTable projCreateFromProject(ProjTable _projTable, CustTable _custTable, WPPWorkOrderTable _workOrderTable, boolean _copyProjId = false)
+    {
+        ProjInvoiceTable    projInvoiceTable;
+        NumberSeq           projNumberSeq;
+        ProjTable           projTable, projTableNew;
+        ProjParentId        projParentId = _projTable.ParentId;
+        WPPWorkOrderLine    workOrderLine;
+
+        if (!_custTable.RecId)
+        {
+            throw error("@DNR10198");
+        }
+
+        if (_projTable.ProjInvoiceProjId)
+        {
+            projInvoiceTable = ProjInvoiceTable::find(_projTable.ProjInvoiceProjId);
+        }
+
+        if (!projInvoiceTable)
+        {
+            ProjInvoiceProjId projInvoiceProjId = BSAContractTable::findActiveContract(smmBusRelTable::findCust(_custTable.AccountNum).BusRelAccount, _workOrderTable.StartDate, _workOrderTable.EndDate).ProjInvoiceProjId;
+            
+            if (projInvoiceProjId)
+            {
+                projInvoiceTable = ProjInvoiceTable::find(projInvoiceProjId);
+            }
+        }
+
+        if (!projInvoiceTable)
+        {
+            select firstonly projInvoiceTable
+                exists join projTable
+                where projTable.ProjInvoiceProjId == projInvoiceTable.ProjInvoiceProjId
+                    join TableId from workOrderLine
+                    where workOrderLine.WorkOrderId == _workOrderTable.WorkOrderId
+                    &&    workOrderLine.ProjId == projTable.ProjId;
+        }
+
+        if (!projInvoiceTable)
+        {
+            projInvoiceTable.ProjInvoiceProjId  = (_projTable.ProjInvoiceProjId ? _projTable.ProjInvoiceProjId : NumberSeq::newGetNum(ProjParameters::numRefProjInvoiceProjId()).num());
+            projInvoiceTable.Description        = _projTable.Name;
+            projInvoiceTable.CurrencyId         = _custTable.Currency;
+            projInvoiceTable.WPPInvoiceStatus   = WPPInvoiceStatus::NoTransaction;
+            projInvoiceTable.TaxGroupId         = _custTable.TaxGroup;
+            projInvoiceTable.ProjPriceGroup     = _custTable.PriceGroup;
+            projInvoiceTable.GiroType           = _custTable.GiroTypeProjInvoice;
+            projInvoiceTable.ListCodeId         = EUSalesList::resolveListCode(_custTable.postalAddress().CountryRegionId, projInvoiceTable.payer().postalAddress().CountryRegionId);
+            projInvoiceTable.insert();
+
+            ProjFundingSource::createFundingSource(projInvoiceTable.ProjInvoiceProjId, _custTable.AccountNum);
+
+            ProjFundingSource projFundingSource = ProjFundingSource::findContractFundingSource(projInvoiceTable.ProjInvoiceProjId, _custTable.AccountNum);
+            ProjFundingRule::createDefaultFundingRule(projInvoiceTable.ProjInvoiceProjId, projFundingSource.RecId);
+
+            TradeBLWIJournalPurposeCodes::createRecord(TradeBLWICustVend::Customer, projInvoiceTable.RecId, _custTable.AccountNum, TradeBLWITypeOfForm::InvoiceProject);
+        }
+
+        if (!projInvoiceTable)
+        {
+            // Creation of invoice project failed, return empty ProjTable record
+            return null;
+        }
+
+        if (_copyProjId)
+        {
+            projTableNew.ProjId = _projTable.ProjId;
+        }
+        else
+        {
+            if (projParentId)
+            {
+                projTableNew.type().initFromParent(projParentId);
+                projTableNew.ProjId = ProjTable::generateNextSubProjectId(projParentId);
+            }
+            else
+            {
+                projNumberSeq = NumberSeq::newGetNum(ProjParameters::numRefProjId(), true);
+
+                if (projNumberSeq)
+                {
+                    projTableNew.ProjId = projNumberSeq.num();
+                }
+            }
+        }
+
+        projTableNew.Type   = _projTable.Type;
+        projTableNew.Name   = _projTable.Name;
+        projTableNew.Format = _projTable.Format;
+
+        ProjGroup projGroup = ProjGroup::find(_projTable.ProjGroupId);
+
+        if (!projGroup)
+        {
+            throw error(strFmt("Project group %1 is not available in current company", _projTable.ProjGroupId));
+        }
+
+        projTableNew.ProjGroupId = _projTable.ProjGroupId;
+        projTableNew.initFromProjGroup(projGroup);
+        
+        ProjTableType projTableType = projTableNew.type();
+        projTableType.initProjTable();
+
+        projTableNew.ProjInvoiceProjId = projInvoiceTable.ProjInvoiceProjId;
+        projTableNew.initFromInvoice(projInvoiceTable);
+        
+        projTableNew.CustAccount = _custTable.AccountNum;
+
+        if (_workOrderTable.CompanyId == curExt())
+        {
+            projTableNew.TaxGroupId         = _projTable.TaxGroupId;
+            projTableNew.DefaultDimension   = _projTable.DefaultDimension;
+        }
+
+        if (!ProjTable::exist(projTableNew.ProjId) && projTableNew.type().validateWrite())
+        {
+            if (ProjWorkerValidation::isWorkerInCurrentCompany(projTableNew.WorkerResponsible)
+            &&  ProjWorkerValidation::isWorkerInCurrentCompany(projTableNew.WorkerResponsibleFinancial)
+            &&  ProjWorkerValidation::isWorkerInCurrentCompany(projTableNew.WorkerResponsibleSales))
+            {
+                projTableNew.insert();
+            }
+
+            if (projNumberSeq)
+            {
+                projNumberSeq.used();
+            }
+        }
+        else
+        {
+            projTableNew.clear();
+
+            if (projNumberSeq)
+            {
+                projNumberSeq.abort();
+            }
+        }
+
+        smmProjectCreate::statusToInProcess(projTableNew);
+
+        return projTableNew;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>projTable</Name>
+				<Source><![CDATA[
+    public ProjTable projTable(boolean _forUpdate = false)
+    {
+        return ProjTable::find(this.ProjId, _forUpdate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setMaintenanceDateExpected</Name>
+				<Source><![CDATA[
+    public void setMaintenanceDateExpected()
+    {
+        WPPWorkOrderTable workOrderTable;
+    
+        if (this.workOrderTaskTable().TaskCategory == WPPTaskCategory::MaintenanceTask)
+        {
+            ttsBegin;
+            workOrderTable = this.workOrderTable(true);
+            if (workOrderTable)
+            {
+                workOrderTable.setMaintenanceDateExpected();
+                workOrderTable.update();
+            }
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transactionsExist</Name>
+				<Source><![CDATA[
+    public boolean transactionsExist()
+    {
+        boolean ret = false;
+    
+        this.projTable().DNRTrxExists = NoYes::Yes;
+
+        if (this.ProjId
+        && !this.isLinkedToFixedProject()
+        &&  this.projTable().trxExists())
+        {
+            ret = true;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update()
+    {
+        WPPWorkOrderLine orig = this.orig();
+    
+        ttsBegin;
+    
+        super();
+    
+        BOBRentalTransManager::newWorkOrder(this).synchronize();
+    
+        if (this.RequestedEndDateTime != orig.RequestedEndDateTime || this.Status != orig.Status)
+        {
+            this.setMaintenanceDateExpected();
+        }
+    
+        if (this.RequestedStartDateTime != orig.RequestedStartDateTime)
+        {
+            WPPWorkOrderLine::updateItemReqDates(this.RecId, this.RequestedStartDateTime);
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateDate</Name>
+				<Source><![CDATA[
+    public utcDateTime updateDate(FieldId                      _dateFieldId2Update,
+                                  Map                          _workOrderTemplateLineMap,
+                                  WPPWorkOrderTemplateLine     _workOrderTemplateLine,
+                                  WPPWorkOrderDateTimeTemplate _workOrderDateTimeTemplate,
+                                  RORRentalDateTimes           _rentalDateTimes,
+                                  WPPWorkOrderTable            _workOrderTable = null)
+    {
+        FieldId     dateOffsetFieldId;
+        FieldId     dateUnitFieldId;
+        FieldId     dateTemplateLineRefFieldId;
+        FieldId     dateSynchSourceFieldId;
+        FieldId     rentalDateTypeFieldId;
+        FieldId     workOrderDateFieldId;
+        TransDate   transDate;
+    
+        switch (_dateFieldId2Update)
+        {
+            case fieldNum(WPPWorkOrderLine, RequestedStartDateTime):
+                dateOffsetFieldId          = fieldNum(WPPWorkOrderDateTimeTemplate, StartDateOffsetDuration);
+                dateUnitFieldId            = fieldNum(WPPWorkOrderDateTimeTemplate, StartDateOffsetUnit);
+                dateTemplateLineRefFieldId = fieldNum(WPPWorkOrderDateTimeTemplate, StartDateTemplateLineRef);
+                dateSynchSourceFieldId     = fieldNum(WPPWorkOrderDateTimeTemplate, StartDateSynchSource);
+                rentalDateTypeFieldId      = fieldNum(WPPWorkOrderDateTimeTemplate, RORRentalStartDateType);
+                workOrderDateFieldId       = fieldNum(WPPWorkOrderTable, StartDate);
+                break;
+    
+            case fieldNum(WPPWorkOrderLine, RequestedEndDateTime):
+                dateOffsetFieldId          = fieldNum(WPPWorkOrderDateTimeTemplate, EndDateOffsetDuration);
+                dateUnitFieldId            = fieldNum(WPPWorkOrderDateTimeTemplate, EndDateOffsetUnit);
+                dateTemplateLineRefFieldId = fieldNum(WPPWorkOrderDateTimeTemplate, EndDateTemplateLineRef);
+                dateSynchSourceFieldId     = fieldNum(WPPWorkOrderDateTimeTemplate, EndDateSynchSource);
+                rentalDateTypeFieldId      = fieldNum(WPPWorkOrderDateTimeTemplate, RORRentalEndDateType);
+                workOrderDateFieldId       = fieldNum(WPPWorkOrderTable, EndDate);
+                break;
+    
+            default:
+                throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    
+        transDate = WPPWorkOrderLine::getDate(_dateFieldId2Update,
+            dateOffsetFieldId,
+            dateUnitFieldId,
+            dateTemplateLineRefFieldId,
+            dateSynchSourceFieldId,
+            rentalDateTypeFieldId,
+            workOrderDateFieldId,
+            _workOrderTemplateLineMap,
+            this,
+            _workOrderTemplateLine,
+            _workOrderDateTimeTemplate,
+            _rentalDateTimes,
+            _workOrderTable);
+
+        if (!transDate || year(transDate) < 1902)
+        {
+            this.(_dateFieldId2Update) = DateTimeUtil::minValue();
+        }
+        else
+        {
+            this.(_dateFieldId2Update) = DateTimeUtil::newDateTime(transDate,
+                DateTimeUtil::time(this.(_dateFieldId2Update)));
+        }
+    
+        return this.(_dateFieldId2Update);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateParentLineNumber</Name>
+				<Source><![CDATA[
+    public void updateParentLineNumber(WPPWorkOrderTemplateId   _templateId,
+                                       WPPLineParent            _parentLineNum,
+                                       Map                      _workOrderTemplateLineMap)
+    {
+        WPPWorkOrderTemplateLine workOrderTemplateLine;
+        WPPWorkOrderLine workOrderLineParent;
+    
+        workOrderTemplateLine = WPPWorkOrderTemplateLine::findRecId(_parentLineNum);
+    
+        if (_workOrderTemplateLineMap.exists(workOrderTemplateLine))
+        {
+            workOrderLineParent = _workOrderTemplateLineMap.lookup(workOrderTemplateLine);
+    
+            this.ParentLineRecId = workOrderLineParent.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateParentLineRecId</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void updateParentLineRecId()
+    {
+        WPPWorkOrderLine workOrderLineNewChild;
+    
+        if (this.ParentLineRecId)
+        {
+            update_recordSet workOrderLineNewChild
+            setting ParentLineRecId = this.ParentLineRecId
+            where workOrderLineNewChild.ParentLineRecId == this.RecId;
+        }
+        else
+        {
+            update_recordSet workOrderLineNewChild
+            setting ParentLineRecId = 0
+            where workOrderLineNewChild.ParentLineRecId == this.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRootLineRecId</Name>
+				<Source><![CDATA[
+    public void updateRootLineRecId(DNRObjectAction     _action,
+                                    WPPWorkOrderLine    _workOrderLineOrig = null)
+    {
+        WPPWorkOrderLine workOrderLineParent;
+        WPPLineParent rootLine;
+    
+        switch (_action)
+        {
+            case DNRObjectAction::Insert:
+                if (this.ParentLineRecId)
+                {
+                    workOrderLineParent = WPPWorkOrderLine::findRecId(this.ParentLineRecId);
+    
+                    while (workOrderLineParent)
+                    {
+                        if (workOrderLineParent.ParentLineRecId)
+                        {
+                            workOrderLineParent = WPPWorkOrderLine::findRecId(workOrderLineParent.ParentLineRecId);
+                        }
+                        else
+                        {
+                            rootLine = workOrderLineParent.RecId;
+                            workOrderLineParent = null;
+                        }
+                    }
+    
+                    this.RootLineRecId = rootLine;
+                }
+                break;
+    
+            case DNRObjectAction::Update:
+                this.RootLineRecId = this.determineRootLine(_workOrderLineOrig);
+                break;
+    
+            case DNRObjectAction::Delete:
+                // Update the root on the child lines
+                if (!this.ParentLineRecId)
+                {
+                    WPPWorkOrderLine::updateChildRootLineRecId(this.RecId, 0);
+                }
+                break;
+    
+            case DNRObjectAction::ModifiedField:
+                // Inside a transaction because child lines are updated as well
+                ttsBegin;
+                this.RootLineRecId = this.determineRootLine(_workOrderLineOrig);
+                WPPWorkOrderLine::updateChildRootLineRecId(this.RecId, this.ParentLineRecId ? this.ParentLineRecId : this.RecId);
+                ttsCommit;
+                break;
+    
+            default:
+                // Do nothing
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateTime</Name>
+				<Source><![CDATA[
+    public utcDateTime updateTime(FieldId                      _timeFieldId2Update,
+                                  Map                          _workOrderTemplateLineMap,
+                                  WPPWorkOrderTemplateLine     _workOrderTemplateLine,
+                                  WPPWorkOrderDateTimeTemplate _workOrderDateTimeTemplate,
+                                  RORRentalDateTimes           _rentalDateTimes)
+    {
+        FieldId     timeOffsetFieldId;
+        FieldId     timeUnitFieldId;
+        FieldId     timeTemplateLineRefFieldId;
+        FieldId     timeSynchSourceFieldId;
+        FieldId     rentalTimeTypeFieldId;
+        TransDate   transDate;
+    
+        switch (_timeFieldId2Update)
+        {
+            case fieldNum(WPPWorkOrderLine, RequestedStartDateTime):
+                timeOffsetFieldId          = fieldNum(WPPWorkOrderDateTimeTemplate, StartTimeOffsetDuration);
+                timeUnitFieldId            = fieldNum(WPPWorkOrderDateTimeTemplate, StartTimeOffsetUnit);
+                timeTemplateLineRefFieldId = fieldNum(WPPWorkOrderDateTimeTemplate, StartTimeTemplateLineRef);
+                timeSynchSourceFieldId     = fieldNum(WPPWorkOrderDateTimeTemplate, StartTimeSynchSource);
+                rentalTimeTypeFieldId      = fieldNum(WPPWorkOrderDateTimeTemplate, RORRentalStartTimeType);
+                break;
+    
+            case fieldNum(WPPWorkOrderLine, RequestedEndDateTime):
+                timeOffsetFieldId          = fieldNum(WPPWorkOrderDateTimeTemplate, EndTimeOffsetDuration);
+                timeUnitFieldId            = fieldNum(WPPWorkOrderDateTimeTemplate, EndTimeOffsetUnit);
+                timeTemplateLineRefFieldId = fieldNum(WPPWorkOrderDateTimeTemplate, EndTimeTemplateLineRef);
+                timeSynchSourceFieldId     = fieldNum(WPPWorkOrderDateTimeTemplate, EndTimeSynchSource);
+                rentalTimeTypeFieldId      = fieldNum(WPPWorkOrderDateTimeTemplate, RORRentalEndTimeType);
+                break;
+    
+            default:
+                throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    
+        transDate = DateTimeUtil::date(this.(_timeFieldId2Update));
+        if (!transDate || year(transDate) < 1902)
+        {
+            this.(_timeFieldId2Update) = DateTimeUtil::minValue();
+        }
+        else
+        {
+            this.(_timeFieldId2Update) = DateTimeUtil::newDateTime(transDate,
+                WPPWorkOrderLine::getTime(_timeFieldId2Update,
+                                            timeOffsetFieldId,
+                                            timeUnitFieldId,
+                                            timeTemplateLineRefFieldId,
+                                            timeSynchSourceFieldId,
+                                            rentalTimeTypeFieldId,
+                                            _workOrderTemplateLineMap,
+                                            _workOrderTemplateLine,
+                                            _workOrderDateTimeTemplate,
+                                            _rentalDateTimes));
+        }
+    
+        return this.(_timeFieldId2Update);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateDelete</Name>
+				<Source><![CDATA[
+    public boolean validateDelete()
+    {
+        boolean ret;
+    
+        ret = super();
+    
+        if (ret &&  this.Status > WPPWorkOrderLineStatus::Created)
+        {
+            ret = checkFailed(strFmt("@DNR7164", new DictEnum(enumNum(WPPWorkOrderLineStatus)).index2Label(WPPWorkOrderLineStatus::Created)));
+        }
+    
+        if (ret &&  this.canCheckTransactionsExist() &&  this.transactionsExist())
+        {
+            ret = checkFailed("@DNR6649");
+        }
+
+        if(ret && this.WorkOrderId)
+        {
+            WPPParameters   wppParameters;
+
+            select firstonly crosscompany RecId, DataAreaId from wppParameters 
+            where wppParameters.InternalWorkOrderId == this.WorkOrderId;
+            
+            if (wppParameters.RecId)
+            {
+                ret = checkFailed(strFmt("@DNR:IntenalWOLineDeleteError", this.WorkOrderId, wppParameters.DataAreaId));
+            }
+        }
+
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateField</Name>
+				<Source><![CDATA[
+    public boolean validateField(FieldId _fieldIdToCheck)
+    {
+        boolean ret;
+    
+        ret = super(_fieldIdToCheck);
+    
+        switch (_fieldIdToCheck)
+        {
+            case fieldNum(WPPWorkOrderLine, ParentLineRecId):
+                if (this.ParentLineRecId
+                && !this.checkParentWorkOrderLine())
+                {
+                    ret = checkFailed("@DNR1893");
+                }
+                break;
+    
+            case fieldNum(WPPWorkOrderLine, ObjectQty):
+                ret = this.checkObjectQty();
+                break;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateOpenSubscriptionOrders</Name>
+				<Source><![CDATA[
+    public boolean validateOpenSubscriptionOrders()
+    {
+        boolean     ret;
+        boolean     firstRecord;
+        SalesTable  salesTable;
+    
+        ret = true;
+        firstRecord = true;
+    
+        while select SalesId from salesTable
+        where salesTable.ProjId      == this.ProjId
+        &&    salesTable.SalesType   == SalesType::Subscription
+        &&    salesTable.SalesStatus == SalesStatus::Backorder
+        {
+            if (firstRecord)
+            {
+                ret = checkFailed("@DNR1404");
+                firstRecord = false;
+            }
+    
+            info("@SYS9694" + ': ' + salesTable.SalesId);
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validatePostedJournals</Name>
+				<Source><![CDATA[
+    public boolean validatePostedJournals()
+    {
+        boolean                         ret;
+        ProjJournalTable                projJournalTable;
+        ProjJournalTrans                projJournalTrans;
+        WPPWorkOrderLineHourTransLink   workOrderLineHourTransLink;
+        WPPParameters                   parameters;
+    
+        parameters = WPPParameters::find();
+    
+        ret = true;
+    
+        if (parameters.SeparateProjectPerWorkOrderLine)
+        {
+            select firstOnly RecId from projJournalTable
+            where projJournalTable.Posted
+                exists join projJournalTrans
+                where projJournalTrans.JournalId == projJournalTable.JournalId
+                &&    projJournalTrans.ProjId    == this.ProjId;
+        }
+        else
+        {
+            select firstOnly RecId from projJournalTable
+            where projJournalTable.Posted
+                exists join projJournalTrans
+                where projJournalTrans.JournalId == projJournalTable.JournalId
+                    join TableId from workOrderLineHourTransLink
+                    where workOrderLineHourTransLink.RefTableId == projJournalTrans.TableId
+                    &&    workOrderLineHourTransLink.RefRecId   == projJournalTrans.RecId
+                    &&    workOrderLineHourTransLink.WorkOrderLineRecId == this.RecId;
+        }
+    
+        if (projJournalTable.RecId && !this.isLinkedToFixedProject())
+        {
+            ret = checkFailed(strFmt("@DNR1426", WPPWorkOrderLineStatus::Created));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateResourceRequired</Name>
+				<Source><![CDATA[
+    public boolean validateResourceRequired(WPPWorkOrderLineStatus _status)
+    {
+        boolean ret = true;
+    
+        if (this.workOrderTaskTable().ResourceRequired
+        && !WPPWorkOrderLineResource::exist(this.RecId))
+        {
+            ret = checkFailed(strFmt("@DNR6646", this.TaskId, _status));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    public boolean validateWrite()
+    {
+        boolean         ret;
+    
+        ret = super();
+    
+        if (DateTimeUtil::DNRIsDateTimePopulated(this.RequestedEndDateTime) && this.RequestedEndDateTime < this.RequestedStartDateTime)
+        {
+            ret = checkFailed(strFmt("@DNR6356", fieldId2pname(tableNum(WPPWorkOrderLine), fieldNum(WPPWorkOrderLine, RequestedStartDateTime)), fieldId2pname(tableNum(WPPWorkOrderLine), fieldNum(WPPWorkOrderLine, RequestedEndDateTime))));
+        }
+    
+        ret = this.checkObjectQty() && ret;
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>workOrderTable</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderTable workOrderTable(boolean _forUpdate = false)
+    {
+        return WPPWorkOrderTable::find(this.WorkOrderId, _forUpdate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>workOrderTaskTable</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderTaskTable workOrderTaskTable(boolean _forUpdate = false)
+    {
+        return WPPWorkOrderTaskTable::find(this.TaskId, _forUpdate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>childExists</Name>
+				<Source><![CDATA[
+    public static boolean childExists(WPPLineParent _parentLineRecId)
+    {
+        return _parentLineRecId && (select firstonly RecId from WPPWorkOrderLine
+                                    where WPPWorkOrderLine.ParentLineRecId == _parentLineRecId).RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteLinkedRecords</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static server void deleteLinkedRecords(ProjId _projId)
+    {
+        WPPWorkOrderTable   workOrderTable;
+        WPPWorkOrderLine    workOrderLine;
+        ProjTable           projTable;
+    
+        ttsBegin;
+        while select forUpdate workOrderLine
+        where workOrderLine.ProjId == _projId
+        {
+            delete_from workOrderTable
+            where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId;
+        }
+    
+        delete_from projTable
+        where projTable.ProjId == _projId;
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>exist</Name>
+				<Source><![CDATA[
+    public static client server boolean exist(WPPWorkOrderId    _workOrderId,
+                                              Line              _workOrderLineNumber)
+    {
+        return (_workOrderId && _workOrderLineNumber && (select firstOnly RecId from WPPWorkOrderLine
+                                                         where WPPWorkOrderLine.WorkOrderId == _workOrderId
+                                                         &&    WPPWorkOrderLine.LineNumber  == _workOrderLineNumber).RecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>existRecId</Name>
+				<Source><![CDATA[
+    public static client server boolean existRecId(WPPLineParent _lineParent)
+    {
+        return (_lineParent && (select firstOnly RecId from WPPWorkOrderLine
+                                where WPPWorkOrderLine.RecId == _lineParent).RecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>find</Name>
+				<Source><![CDATA[
+    public static client server WPPWorkOrderLine find(WPPWorkOrderId    _workOrderId,
+                                                      Line              _lineNumber,
+                                                      boolean           _forUpdate = false)
+    {
+        WPPWorkOrderLine workOrderLine;
+    
+        if (_workOrderId && _lineNumber)
+        {
+            workOrderLine.selectForUpdate(_forUpdate);
+    
+            select firstOnly workOrderLine
+            where workOrderLine.WorkOrderId == _workOrderId
+            &&    workOrderLine.LineNumber  == _lineNumber;
+        }
+    
+        return workOrderLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findProjId</Name>
+				<Source><![CDATA[
+    public static client server WPPWorkOrderLine findProjId(ProjId  _projId,
+                                                            boolean _forUpdate = false)
+    {
+        WPPWorkOrderLine workOrderLine;
+    
+        if (_projId)
+        {
+            workOrderLine.selectForUpdate(_forUpdate);
+    
+            select firstOnly workOrderLine
+            where workOrderLine.ProjId == _projId;
+        }
+    
+        return workOrderLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findRecId</Name>
+				<Source><![CDATA[
+    public static client server WPPWorkOrderLine findRecId(RefRecId _recId,
+                                                           boolean  _forUpdate = false)
+    {
+        WPPWorkOrderLine workOrderLine;
+    
+        if (_recId)
+        {
+            workOrderLine.selectForUpdate(_forUpdate);
+    
+            select firstOnly workOrderLine
+            where workOrderLine.RecId == _recId;
+        }
+    
+        return workOrderLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findTaskId</Name>
+				<Source><![CDATA[
+    public static client server WPPWorkOrderLine findTaskId(WPPWorkOrderId      _workOrderId,
+                                                            WPPWorkOrderTaskId  _taskId,
+                                                            boolean             _forUpdate = false)
+    {
+        WPPWorkOrderLine workOrderLine;
+    
+        if (_workOrderId && _taskId)
+        {
+            workOrderLine.selectForUpdate(_forUpdate);
+    
+            select firstOnly workOrderLine
+            where workOrderLine.WorkOrderId == _workOrderId
+            &&    workOrderLine.TaskId      == _taskId;
+        }
+    
+        return workOrderLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDate</Name>
+				<Source><![CDATA[
+    public static client server TransDate getDate(FieldId                       _dateFieldId2Update,
+                                                  FieldId                       _dateOffsetFieldId,
+                                                  FieldId                       _dateUnitFieldId,
+                                                  FieldId                       _dateTemplateLineRefFieldId,
+                                                  FieldId                       _dateSynchSourceFieldId,
+                                                  FieldId                       _rentalDateTypeFieldId,
+                                                  FieldId                       _workOrderDateFieldId,
+                                                  Map                           _workOrderTemplateLineMap,
+                                                  WPPWorkOrderLine              _workOrderLine,
+                                                  WPPWorkOrderTemplateLine      _workOrderTemplateLine,
+                                                  WPPWorkOrderDateTimeTemplate  _workOrderDateTimeTemplate,
+                                                  RORRentalDateTimes            _rentalDateTimes,
+                                                  WPPWorkOrderTable             _workOrderTable = null)
+    {
+        TransDate                       transDate;
+        FieldId                         rentalDateFieldId;
+        WPPWorkOrderLine                workOrderLineReference;
+        WPPWorkOrderTemplateLine        workOrderTemplateLineReference;
+        WPPWorkOrderDateTimeTemplate    workOrderDateTimeTemplateReference;
+    
+        switch (_workOrderDateTimeTemplate.(_dateSynchSourceFieldId))
+        {
+            case WPPStartDateSynchSource::SystemDate:
+                transDate = RORRentalDateTimes::applyDateOffset(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()),
+                                                                _workOrderDateTimeTemplate.(_dateOffsetFieldId),
+                                                                _workOrderDateTimeTemplate.(_dateUnitFieldId));
+                break;
+    
+            case WPPStartDateSynchSource::DeliveryDate:
+                transDate = RORRentalDateTimes::applyDateOffset(_workOrderLine.workOrderTable().deliveryDate(),
+                                                                _workOrderDateTimeTemplate.(_dateOffsetFieldId),
+                                                                _workOrderDateTimeTemplate.(_dateUnitFieldId));
+                break;
+    
+            case WPPStartDateSynchSource::RentalDate:
+                if (_rentalDateTimes)
+                {
+                    rentalDateFieldId = RORRentalDateTimes::dateTimeType2FieldId(_workOrderDateTimeTemplate.(_rentalDateTypeFieldId));
+    
+                    if (rentalDateFieldId)
+                    {
+                        transDate = RORRentalDateTimes::applyDateOffset(DateTimeUtil::date(_rentalDateTimes.(rentalDateFieldId)),
+                                                                        _workOrderDateTimeTemplate.(_dateOffsetFieldId),
+                                                                        _workOrderDateTimeTemplate.(_dateUnitFieldId));
+                    }
+                }
+                break;
+    
+            case WPPStartDateSynchSource::TemplateLine:
+                if (_workOrderDateTimeTemplate.(_dateTemplateLineRefFieldId))
+                {
+                    workOrderTemplateLineReference = WPPWorkOrderTemplateLine::findRecId(_workOrderDateTimeTemplate.(_dateTemplateLineRefFieldId));
+    
+                    if (_workOrderTemplateLineMap.exists(workOrderTemplateLineReference))
+                    {
+                        workOrderLineReference = _workOrderTemplateLineMap.lookup(workOrderTemplateLineReference);
+                        workOrderDateTimeTemplateReference = WPPWorkOrderDateTimeTemplate::find(workOrderTemplateLineReference.RecId);
+    
+                        // Update the reference record first
+                        transDate = RORRentalDateTimes::applyDateOffset(DateTimeUtil::date(workOrderLineReference.updateDate(_dateFieldId2Update,
+                                                                                                                             _workOrderTemplateLineMap,
+                                                                                                                             workOrderTemplateLineReference,
+                                                                                                                             workOrderDateTimeTemplateReference,
+                                                                                                                             _rentalDateTimes,
+                                                                                                                             _workOrderTable)),
+                                                                                                                            _workOrderDateTimeTemplate.(_dateOffsetFieldId),
+                                                                                                                            _workOrderDateTimeTemplate.(_dateUnitFieldId));
+                                                    }
+                }
+                break;
+    
+            case WPPStartDateSynchSource::WorkOrderDate:
+                transDate = _workOrderTable.WorkOrderId ? _workOrderTable.(_workOrderDateFieldId) : _workOrderLine.workOrderTable().(_workOrderDateFieldId);
+                break;
+    
+            default:
+                break;
+        }
+    
+        return transDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getHighestStatus</Name>
+				<Source><![CDATA[
+    public static client server WPPWorkOrderLineStatus getHighestStatus(WPPWorkOrderId _workOrderId)
+    {
+        WPPWorkOrderLine workOrderLine;
+    
+        if (_workOrderId)
+        {
+            select maxOf(Status) from workOrderLine
+            where workOrderLine.WorkOrderId == _workOrderId;
+        }
+    
+        return workOrderLine.Status;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLowestStatus</Name>
+				<Source><![CDATA[
+    public static client server WPPWorkOrderLineStatus getLowestStatus(WPPWorkOrderId _workOrderId)
+    {
+        WPPWorkOrderLine workOrderLine;
+    
+        if (_workOrderId)
+        {
+            select minOf(Status) from workOrderLine
+            where workOrderLine.WorkOrderId == _workOrderId;
+        }
+    
+        return workOrderLine.Status;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTime</Name>
+				<Source><![CDATA[
+    public static client server TimeExpected getTime(FieldId                        _timeFieldId2Update,
+                                                     FieldId                        _timeOffsetFieldId,
+                                                     FieldId                        _timeUnitFieldId,
+                                                     FieldId                        _timeTemplateLineRefFieldId,
+                                                     FieldId                        _timeSynchSourceFieldId,
+                                                     FieldId                        _rentalTimeTypeFieldId,
+                                                     Map                            _workOrderTemplateLineMap,
+                                                     WPPWorkOrderTemplateLine       _workOrderTemplateLine,
+                                                     WPPWorkOrderDateTimeTemplate   _workOrderDateTimeTemplate,
+                                                     RORRentalDateTimes             _rentalDateTimes)
+    {
+        TransDateTime                   transDateTime;
+        TimeExpected                    timeExpected;
+        FieldId                         rentalDateFieldId;
+        WPPWorkOrderLine                workOrderLineReference;
+        WPPWorkOrderTemplateLine        workOrderTemplateLineReference;
+        WPPWorkOrderDateTimeTemplate    workOrderDateTimeTemplateReference;
+    
+        #TimeConstants
+    
+        switch (_workOrderDateTimeTemplate.(_timeSynchSourceFieldId))
+        {
+            case WPPStartEndTimeSynchSource::SystemTime:
+                timeExpected = RORRentalDateTimes::applyTimeOffset(DateTimeUtil::getTimeNow(DateTimeUtil::getUserPreferredTimeZone()),
+                                                                   _workOrderDateTimeTemplate.(_timeOffsetFieldId),
+                                                                   _workOrderDateTimeTemplate.(_timeUnitFieldId));
+    
+                // This does not seem to work with dateNull(), therefore systemDateGet is used instead
+                transDateTime = DateTimeUtil::newDateTime(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), timeExpected);
+                timeExpected = DateTimeUtil::time(DateTimeUtil::removeTimeZoneOffset(transDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+                break;
+    
+            case WPPStartEndTimeSynchSource::RentalDate:
+                if (_rentalDateTimes)
+                {
+                    rentalDateFieldId = RORRentalDateTimes::dateTimeType2FieldId(_workOrderDateTimeTemplate.(_rentalTimeTypeFieldId));
+    
+                    if (rentalDateFieldId)
+                    {
+                        timeExpected = RORRentalDateTimes::applyTimeOffset(DateTimeUtil::time(_rentalDateTimes.(rentalDateFieldId)),
+                                                                        _workOrderDateTimeTemplate.(_timeOffsetFieldId),
+                                                                        _workOrderDateTimeTemplate.(_timeUnitFieldId));
+                    }
+                }
+                break;
+    
+            case WPPStartEndTimeSynchSource::TemplateLine:
+                if (_workOrderDateTimeTemplate.(_timeTemplateLineRefFieldId))
+                {
+                    workOrderTemplateLineReference = WPPWorkOrderTemplateLine::findRecId(_workOrderDateTimeTemplate.(_timeTemplateLineRefFieldId));
+    
+                    if (_workOrderTemplateLineMap.exists(workOrderTemplateLineReference))
+                    {
+                        workOrderLineReference = _workOrderTemplateLineMap.lookup(workOrderTemplateLineReference);
+                        workOrderDateTimeTemplateReference = WPPWorkOrderDateTimeTemplate::find(workOrderTemplateLineReference.RecId);
+    
+                        // Update the reference record first
+                        timeExpected = RORRentalDateTimes::applyTimeOffset(DateTimeUtil::time(workOrderLineReference.updateTime(_timeFieldId2Update,
+                                                                                                                                _workOrderTemplateLineMap,
+                                                                                                                                workOrderTemplateLineReference,
+                                                                                                                                workOrderDateTimeTemplateReference,
+                                                                                                                                _rentalDateTimes)),
+                                                                                                                                _workOrderDateTimeTemplate.(_timeOffsetFieldId),
+                                                                                                                                _workOrderDateTimeTemplate.(_timeUnitFieldId));
+                    }
+                }
+                break;
+    
+            case WPPStartEndTimeSynchSource::Fixed:
+                timeExpected  = _timeFieldId2Update == fieldNum(WPPWorkOrderLine, RequestedStartDateTime) ?
+                                _workOrderDateTimeTemplate.StartTimeFixed :
+                                _workOrderDateTimeTemplate.EndTimeFixed;
+    
+                // This does not seem to work with dateNull(), therefore systemDateGet is used instead
+                transDateTime = DateTimeUtil::newDateTime(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), timeExpected);
+                timeExpected = DateTimeUtil::time(DateTimeUtil::removeTimeZoneOffset(transDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+                break;
+    
+            default:
+                break;
+        }
+    
+        return timeExpected;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasProject</Name>
+				<Source><![CDATA[
+    public static client boolean hasProject(WPPWorkOrderId _workOrderId)
+    {
+        return _workOrderId && (select firstOnly RecId from WPPWorkOrderLine
+                                where WPPWorkOrderLine.WorkOrderId == _workOrderId
+                                &&    WPPWorkOrderLine.ProjId).RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lastLineNumber</Name>
+				<Source><![CDATA[
+    public static client server Line lastLineNumber(WPPWorkOrderId  _workOrderId)
+    {
+        return (select maxOf(LineNumber) from WPPWorkOrderLine
+                where WPPWorkOrderLine.WorkOrderId == _workOrderId).LineNumber;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lookupParentWorkOrderLine</Name>
+				<Source><![CDATA[
+    public static client void lookupParentWorkOrderLine(FormControl         _callingControl,
+                                                        WPPWorkOrderLine    _workOrderLine)
+    {
+        Query                   query = new Query();
+        QueryBuildDataSource    qbdsWorkOrderLine;
+        SysTableLookup          sysTableLookup = SysTableLookup::newParameters(tableNum(WPPWorkOrderLine), _callingControl);
+    
+        qbdsWorkOrderLine = query.addDataSource(tableNum(WPPWorkOrderLine));
+        qbdsWorkOrderLine.addRange(fieldNum(WPPWorkOrderLine, WorkOrderId)).value(_workOrderLine.WorkOrderId);
+        qbdsWorkOrderLine.addRange(fieldNum(WPPWorkOrderLine, LineNumber)).value(SysQuery::valueNot(_workOrderLine.LineNumber));
+    
+        sysTableLookup.parmQuery(query);
+    
+        sysTableLookup.addLookupfield(fieldNum(WPPWorkOrderLine, LineNumber));
+        sysTableLookup.addLookupfield(fieldNum(WPPWorkOrderLine, ProjId));
+    
+        sysTableLookup.performFormLookup();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>scheduleTasks</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void scheduleTasks(WPPWorkOrderLine _workOrderLine, WPPResourceId _resourceGroup)
+    {
+        #DNRConstants
+
+        WPPResourceGroupResource    resourceGroupResource;
+        WPPResourceTable            resourceTable, resourceGroup;
+        ValidFromDateTime           validFromDateTime = _workOrderLine.RequestedStartDateTime;
+        ValidToDateTime             validToDateTime = _workOrderLine.RequestedEndDateTime;
+        WPPWorkOrderLineResource    workOrderLineResource;
+        LineNum                     lastLineNum;
+        boolean                     resourcePlanningCreated = true;
+
+         // Only schedule the tasks when the dates are filled
+        if (DateTimeUtil::DNRIsDateTimePopulated(validFromDateTime) && DateTimeUtil::DNRIsDateTimePopulated(validToDateTime))
+        {
+            // Find the resources that belong to the _resourceGroup at the planning date
+            while select validTimeState(validFromDateTime, validToDateTime) resourceGroupResource
+            where resourceGroupResource.ResourceGroup == _resourceGroup
+                join ResourceId from resourceTable
+                where resourceTable.ResourceId == resourceGroupResource.ResourceId
+                &&    resourceTable.IsIndividualResource
+                    exists join resourceGroup
+                    where  resourceGroup.ResourceId == resourceGroupResource.ResourceGroup
+                    &&    !resourceGroup.IsIndividualResource
+            {
+                workOrderLineResource = WPPWorkOrderLineResource::createFromWorkOrderLine(_workOrderLine,
+                                                                                          resourceGroupResource,
+                                                                                          resourceTable.ResourceId,
+                                                                                          WrkCtrGroupWrkCtr::WrkCtr,
+                                                                                          false,
+                                                                                          false);
+                // Don't break, because we want to validate all resources
+                if (!workOrderLineResource)
+                {
+                    resourcePlanningCreated = false;
+                }
+            }
+        }
+    
+        if (resourcePlanningCreated)
+        {
+            WPPTaskAssignmentEngine_Service taskAssignmentEngine_Service = WPPTaskAssignmentEngine_Service::construct();
+
+            // Plan the task on the group as well
+            lastLineNum = workOrderLineResource.LineNum;
+    
+            TransDateTime plannedFromDateTime   = resourceGroupResource.ValidFrom && _workOrderLine.RequestedStartDateTime < resourceGroupResource.ValidFrom ?
+                                                  resourceGroupResource.ValidFrom :  _workOrderLine.RequestedStartDateTime;
+            TransDateTime plannedToDateTime     = resourceGroupResource.ValidTo   && _workOrderLine.RequestedEndDateTime   > resourceGroupResource.ValidTo   ?
+                                                  resourceGroupResource.ValidTo   :  _workOrderLine.RequestedEndDateTime;
+
+            taskAssignmentEngine_Service.createResourcePlanningExternal(_resourceGroup,
+                                                                        WrkCtrGroupWrkCtr::WrkCtrGroup,
+                                                                        plannedFromDateTime,
+                                                                        plannedToDateTime,
+                                                                        _workOrderLine.RecId,
+                                                                        lastLineNum + 1,
+                                                                        '');
+        }
+        else
+        {
+            // Update the work order line to Created and all planned resources will be deleted
+            workOrderLineResource = null;
+    
+            // Only resource must be deleted, because the work order line status is still Created
+            delete_from workOrderLineResource
+            where workOrderLineResource.WorkOrderLineRecId == _workOrderLine.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>scheduleTasksFromMap</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void scheduleTasksFromMap(Map _wrkCtrIdTypeMap)
+    {
+        WPPWorkOrderLine    workOrderLine;
+        MapEnumerator       enumerator;
+        container           resourceCon;
+        Counter             conCounter;
+        WPPWorkOrderId      workOrderId;
+        Line                line;
+        WPPResourceId       resourceId;
+        WrkCtrGroupWrkCtr   resourceType;
+        ValidFromDate       validFromDate;
+        ValidToDate         validToDate;
+    
+        enumerator = _wrkCtrIdTypeMap.getEnumerator();
+    
+        // Go through the work order lines stored in the map
+        while (enumerator.moveNext())
+        {
+            [workOrderId,
+             line]        = enumerator.currentKey();
+            workOrderLine = WPPWorkOrderLine::find(workOrderId, line);
+            validFromDate = DateTimeUtil::date(workOrderLine.RequestedStartDateTime);
+            validToDate   = DateTimeUtil::date(workOrderLine.RequestedEndDateTime);
+    
+             // Only schedule the tasks when the dates are filled
+            if (validFromDate > dateNull()
+            &&  validToDate > dateNull())
+            {
+                // Get the container from the map
+                resourceCon = enumerator.currentValue();
+    
+                for (conCounter = 1; conCounter <= conLen(resourceCon); conCounter++)
+                {
+                    resourceId = conPeek(resourceCon, conCounter);
+                    conCounter++;
+                    resourceType = conPeek(resourceCon, conCounter);
+    
+                    WPPWorkOrderLineResource::createFromWorkOrderLine(workOrderLine, null, resourceId, resourceType, true);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateChildRootLineRecId</Name>
+				<Source><![CDATA[
+    public static void updateChildRootLineRecId(WPPLineParent   _parentLineRecId,
+                                                WPPLineParent   _newRoot)
+    {
+        WPPWorkOrderLine    workOrderLine;
+    
+        while select forUpdate workOrderLine
+        where workOrderLine.ParentLineRecId == _parentLineRecId
+        {
+            workOrderLine.RootLineRecId = _newRoot;
+            workOrderLine.doUpdate(); // Only RootLineRecId is updated, no need to execute all the code in the update method
+    
+            WPPWorkOrderLine::updateChildRootLineRecId(workOrderLine.RecId,
+                                                       _newRoot ? _newRoot : workOrderLine.RecId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateItemReqDates</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void updateItemReqDates(WPPWorkOrderLineRecId _workOrderLineRecId,
+                                          TransDateTime         _transDateTime)
+    {
+        WPPWorkOrderLine workOrderLine;
+        SalesLine        salesLine;
+    
+        TransDate newDate = DateTimeUtil::date(_transDateTime);
+    
+        update_recordSet salesLine
+        setting ConfirmedDlv          = newDate,
+                ReceiptDateRequested  = newDate,
+                ShippingDateRequested = newDate
+        where salesLine.SalesStatus == SalesStatus::Backorder
+        &&    salesLine.SalesType == SalesType::ItemReq
+        &&    salesLine.ProjId
+        &&   (salesLine.ConfirmedDlv          != newDate
+        ||    salesLine.ReceiptDateRequested  != newDate
+        ||    salesLine.ShippingDateRequested != newDate)
+            exists join workOrderLine
+            where workOrderLine.ProjId == salesLine.ProjId
+            &&    workOrderLine.RecId  == _workOrderLineRecId;
+        
+        InventJournalTrans  inventJournalTrans;
+        InventJournalTable  inventJournalTable;
+    
+        inventJournalTrans.skipDataMethods(true);
+        inventJournalTrans.skipEvents(true);
+
+        update_recordset inventJournalTrans
+        setting TransDate = newDate
+            exists join inventJournalTable
+            where inventJournalTable.JournalId == inventJournalTrans.JournalId
+            &&   !inventJournalTable.Posted
+            &&    inventJournalTable.WPPProjId
+                exists join workOrderLine
+                where workOrderLine.ProjId == inventJournalTable.WPPProjId
+                &&    workOrderLine.RecId  == _workOrderLineRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateItemReqInventLocation</Name>
+				<Source><![CDATA[
+    public static void updateItemReqInventLocation(WPPWorkOrderLineRecId _workOrderLineRecId, WPPResourceId _resourceId)
+    {
+        if (_workOrderLineRecId
+        && _resourceId
+        && WPPParameters::find().SeparateProjectPerWorkOrderLine)
+        {
+            WPPResourceTable resourceTable;
+            HcmWorker worker;
+            DNRWorkerDefaults workerDefaults;
+                
+            select firstonly WPPServiceWarehouse from workerDefaults
+                exists join worker
+                where worker.RecId == workerDefaults.Worker
+                    join RecId from resourceTable
+                    where resourceTable.ResourceId == _resourceId
+                    &&    resourceTable.RelationAccount == worker.PersonnelNumber
+                    &&    resourceTable.ResourceCategory == WPPResourceCategory::HumanResource;
+
+            if (workerDefaults.WPPServiceWarehouse)
+            {
+                WPPWorkOrderLine    workOrderLine;
+                InventDim           inventDim;
+                InventJournalTrans  inventJournalTrans;
+                InventJournalTable  inventJournalTable;
+
+                // Item journals
+                while select forupdate inventJournalTrans
+                    join inventDim
+                    where inventDim.InventDimId == inventJournalTrans.InventDimId
+                    &&    inventDim.InventLocationId != workerDefaults.WPPServiceWarehouse
+                        exists join inventJournalTable
+                        where inventJournalTable.JournalId == inventJournalTrans.JournalId
+                        &&   !inventJournalTable.Posted
+                        &&    inventJournalTable.WPPProjId
+                            exists join workOrderLine
+                            where workOrderLine.ProjId == inventJournalTable.WPPProjId
+                            &&    workOrderLine.RecId  == _workOrderLineRecId
+                {
+                    InventDim inventDimNew;
+                    buf2Buf(inventDim, inventDimNew);
+                    inventDimNew.InventLocationId = workerDefaults.WPPServiceWarehouse;
+                    inventDimNew.modifiedField(fieldNum(InventDim, InventLocationId));
+                    inventDimNew = InventDim::findOrCreate(inventDimNew);
+
+                    inventJournalTrans.InventDimId = inventDimNew.InventDimId;
+                    inventJournalTrans.update();
+                }
+
+
+                SalesLine salesLine;
+
+                // Item requirements
+                while select forupdate salesLine
+                where salesLine.SalesStatus == SalesStatus::Backorder
+                &&    salesLine.SalesType == SalesType::ItemReq
+                &&    salesLine.ProjId
+                    join inventDim
+                    where inventDim.InventDimId == salesLine.InventDimId
+                    &&    inventDim.InventLocationId != workerDefaults.WPPServiceWarehouse
+                        exists join workOrderLine
+                        where workOrderLine.ProjId == salesLine.ProjId
+                        &&    workOrderLine.RecId  == _workOrderLineRecId
+                {
+                    InventDim inventDimSalesNew;
+                    buf2Buf(inventDim, inventDimSalesNew);
+                    inventDimSalesNew.InventLocationId = workerDefaults.WPPServiceWarehouse;
+                    inventDimSalesNew.modifiedField(fieldNum(InventDim, InventLocationId));
+                    inventDimSalesNew = InventDim::findOrCreate(inventDimSalesNew);
+
+                    salesLine.InventDimId = inventDimSalesNew.InventDimId;
+                    salesLine.update();
+                }
+            }            
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWorkOrderLineParentStatus</Name>
+				<Source><![CDATA[
+    public static boolean validateWorkOrderLineParentStatus(SalesLine _salesLine)
+    {
+        WPPWorkOrderLine    workOrderLineParent;
+        WPPWorkOrderLine    workOrderLine;
+        WPPWorkOrderTable   workOrderTable;
+    
+        select firstOnly RecId from workOrderLineParent
+        where workOrderLineParent.Status > WPPWorkOrderLineStatus::Planned
+            exists join workOrderLine
+            where workOrderLine.ParentLineRecId == workOrderLineParent.RecId
+                join TableId from workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                &&    workOrderTable.OrderTableId == _salesLine.TableId
+                &&    workOrderTable.OrderRecId   == _salesLine.RecId;
+    
+        return !workOrderLineParent.RecId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR7578</DeveloperDocumentation>
+	<Label>@DNR6467</Label>
+	<TableGroup>WorksheetLine</TableGroup>
+	<TitleField1>WorkOrderId</TitleField1>
+	<TitleField2>TaskId</TitleField2>
+	<CacheLookup>NotInTTS</CacheLookup>
+	<ClusteredIndex>WorkOrderLineNumberIdx</ClusteredIndex>
+	<CreatedBy>Yes</CreatedBy>
+	<CreatedDateTime>Yes</CreatedDateTime>
+	<PrimaryIndex>WorkOrderLineNumberIdx</PrimaryIndex>
+	<ReplacementKey>WorkOrderLineNumberIdx</ReplacementKey>
+	<SaveDataPerCompany>No</SaveDataPerCompany>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>WorkOrderId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ProjId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TaskId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExecutionGroupId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RequestedStartDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RequestedEndDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Status</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>WorkOrderId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LineNumber</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TaskId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExecutionGroupId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ProjId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Status</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>WorkOrderId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LineNumber</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Dimension</Name>
+			<Label>@SYS342338</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>FINDefaultDimension</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>General</Name>
+			<Label>@SYS35893</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ProjId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TaskId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RORProjActivity</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExecutionGroupId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RequestedStartDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RequestedEndDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Status</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Identification</Name>
+			<Label>@SYS53631</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>WorkOrderId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LineNumber</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Items</Name>
+			<Label>@SYS50258</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ItemReqAdded</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>LineNumber</Name>
+			<Label>@SYS27207</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>LineNumber</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Miscellaneous</Name>
+			<Label>@SYS334317</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>createdBy</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>createdDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Object</Name>
+			<Label>@SYS53430</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ObjectQty</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Parent</Name>
+			<Label>@SYS73823</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ParentLineRecId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Quantities</Name>
+			<Label>@SYS309572</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ObjectQty</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ResourceQty</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Root</Name>
+			<Label>@SYS104686</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>RootLineRecId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>TemplateResourceQty</Name>
+			<Label>@DNR10049</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>TemplateLineResourceQty</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>WorkOrder</Name>
+			<Label>@DNR6492</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>WorkOrderId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>DefaultValues</Name>
+			<Label>@SYS40219</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ProjCategoryIdDefault</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ExecutionGroupId</Name>
+			<ExtendedDataType>WPPExecutionGroupId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>FINDefaultDimension</Name>
+			<ExtendedDataType>DimensionDefault</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>ItemReqAdded</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>WPPItemReqAdded</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>LineNumber</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>Line</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>ObjectQty</Name>
+			<ExtendedDataType>WPPObjectQty</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>ParentLineRecId</Name>
+			<ExtendedDataType>WPPLineParent</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ProjId</Name>
+			<ExtendedDataType>ProjId</ExtendedDataType>
+			<IgnoreEDTRelation>Yes</IgnoreEDTRelation>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>RequestedEndDateTime</Name>
+			<ExtendedDataType>WPPRequestedEndDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>RequestedStartDateTime</Name>
+			<ExtendedDataType>WPPRequestedStartDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>ResourceQty</Name>
+			<ExtendedDataType>WPPResourceQty</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>RootLineRecId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>RORProjActivity</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ConfigurationKey>Project3</ConfigurationKey>
+			<ExtendedDataType>smmActivityNumber</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Status</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<EnumType>WPPWorkOrderLineStatus</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>TaskId</Name>
+			<ExtendedDataType>WPPWorkOrderTaskId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>TemplateLineResourceQty</Name>
+			<ExtendedDataType>WPPResourceQty</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>WorkOrderId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>WPPWorkOrderId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ProjCompanyId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SelectableDataArea</ExtendedDataType>
+			<IgnoreEDTRelation>Yes</IgnoreEDTRelation>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ProjCategoryIdDefault</Name>
+			<ExtendedDataType>ProjCategoryEmplId</ExtendedDataType>
+			<Label>@SYS91939</Label>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>TaskIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>TaskId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>WorkOrderLineNumberIdx</Name>
+			<AlternateKey>Yes</AlternateKey>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>WorkOrderId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>LineNumber</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>TransportPlanboardIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>ExecutionGroupId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>RequestedStartDateTime</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>RequestedEndDateTime</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>ProjIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>ProjId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>WOTaskIdLineNumStatusIdx</Name>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>WorkOrderId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>LineNumber</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>TaskId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>Status</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>DefaultDimension</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>DimensionAttributeValueSet</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>FINDefaultDimension</Name>
+					<Field>FINDefaultDimension</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>LineParent</Name>
+			<Cardinality>ExactlyOne</Cardinality>
+			<RelatedTable>WPPWorkOrderLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>LineParent</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ParentLineRecId</Name>
+					<Field>ParentLineRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>ProjTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>ProjTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ProjId</Name>
+					<Field>ProjId</Field>
+					<RelatedField>ProjId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>ProjectIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>RootLine</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>WPPWorkOrderLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>RootLine</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RootLineRecId</Name>
+					<Field>RootLineRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>smmActivities</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<RelatedTable>smmActivities</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RORProjActivity</Name>
+					<SourceEDT>smmActivityNumber</SourceEDT>
+					<Field>RORProjActivity</Field>
+					<RelatedField>ActivityNumber</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>WPPExecutionGroup</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>WPPExecutionGroup</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ExecutionGroupId</Name>
+					<Field>ExecutionGroupId</Field>
+					<RelatedField>ExecutionGroupId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>ExecutionGroupIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>WPPWorkOrderTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>WPPWorkOrderTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>WorkOrderId</Name>
+					<Field>WorkOrderId</Field>
+					<RelatedField>WorkOrderId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>WorkOrderIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>WPPWorkOrderTaskTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>WPPWorkOrderTaskTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelatedTableRole>WPPWorkOrderTaskTable</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>WPPWorkOrderTable_WorkOrderLine</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>TaskId</Name>
+					<Field>TaskId</Field>
+					<RelatedField>TaskId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>TaskIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>WPPWorkOrderView</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>WPPWorkOrderView</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>WPPWorkOrderView</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>WPPWorkOrderView_WorkOrderLine</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Validate>No</Validate>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>WorkOrderId</Name>
+					<Field>WorkOrderId</Field>
+					<RelatedField>WorkOrderId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>ProjCategory</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>ProjCategory</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ProjCategoryIdDefault</Name>
+					<Field>ProjCategoryIdDefault</Field>
+					<RelatedField>CategoryId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintRelatedFixed">
+					<Name>CategoryType</Name>
+					<RelatedField>CategoryType</RelatedField>
+					<ValueStr>ProjCategoryType::Hour</ValueStr>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>CategoryIdx</Index>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

@@ -1,0 +1,605 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINPurchTotals</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINPurchTotals implements VendIInvoiceTotals
+{
+    VendInvoiceInfoTable  parmTable;
+    Common  callerBuffer;
+    PurchUpdate specQty = PurchUpdate::All;
+    TransDate transDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+    INVCalculationDateTime calculationDateTime = DateTimeUtil::getSystemDateTime();
+    FINInvoicingOptions invoicingOptionsForCredit;
+    boolean forceInvoicingOptionsForCredit;
+    ParmId parmId;
+    PurchTable purchTable;
+    PurchLine purchLine;
+    boolean wasInvoiced;
+    boolean hasPendingInvoice;
+    Set recIdSet = new Set(Types::Int64);
+    Set tempMarkupRecIdSet = new Set(Types::Int64);
+    public boolean mustPrepareInvoicedData;
+    DocumentStatus documentStatus;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setInvoicingOptionsForCredit</Name>
+				<Source><![CDATA[
+    public void setInvoicingOptionsForCredit(FINInvoicingOptions _invoicingOptionsForCredit)
+    {
+        invoicingOptionsForCredit = _invoicingOptionsForCredit;
+        forceInvoicingOptionsForCredit = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>recIdSet</Name>
+				<Source><![CDATA[
+    public Set recIdSet()
+    {
+        return recIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>specQty</Name>
+				<Source><![CDATA[
+    PurchUpdate specQty(PurchUpdate _specQty = specQty)
+    {
+        specQty = _specQty;
+
+        return specQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculationDateTime</Name>
+				<Source><![CDATA[
+    INVCalculationDateTime calculationDateTime(INVCalculationDateTime _calculationDateTime = calculationDateTime)
+    {
+        calculationDateTime = _calculationDateTime;
+
+        return calculationDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transDate</Name>
+				<Source><![CDATA[
+    TransDate transDate(TransDate _transDate = transDate)
+    {
+        transDate = _transDate;
+
+        return transDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerBuffer</Name>
+				<Source><![CDATA[
+    public Common parmCallerBuffer(Common _callerBuffer = callerBuffer)
+    {
+        callerBuffer = _callerBuffer;
+        return callerBuffer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getParmTable</Name>
+				<Source><![CDATA[
+    public VendInvoiceInfoTable getParmTable()
+    {
+        return parmTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareDataForTotals</Name>
+				<Source><![CDATA[
+    public void prepareDataForTotals()
+    {
+        this.prepareForecastData();
+
+        if (callerBuffer.TableId == tableNum(PurchTable) && mustPrepareInvoicedData)
+        {
+            this.prepareInvoicedData();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanupPrecalculatedData</Name>
+				<Source><![CDATA[
+    public void cleanupPrecalculatedData()
+    {
+        ttsbegin;
+        if (parmTable)
+        {
+            if (hasPendingInvoice)
+            {
+                VendInvoiceInfoTable::moveFromActiveToSaved(parmTable);
+            }
+            else
+            {
+                parmTable.selectForUpdate(true);
+                parmTable.delete();
+            }
+        }
+
+        if (parmId)
+        {
+            FINMarkupWorkTrans  markupWorkTrans;
+
+            delete_from markupWorkTrans
+            where markupWorkTrans.ParmId == parmId;
+
+            FINInvoiceCalculatorParm    invoiceCalcParm;
+
+            delete_from invoiceCalcParm
+            where invoiceCalcParm.ParmId == parmId;
+
+            FINVendInvoiceRun   vendInvoiceRun;
+            
+            delete_from vendInvoiceRun
+            where vendInvoiceRun.ParmId == parmId;
+        }
+
+        this.deleteTempMarkupTrans();
+        
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteTempMarkupTrans</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void deleteTempMarkupTrans()
+    {
+        using (FINVersioningPurchaseOrderContext context = FINVersioningPurchaseOrderContext::construct())
+        {
+            context.parmSkipChange(true);
+
+            if (recIdSet && !recIdSet.empty())
+            {
+                SetEnumerator enumerator = recIdSet.getEnumerator();
+            
+                while (enumerator.moveNext())
+                {
+                    RecId deletedRecId = enumerator.current();
+                    MarkupTrans markupTrans = MarkupTrans::findRecId(deletedRecId, true);
+
+                    if (markupTrans.SourceDocumentLine)
+                    {
+                        AccountingDistributionProcessor::deleteSourceDocumentLine(markupTrans.SourceDocumentLine);
+                        AccountingDistributionProcessor::deleteAllDistributionsForSourceDocLine(markupTrans.SourceDocumentLine);
+                    }
+
+                    markupTrans.delete();
+                }
+            }
+
+            if (tempMarkupRecIdSet && !tempMarkupRecIdSet.empty())
+            {
+                SetEnumerator enumeratorTemp = tempMarkupRecIdSet.getEnumerator();
+            
+                while (enumeratorTemp.moveNext())
+                {
+                    RecId deletedRecId = enumeratorTemp.current();
+                    FINMarkupWorkTrans markupWorkTrans;
+
+                    delete_from markupWorkTrans
+                    where markupWorkTrans.RecId == deletedRecId;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareForecastData</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void prepareForecastData()
+    {
+        PurchFormLetter     purchFormLetter =  PurchFormLetter::construct(DocumentStatus::Invoice);
+        VendInvoiceInfoLine parmLine;
+        FormDataSource      recordDataSource;
+        container           dataSourceRecordsPacked;
+        
+        purchTable = callerBuffer as PurchTable;
+        purchLine = callerBuffer as PurchLine;
+
+        if (purchLine)
+        {
+            FormRun formRun = PurchLine.dataSource().formRun();
+            
+            recordDataSource = formRun.dataSource('PurchTable');
+            purchTable = PurchTable::find(purchLine.PurchId);
+        }
+        else
+        {
+            recordDataSource  = FormDataUtil::getFormDataSource(purchTable);
+        }
+
+        if (recordDataSource)
+        {
+            dataSourceRecordsPacked = FormLetter::getFormRecord(recordDataSource);
+            purchFormLetter.parmDataSourceRecordsPacked(dataSourceRecordsPacked);
+        }
+
+        select firstonly parmTable
+            where parmTable.PurchId == purchTable.PurchId
+            &&    parmTable.ParmJobStatus == ParmJobStatus::Waiting;
+
+        if (parmTable)
+        {
+            hasPendingInvoice = true;
+
+            purchFormLetter = PurchFormLetter_Invoice::newFromSavedInvoice(parmTable);            
+        }
+        else
+        {
+            FINInvoicingOptions invoicingOptions;
+
+            if (forceInvoicingOptionsForCredit)
+            {
+                invoicingOptions = invoicingOptionsForCredit;
+            }
+            else
+            {
+                if (purchLine)
+                {
+                    purchTable = PurchTable::find(purchLine.PurchId);
+                    calculationDateTime = max(calculationDateTime, purchLine.RORRentalDateTimes().getOffRentDateTime(true, true));
+                }
+                else
+                {
+                    calculationDateTime = max(calculationDateTime, RORRentalDateTimes::findReference(purchTable.TableId, purchTable.RecId).getOffRentDateTime(true, true));
+                }
+
+                // Move calculation to begining of next month to be sure that monthly invoicing is correctly calculated.
+                calculationDateTime = DateTimeUtil::newDateTime(endMth(DateTimeUtil::date(calculationDateTime)) + 2, 0);
+
+                invoicingOptions = FINInvoicingOptions::construct();
+                invoicingOptions.includeUninvoiced = NoYes::Yes;
+                invoicingOptions.includeCredited = NoYes::Yes;
+                invoicingOptions.calculationDateTime = calculationDateTime;
+            }
+
+            // Force creation of PurchParmUpdate
+            PurchParmUpdate dummyPurchParmUpdate;
+            purchFormLetter.purchParmUpdate(dummyPurchParmUpdate);
+            purchFormLetter.purchTable(purchTable);
+            purchFormLetter.transDate(transDate);
+            purchFormLetter.specQty(this.specQty());
+            purchFormLetter.FINSetInvoicingOption(invoicingOptions);
+            purchFormLetter.RORparmRentalSubStatus(BOBRentalSubStatus::Invoiced);
+            if (!invoicingOptions.isCreditPreview)
+            {
+                // For credit we want to see only delivered lines
+                purchFormLetter.FINParmCalcEstimation(true);
+                purchFormLetter.FINParmInvoiceJourRecId(0);
+            }
+            purchFormLetter.FINParmDocumentStatus(this.parmDocumentStatus());
+            purchFormLetter.initLinesQuery();
+
+            if (purchLine && purchFormLetter.parmId())
+            {
+                delete_from parmLine
+                where parmLine.ParmId == purchFormLetter.parmId()
+                &&    parmLine.PurchLineRecId != purchLine.RecId;
+            }
+
+            select firstonly parmTable where parmTable.parmId == purchFormLetter.parmId();
+
+            if (!purchLine && parmTable && this.parmDocumentStatus() != DocumentStatus::Confirmation)
+            {
+                VendInvoiceInfoLine vendInvoiceInfoLine;
+                PurchLine purchLineLocal;
+
+                while select vendInvoiceInfoLine 
+                where vendInvoiceInfoLine.ParmId == parmTable.parmId
+                    exists join purchLineLocal
+                    where purchLineLocal.InventTransId == vendInvoiceInfoLine.InventTransId
+                    &&    purchLineLocal.RORTradeType == RORTradeType::SubRental
+                {
+                    FINMarkupTransGenerator::createMarkupWorkTrans(vendInvoiceInfoLine.ParmId, vendInvoiceInfoLine.TableId, vendInvoiceInfoLine.RecId);
+                }
+
+                this.createMarkupTransLinkedToPurchLine(parmTable.parmId);
+            }
+        }
+
+        parmId = purchFormLetter.parmId();                
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareInvoicedData</Name>
+				<Source><![CDATA[
+    protected void prepareInvoicedData()
+    {
+        RecordInsertList insertList = new RecordInsertList(tableNum(FINMarkupWorkTrans));
+        MarkupTrans markupTrans;
+        VendInvoiceTrans vendInvoiceTrans;
+        PurchLine orderLine;
+        ParmId localParmId = int642Str(purchTable.RecId);
+                
+        while select markupTrans
+            join TableId, RecId from vendInvoiceTrans
+            where vendInvoiceTrans.PurchId == purchTable.PurchId
+            &&    (!purchLine.RecId || vendInvoiceTrans.InventTransId == purchLine.InventTransId)
+            &&    vendInvoiceTrans.TableId == markupTrans.TransTableId
+            &&    vendInvoiceTrans.RecId == markupTrans.TransRecId
+                join TableId, RecId from orderLine
+                where orderLine.InventTransId == vendInvoiceTrans.InventTransId
+        {
+            FINMarkupWorkTrans  markupWorkTrans;
+            
+            markupWorkTrans.clear();
+            markupWorkTrans.RefTableId = orderLine.TableId;
+            markupWorkTrans.RefRecId = orderLine.RecId;
+            markupWorkTrans.ParmLineTableId = vendInvoiceTrans.TableId;
+            markupWorkTrans.ParmLineRecId = vendInvoiceTrans.RecId;
+            markupWorkTrans.MarkupCode = markupTrans.markupCode;
+            markupWorkTrans.Txt = markupTrans.Txt;
+            markupWorkTrans.TaxItemGroup = markupTrans.TaxItemGroup;
+            markupWorkTrans.AmountCur = markupTrans.CalculatedAmount;
+            markupWorkTrans.initFromRentalLine(orderLine);
+            markupWorkTrans.ParmId = localParmId;
+
+            insertList.add(markupWorkTrans);
+         
+            wasInvoiced = true;
+        }
+
+        insertList.insertDatabase();
+
+        this.createMarkupTransLinkedToPurchLine(localParmId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMarkupTransLinkedToPurchLine</Name>
+				<Source><![CDATA[
+    private void createMarkupTransLinkedToPurchLine(ParmId _parmId)
+    {
+        // create temporary markupTrans linked to purchLine
+        FINMarkupWorkTrans  markupWorkTrans;
+        MarkupTable markupTable;
+        //parmId = parmTable.ParmId;
+                    
+        ttsbegin;
+        while select markupWorkTrans
+        where markupWorkTrans.ParmId == _parmId
+            join purchLine
+            where purchLine.TableId == markupWorkTrans.RefTableId
+            &&    purchLine.RecId == markupWorkTrans.RefRecId
+                exists join markupTable
+                where markupTable.MarkupCode == markupWorkTrans.MarkupCode
+            &&    markupTable.ModuleType == MarkupModuleType::Vend
+                // Do not add to header totals internal charges like rental cost
+                && (markupTable.CustType == MarkupType::CustVend ||
+                    markupTable.VendType == MarkupType::CustVend)
+        {
+            tempMarkupRecIdSet.add(markupWorkTrans.RecId);
+            
+            using (FINVersioningPurchaseOrderContext context = FINVersioningPurchaseOrderContext::construct())
+            {
+                context.parmSkipChange(true);
+                RecId recId = FINMarkupWorkTrans::createMarkupTransFromMarkupWorkTrans(markupWorkTrans, purchLine);
+                recIdSet.add(recId);
+            }
+        }
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>wasInvoiced</Name>
+				<Source><![CDATA[
+    public boolean wasInvoiced()
+    {
+        return wasInvoiced;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void main(Args _args)
+    {
+        if (_args && _args.record()
+        && (_args.dataSet() == tableNum(PurchTable) || _args.dataSet() == tableNum(PurchLine)))
+        {
+            FINCreditManager creditManager;
+
+            if (_args.parmObject() && _args.parmObject() is FINCreditManager)
+            {
+                creditManager = _args.parmObject();
+            }
+
+            FINPurchTotals  finPurchTotals = new FINPurchTotals();
+
+            if (creditManager)
+            {
+                finPurchTotals.calculationDateTime(creditManager.calculationDateTime());
+                finPurchTotals.specQty(PurchUpdate::ReceiveNow);
+                finPurchTotals.mustPrepareInvoicedData = false;
+            }
+            finPurchTotals.parmCallerBuffer(_args.record());
+            finPurchTotals.prepareDataForTotals();
+              
+            FormRun formRun;
+            Args args = new Args();
+            PurchLine purchLine;
+            
+            VendInvoiceInfoTable vendInvoiceInfoTable = finPurchTotals.getParmTable();
+            VendInvoiceInfoLine vendInvoiceInfoLine;
+
+            args.parmEnum(enum2int(finPurchTotals.specQty()));
+
+            args.caller(finPurchTotals);
+            if (_args.dataSet() == tableNum(PurchTable))
+            {                   
+                args.record(_args.record());                    
+                args.name(formStr(FINPurchTotals));
+            }
+            else
+            {
+                purchLine = _args.record();
+                      
+                if (purchLine.RORTradeType == RORTradeType::SalesPurch)
+                {
+                    delete_from vendInvoiceInfoLine
+                    where vendInvoiceInfoLine.InventTransId != purchLine.InventTransId
+                    &&    vendInvoiceInfoLine.ParmId == vendInvoiceInfoTable.ParmId;
+
+                    args.record(purchLine);
+                    args.name(formStr(FINPurchTotals));
+                }
+                else
+                {
+                    select firstonly vendInvoiceInfoLine
+                    where vendInvoiceInfoLine.InventTransId == purchLine.InventTransId
+                    &&    vendInvoiceInfoLine.ParmId == vendInvoiceInfoTable.ParmId;
+
+                    if (vendInvoiceInfoLine)
+                    {
+                        args.record(vendInvoiceInfoLine);
+                    }
+                    else
+                    {
+                        args.record(purchLine);
+                    }
+                    args.parm('invoiced');
+                    args.name(formStr(FINRentalInvoiceDetail));
+                }
+            }
+
+            formRun = classfactory.formRunClass(args);
+            formRun.init();
+            formRun.run();
+              
+            if (vendInvoiceInfoTable)
+            {
+                ttsbegin;
+                vendInvoiceInfoTable.selectForUpdate(true);
+                vendInvoiceInfoTable.delete();
+                ttscommit;
+            }
+
+
+            ttsbegin;
+            finPurchTotals.deleteTempMarkupTrans();
+            ttscommit;
+            
+            if (creditManager)
+            {
+                creditManager.restoreOrig();                    
+            }
+        }        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotalAmount</Name>
+				<Source><![CDATA[
+    public static AmountCur calculateTotalAmount(Args _args)
+    {
+        AmountCur ret;
+
+        if (_args && _args.record()
+        && (_args.dataSet() == tableNum(PurchTable) || _args.dataSet() == tableNum(PurchLine)))
+        {
+            FINCreditManager creditManager;
+
+            if (_args.parmObject() && _args.parmObject() is FINCreditManager)
+            {
+                creditManager = _args.parmObject();
+            }
+
+            FINPurchTotals  finPurchTotals = new FINPurchTotals();
+
+            if (creditManager)
+            {
+                finPurchTotals.calculationDateTime(creditManager.calculationDateTime());
+                finPurchTotals.specQty(PurchUpdate::ReceiveNow);
+                finPurchTotals.mustPrepareInvoicedData = false;
+              
+                FINInvoicingOptions invoicingOptions = FINInvoicingOptions::construct();
+                invoicingOptions.includeUninvoiced = NoYes::Yes;
+                invoicingOptions.includeCredited = NoYes::Yes;
+                invoicingOptions.calculationDateTime = finPurchTotals.calculationDateTime();
+                invoicingOptions.isCreditPreview = NoYes::Yes;
+                finPurchTotals.setInvoicingOptionsForCredit(invoicingOptions);
+            }
+            finPurchTotals.parmCallerBuffer(_args.record());
+            finPurchTotals.prepareDataForTotals();
+                                    
+            if (finPurchTotals.getParmTable())
+            {
+                VendInvoiceInfoLine vendInvoiceInfoLine;
+                VendInvoiceInfoTable vendInvoiceInfoTable = finPurchTotals.getParmTable();
+
+                while select vendInvoiceInfoLine
+                where vendInvoiceInfoLine.ParmId ==  vendInvoiceInfoTable.parmId
+                {
+                    FINRentalInvoiceDetailHelper helper = new FINRentalInvoiceDetailHelper();
+                    helper.initParameters(vendInvoiceInfoLine, false);
+                    helper.calculate();
+
+                    ret += helper.totalChargedAmount;
+                }
+
+                if (vendInvoiceInfoTable)
+                {
+                    ttsbegin;
+                    vendInvoiceInfoTable.selectForUpdate(true);
+                    vendInvoiceInfoTable.delete();
+                    ttscommit;
+                }
+            }
+
+            FINMarkupTransGenerator::deleteMarkupTransForSet(finPurchTotals.recIdSet());
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDocumentStatus</Name>
+				<Source><![CDATA[
+    public DocumentStatus parmDocumentStatus(DocumentStatus _documentStatus = documentStatus)
+    {
+        documentStatus = _documentStatus;
+        return documentStatus;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRInventUpd_PickedClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(InventUpd_Picked))]
+public final class DNRInventUpd_PickedClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkUpdateMovement</Name>
+				<Source><![CDATA[
+    protected boolean checkUpdateMovement(TransDate _transDate)
+    {
+        InventMovement movement = this.movement();
+
+        boolean ret = next checkUpdateMovement(_transDate);
+
+        if (ret && movement.buffer().TableId == tableNum(SalesLine))
+        {
+            ret = this.BOBValidatePick(movement.buffer());
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePickInventTrans</Name>
+				<Source><![CDATA[
+    protected InventQtyPicked updatePickInventTrans(InventTrans _inventTrans, InventQtyPicked _addPicked,PdsCWInventQty _cwAddPicked)
+    {
+        BOBRentalTransSyncDisposableContext rentalTransSyncContext = BOBRentalTransSyncDisposableContext::current();
+        boolean         contextCreatedHere = false;
+        InventQtyPicked ret;
+
+        movement.DNRparmAllowInventTransUpdate(false); // Used in /Classes/DNRInventMovementClass_Extension/Methods/BOBUpdateSerialNumber
+
+        try
+        {
+
+            if (!rentalTransSyncContext)
+            {
+                rentalTransSyncContext  = new BOBRentalTransSyncDisposableContext();
+                contextCreatedHere      = true;
+            }
+
+            // Do not add '_inventTrans.RecId' as a filter when creating the 'BOBRentalTransSyncParameters' object!
+            // If the relevant inventory transaction must be split (i.e., this might happen when partially picking the order), the call to 'updateSplit()' 
+            // (in the 'original' method) changes the RecId of '_inventTrans'! If '_inventTrans.RecId' is added as a filter here, the assoicated rental 
+            // transaction is not synchronized.
+            rentalTransSyncContext.push(new BOBRentalTransSyncParameters(funcName(), BOBRentalTransSyncEvent::OnUpdated));
+
+            using(DNRInventTransUpdateSplitDisposableContext inventTransUpdateSplitContext =
+                  new DNRInventTransUpdateSplitDisposableContext(BOBInventSplitReason::ProgressStatus, BOBRentalSubStatus::Picked))
+            {
+                ret = next updatePickInventTrans(_inventTrans, _addPicked, _cwAddPicked);
+            }
+
+            rentalTransSyncContext.processInventTransRecIds(funcName(), movement);
+        }
+        catch
+        {
+            // do nothing
+        }
+        finally
+        {
+            if (contextCreatedHere)
+            {
+                rentalTransSyncContext.dispose();
+            }
+        }
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePickLess</Name>
+				<Source><![CDATA[
+    protected void updatePickLess()
+    {
+        BOBRentalTransSyncDisposableContext rentalTransSyncContext = BOBRentalTransSyncDisposableContext::current();
+        boolean contextCreatedHere = false;
+
+        try
+        {
+
+            if (!rentalTransSyncContext)
+            {
+                rentalTransSyncContext  = new BOBRentalTransSyncDisposableContext();
+                contextCreatedHere      = true;
+            }
+
+            BOBRentalTransSyncParameters syncParameters = new BOBRentalTransSyncParameters(funcName(), BOBRentalTransSyncEvent::OnUpdated);
+  
+            rentalTransSyncContext.push(syncParameters);
+
+            using(DNRInventTransUpdateSplitDisposableContext context =
+                new DNRInventTransUpdateSplitDisposableContext(BOBInventSplitReason::RegressStatus, BOBRentalSubStatus::Confirmed))
+            {
+                next updatePickLess();
+            }
+
+            rentalTransSyncContext.processInventTransRecIds(funcName(), movement);
+
+            // Update the unpicked lines back to Confirmed.
+            SetEnumerator enumerator = syncParameters.getInventTransRecIdEnumerator();
+
+            while (enumerator.moveNext())
+            {
+                InventTransRefRecId        inventTransRecId    = enumerator.current();
+                InventTrans                inventTrans;
+                InventTransOriginSalesLine originSalesLine;
+                
+                select firstonly inventTrans
+                where inventTrans.RecId == inventTransRecId
+                    exists join originSalesLine
+                    where  originSalesLine.InventTransOrigin == inventTrans.InventTransOrigin;
+                
+                if (inventTrans)
+                {
+                    BOBRentalTransManager transManager = BOBRentalTransManager::newInventMovement(movement, inventTrans, BOBRentalSubStatus::Confirmed);
+                    transManager.parmDoUpdateBuffer(true);
+                    transManager.updateSubStatus(inventTrans.Qty);
+                }
+            }
+        }
+        catch
+        {
+            // do nothing
+        }
+        finally
+        {
+            if (contextCreatedHere)
+            {
+                rentalTransSyncContext.dispose();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateNow</Name>
+				<Source><![CDATA[
+    public void updateNow()
+    {
+        ttsbegin;
+
+        if (picked)
+        {
+            if (!this.BOBParmIsCompensatingTrans()
+            &&  !this.BOBParmBlockUpdateCompensatingTrans())
+            {
+                this.BOBCheckUpdateCompensatingTrans();
+            }
+        }
+
+        next updateNow();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBValidatePick</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private boolean BOBValidatePick(SalesLine _salesLine)
+    {
+        boolean ret = true;
+    
+        if (_salesLine.BOBSellFixedAsset && (!_salesLine.BOBConversionJourId || _salesLine.BOBMustReConfirm))
+        {
+            ret = checkFailed("@DNR8114");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBCheckUpdateCompensatingTrans</Name>
+				<Source><![CDATA[
+    private void BOBCheckUpdateCompensatingTrans()
+    {
+        InventUpd_Registered    inventUpd_Registered;
+        InventMovement          inventMovement;
+        SalesLine               salesLine;
+        InventTransferLine      inventTransferLine;
+        InventDim               inventDim;
+        WMSOrder                wmsOrder;
+    
+        switch(movement.buffer().TableId)
+        {
+            case tableNum(WMSOrder):
+                wmsOrder = movement.buffer() as WMSOrder;
+    
+                if(wmsOrder.inventTransType == InventTransType::Sales)
+                {
+                    salesLine = SalesLine::findInventTransId(wmsOrder.inventTransId, true);
+                }
+                else if (wmsOrder.inventTransType == InventTransType::TransferOrderShip)
+                {
+                    inventTransferLine = InventTransferLine::findTransIdShip(wmsOrder.inventTransId, true);
+                }
+                break;
+    
+            case tableNum(SalesLine):
+                salesLine = movement.buffer() as SalesLine;
+                salesLine.selectForUpdate(true);
+                break;
+    
+            case tableNum(InventTransferLine):
+                inventTransferLine = movement.buffer() as InventTransferLine;
+                inventTransferLine.selectForUpdate(true);
+                break;
+        }
+    
+        if (salesLine && (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental))
+        {
+            inventMovement = InventMovement::construct(salesLine, InventMovSubType::BOBCompensatingTrans);
+        }
+        else if (inventTransferLine && (inventTransferLine.RORTradeType == RORTradeType::Rental || inventTransferLine.RORTradeType == RORTradeType::SubRental))
+        {
+            inventMovement = InventMovement::construct(inventTransferLine, InventMovSubType::BOBCompensatingTrans);
+        }
+    
+        if (inventMovement)
+        {
+            inventUpd_Registered = InventUpd_Registered::newParameters(inventMovement,
+                                                                       this.parmPickInventDimCriteria(),
+                                                                       this.parmPickInventDimParm(),
+                                                                       this.parmReservInventDimCriteria(),
+                                                                       this.parmReservInventDimParm(),
+                                                                       -this.parmPicked());
+            inventUpd_Registered.parmAllowNegativePhysical(true);
+            inventUpd_Registered.updateNow();
+    
+            if (salesLine && salesLine.inventDim().inventSerialId != inventMovement.inventdim().inventSerialId)
+            {
+                inventDim = salesLine.inventDim();
+                inventDim.inventSerialId = inventMovement.inventdim().inventSerialId;
+                inventDim = InventDim::findOrCreate(inventDim);
+    
+                salesLine.InventDimId = inventDim.inventDimId;
+                salesLine.update();
+            }
+        }
+    
+        if(inventTransferLine && (inventTransferLine.RORTradeType == RORTradeType::Rental || inventTransferLine.RORTradeType == RORTradeType::SubRental))
+        {
+            if(inventTransferLine && inventTransferLine.inventDim().inventSerialId != this.parmReservInventDimCriteria().inventSerialId)
+            {
+                BOBObjectAssignmentEngine objectAssignmentEngine = BOBObjectAssignmentEngine::construct(inventTransferLine, this.parmReservInventDimCriteria().inventSerialId);
+                objectAssignmentEngine.runOperation();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRRORRentalEditorLineTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(RORRentalEditorLine))]
+public final class DNRRORRentalEditorLineTable_Extension
+{
+    // Extension methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>FINTimeZoneOrder</Name>
+				<Source><![CDATA[
+    public TimeZone FINTimeZoneOrder()
+    {
+        return this.FINTimeZoneOrder ? this.FINTimeZoneOrder : DateTimeUtil::getCompanyTimeZone();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetTierMultiplierRateOnCreation_post</Name>
+				<Source><![CDATA[
+    // Event handler methods
+
+    [PostHandlerFor(tableStr(RORRentalEditorLine), tableMethodStr(RORRentalEditorLine, INVSetTierMultiplierRateOnCreation))]
+    public static void INVSetTierMultiplierRateOnCreation_post(XppPrePostArgs _args)
+    {
+        RORRentalEditorLine rentalEditorLine = _args.getThis();
+        RORRentalEditorLine rentalEditorLineOrig = rentalEditorLine.orig();
+        boolean forceCalculation;
+        boolean invoiceProfileOnCreation = FINRentalInvoiceProfile::find(rentalEditorLine.INVInvoiceProfileId).PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating;
+        boolean invoiceProfileOrigOnCreation = FINRentalInvoiceProfile::find(rentalEditorLineOrig.INVInvoiceProfileId).PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating;
+
+        if ((rentalEditorLine.INVInvoiceProfileId != rentalEditorLineOrig.INVInvoiceProfileId
+        ||   rentalEditorLine.DNRCalendarId != rentalEditorLineOrig.DNRCalendarId)
+        && (invoiceProfileOnCreation || invoiceProfileOrigOnCreation))
+        {
+            forceCalculation = true;
+        }
+
+        ttsbegin;
+        
+        if (rentalEditorLine
+        && (forceCalculation || INVInvoicePeriodHost::canCalcMuliplierOnCreation(rentalEditorLine.TableId, rentalEditorLine.RecId, false)))
+        {          
+            RORRentalEditorLine rentalEditorLineLocal;
+            rentalEditorLineLocal.data(rentalEditorLine.data());
+            INVRateMultiplierTier rateMultiplier = 1;
+            
+            // Set calculated multiplier on line level only if current invoice profile requires that.
+            if (invoiceProfileOnCreation)
+            {
+                rateMultiplier = FINPeriodSpecificationManager::getTierMultiplierOnCreation(rentalEditorLineLocal);
+            }
+
+            // Avoid division by 0.
+            if (rentalEditorLine.INVRateMultiplierTier && rateMultiplier && rentalEditorLine.INVRateMultiplierTier != rateMultiplier)
+            {
+                rentalEditorLine.RentalGrossAmount = CurrencyExchangeHelper::amount(rentalEditorLine.RentalGrossAmount / rentalEditorLine.INVRateMultiplierTier * rateMultiplier, rentalEditorLine.CurrencyCode);
+                rentalEditorLine.LineAmount = CurrencyExchangeHelper::amount(rentalEditorLine.LineAmount / rentalEditorLine.INVRateMultiplierTier * rateMultiplier, rentalEditorLine.CurrencyCode);
+                rentalEditorLine.INVRateMultiplierTier = rateMultiplier;
+                rentalEditorLine.RORRentalLine::rentalPricesModified();
+
+                rentalEditorLine.update();
+            }
+            else if ((!rentalEditorLine.INVRateMultiplierTier || !rateMultiplier)
+                   && rentalEditorLine.INVRateMultiplierTier != rateMultiplier)
+            {
+                rentalEditorLine.RentalGrossAmount = 0;
+                rentalEditorLine.LineAmount = 0;
+                rentalEditorLine.INVRateMultiplierTier = rateMultiplier;
+                rentalEditorLine.RORRentalLine::rentalPricesModified();
+
+                rentalEditorLine.update();
+            }
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromRentalLine_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(tableStr(RORRentalEditorLine), tableMethodStr(RORRentalEditorLine, initFromRentalLine))]
+    public static void initFromRentalLine_post(XppPrePostArgs _eventArgs)
+    {
+        RORRentalEditorLine hostObject  = _eventArgs.getThis();
+        RORRentalLine       rentalLine  = _eventArgs.getArg('_rentalLine');
+
+        switch (rentalLine.TableId)
+        {
+            case tableNum(SalesLine) :
+                SalesLine salesLine = rentalLine as SalesLine;
+
+                hostObject.TransportPrice       = salesline.SalesQty ? salesLine.RORDeliveryNetAmount / salesline.SalesQty : 0;
+                hostObject.ReturnTransportPrice = salesline.SalesQty ? salesLine.RORReturnNetAmount / salesline.SalesQty : 0;
+                hostObject.InsurancePercentage  = salesLine.RORInsuranceNetPercentage;
+                break;
+
+            case tableNum(SalesQuotationLine) :
+                SalesQuotationLine salesQuotationLine   = rentalLine as SalesQuotationLine;
+
+                hostObject.TransportPrice               = salesQuotationline.SalesQty ? salesQuotationLine.RORDeliveryNetAmount / salesQuotationLine.SalesQty : 0;
+                hostObject.ReturnTransportPrice         = salesQuotationLine.SalesQty ? salesQuotationLine.RORReturnNetAmount / salesQuotationLine.SalesQty : 0;
+                hostObject.InsurancePercentage          = salesQuotationLine.RORInsuranceNetPercentage;
+
+                break;
+
+            case tableNum(PurchLine) :
+                PurchLine purchLine = rentalLine as PurchLine;
+
+                hostObject.TransportPrice       = purchLine.PurchQty ? purchLine.RORDeliveryNetAmount / purchLine.PurchQty : 0;
+                hostObject.ReturnTransportPrice = purchLine.PurchQty ? purchLine.RORReturnNetAmount / purchLine.PurchQty : 0;
+                hostObject.InsurancePercentage  = purchLine.RORInsuranceNetPercentage;
+
+                break;
+        }
+
+        hostObject.FINTimeZoneOrder = rentalLine.RORRentalLine::FINTimeZoneOrder();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORDisplayCurrentNetPrice</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display FINCurrentNetPrice RORDisplayCurrentNetPrice()
+    {
+        FINCurrentNetPrice  netAmount;
+        SalesPurchLine      salesPurchLine;
+        
+        salesPurchLine = this.salesPurchLine();
+
+        if (salesPurchLine)
+        {
+            netAmount = salesPurchLine.RORRentalLine::RORCurrentNetPrice();
+        }
+        else
+        {
+            netAmount = this.LinePercent ? this.RentalGrossAmount - (this.RentalGrossAmount * this.LinePercent / 100) : this.RentalGrossAmount;
+        }
+    
+        return netAmount;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

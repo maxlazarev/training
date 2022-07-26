@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchPurchOrderJournalPostClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchPurchOrderJournalPost))]
+public final class DNRPurchPurchOrderJournalPostClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>postJournalPost</Name>
+				<Source><![CDATA[
+    public void postJournalPost()
+    {
+        next postJournalPost();
+
+        WPPWorkOrderSynchronizer::newPurchTable(purchTable).run();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePurchTable</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    protected void updatePurchTable()
+    {
+        if (purchTable.RORIsModified)
+        {
+            purchTable.RORIsModified = NoYes::No;
+            purchTable.type().RORupdateAmendmentLog(vendPurchOrderJour.PurchOrderDocNum);
+        }
+
+        next updatePurchTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "PurchLineLocal is updated by the BOBRentalTransManager class hierarchy")]
+    protected void updateSourceLine()
+    {
+        next updateSourceLine();
+
+        if (purchLine.RORIsModified)
+        {
+            purchLine.selectForUpdate(true);
+            purchLine.RORIsModified = NoYes::No;
+    
+            PurchLineType purchLineType = purchLine.type();
+            purchLineType.RORupdateAmendmentLog(vendPurchOrderJour.PurchOrderDocNum);
+    
+            purchLine.doUpdate();
+        }
+    
+        // create new bulk business object and bulk parent fixed asset if necessary
+        boolean wasBulkObjectCreated = BOBObjectManager::confirmPurchLine(purchLine, purchParmTable.TransDate);
+    
+        PurchLine purchLineLocal;
+        InventTrans inventTrans;
+        InventTransOriginPurchLine originPurchLine;
+        while select forUpdate purchLineLocal
+        where purchLineLocal.RecId == purchLine.RecId
+            join TableId from originPurchLine
+            where originPurchLine.PurchLineDataAreaId == purchLineLocal.dataAreaId
+            &&    originPurchLine.PurchLineInventTransId == purchLineLocal.InventTransId
+                join  inventTrans
+                where inventTrans.InventTransOrigin == originPurchLine.InventTransOrigin
+        {
+            InventMovement inventMovement = InventMovement::construct(purchLineLocal);
+            BOBRentalTransManager transManager = BOBRentalTransManager::newInventMovement(inventMovement, inventTrans, BOBRentalSubStatus::Confirmed);
+            transManager.parmDoUpdateBuffer(true);
+    
+            if(wasBulkObjectCreated)
+            {
+                // make sure the new bulk business object's ID is stamped on the rental transaction as well
+                transManager.synchronize();
+            }
+    
+            transManager.updateSubStatus(inventTrans.Qty);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

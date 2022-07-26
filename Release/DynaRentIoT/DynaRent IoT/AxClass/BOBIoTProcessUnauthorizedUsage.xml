@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBIoTProcessUnauthorizedUsage</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBIoTProcessUnauthorizedUsage
+{
+    SalesLine salesLine;
+    BOBIoTDeviceTrans deviceTrans;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static BOBIoTProcessUnauthorizedUsage construct(BOBIoTDeviceTrans _deviceTrans, SalesLine _salesLine)
+    {
+        BOBIoTProcessUnauthorizedUsage unauthorizedUsageProcessor = new BOBIoTProcessUnauthorizedUsage();
+        unauthorizedUsageProcessor.parmDeviceTrans(_deviceTrans);
+        unauthorizedUsageProcessor.parmSalesLine(_salesLine);
+
+        return unauthorizedUsageProcessor;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        if (_args.dataset() != tableNum(BOBIoTTmpDeviceTrans))
+        {
+            throw error(Error::missingRecord(tableId2pname(tableNum(BOBIoTTmpDeviceTrans))));
+        }
+
+        BOBIoTTmpDeviceTrans deviceTransData = _args.record();
+        BOBIoTDeviceTrans deviceTrans = BOBIoTDeviceTrans::findRecId(deviceTransData.DeviceTransRecId);
+        SalesLine salesLineLocal = SalesLine::find(deviceTransData.ROROrderId);
+
+        BOBIoTProcessUnauthorizedUsage unauthorizedUsageProcessor = BOBIoTProcessUnauthorizedUsage::construct(deviceTrans, salesLineLocal);
+        unauthorizedUsageProcessor.processUnauthorizedUsage();
+        unauthorizedUsageProcessor.researchCallerDatasource();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processUnauthorizedUsage</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void processUnauthorizedUsage()
+    {
+        INVPeriodStartDateTime periodStartDateTime;
+        INVPeriodEndDateTime periodEndDateTime;
+        TransDate messageDate = DateTimeUtil::date(deviceTrans.MessageDateTime);
+        [periodStartDateTime, periodEndDateTime] = this.determineStartEndDateTimes(messageDate);
+
+        ttsbegin;
+
+        Map changesMapSales = new Map(Types::Container, Types::Container);
+        CalendarId calendarId = RORParameters::find().RentalActiveCalendar;
+        changesMapSales.insert([periodStartDateTime, periodEndDateTime, 'CalendarId'], [calendarId]);
+        INVInvoicePeriodHost invoicePeriodHost = salesLine;
+        ROROrderAmendmentDialogType::runFinancialChanges(invoicePeriodHost, changesMapSales);
+
+        this.cascadeToChildLines_SalesLine(salesLine, periodStartDateTime, periodEndDateTime);
+
+        this.createOrderAmendmentLog(periodStartDateTime, periodEndDateTime);
+
+        salesLine.selectForUpdate(true);
+        salesLine.RORIsModified = NoYes::Yes;
+        salesLine.INVSetTierMultiplierOnCreation();
+        salesLine.update();
+
+        // A rental activation is created for the entire day, so
+        // we can skip any messages generated on the same day
+
+        #DNRConstants
+        FromDateTime fromDateTime = DateTimeUtil::newDateTime(messageDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+        ToDateTime toDateTime = DateTimeUtil::newDateTime(messageDate, #INVTimeMax, DateTimeUtil::getUserPreferredTimeZone());
+        BOBIoTDeviceTrans deviceTransSameDate;
+
+        update_recordset deviceTransSameDate
+        setting IsUnauthorizedUsageProcessed = NoYes::Yes
+        where deviceTransSameDate.DeviceTableRecId == deviceTrans.DeviceTableRecId
+        &&    deviceTransSameDate.IsUnauthorizedUsage == NoYes::Yes
+        &&    deviceTransSameDate.IsUnauthorizedUsageProcessed == NoYes::No
+        &&    deviceTransSameDate.MessageDateTime >= fromDateTime
+        &&    deviceTransSameDate.MessageDateTime <= toDateTime;
+        
+        ttscommit;
+
+        info(strFmt("@DNR:Created1From2To3ForOrder4", "@DNR4349", periodStartDateTime, periodEndDateTime, salesLine.SalesId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>determineStartEndDateTimes</Name>
+				<Source><![CDATA[
+    private container determineStartEndDateTimes(TransDate _activationDate)
+    {
+        TimeZone userTimeZone = DateTimeUtil::getUserPreferredTimeZone();
+
+        RORRentalDateTimes rentalDateTimesLocal = salesLine.RORRentalDateTimesHost::rentalDateTimes();
+        INVPeriodStartDateTime periodStartDateTime  = DateTimeUtil::applyTimeZoneOffset(rentalDateTimesLocal.OnRentDateTime , DateTimeUtil::getOriginatingTimeZone(rentalDateTimesLocal.OnRentDateTime ));
+        INVPeriodEndDateTime periodEndDateTime    = DateTimeUtil::applyTimeZoneOffset(rentalDateTimesLocal.OffRentDateTime, DateTimeUtil::getOriginatingTimeZone(rentalDateTimesLocal.OffRentDateTime));
+    
+        periodStartDateTime = (_activationDate == DateTimeUtil::date(periodStartDateTime) ?
+                            rentalDateTimesLocal.OnRentDateTime :
+                            DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::newDateTime(_activationDate, 0), userTimeZone));
+
+        periodEndDateTime = (_activationDate == DateTimeUtil::date(periodEndDateTime) ?
+                          rentalDateTimesLocal.OffRentDateTime :
+                          DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::newDateTime(_activationDate + 1, 0), userTimeZone));
+
+        return [periodStartDateTime, periodEndDateTime];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeToChildLines_SalesLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent","SalesLineChild is updated by the ROROrderAmendmentDialogType class hierarchy")]
+    private void cascadeToChildLines_SalesLine(SalesLine _salesLine, INVPeriodStartDateTime _startDateTime, INVPeriodEndDateTime _endDateTime)
+    {
+        SalesLine salesLineChild;
+        CalendarId calendarId = RORParameters::find().RentalActiveCalendar;
+           
+        while select forupdate salesLineChild
+        where salesLineChild.SalesId == _salesLine.SalesId
+        &&    salesLineChild.RORParentLineRecId == _salesLine.RecId
+        &&    salesLineChild.RORTradeType != RORTradeType::SalesPurch
+        &&    salesLineChild.DNRCalendarId == _salesLine.DNRCalendarId
+        {
+            Map changesMap = new Map(Types::Container, Types::Container);
+            changesMap.insert([_startDateTime, _endDateTime, 'CalendarId'], [calendarId]);
+            INVInvoicePeriodHost invoicePeriodHost = salesLineChild;
+            ROROrderAmendmentDialogType::runFinancialChanges(invoicePeriodHost, changesMap);
+    
+            // update also sub-kits.
+            this.cascadeToChildLines_SalesLine(salesLineChild, _startDateTime, _endDateTime);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createOrderAmendmentLog</Name>
+				<Source><![CDATA[
+    private void createOrderAmendmentLog(INVPeriodStartDateTime _startDateTime, INVPeriodEndDateTime _endDateTime)
+    {
+        ttsbegin;
+
+        ROROrderAmendmentLog orderAmendmentLog;
+        orderAmendmentLog.initValue();
+        orderAmendmentLog.DNRReasonType = DNRReasonType::RentalStop;
+        orderAmendmentLog.DNRReasonCode = BOBIoTParameters::find().DNRReasonCode;
+        orderAmendmentLog.initFromSalesPurchLine(salesLine);
+        orderAmendmentLog.AmendmentAction = DNRAmendmentAction::Created;
+        orderAmendmentLog.AmendmentEventType = DNRAmendmentEventType::RentalActivation;
+        orderAmendmentLog.FromDateTime = _startDateTime;
+        orderAmendmentLog.ToDateTime = _endDateTime;
+        LanguageId languageId = CompanyInfo::languageId();
+        orderAmendmentLog.LogTxtGenerated = strFmt(SysLabel::labelId2String2("@DNR4357", languageId), _startDateTime, _endDateTime);
+        orderAmendmentLog.insert();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>researchCallerDatasource</Name>
+				<Source><![CDATA[
+    private void researchCallerDatasource()
+    {
+        FormDataSource deviceTrans_ds = FormDataUtil::getFormDataSource(deviceTrans);
+
+        if (deviceTrans_ds)
+        {
+            deviceTrans_ds.research(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDeviceTrans</Name>
+				<Source><![CDATA[
+    public BOBIoTDeviceTrans parmDeviceTrans(BOBIoTDeviceTrans _deviceTrans = deviceTrans)
+    {
+        deviceTrans = _deviceTrans;
+        return deviceTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSalesLine</Name>
+				<Source><![CDATA[
+    public SalesLine parmSalesLine(SalesLine _salesLine = salesLine)
+    {
+        salesLine = _salesLine;
+        return salesLine;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

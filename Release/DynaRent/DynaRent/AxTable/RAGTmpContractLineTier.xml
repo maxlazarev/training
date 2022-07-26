@@ -1,0 +1,735 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RAGTmpContractLineTier</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class RAGTmpContractLineTier extends common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>contractTable</Name>
+				<Source><![CDATA[
+    public RAGContractTable contractTable(boolean _forUpdate = false)
+    {
+        return RAGContractTable::find(this.ContractId, _forUpdate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createContractTier</Name>
+				<Source><![CDATA[
+    public RAGContractLine createContractTier()
+    {
+        RAGContractTable    contractTable;
+        RAGContractLine     contractLine;
+        RAGContractLine     newBaseTier;
+        RAGContractLine     newRelatedTier;
+        RAGContractLine     precedingTier;
+        CurrencyCode        currencyCode;
+        ;
+    
+        contractTable = this.contractTable();
+        currencyCode = contractTable.CurrencyCode;
+    
+        if (contractTable.ContractType == RAGContractType::Default
+        &&  this.ContractLevel == RAGContractLevel::Contract)
+        {
+            // create a new "base" tier
+            newBaseTier.ContractId          = this.ContractId;
+            newBaseTier.ContractLevel       = this.ContractLevel;
+            newBaseTier.RentalTypeRelation  = this.RentalTypeRelation;
+            newBaseTier.AgreementType       = this.AgreementType;
+            newBaseTier.NumOfTierPeriods    = this.NumOfTierPeriods;
+            newBaseTier.TierPeriod          = this.TierPeriod;
+            newBaseTier.Value               = this.getPackedValueContainer();
+            newBaseTier.insert();
+    
+            // select the contract line tier preceding the one that was just inserted
+            select firstonly NumOfTierPeriods, TierPeriod from precedingTier
+            order by TierPeriod desc, NumOfTierPeriods desc
+            where precedingTier.ContractId          == this.ContractId
+            &&    precedingTier.AgreementType       == this.AgreementType
+            &&    precedingTier.NumOfTierPeriods    <  this.NumOfTierPeriods
+            &&    precedingTier.TierPeriod          == this.TierPeriod;
+    
+            RecordInsertList insertList = new RecordInsertList(tableNum(RAGContractLine)); 
+
+            if (precedingTier)
+            {
+                // on all contract levels where the preceding tier is overwritten we need
+                // to add the new tier with the same multiplier as the preceding tier
+                while select contractLine
+                where contractLine.AgreementType    == this.AgreementType
+                &&    contractLine.NumOfTierPeriods == precedingTier.NumOfTierPeriods
+                &&    contractLine.TierPeriod       == precedingTier.TierPeriod
+                    join  TableId from contractTable
+                    where contractTable.ContractId   == contractLine.ContractId
+                    &&    contractTable.CurrencyCode == currencyCode
+                    &&  !(contractTable.ContractType == RAGContractType::Default && // this is the contract level we're editing
+                          contractLine.ContractLevel == RAGContractLevel::Contract) // so don't do any additional stuff here
+                {
+                    newRelatedTier.clear();
+                    newRelatedTier.data(contractLine);
+                    newRelatedTier.NumOfTierPeriods = this.NumOfTierPeriods;
+                    // newRelatedTier.insert(); remove this
+                    insertList.add(newRelatedTier);
+                }
+
+                
+            }
+    
+            ttsbegin;
+            insertList.insertDatabase(); 
+            // stamp additional new values on current record
+            this.isOverridden = NoYes::Yes;
+            this.ContractIdSource = newBaseTier.ContractId;
+            this.ContractLineSource = newBaseTier.RecId;
+            this.update();
+    
+            ttscommit;
+        }
+        else
+        {
+            throw error("@DNR6601");
+        }
+    
+        return newBaseTier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteContractTier</Name>
+				<Source><![CDATA[
+    public server boolean deleteContractTier(RAGContractDataParm _dataParm)
+    {
+        RAGContractTable        contractTable;
+        CurrencyCode            currencyCode;
+        RAGContractLine         contractLine;
+        boolean                 ok = true;
+    
+        Query                   query;
+        QueryBuildDataSource    qbdsContractLine;
+        QueryRun                queryRun;
+    
+        str                     dependencies;
+        FormDataSource          dataSource;
+        ;
+    
+        contractTable = this.contractTable();
+        currencyCode = contractTable.CurrencyCode;
+        dataSource = FormDataUtil::getFormDataSource(this);
+    
+        if (contractTable.ContractType == RAGContractType::Default
+        &&  this.ContractLevel == RAGContractLevel::Contract)
+        {
+            // User is trying to delete a "base" tier (one that's set up on the default contract).
+            // Check if there are dependencies: any contract lines that are based upon the one being deleted.
+            // If so, either delete everything or cancel the original deletion.
+    
+            while select ContractId, ContractLevel, RentalTypeRelation from contractLine
+            where contractLine.AgreementType    == this.AgreementType
+            &&    contractLine.NumOfTierPeriods == this.NumOfTierPeriods
+            &&    contractLine.TierPeriod       == this.TierPeriod
+            &&    contractLine.RecId            != this.ContractLineSource
+                exists join contractTable
+                where contractTable.ContractId      == contractLine.ContractId
+                &&    contractTable.CurrencyCode    == currencyCode
+            {
+                ok = false;
+                dependencies += strFmt("@DNR6602", contractLine.ContractId, contractLine.ContractLevel, contractLine.RentalTypeRelation) + '\n';
+            }
+    
+            if (dependencies)
+            {
+                dependencies = strFmt("@DNR1947", this.NumOfTierPeriods, enum2str(this.TierPeriod), this.AgreementType) +
+                               '\n\n' + dependencies + '\n' + "@DNR1948";
+    
+                if (Box::okCancel(dependencies, DialogButton::Cancel, "@SYS28002") == DialogButton::Ok)
+                {
+                    delete_from contractLine
+                    where contractLine.AgreementType    == this.AgreementType
+                    &&    contractLine.NumOfTierPeriods == this.NumOfTierPeriods
+                    &&    contractLine.TierPeriod       == this.TierPeriod
+                        exists join contractTable
+                        where contractTable.ContractId      == contractLine.ContractId
+                        &&    contractTable.CurrencyCode    == currencyCode;
+    
+                    ok = true;
+                }
+            }
+    
+            if (ok)
+            {
+                ttsbegin;
+    
+                delete_from contractLine
+                where contractLine.RecId == this.ContractLineSource;
+    
+                this.delete();
+    
+                ttscommit;
+    
+                dataSource.research();
+            }
+        }
+        else // User is trying to delete a "non-base" tier
+        {
+            ttsbegin;
+    
+            // delete the actual contract line from the database
+            delete_from contractLine
+            where contractLine.RecId == this.ContractLineSource;
+    
+            // find a contract line in the database to replace the relevant contract tier
+            query = RAGContractLine::buildQuery(_dataParm.contractHierarchyRange(), SortOrder::Descending, true, RAGContractLineQueryType::All, this.RentalTypeRelation);
+            qbdsContractLine = query.dataSourceTable(tableNum(RAGContractLine));
+            qbdsContractLine.addRange(fieldNum(RAGContractLine, AgreementType)).value(SysQuery::value(this.AgreementType));
+            qbdsContractLine.addRange(fieldNum(RAGContractLine, ContractLevel)).value(SysQuery::value(this.ContractLevel));
+            qbdsContractLine.addRange(fieldNum(RAGContractLine, NumOfTierPeriods)).value(SysQuery::value(this.NumOfTierPeriods));
+            qbdsContractLine.addRange(fieldNum(RAGContractLine, TierPeriod)).value(SysQuery::value(this.TierPeriod));
+            queryRun = new QueryRun(query);
+            queryRun.next();
+            contractLine = queryRun.get(tableNum(RAGContractLine));
+    
+            // if no applicable tier information was found, use the default contract's
+            if (!contractLine)
+            {
+                select firstonly contractLine
+                where contractLine.ContractId       == _dataParm.contractHierarchyMap().lookup(RAGContractType::Default)
+                &&    contractLine.ContractLevel    == RAGContractLevel::Contract
+                &&    contractLine.AgreementType    == this.AgreementType
+                &&    contractLine.NumOfTierPeriods == this.NumOfTierPeriods
+                &&    contractLine.TierPeriod       == this.TierPeriod;
+            }
+    
+            // apply tier information to the record being deleted
+            this.initfromContractLine(contractLine);
+            this.isOverridden = NoYes::No;
+            this.update();
+    
+            ttscommit;
+    
+            dataSource.reread();
+            dataSource.refresh();
+        }
+    
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifyContractTier</Name>
+				<Source><![CDATA[
+    public server RAGContractLine modifyContractTier()
+    {
+        RAGContractLine contractLine;
+    
+        contractLine = RAGContractLine::findRecId(this.ContractLineSource);
+    
+        if (contractLine.ContractId          == this.ContractId
+        &&  contractLine.ContractLevel       == this.ContractLevel
+        &&  contractLine.RentalTypeRelation  == this.RentalTypeRelation
+        &&  contractLine.AgreementType       == this.AgreementType
+        &&  contractLine.NumOfTierPeriods    == this.NumOfTierPeriods
+        &&  contractLine.TierPeriod          == this.TierPeriod) // update existing contract line
+        {
+            ttsbegin;
+            contractLine.selectForUpdate(true);
+            contractLine.Value = this.getPackedValueContainer();
+            contractLine.update();
+            ttscommit;
+        }
+        else // create new contract line
+        {
+            contractLine.clear();
+            contractLine.ContractId         = this.ContractId;
+            contractLine.ContractLevel      = this.ContractLevel;
+            contractLine.RentalTypeRelation = this.RentalTypeRelation;
+            contractLine.AgreementType      = this.AgreementType;
+            contractLine.NumOfTierPeriods   = this.NumOfTierPeriods;
+            contractLine.TierPeriod         = this.TierPeriod;
+            contractLine.Value              = this.getPackedValueContainer();
+            contractLine.insert();
+        }
+    
+        // stamp additional new values on current record
+        this.isOverridden = NoYes::Yes;
+        this.ContractIdSource = contractLine.ContractId;
+        this.ContractLineSource = contractLine.RecId;
+        this.update();
+    
+        return contractLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setValues</Name>
+				<Source><![CDATA[
+    public void setValues(RAGContractLine _contractLine, RAGContractId _activeContractId)
+    {
+        if (!this.ContractLineSource)
+        {
+            this.initfromContractLine(_contractLine);
+            this.isOverridden       = (_contractLine.ContractId == _activeContractId &&
+                                       _contractLine.ContractLevel == this.ContractLevel &&
+                                       _contractLine.RentalTypeRelation == this.RentalTypeRelation);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPackedValueContainer</Name>
+				<Source><![CDATA[
+    protected container getPackedValueContainer()
+    {
+        return [this.Multiplier, this.Activate];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initfromContractLine</Name>
+				<Source><![CDATA[
+    protected void initfromContractLine(RAGContractLine _contractLine)
+    {
+        this.Multiplier = conPeek(_contractLine.Value, 1);
+        this.Activate = conPeek(_contractLine.Value, 2);
+        this.ContractIdSource = _contractLine.ContractId;
+        this.ContractLineSource = _contractLine.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>find</Name>
+				<Source><![CDATA[
+    public static RAGTmpContractLineTier find(RAGTmpContractLineTier    _tableBuffer,
+                                              RAGContractLine           _contractLine,
+                                              boolean                   _forUpdate = false)
+    {
+        RAGTmpContractLineTier tmpContractLineTier;
+    
+        if (_tableBuffer.ContractId && _contractLine)
+        {
+            tmpContractLineTier.linkPhysicalTableInstance(_tableBuffer);
+            tmpContractLineTier.selectForUpdate(_forUpdate);
+    
+            select firstonly tmpContractLineTier
+            where tmpContractLineTier.ContractLevel         == _contractLine.ContractLevel
+            &&    tmpContractLineTier.RentalTypeRelation    == _contractLine.RentalTypeRelation
+            &&    tmpContractLineTier.AgreementType         == _contractLine.AgreementType
+            &&    tmpContractLineTier.NumOfTierPeriods      == _contractLine.NumOfTierPeriods
+            &&    tmpContractLineTier.TierPeriod            == _contractLine.TierPeriod;
+        }
+    
+        return tmpContractLineTier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findHighestTier</Name>
+				<Source><![CDATA[
+    public static RAGTmpContractLineTier findHighestTier(RAGTmpContractLineTier _tableBuffer,
+                                                         RAGAgreementType       _agmtType,
+                                                         FINRentalInvoiceProfile    _invoiceProfile)
+    {
+        RAGTmpContractLineTier  tmpHighestTier;
+        ;
+    
+        if (_tableBuffer.ContractId && _invoiceProfile)
+        {
+            tmpHighestTier.linkPhysicalTableInstance(_tableBuffer);
+    
+            if (_invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Chargeable)
+            {
+                // Chargeable periods cannot be converted into calendar periods, and vice versa.
+                // If there's no tiers whose period types match the invoice profile's one, we return nothing.
+    
+                select firstonly tmpHighestTier
+                order by NumOfTierPeriods desc // The Minutes field is not filled in on chargeable periods, so order by the number instead
+                where tmpHighestTier.AgreementType == _agmtType
+                &&    tmpHighestTier.Activate == NoYes::Yes
+            && ((_invoiceProfile.GenerationPeriod     == INVGenerationPeriod::Hours &&
+                       tmpHighestTier.TierPeriod        == RAGPriceTierPeriod::ChargeableHours)
+    
+                ||   (_invoiceProfile.GenerationPeriod     != INVGenerationPeriod::Hours                &&
+                       tmpHighestTier.TierPeriod        == RAGPriceTierPeriod::ChargeableDays)
+    
+                );
+            }
+            else
+            {
+                select firstonly tmpHighestTier
+                order by Minutes desc
+                where tmpHighestTier.AgreementType == _agmtType
+                &&    tmpHighestTier.Activate == NoYes::Yes
+                &&    tmpHighestTier.TierPeriod != RAGPriceTierPeriod::AfterDays;
+            }
+        }
+    
+        return tmpHighestTier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMultiplier</Name>
+				<Source><![CDATA[
+    public static RAGTierMultiplier getMultiplier(RAGTmpContractLineTier    _tableBuffer,
+                                                  BOBRentalTypeId           _rentalTypeId,
+                                                  RAGAgreementType          _agmtType,
+                                                  RORNumOfPeriods           _numOfPeriods,
+                                                  RAGPriceTierPeriod        _priceTierPeriod)
+    {
+        #TimeConstants
+        RAGTmpContractLineTier  tmpTier;
+        ;
+    
+        if (_tableBuffer.ContractId)
+        {
+            tmpTier.linkPhysicalTableInstance(_tableBuffer);
+    
+            select firstonly Multiplier, RecId from tmpTier
+            order by TierPeriod desc, NumOfTierPeriods desc
+            where tmpTier.RentalTypeRelation    == _rentalTypeId
+            &&    tmpTier.AgreementType         == _agmtType
+            &&    tmpTier.Activate              == NoYes::Yes
+            &&  ((_priceTierPeriod              == RAGPriceTierPeriod::ChargeableHours  &&
+                   tmpTier.TierPeriod           == RAGPriceTierPeriod::ChargeableHours  &&
+                   tmpTier.NumOfTierPeriods     <= _numOfPeriods)
+    
+            ||   (_priceTierPeriod              == RAGPriceTierPeriod::ChargeableDays   &&
+                   tmpTier.TierPeriod           == RAGPriceTierPeriod::ChargeableDays   &&
+                   tmpTier.NumOfTierPeriods     <= _numOfPeriods)
+    
+            ||   (_priceTierPeriod              == RAGPriceTierPeriod::Days             &&
+                   tmpTier.TierPeriod           == RAGPriceTierPeriod::Days             &&
+                   tmpTier.NumOfTierPeriods     <= _numOfPeriods)
+    
+            ||   (_priceTierPeriod              == RAGPriceTierPeriod::Days             &&
+                   tmpTier.TierPeriod           == RAGPriceTierPeriod::Hours            &&
+                   tmpTier.NumOfTierPeriods     <= _numOfPeriods * #hoursPerDay)
+    
+            ||   (_priceTierPeriod              == RAGPriceTierPeriod::Hours            &&
+                   tmpTier.TierPeriod           == RAGPriceTierPeriod::Days             &&
+                   tmpTier.NumOfTierPeriods     <= _numOfPeriods / #hoursPerDay)
+    
+            ||   (_priceTierPeriod              == RAGPriceTierPeriod::Hours            &&
+                   tmpTier.TierPeriod           == RAGPriceTierPeriod::Hours            &&
+                   tmpTier.NumOfTierPeriods     <= _numOfPeriods));
+        }
+    
+        return (tmpTier.RecId ? tmpTier.Multiplier : 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMultiplierMap</Name>
+				<Source><![CDATA[
+    public static Map getMultiplierMap(
+        RAGTmpContractLineTier    _tableBuffer,
+        BOBRentalTypeId           _rentalTypeId,
+        RAGAgreementType          _agmtType,
+        RAGPriceTierPeriod        _priceTierPeriod)
+    {
+        #TimeConstants
+        RAGTmpContractLineTier  tmpTier;
+        Map                     multiplierMap = new Map(Types::Integer, Types::Container);
+        Int                     rangeCounter;
+        ;
+    
+        if (_tableBuffer.ContractId)
+        {
+            tmpTier.linkPhysicalTableInstance(_tableBuffer);
+    
+            while select Multiplier, RecId from tmpTier
+            order by TierPeriod desc, NumOfTierPeriods asc
+            where tmpTier.RentalTypeRelation    == _rentalTypeId
+            &&    tmpTier.AgreementType         == _agmtType
+            &&    tmpTier.Activate              == NoYes::Yes
+            &&    tmpTier.TierPeriod            == _priceTierPeriod
+            {
+                rangeCounter++;
+                multiplierMap.insert(rangeCounter, [tmpTier.NumOfTierPeriods, tmpTier.Multiplier]);
+            }
+        }
+    
+        return multiplierMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromContractLineTierCache</Name>
+				<Source><![CDATA[
+    public void initFromContractLineTierCache(RAGContractLineTierCache _contractLineTierCache)
+    {
+        Global::DNRbuf2bufByFieldName(_contractLineTierCache, this);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR7578</DeveloperDocumentation>
+	<Label>@DNR6599</Label>
+	<ClusteredIndex>ContractLineTierIdx</ClusteredIndex>
+	<CreateRecIdIndex>No</CreateRecIdIndex>
+	<PrimaryIndex>ContractLineTierIdx</PrimaryIndex>
+	<TableType>TempDB</TableType>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Identification</Name>
+			<Label>@SYS36186</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ContractId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ContractLevel</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RentalTypeRelation</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>AgreementType</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Overview</Name>
+			<Label>@SYS50012</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>NumOfTierPeriods</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TierPeriod</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Multiplier</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>isOverridden</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ContractIdSource</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Activate</Name>
+			<HelpText>@DNR6427</HelpText>
+			<Label>@SYS26201</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>AgreementType</Name>
+			<EnumType>RAGAgreementType</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ContractId</Name>
+			<ExtendedDataType>RAGContractId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ContractIdSource</Name>
+			<ExtendedDataType>RAGContractId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>ContractLevel</Name>
+			<EnumType>RAGContractLevel</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>ContractLineSource</Name>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>isOverridden</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RAGIsOverridden</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>Minutes</Name>
+			<ExtendedDataType>Minutes</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>Multiplier</Name>
+			<ExtendedDataType>RAGTierMultiplier</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>NumOfTierPeriods</Name>
+			<AllowEdit>No</AllowEdit>
+			<ExtendedDataType>RORNumOfPeriods</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>RentalTypeRelation</Name>
+			<ExtendedDataType>RAGRentalTypeRelation</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>TierPeriod</Name>
+			<AllowEdit>No</AllowEdit>
+			<EnumType>RAGPriceTierPeriod</EnumType>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>ContractLineTierIdx</Name>
+			<AlternateKey>Yes</AlternateKey>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>ContractId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>ContractLevel</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>RentalTypeRelation</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>AgreementType</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>NumOfTierPeriods</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>TierPeriod</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation>
+			<Name>RAGContractLine</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>RAGContractLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ContractLineSource</Name>
+					<Field>ContractLineSource</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>RAGContractTable_ContractId</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<RelatedTable>RAGContractTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelatedTableRole>RAGContractTable_ContractId</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ContractId</Name>
+					<SourceEDT>RAGContractId</SourceEDT>
+					<Field>ContractId</Field>
+					<RelatedField>ContractId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>ContractIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>RAGContractTable_ContractIdSource</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<RelatedTable>RAGContractTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelatedTableRole>RAGContractTable_ContractIdSource</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ContractIdSource</Name>
+					<SourceEDT>RAGContractId</SourceEDT>
+					<Field>ContractIdSource</Field>
+					<RelatedField>ContractId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>ContractIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>RAGTmpContractLine</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>RAGTmpContractLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ContractId</Name>
+					<Field>ContractId</Field>
+					<RelatedField>ContractId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ContractLevel</Name>
+					<Field>ContractLevel</Field>
+					<RelatedField>ContractLevel</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RentalTypeRelation</Name>
+					<Field>RentalTypeRelation</Field>
+					<RelatedField>RentalTypeRelation</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

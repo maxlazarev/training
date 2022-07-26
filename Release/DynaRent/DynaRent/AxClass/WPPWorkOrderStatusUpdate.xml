@@ -1,0 +1,1569 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPWorkOrderStatusUpdate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class WPPWorkOrderStatusUpdate
+{
+    // Tables
+    WPPWorkOrderLine            workOrderLine;
+    SalesTable                  salesTable;
+    PurchTable                  purchTable;
+    InventTransferTable         inventTransferTable;
+    WPPParameters               parameters;
+
+    // Classes
+    SalesFormLetter             salesFormLetter;
+    PurchFormLetter             purchFormLetter;
+    InventTransferMultiShip     inventTransferMultiShip;
+    WPPChangeObjectAvailability changeObjectAvailability;
+
+    // Variables
+    WPPWorkOrderLineStatus      workOrderLineStatusCurrent;
+    boolean                     validateParent;
+    Set                         blockDeliverySet;
+    boolean                     mustDuplicateWorkOrderLine;
+    BOBRentalSubStatus          rentalSubStatus;
+    boolean                     blockPrinting;
+    boolean                     runSilent;
+    DNRReasonCode               objAvailChangeReasonCode;
+    boolean                     skipStatusGroupSetupValidation;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>BOBUnassignObject</Name>
+				<Source><![CDATA[
+    protected void BOBUnassignObject()
+    {
+        if ((workOrderLine.Status == WPPWorkOrderLineStatus::Confirmed || workOrderLine.Status == WPPWorkOrderLineStatus::Created)
+        && workOrderLine.workOrderTable().BOBObjectTableRecId
+        && WPPWorkOrderTaskTable::find(workOrderLine.TaskId).BOBObjectAssignment)
+        {
+            BOBObjectTable objectTable = workOrderLine.workOrderTable().BOBObjectTable();
+    
+            if (objectTable && workOrderLine.BOBAssignObject())
+            {
+                warning(strFmt("@DNR8226", objectTable.ObjectId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateLocationLog</Name>
+				<Source><![CDATA[
+    protected void BOBUpdateLocationLog()
+    {
+        BOBObjectManager::WPPUpdateWorkOrderLineStatus(workOrderLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canPickingListBeRegistered</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Determines whether the picking list registration form should be shown or not
+    /// </summary>
+    /// <returns>
+    ///    true if the picking registration form should be shown; otherwise, false.
+    /// </returns>
+    private boolean canPickingListBeRegistered()
+    {
+        boolean ret;
+    
+        if (salesTable)
+        {
+            SalesTableCheckIfUpdateContract checkIfUpdateContract = SalesTableCheckIfUpdateContract::construct();
+    
+            checkIfUpdateContract.parmCheckPickingListRegistration(true);
+            container canBeUpdated = salesTable.checkIfUpdate(checkIfUpdateContract.pack());
+            SalesTableCanBeUpdatedContract canBeUpdatedContract = SalesTableCanBeUpdatedContract::create(canBeUpdated);
+    
+            ret = canBeUpdatedContract.parmCanPickingListBeRegistrated();
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkAssociatedDeliveryTask</Name>
+				<Source><![CDATA[
+    protected boolean checkAssociatedDeliveryTask(SalesLine _salesLine)
+    {
+        boolean ret = true;
+    
+        if (!blockDeliverySet)
+        {
+            blockDeliverySet = new Set(Types::Int64);
+        }
+    
+        if (blockDeliverySet.in(_salesLine.RecId))
+        {
+            ret = false;
+        }
+        else
+        {
+            SalesLine salesLineParent = _salesLine.RORGetParentLine();
+    
+            if (this.checkBlockDeliveryItemHierarchy(salesLineParent))
+            {
+                ret = false;
+            }
+            else
+            {
+                /*
+                // Check if associated delivery task is different than updated task of parent and has a lower status
+                select firstOnly RecId from associatedDelivery
+                where associatedDelivery.ItemId == _salesLine.ItemId
+                    exists join workOrderLineLocal
+                    where workOrderLineLocal.TaskId == associatedDelivery.TaskId
+                    &&    workOrderLineLocal.Status < associatedDelivery.Status
+                        join RecId from workOrderTableLocal
+                        where workOrderTableLocal.WorkOrderId   == workOrderLineLocal.WorkOrderId
+                        &&    workOrderTableLocal.OrderTableId  == _salesLine.TableId
+                        &&    workOrderTableLocal.OrderRecId   == _salesLine.RecId;
+                */
+    
+                WPPAssociatedDelivery associatedDelivery;
+
+                select firstOnly RecId from associatedDelivery
+                where associatedDelivery.ItemId == _salesLine.ItemId;
+    
+                if (associatedDelivery)
+                {
+                    ret = false;
+                    blockDeliverySet.add(_salesLine.RecId);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkAutoPost</Name>
+				<Source><![CDATA[
+    private boolean checkAutoPost(WPPWorkOrderTaskTable _workOrderTaskTable, WPPWorkOrderTable _workOrderTable)
+    {
+        boolean ret = _workOrderTaskTable.AutoPostUpdateDocuments;
+    
+        if (ret)
+        {
+            switch (_workOrderTable.OrderTableId)
+            {
+                case tableNum(PurchLine),
+                     tableNum(PurchTable):
+                    ret = _workOrderTaskTable.AutoPostType != WPPAllPurchaseSales::Sales;
+                    break;
+    
+                case tableNum(SalesLine),
+                     tableNum(SalesTable),
+                     tableNum(WMSShipment) :
+                    ret = _workOrderTaskTable.AutoPostType != WPPAllPurchaseSales::Purch;
+                    break;
+    
+                case tableNum(InventJournalTable) :
+                    ret = false;
+                    break;
+                default:
+                    throw error(Error::missingParameter(null));
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkItemModelGroup</Name>
+				<Source><![CDATA[
+    protected boolean checkItemModelGroup(SalesLine _salesLine)
+    {
+        boolean ret = true;
+    
+        if (!blockDeliverySet)
+        {
+            blockDeliverySet = new Set(Types::Int64);
+        }
+    
+        if (blockDeliverySet.in(_salesLine.RecId))
+        {
+            ret = false;
+        }
+        else
+        {
+            SalesLine salesLineParent = _salesLine.RORGetParentLine();
+    
+            if (this.checkBlockDeliveryItemHierarchy(salesLineParent))
+            {
+                ret = false;
+            }
+            else
+            {
+                if (_salesLine.inventTable().modelGroup().MandatoryPick && !this.checkSalesLineIsPicked(_salesLine))
+                {
+                    ret = false;
+                    blockDeliverySet.add(_salesLine.RecId);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkUpdateBusinessObject</Name>
+				<Source><![CDATA[
+    protected void checkUpdateBusinessObject()
+    {
+        if (changeObjectAvailability)
+        {
+            changeObjectAvailability.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkUpdatePurch</Name>
+				<Source><![CDATA[
+    protected void checkUpdatePurch()
+    {
+        if (purchFormLetter)
+        {
+            purchFormLetter.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkUpdateSales</Name>
+				<Source><![CDATA[
+    protected void checkUpdateSales()
+    {
+        if (salesFormLetter)
+        {
+            salesFormLetter.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>duplicateWorkOrderLineFromRegistration</Name>
+				<Source><![CDATA[
+    private void duplicateWorkOrderLineFromRegistration()
+    {
+        WPPDuplicateWorkOrderLine   duplicateWorkOrderLine;
+    
+        if (mustDuplicateWorkOrderLine)
+        {
+            duplicateWorkOrderLine = new WPPDuplicateWorkOrderLine(workOrderLine);
+            duplicateWorkOrderLine.parmDuplicateAdditionalNotes(true);
+            duplicateWorkOrderLine.parmNewWorkOrderLineStatus(WPPWorkOrderLineStatus::Created);
+            duplicateWorkOrderLine.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generateFormLetterList</Name>
+				<Source><![CDATA[
+    protected List generateFormLetterList(DocumentStatus  _documentStatus)
+    {
+        List deliveryList = new List(Types::Record);
+        WPPWorkOrderTable workOrderTable = workOrderLine.workOrderTable();
+        SalesLine salesLine;
+    
+        // Select the sales line:
+        // * linked to the current work order only,
+        while select salesLine
+        where salesLine.SalesId == salesTable.SalesId
+        &&   (_documentStatus != DocumentStatus::RORReturnNote || salesLine.RORRemainInventReturn)
+        {
+            if ((salesLine.TableId == workOrderTable.OrderTableId && salesLine.RecId == workOrderTable.OrderRecId)
+             || (salesTable.TableId == workOrderTable.OrderTableId && salesTable.RecId == workOrderTable.OrderRecId))
+            {
+                deliveryList.addEnd(salesLine);
+            }
+            else if (this.isChildLine(salesLine, workOrderTable.OrderRecId))
+            {
+                if (_documentStatus == DocumentStatus::PackingSlip)
+                {
+                    // Check whether the salesLine is a contract element
+                    ItemId itemIdWarranty = RAGParameters::find().ItemIdWarranty;
+                    if (salesLine.ItemId == itemIdWarranty)
+                    {
+                        deliveryList.addEnd(salesLine);
+                    }
+                    else
+                    if (this.mustBeDelivered(salesLine, workOrderTable.OrderRecId))
+                    {
+                        if (WPPAssociatedDelivery::existItemId(salesLine.ItemId))
+                        {
+                            if (this.checkAssociatedDeliveryTask(salesLine))
+                            {
+                                deliveryList.addEnd(salesLine);
+                            }
+                        }
+                        else if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+                        {
+                            if (this.checkItemModelGroup(salesLine))
+                            {
+                                deliveryList.addEnd(salesLine);
+                            }
+                        }
+                        else if (!this.checkBlockDeliveryItemHierarchy(salesLine))
+                        {
+                            deliveryList.addEnd(salesLine);
+                        }
+                    }
+                    else
+                    // When associated delivery is setup for the current Item, Task and Status
+                    // then the line should be delivered
+                    if (WPPAssociatedDelivery::existStatus(salesLine.ItemId, workOrderLine.TaskId, this.workOrderLineStatus()))
+                    {
+                        deliveryList.addEnd(salesLine);
+                    }
+                }
+                else
+                {
+                    deliveryList.addEnd(salesLine);
+                }
+            }
+        }
+    
+        return deliveryList;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getWorkOrderStatusGroupId</Name>
+				<Source><![CDATA[
+    private WPPWorkOrderStatusGroupId getWorkOrderStatusGroupId()
+    {
+        WPPWorkOrderStatusGroup workOrderStatusGroup;
+        WPPWorkOrderTaskTable   workOrderTaskTable;
+    
+        select firstOnly WorkOrderStatusGroupId from workOrderStatusGroup
+            exists join workOrderTaskTable
+            where workOrderTaskTable.TaskId                 == workOrderLine.TaskId
+            &&    workOrderTaskTable.WorkOrderStatusGroupId == workOrderStatusGroup.WorkOrderStatusGroupId;
+    
+        return workOrderStatusGroup.WorkOrderStatusGroupId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init(boolean _validateParent  = true)
+    {
+        WPPWorkOrderTable workOrderTable = workOrderLine.workOrderTable();
+
+        switch (workOrderTable.OrderTableId)
+        {
+            case tableNum(SalesLine):
+                salesTable = SalesTable::find(SalesLine::findRecId(workOrderTable.OrderRecId).SalesId);
+                break;
+    
+            case tableNum(PurchLine):
+                purchTable = PurchTable::find(PurchLine::findRecId(workOrderTable.OrderRecId).PurchId);
+                break;
+    
+            case tableNum(SalesTable):
+                salesTable = SalesTable::findRecId(workOrderTable.OrderRecId);
+                break;
+    
+            case tableNum(PurchTable):
+                purchTable = PurchTable::findRecId(workOrderTable.OrderRecId);
+                break;
+    
+            default:
+                // Do nothing
+                break;
+        }
+    
+        validateParent = _validateParent;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFormLetter</Name>
+				<Source><![CDATA[
+    private void initFormLetter(WPPWorkOrderTable       _workOrderTable,
+                                BOBRentalSubStatus      _rentalSubStatus,
+                                boolean                 _isAvailable)
+    {            
+        switch (_workOrderTable.OrderTableId)
+        {
+            case tableNum(PurchLine),
+                 tableNum(PurchTable):
+                this.initPurchFormLetter(_rentalSubStatus, _isAvailable);
+                break;
+    
+            case tableNum(SalesLine),
+                 tableNum(SalesTable):
+                this.initSalesFormLetter(_rentalSubStatus, _isAvailable);
+                break;
+    
+            case tableNum(WHSShipmentTable) :
+                InventTransferLine inventTransferLine = this.getInventTransferLine(_workOrderTable.OrderRecId) as InventTransferLine;
+
+                if (inventTransferLine)
+                {
+                    // just open form at the end of update
+                    inventTransferTable = inventTransferLine.inventTransferTable();
+                }
+                else
+                {
+                    this.initSalesFormLetter(_rentalSubStatus, _isAvailable);
+                }
+                break;
+    
+            default:
+                throw error(Error::missingParameter(null));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInventTransferLine</Name>
+				<Source><![CDATA[
+    protected InventTransferLine getInventTransferLine(RecId _recId)
+    {
+        InventTransferLine inventTransferLine;
+        return inventTransferLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initPurchFormLetter</Name>
+				<Source><![CDATA[
+    protected void initPurchFormLetter(BOBRentalSubStatus   _rentalSubStatus,
+                                       boolean              _isObjectAvailable)
+    {
+        DocumentStatus documentStatus = BOBPostingPolicyRule::subStatus2DocumentStatus(_rentalSubStatus);
+    
+        purchFormLetter = PurchFormLetter::construct(documentStatus);
+        purchFormLetter.createFromLines(false);
+
+        PurchLine           purchLine;
+        WPPWorkOrderTable   workOrderTable;
+    
+        select firstOnly RecId from purchLine
+            exists join workOrderTable
+            where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+            &&    workOrderTable.OrderTableId == purchLine.TableId
+            &&    workOrderTable.OrderRecId   == purchLine.RecId;
+    
+        if (purchLine.RecId)
+        {
+            purchFormLetter.createFromLines(true);
+            purchFormLetter.parmLineList(this.generateFormLetterList(documentStatus).pack());
+        }
+    
+        if (documentStatus == DocumentStatus::PackingSlip || documentStatus == DocumentStatus::RORReturnNote)
+        {
+            WPPParameters wppParameters = WPPParameters::find();
+            purchFormLetter.specQty(wppParameters.RORDefaultPurchUpdate);
+        }
+        else
+        {
+            purchFormLetter.specQty(PurchUpdate::All);
+        }
+    
+        if (blockPrinting)
+        {
+            purchFormLetter.printFormLetter(false);
+        }
+
+        purchFormLetter.enableUpdateNowField(true);
+        purchFormLetter.RORparmRentalSubStatus(_rentalSubStatus);
+        purchFormLetter.RORparmCanGoBatch(false);
+        purchFormLetter.WPPparmWorkOrderId(workOrderLine.WorkOrderId);
+        purchFormLetter.WPPParmWorkOrderLineRecId(workOrderLine.RecId);
+        purchFormLetter.WPPparmChangeObjectAvailability(this.mustChangeAvailability(workOrderLine.workOrderTaskTable(), _isObjectAvailable));
+        purchFormLetter.purchTable(purchTable);
+        purchFormLetter.createParmUpdateFromParmUpdateRecord(PurchFormletterParmData::initpurchParmUpdateFormletter(documentStatus, purchFormLetter.pack()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSalesFormLetter</Name>
+				<Source><![CDATA[
+    protected void initSalesFormLetter(BOBRentalSubStatus   _rentalSubStatus,
+                                       boolean              _isObjectAvailable)
+    {
+        DocumentStatus documentStatus = BOBPostingPolicyRule::subStatus2DocumentStatus(_rentalSubStatus);
+    
+        salesFormLetter = SalesFormLetter::construct(documentStatus);
+        salesFormLetter.allowEmptyTable(true);
+        salesFormLetter.createFromLines(false);
+
+        SalesLine           salesLine;
+        WPPWorkOrderTable   workOrderTable;
+
+        select firstOnly RecId from salesLine
+            exists join workOrderTable
+            where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+            &&    workOrderTable.OrderTableId == salesLine.TableId
+            &&    workOrderTable.OrderRecId   == salesLine.RecId;
+    
+        if (salesLine.RecId || salesTable)
+        {
+            if(salesFormLetter is SalesFormLetter_RORSubStatus)
+            {
+                RORFormLetterSubStatusController formLetterSubStatusController = SalesFormLetter::DNRParmFormLetterSubStatusController(new RORFormLetterSubStatusController_Rental());
+                formLetterSubStatusController.parmRentalSubStatus(_rentalSubStatus);
+            }
+
+            salesFormLetter.createFromLines(true);
+
+            salesFormLetter.parmLineList(this.generateFormLetterList(documentStatus).pack());
+        }
+        else
+        {
+            List deliveryList = this.generateFormLetterListForShipment(documentStatus);
+            if (deliveryList.elements())
+            {
+                salesFormLetter.createFromLines(true);
+                salesFormLetter.parmLineList(deliveryList.pack());
+            }
+        }
+    
+        if (documentStatus == DocumentStatus::PackingSlip && workOrderLine.workOrderTable().OrderTableId == tableNum(WMSShipment))
+        {
+            salesFormLetter.specQty(SalesUpdate::PickingListAndNonInventoried);
+        }
+        else
+        {
+            if (documentStatus == DocumentStatus::PackingSlip || documentStatus == DocumentStatus::RORReturnNote)
+            {
+                WPPParameters wppParameters = WPPParameters::find();
+                salesFormLetter.specQty(wppParameters.RORDefaultSalesUpdate);
+            }
+            else
+            {
+                salesFormLetter.specQty(SalesUpdate::All);
+            }
+        }
+        
+        if (blockPrinting)
+        {
+            salesFormLetter.printFormLetter(false);
+        }
+
+        if (documentStatus == DocumentStatus::RORReturnNote)
+        {
+            salesFormLetter.transDate(DateTimeUtil::date(workOrderLine.RequestedEndDateTime));
+        }
+
+        salesFormLetter.lockSalesUpdateField(false);
+        salesFormLetter.enableUpdateNowField(true);
+        salesFormLetter.RORparmRentalSubStatus(_rentalSubStatus);
+        salesFormLetter.RORparmCanGoBatch(false);
+        salesFormLetter.WPPparmWorkOrderId(workOrderLine.WorkOrderId);
+        salesFormLetter.WPPParmWorkOrderLineRecId(workOrderLine.RecId);
+        salesFormLetter.WPPparmChangeObjectAvailability(this.mustChangeAvailability(workOrderLine.workOrderTaskTable(), _isObjectAvailable));
+        salesFormLetter.parmVersioningUpdateType(VersioningUpdateType::Initial);
+        salesFormLetter.salesTable(salesTable);
+        salesFormLetter.prePromptInit();
+        salesFormLetter.createParmUpdateFromParmUpdateRecord(SalesFormletterParmData::initSalesParmUpdateFormletter(documentStatus, salesFormLetter.pack()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generateFormLetterListForShipment</Name>
+				<Source><![CDATA[
+    protected List generateFormLetterListForShipment(DocumentStatus  _documentStatus)
+    {
+        List  deliveryList = new List(Types::Record);        
+        return deliveryList;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateOrderLineForShipment</Name>
+				<Source><![CDATA[
+    protected boolean validateOrderLineForShipment(
+        RefTableId    _orderTableId,
+        RefRecId      _orderRecId)
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertWorkOrderLineStatusHistory</Name>
+				<Source><![CDATA[
+    protected void insertWorkOrderLineStatusHistory()
+    {
+        if (parameters.CreateWorkOrderLineStatusHistory && this.workOrderLineStatus() != this.parmWorkOrderLineStatusCurrent())
+        {
+            WPPWorkOrderLineStatusHistory workOrderLineStatusHistory;
+
+            workOrderLineStatusHistory.WorkOrderLineRecId = workorderLine.RecId;
+            workOrderLineStatusHistory.StatusOld          = this.parmWorkOrderLineStatusCurrent();
+            workOrderLineStatusHistory.StatusNew          = this.workOrderLineStatus();
+            workOrderLineStatusHistory.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isChildLine</Name>
+				<Source><![CDATA[
+    protected boolean isChildLine(SalesLine   _salesLineChild,
+                                  RecId       _orderLineRecId)
+    {
+        boolean ret;
+        SalesLine salesLineParent = _salesLineChild.RORGetParentLine();
+    
+        while (salesLineParent)
+        {
+            if (salesLineParent.RecId == _orderLineRecId)
+            {
+                ret = true;
+                salesLineParent = null;
+            }
+            else
+            {
+                salesLineParent = salesLineParent.RORGetParentLine();
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isObjectAvailable</Name>
+				<Source><![CDATA[
+    private boolean isObjectAvailable(BOBObjectTableRecId   _refRecId)
+    {
+        BOBObjectView   objectView;
+        BOBObjectTable  objectTable;
+    
+        select firstOnly IsAvailable from objectView
+            exists join objectTable
+            where objectTable.ObjectId == objectView.ObjectId
+            &&    objectTable.RecId    == _refRecId;
+    
+        return objectView.IsAvailable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustBeDelivered</Name>
+				<Source><![CDATA[
+    protected boolean mustBeDelivered(SalesLine   _salesLineChild,
+                                      RecId       _orderLineRecId)
+    {
+        boolean ret;
+    
+        // Never deliver fuel automatically
+        if (_salesLineChild.ItemId != RORParameters::find().ItemIdFuel)
+        {
+            SalesLine salesLineParent = _salesLineChild.RORGetParentLine();
+    
+            while (salesLineParent)
+            {
+                if (salesLineParent.RecId == _orderLineRecId)
+                {
+                    // When the parent is a Kit then supplementary rental items must be delivered as well
+                    // or the child must be of type Sales/Purchase
+                    // or the child line must not have a Work order template
+                    if (salesLineParent.RORKitComponentType == RORKitComponentType::Kit
+                    ||  _salesLineChild.RORTradeType == RORTradeType::SalesPurch
+                    || !_salesLineChild.WPPWorkOrderTemplateId)
+                    {
+                        ret = true;
+                    }
+                    else
+                    {
+                        if (_salesLineChild.WPPWorkOrderTemplateId)
+                        {
+                            WPPWorkOrderStatusPostingSetup  workOrderStatusPostingSetup;
+                            WPPWorkOrderTemplateLine        workOrderTemplateLine;
+
+                            select firstOnly RecId from workOrderStatusPostingSetup
+                            where workOrderStatusPostingSetup.BOBRentalSubStatus == BOBRentalSubStatus::Delivered
+                                exists join workOrderTemplateLine
+                                where workOrderTemplateLine.TaskId == workOrderStatusPostingSetup.TaskId
+                                &&    workOrderTemplateLine.TemplateId == _salesLineChild.WPPWorkOrderTemplateId;
+    
+                            if (!workOrderStatusPostingSetup)
+                            {
+                                ret = true;
+                            }
+                        }
+                    }
+    
+    
+                    salesLineParent = null;
+                }
+                else
+                {
+                    salesLineParent = salesLineParent.RORGetParentLine();
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustChangeAvailability</Name>
+				<Source><![CDATA[
+    private boolean mustChangeAvailability(WPPWorkOrderTaskTable    _workOrderTaskTable,
+                                           boolean                  _isObjectAvailable)
+    {
+        boolean                 ret;
+        BOBRentalType           rentalType;
+        BOBObjectTable          objectTable;
+        WPPWorkOrderTable       workOrderTable;
+    
+        select firstOnly RecId from rentalType
+        where rentalType.Classification == BOBRentalTypeClassification::Serialized
+            join objectTable
+            where objectTable.RentalTypeId == rentalType.RentalTypeId
+            &&    objectTable.InventSerialId
+                join TableId from workOrderTable
+                where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                &&    workOrderTable.WorkOrderId         == workOrderLine.WorkOrderId;
+    
+        if (rentalType)
+        {
+            WPPWorkOrderLineStatus setObjectAvailStatus    = WPPWorkOrderTaskTable::lineStatusNone2LineStatus(_workOrderTaskTable.SetObjectAvailStatus);
+            WPPWorkOrderLineStatus setObjectNotAvailStatus = WPPWorkOrderTaskTable::lineStatusNone2LineStatus(_workOrderTaskTable.SetObjectNotAvailStatus);
+    
+            // Check whether the availability of an object should be changed
+            if (!_isObjectAvailable
+            &&   _workOrderTaskTable.SetObjectAvailStatus != WPPWorkOrderLineStatusNone::None
+            &&   this.workOrderLineStatus()               >= setObjectAvailStatus
+            &&   setObjectAvailStatus                     <= parameters.ShowUpdateObjectAvailFormStatus
+            &&   this.workOrderLineStatus()               <= parameters.ShowUpdateObjectAvailFormStatus)
+            {
+                ret = !this.otherAvailabilityTriggerExist(objectTable);
+            }
+            else
+            if (_isObjectAvailable
+            &&  _workOrderTaskTable.SetObjectNotAvailStatus != WPPWorkOrderLineStatusNone::None
+            &&  setObjectNotAvailStatus                     <= this.workOrderLineStatus())
+            {
+                ret = true;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(WPPWorkOrderLine    _workOrderLine)
+    {
+        workOrderLine = _workOrderLine;
+        workOrderLineStatusCurrent = _workOrderLine.Status;
+    
+        parameters = WPPParameters::find();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>otherAvailabilityTriggerExist</Name>
+				<Source><![CDATA[
+    private boolean otherAvailabilityTriggerExist(BOBObjectTable _objectTable)
+    {
+        WPPWorkOrderTaskTable   workOrderTaskTable;
+        WPPWorkOrderLine        workOrderLineFind;
+        WPPWorkOrderTable       workOrderTable;
+    
+        while select SetObjectAvailStatus from workOrderTaskTable
+            join Status from workOrderLineFind
+            where workOrderLineFind.TaskId == workOrderTaskTable.TaskId
+            &&    workOrderLineFind.RecId  != workOrderLine.RecId
+            &&    workOrderLineFind.Status >  WPPWorkOrderLineStatus::Created
+                exists join workOrderTable
+                where workOrderTable.WorkOrderId         == workOrderLineFind.WorkOrderId
+                &&    workOrderTable.BOBObjectTableRecId == _objectTable.RecId
+        {
+            WPPWorkOrderLineStatus setObjectAvailStatus = WPPWorkOrderTaskTable::lineStatusNone2LineStatus(workOrderTaskTable.SetObjectAvailStatus);
+    
+            if (workOrderTaskTable.SetObjectAvailStatus != WPPWorkOrderLineStatusNone::None
+            &&  setObjectAvailStatus                    >  workOrderLineFind.Status)
+            {
+                return true;
+            }
+        }
+    
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmBlockPrinting</Name>
+				<Source><![CDATA[
+    public boolean parmBlockPrinting(boolean _blockPrinting = blockPrinting)
+    {
+        blockPrinting = _blockPrinting;
+        return blockPrinting;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmWorkOrderLineStatusCurrent</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderLineStatus parmWorkOrderLineStatusCurrent(WPPWorkOrderLineStatus _workOrderLineStatusCurrent = workOrderLineStatusCurrent)
+    {
+        workOrderLineStatusCurrent = _workOrderLineStatusCurrent;
+        return workOrderLineStatusCurrent;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postUpdate</Name>
+				<Source><![CDATA[
+    protected void postUpdate()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>preUpdate</Name>
+				<Source><![CDATA[
+    protected void preUpdate()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prompt</Name>
+				<Source><![CDATA[
+    public boolean prompt(boolean _runUpdates = true)
+    {
+        // ret is always true, unless a user hits the Cancel button on a dialog/form
+        boolean ret = true;
+        rentalSubStatus = BOBRentalSubStatus::None;
+        WPPWorkOrderTable workOrderTable = workOrderLine.workOrderTable();
+        WPPWorkOrderTaskTable workOrderTaskTable = workOrderLine.workOrderTaskTable();
+    
+        if (_runUpdates || workOrderTaskTable.AutoPostUpdateDocuments)
+        {
+            boolean isObjectAvailable = this.isObjectAvailable(workOrderTable.BOBObjectTableRecId);
+    
+            // Linked to order?
+            if (workOrderTable.OrderRecId
+            &&  workOrderTable.OrderTableId)
+            {
+                // Should the task post something
+                if (this.checkAutoPost(workOrderTaskTable, workOrderTable))
+                {
+                    WPPWorkOrderStatusPostingSetup workOrderStatusPostingSetup = WPPWorkOrderStatusPostingSetup::find(workOrderLine.TaskId, this.workOrderLineStatus());
+    
+                    if (workOrderTable.OrderTableId == tableNum(WMSShipment) && workOrderStatusPostingSetup.BOBRentalSubStatus != BOBRentalSubStatus::Delivered)
+                    {
+                        return ret;
+                    }
+
+                    // WorkOrderStatusPostingSetup applies only for rental or subrental orders
+                    boolean ignoreWorkOrderStatusPostingSetup;
+                    SalesLine salesLine;
+                    PurchLine purchLine;
+
+                    // Find the linked order line
+                    switch (workOrderTable.OrderTableId)
+                    {
+                        case tableNum(SalesTable):
+                            select firstOnly BOBRentalSubStatus, RecId from salesLine
+                            where salesLine.SalesId == salesTable.SalesId
+                            &&    salesLine.BOBRentalSubStatus < workOrderStatusPostingSetup.BOBRentalSubStatus
+                            &&    salesLine.RORTradeType != RORTradeType::SalesPurch;
+
+                            ignoreWorkOrderStatusPostingSetup = (salesLine.RecId == 0);
+                            break;
+    
+                        case tableNum(PurchTable):
+                            select firstOnly BOBRentalSubStatus, RecId from purchLine
+                            where purchLine.PurchId == purchTable.PurchId
+                            &&    purchLine.BOBRentalSubStatus < workOrderStatusPostingSetup.BOBRentalSubStatus
+                            &&    purchLine.RORTradeType != RORTradeType::SalesPurch;
+
+                            ignoreWorkOrderStatusPostingSetup = (purchLine.RecId == 0);
+                            break;
+    
+                        case tableNum(SalesLine):
+                            salesLine = SalesLine::findRecId(workOrderTable.OrderRecId);
+                            rentalSubStatus = salesLine.BOBRentalSubStatus;
+                            ignoreWorkOrderStatusPostingSetup = (salesLine.RORTradeType == RORTradeType::SalesPurch);
+                            break;
+    
+                        case tableNum(PurchLine):
+                            purchLine = PurchLine::findRecId(workOrderTable.OrderRecId);
+                            rentalSubStatus = purchLine.BOBRentalSubStatus;
+                            ignoreWorkOrderStatusPostingSetup = (purchLine.RORTradeType == RORTradeType::SalesPurch);
+                            break;
+                    }
+
+    
+                    // Should the task post something for the specific status
+                    // and should it show the edit lines form
+                    // Larger and equal to the rentalSubStatus because of partial deliveries/returns
+                    if (!ignoreWorkOrderStatusPostingSetup
+                    &&  workOrderStatusPostingSetup
+                    &&  workOrderStatusPostingSetup.BOBRentalSubStatus >= rentalSubStatus)
+                    {
+                        this.initFormLetter(workOrderTable, workOrderStatusPostingSetup.BOBRentalSubStatus, isObjectAvailable);
+    
+                        if (!workOrderStatusPostingSetup.AutomaticPosting)
+                        {
+                            // FormLetter.prompt()
+                            if (purchFormLetter
+                            && (purchFormLetter.createFromLines() || !List::create(purchFormLetter.parmLineList()).empty())
+                            // if _runUpdates is false then multiple tasks are updated in one process and we don't want to display posting form to a user
+                            && _runUpdates
+                            && !runSilent)
+                            {
+                                ret = purchFormLetter.prompt();
+                            }
+                            else
+                            if (salesFormLetter
+                            &&  (!salesFormLetter.createFromLines() || !List::create(salesFormLetter.parmLineList()).empty())
+                            // if _runUpdates is false then multiple tasks are updated in one process and we don't want to display posting form to a user
+                            && _runUpdates
+                            && !runSilent)
+                            {
+                                ret = salesFormLetter.prompt();
+                            }
+                        }
+                    }
+                    else if (!ignoreWorkOrderStatusPostingSetup)
+                    {
+                        // Check whether picking is activated,
+                        // because then the picking list registration might be triggered when the status reaches Completed
+                        if (WPPWorkOrderStatusPostingSetup::findTaskRentalSubStatus(workOrderLine.TaskId, BOBRentalSubStatus::Picked)
+                        &&  salesTable
+                        &&  this.workOrderLineStatus() == WPPWorkOrderLineStatus::Completed
+                        &&  this.canPickingListBeRegistered())
+                        {
+                            WPPPickingRegistration pickingRegistration = WPPPickingRegistration::construct();
+                            pickingRegistration.parmSalesTable(salesTable);
+                            pickingRegistration.run();
+    
+                            mustDuplicateWorkOrderLine = !pickingRegistration.isOrderFullyRegistered();
+                        }
+                    }
+                }
+            }
+    
+            // When no FormLetter has been initialized it is still possible to change the
+            // availability of the object
+            if (!salesFormLetter && !purchFormLetter
+            &&   workOrderTable.BOBObjectTableRecId
+            &&   this.mustChangeAvailability(workOrderTaskTable, isObjectAvailable))
+            {
+                changeObjectAvailability = WPPChangeObjectAvailability::construct();
+                changeObjectAvailability.parmWorkOrderTable(workOrderTable);
+                changeObjectAvailability.init();
+                
+                if (runSilent)
+                {
+                    if (!objAvailChangeReasonCode)
+                    {
+                        throw Error("@DNR:ReasonCodeMandatoryError"); //Reason code is mandatory
+                    }
+
+                    changeObjectAvailability.DNRparmReasonCode(objAvailChangeReasonCode);
+                    changeObjectAvailability.run();
+                    ret = true;
+                }
+                else
+                {
+                    ret = changeObjectAvailability.dialog();
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmRunSilent</Name>
+				<Source><![CDATA[
+    //skips showing dialogs to user when set to true
+    public boolean parmRunSilent(boolean _runSilent)
+    {
+        runSilent = _runSilent;
+        return runSilent;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmReasonCode</Name>
+				<Source><![CDATA[
+    //This is required only in case when runSilent is set to true and BO availablity has to change
+    public DNRReasonCode parmReasonCode(DNRReasonCode _reasonCode)
+    {
+        objAvailChangeReasonCode = _reasonCode;
+        return objAvailChangeReasonCode;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSkipStatusGroupSetupValidation</Name>
+				<Source><![CDATA[
+    public boolean parmSkipStatusGroupSetupValidation(boolean _skipStatusGroupSetupValidation = skipStatusGroupSetupValidation)
+    {
+        skipStatusGroupSetupValidation = _skipStatusGroupSetupValidation;
+        return skipStatusGroupSetupValidation;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        ttsBegin;
+    
+        if (this.validate())
+        {
+            this.preUpdate();
+    
+            this.checkUpdateSales();
+            this.checkUpdatePurch();
+            this.checkUpdateBusinessObject();
+            this.updateWorkOrderLine();
+            this.BOBUnassignObject();
+            this.insertWorkOrderLineStatusHistory();
+            this.setupAssociatedDelivery();
+            this.updateProjTable();
+            this.BOBUpdateLocationLog();
+            this.duplicateWorkOrderLineFromRegistration();
+    
+            this.postUpdate();
+        }
+        else
+        {
+            throw error("@SYS18447");
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setupAssociatedDelivery</Name>
+				<Source><![CDATA[
+    private void setupAssociatedDelivery()
+    {
+        List associatedDeliveryList = new List(Types::Record);
+        SalesLine salesLine;
+    
+        // Deliver any associated tasks "under water"
+        // Select all the sales lines:
+        // * linked to the sales order,
+        //   that is linked to the work order header of the current work order line (found in the init method)
+        while select salesLine
+        where salesLine.SalesId == salesTable.SalesId
+        {
+            // Check whether the salesLine is of type SalesPurch
+            if (salesLine.RORTradeType == RORTradeType::SalesPurch)
+            {
+                // When associated delivery is setup for the current Item, Task and Status
+                // then the line should be delivered
+                if (WPPAssociatedDelivery::existStatus(salesLine.ItemId, workOrderLine.TaskId, this.workOrderLineStatus())
+                    || (!WPPAssociatedDelivery::exist(salesLine.ItemId, workOrderLine.TaskId) && WPPAssociatedDelivery::existStatusParentHierarchy(salesLine.RORGetParentLine(), workOrderLine.TaskId, this.workOrderLineStatus())))
+                {
+                    associatedDeliveryList.addEnd(salesLine);
+                }
+            }
+        }
+    
+        if (associatedDeliveryList.elements())
+        {
+            salesFormLetter = null;
+            WPPWorkOrderTable workOrderTable  = workOrderLine.workOrderTable();
+    
+            this.initFormLetter(workOrderTable, BOBRentalSubStatus::Delivered, false);
+            salesFormLetter.parmLineList(associatedDeliveryList.pack());
+            salesFormLetter.update(salesFormLetter.salesTable(), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), SalesUpdate::All);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateProjTable</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void updateProjTable()
+    {
+        if (parameters.UpdateProjStageToCompleted
+        &&  workOrderLine.ProjId)
+        {
+            ProjTable projTable;
+
+            if (this.workOrderLineStatus() >= WPPWorkOrderLineStatus::Completed)
+            {
+                projTable = ProjTable::find(workOrderLine.ProjId, true);
+                ProjStatusUpd projStatusUpd = ProjStatusUpd::construct(projTable, ProjStatus::Completed);
+                
+                ttsbegin;
+                projStatusUpd.run();
+                ttscommit;
+            }
+            else
+            {
+                update_recordSet projTable
+                setting Status = ProjStatus::InProcess
+                where projTable.ProjId == workOrderLine.ProjId
+                &&    projTable.Status == ProjStatus::Completed;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateWorkOrderLine</Name>
+				<Source><![CDATA[
+    protected void updateWorkOrderLine()
+    {
+        // for some reason, just selecting forupdate won't work here
+        workOrderLine = WPPWorkOrderLine::findRecId(workOrderLine.RecId, true);
+        workOrderLine.Status = this.workOrderLineStatus();
+        workOrderLine.update();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    protected boolean validate()
+    {
+        boolean ret = true;
+        
+        WPPWorkOrderTable workOrderTable = workOrderLine.workOrderTable();
+    
+        if (!workOrderLine)
+        {
+            ret = checkFailed(strFmt("@SYS134996", tableId2Pname(tableNum(WPPWorkOrderLine))));
+        }
+    
+        if (ret && !skipStatusGroupSetupValidation)
+        {
+            ret = this.validateStatusGroupSetup();
+        }
+
+        WPPWorkOrderTaskTable workOrderLineTask = workOrderLine.workOrderTaskTable();
+
+        if (ret)
+        {
+            if (workOrderLineTask.TaskType == WPPTaskType::Delivery)
+            {
+                WPPWorkOrderLine workOrderLineChild;
+
+                while select workOrderLineChild
+                where workOrderLineChild.ParentLineRecId == workOrderLine.RecId
+                {
+                    if (workOrderLineChild.Status < this.workOrderLineStatus())
+                    {
+                        ret = checkFailed(strFmt("@DNR:WarningChildLowerStatus", this.workOrderLineStatus(), workOrderLineChild.TaskId, workOrderLineChild.WorkOrderId, workOrderLineChild.LineNumber));
+                    }
+                }
+            }
+            else if (workOrderLineTask.TaskType != WPPTaskType::InternalLoad && validateParent && workOrderLine.ParentLineRecId)
+            {
+                WPPWorkOrderLine workOrderLineParent = WPPWorkOrderLine::findRecId(workOrderLine.ParentLineRecId);
+                
+                if (workOrderLineParent
+                &&  workOrderLineParent.Status < this.workOrderLineStatus())
+                {
+                    ret = checkFailed(strFmt("@DNR6806", this.workOrderLineStatus(), workOrderLineParent.TaskId, workOrderLineParent.WorkOrderId, workOrderLineParent.LineNumber));
+                }
+            }
+        }
+    
+        if (ret
+        &&  this.workOrderLineStatus() >= WPPWorkOrderLineStatus::Planned)
+        {
+            ret = ret && workOrderLine.validateResourceRequired(this.workOrderLineStatus());
+    
+            if (this.workOrderLineStatus() > WPPWorkOrderLineStatus::Planned)
+            {
+                if (workOrderTable.OrderTableId
+                &&  (workOrderTable.OrderTableId == tableNum(SalesLine)
+                ||   workOrderTable.OrderTableId == tableNum(PurchLine)
+                ||   workOrderTable.OrderTableId == tableNum(SalesTable)
+                ||   workOrderTable.OrderTableId == tableNum(PurchTable)))
+                {
+                    ret = ret && this.validateOrderLine(workOrderTable.OrderTableId, workOrderTable.OrderRecId);
+                }
+                else if (workOrderTable.OrderTableId && workOrderTable.OrderTableId == tableNum(InventJournalTable))
+                {
+                    // no special validation needed at the moment
+                }
+                else
+                if (!workOrderTable.BOBObjectTableRecId)
+                {
+                    ret = checkFailed(strFmt("@DNR7185", new DictEnum(enumNum(WPPWorkOrderLineStatus)).value2Label(this.workOrderLineStatus())));
+                }
+            }
+        }
+    
+        if (ret
+        &&  this.workOrderLineStatus() >= WPPWorkOrderLineStatus::CheckedWorkshop
+        && workOrderLine.canCheckTransactionsExist()
+        && !WPPCheckOpenTransactions::construct(workOrderLine.projTable(), false).check(true, true, true, true, true))
+        {
+            ret = checkFailed(strFmt("@DNR6673", this.workOrderLineStatus()));
+        }
+    
+        if (ret
+        &&  this.workOrderLineStatus() > WPPWorkOrderLineStatus::Created)
+        {
+            if (workOrderLine.TaskId == parameters.InternalDeliveryTaskId
+            ||  workOrderLine.TaskId == parameters.InternalLoadTaskId
+            ||  workOrderLineTask.TaskType == WPPTaskType::Delivery
+            ||  workOrderLineTask.TaskType == WPPTaskType::Load
+            && (!workOrderLine.RequestedStartDateTime
+            ||  !workOrderLine.RequestedEndDateTime))
+            {
+                ret = checkFailed(strFmt("@DNR7191", this.workOrderLineStatus(), fieldId2pname(tableNum(WPPWorkOrderLine), fieldNum(WPPWorkOrderLine, RequestedStartDateTime)), fieldId2pname(tableNum(WPPWorkOrderLine), fieldNum(WPPWorkOrderLine, RequestedEndDateTime))));
+            }
+    
+            if (ret
+            &&  workOrderTable)
+            {
+                ret = workOrderTable.FINcheckCreditLimit();
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateStatusGroupSetup</Name>
+				<Source><![CDATA[
+    protected boolean validateStatusGroupSetup()
+    {
+        boolean ret = true;
+        WPPWorkOrderStatusGroupId workOrderStatusGroupId = this.getWorkOrderStatusGroupId();
+        Map possibleStatusMap = WPPWorkOrderStatusSetup::getPossibleWorkOrderStatus(workOrderStatusGroupId, this.parmWorkOrderLineStatusCurrent());
+        boolean statusEnabled = possibleStatusMap.lookup(this.workOrderLineStatus());
+
+        if (!statusEnabled)
+        {
+            ret = checkFailed(strFmt("@DNR6554", workOrderLine.TaskId, this.workOrderLineStatus()));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateOrderLine</Name>
+				<Source><![CDATA[
+    private boolean validateOrderLine(RefTableId    _orderTableId,
+                                      RefRecId      _orderRecId)
+    {
+        RORRentalLine       rentalLineParent, rentalLineChild;
+        RORRentalHeader     rentalHeader;
+        InventDim           inventDim;
+        InventTable         inventTable;
+        EcoResProduct       ecoResProduct;
+        BOBRentalType       rentalType;
+    
+        boolean ret = true;
+    
+        switch (_orderTableId)
+        {
+            case tableNum(SalesLine):
+                rentalLineParent = SalesLine::findRecId(_orderRecId);
+                break;
+    
+            case tableNum(PurchLine):
+                rentalLineParent = PurchLine::findRecId(_orderRecId);
+                break;
+    
+            case tableNum(SalesTable):
+                rentalHeader = SalesTable::findRecId(_orderRecId);
+                break;
+    
+            case tableNum(PurchTable):
+                rentalHeader = PurchTable::findRecId(_orderRecId);
+                break;
+        }
+    
+        if (rentalHeader)
+        {
+            rentalLineChild  = rentalHeader.RORLineBuffer();
+    
+            select firstOnly RecId from rentalLineChild
+            where rentalLineChild.HeaderId == rentalHeader.HeaderId
+                exists join inventDim
+                where inventDim.inventDimId == rentalLineChild.InventDimId
+                &&   !inventDim.inventSerialId
+                    join TableId from inventTable
+                    where inventTable.ItemId == rentalLineChild.ItemId
+                        join TableId from ecoResProduct
+                        where ecoResProduct.RecId == inventTable.Product
+                            join TableId from rentalType
+                            where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                            &&    rentalType.Classification == BOBRentalTypeClassification::Serialized;
+    
+            if (rentalLineChild.RecId)
+            {
+                ret = checkFailed(strFmt("@DNR7185", new DictEnum(enumNum(WPPWorkOrderLineStatus)).value2Label(this.workOrderLineStatus())));
+            }
+        }
+        else
+        if (rentalLineParent.ItemId)
+        {
+            rentalType = BOBRentalType::findFromItemId(rentalLineParent.ItemId);
+            RORKitStandalone kitStandAlone = rentalType.RORKitStandalone;
+    
+            if (kitStandAlone == RORKitStandalone::Standalone)
+            {
+                if (rentalType.Classification == BOBRentalTypeClassification::Serialized
+                &&  !InventDim::find(rentalLineParent.InventDimId).inventSerialId)
+                {
+                    ret = checkFailed(strFmt("@DNR7185", new DictEnum(enumNum(WPPWorkOrderLineStatus)).value2Label(this.workOrderLineStatus())));
+                }
+            }
+            else
+            {
+                rentalLineChild  = rentalLineParent.RORLineBuffer();
+    
+                select firstOnly RecId from rentalLineChild
+                where rentalLineChild.ParentLineRecId == rentalLineParent.RecId
+                    exists join inventDim
+                    where inventDim.inventDimId == rentalLineChild.InventDimId
+                    &&   !inventDim.inventSerialId
+                        join TableId from inventTable
+                        where inventTable.ItemId == rentalLineChild.ItemId
+                            join TableId from ecoResProduct
+                            where ecoResProduct.RecId == inventTable.Product
+                                join TableId from rentalType
+                                where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                                &&    rentalType.Classification == BOBRentalTypeClassification::Serialized;
+    
+                if (rentalLineChild.RecId)
+                {
+                    ret = checkFailed(strFmt("@DNR7185", new DictEnum(enumNum(WPPWorkOrderLineStatus)).value2Label(this.workOrderLineStatus())));
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>workOrderLineStatus</Name>
+				<Source><![CDATA[
+    public abstract WPPWorkOrderLineStatus workOrderLineStatus()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static server WPPWorkOrderStatusUpdate construct(WPPWorkOrderLine        _workOrderLine,
+                                                            WPPWorkOrderLineStatus  _statusTo)
+    {
+        WPPWorkOrderStatusUpdate workOrderStatusUpdate;
+    
+        switch (_statusTo)
+        {
+            case WPPWorkOrderLineStatus::Created:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_Created(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::Confirmed:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_Confirmed(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::Released:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_Released(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::Planned:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_Planned(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::InProgress:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_InProgress(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::Completed:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_Completed(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::CheckedWorkshop:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_CheckedWorkshop(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::CheckedAdmin:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_CheckedAdmin(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::Invoiced:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_Invoiced(_workOrderLine);
+                break;
+    
+            case WPPWorkOrderLineStatus::Closed:
+                workOrderStatusUpdate = new WPPWorkOrderStatusUpdate_Closed(_workOrderLine);
+                break;
+    
+            default:
+                throw error(Error::missingParameter(null));
+    
+        }
+    
+        return workOrderStatusUpdate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        if (_args.dataset() != tableNum(WPPWorkOrderLine))
+        {
+            throw error(strFmt("@SYS113735", classStr(WPPWorkOrderStatusUpdate), tableStr(WPPWorkOrderLine)));
+        }
+    
+        if (_args.parmEnumType() != enumNum(WPPWorkOrderLineStatus))
+        {
+            throw error(strfmt("@SYS22828", "@DNR6543"));
+        }
+    
+        WPPWorkOrderLine workOrderLine = _args.record();
+        WPPWorkOrderLineStatus workOrderLineStatus = _args.parmEnum();
+        WPPWorkOrderTable workOrderTable = workOrderLine.workOrderTable();
+
+        changecompany(workOrderTable.CompanyId)
+        {
+            WPPWorkOrderStatusUpdate workOrderStatusUpdate = WPPWorkOrderStatusUpdate::construct(workOrderLine, workOrderLineStatus);
+            workOrderStatusUpdate.init();
+    
+        
+            if (workOrderStatusUpdate.prompt())
+            {
+                workOrderStatusUpdate.run();
+            }
+        }
+    
+        if (FormDataUtil::getFormDataSource(workOrderLine))
+        {
+            FormDataSource formDataSource = FormDataUtil::getFormDataSource(workOrderLine);
+            formDataSource.reread();
+            formDataSource.research(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkBlockDeliveryItemHierarchy</Name>
+				<Source><![CDATA[
+    private boolean checkBlockDeliveryItemHierarchy(SalesLine _salesLine)
+    {
+        if (blockDeliverySet && blockDeliverySet.in(_salesLine.RecId))
+        {
+            return true;
+        }
+
+        SalesLine salesLineParent = _salesLine.RORGetParentLine();
+    
+        if (salesLineParent && this.checkBlockDeliveryItemHierarchy(salesLineParent))
+        {
+            return true;
+        }
+        
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkSalesLineIsPicked</Name>
+				<Source><![CDATA[
+    protected boolean checkSalesLineIsPicked(SalesLine _salesLine)
+    {
+        BOBRentalTrans              rentalTrans;
+        InventTransOriginSalesLine  inventTransOriginSalesLine;
+
+        select minOf(SubStatus), count(RecId) from rentalTrans
+        where rentalTrans.TransType != BOBRentalTransType::InventCounting
+            exists join inventTransOriginSalesLine
+            where inventTransOriginSalesLine.InventTransOrigin   == rentalTrans.InventTransOrigin
+            && inventTransOriginSalesLine.SalesLineDataAreaId    == _salesLine.dataAreaId
+            && inventTransOriginSalesLine.SalesLineInventTransId == _salesLine.InventTransId;
+
+        if (rentalTrans.RecId && rentalTrans.SubStatus == BOBRentalSubStatus::Picked)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesLineTypeClass1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesLineType))]
+public final class DNRSalesLineTypeClass1_Extension
+{
+    // event handler methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>INVhasNoMoreLinesToInvoice_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(SalesLineType), methodStr(SalesLineType, INVhasNoMoreLinesToInvoice))]
+    public static void INVhasNoMoreLinesToInvoice_post(XppPrePostArgs _eventArgs)
+    {
+        SalesLineType   hostObject  = _eventArgs.getThis();
+        SalesLine       salesLine   = _eventArgs.getArg('_salesLine');
+        boolean         ret         = _eventArgs.getReturnValue();
+
+        if (salesLine.SalesStatus == SalesStatus::Canceled)
+        {
+            ret = true;
+        }
+        else
+        {
+            UnitOfMeasure rateCode = UnitOfMeasure::find(salesLine.RORPriceTimeUnit);
+
+            if (!FINInvoicePeriodQtyFinancial::existForCharging(salesLine.TableId, salesLine.RecId, salesLine.RORRentalLine::FINTimeZoneOrder(), FINRentalInvoiceProfile::find(salesLine.INVInvoiceProfileId).isHourlyInvoicing()))
+            {
+                ret = true;
+            }
+            else if (salesLine.ProjId && rateCode.FINInvoiceProjectEngine)
+            {
+                ProjEmplTrans       projEmplTrans;
+                ProjLineProperty    projLineProperty;
+
+                select firstonly TableId from projEmplTrans
+                where projEmplTrans.INVRefTableId   == salesLine.TableId
+                &&    projEmplTrans.INVRefRecId     == salesLine.RecId
+                    join ToBeInvoiced from projLineProperty
+                    where projEmplTrans.LinePropertyId == projLineProperty.LinePropertyId;
+
+                if (projLineProperty.ToBeInvoiced == NoYes::Yes && !salesLine.type().FINHasUninvoicedHourTrans())
+                {
+                    ret = true;
+                }
+            }
+        }
+
+        _eventArgs.setReturnValue(ret);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>SalesLineType_Post_inserted</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(SalesLineType), methodStr(SalesLineType, inserted))]
+    public static void SalesLineType_Post_inserted(XppPrePostArgs _eventArgs)
+    {
+        SalesLineType hostObject = _eventArgs.getThis();
+        SalesLine   salesLine = hostObject.RORParmSalesLine();
+
+        if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            SalesLineType::FINCreateRentalDates(salesLine);
+            
+            SalesQuotationLine  quoteLine;
+
+            if (salesLine.DNRSourceSalesQuoteLineRecId)
+            {
+                select firstonly RecId, INVRateMultiplierTier from quoteLine
+                where quoteLine.RecId == salesLine.DNRSourceSalesQuoteLineRecId;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>SalesLineType_Post_updated</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(SalesLineType), methodStr(SalesLineType, updated))]
+    public static void SalesLineType_Post_updated(XppPrePostArgs _eventArgs)
+    {
+        SalesLineType hostObject = _eventArgs.getThis();
+        SalesLine   salesLineOrig = _eventArgs.getArg('_salesLineOrig'); 
+        
+        SalesLineType::FINUpdateInvoicePeriod(hostObject, salesLineOrig);                                 
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINHasUninvoicedHourTrans</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public boolean FINHasUninvoicedHourTrans()
+    {
+        ProjEmplTrans       projEmplTrans;
+        ProjEmplTransSale   projEmplTransSale;
+        ProjLineProperty    projLineProperty;
+
+        select firstonly transStatus from projEmplTransSale
+        where projEmplTransSale.TransStatus == ProjTransStatus::Registered
+           || projEmplTransSale.TransStatus == ProjTransStatus::Posted
+           || projEmplTransSale.TransStatus == ProjTransStatus::InvoiceProposal
+           || projEmplTransSale.TransStatus == ProjTransStatus::MarkedCreditnote
+           || projEmplTransSale.TransStatus == ProjTransStatus::CreditnoteProposal
+           || projEmplTransSale.TransStatus == ProjTransStatus::Adjusted
+           && projEmplTransSale.LineAmount //exclude Non chargeable lines
+            join TableId from projEmplTrans
+            where projEmplTrans.TransId == projEmplTransSale.TransId
+            &&    projEmplTrans.INVRefTableId == SalesLine.TableId
+            &&    projEmplTrans.INVRefRecId == SalesLine.RecId
+                join ToBeInvoiced from projLineProperty
+                where projEmplTrans.LinePropertyId == projLineProperty.LinePropertyId;
+
+        return (projLineProperty.ToBeInvoiced == NoYes::Yes ? true : false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCreateRentalDates</Name>
+				<Source><![CDATA[
+    private static void FINCreateRentalDates(SalesLine _salesLine)
+    {
+        if (isConfigurationkeyEnabled(configurationKeyNum(RORRentalDateTimes)))
+        {
+            RORRentalDateTimes rentalDateTimes;
+
+            select firstonly rentalDateTimes
+            where rentalDateTimes.RefTableId == _salesLine.TableId
+            &&    rentalDateTimes.RefRecId == _salesLine.RecId;
+
+            if (!rentalDateTimes)
+            {
+                rentalDateTimes = _salesLine.RORRentalLine::createRentalDateTimes();
+            }
+           
+            FINInvoicePeriodManager_Creation invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::Creation, _salesLine);
+            invoicePeriodManager.setRentalDateTimes(rentalDateTimes);
+            invoicePeriodManager.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRCheckActiveInvoiceProposal</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Checks for existing invoice proposal
+    /// </summary>
+    /// <returns>
+    /// Return false if there is an active invoice proposal
+    /// </returns>
+    protected boolean DNRCheckActiveInvoiceProposal()
+    {
+        FinCustInvoiceTransProforma  custInvoiceTransProforma;
+        FinCustInvoiceJourProforma   custInvoiceJourProforma;
+        FINCustInvoiceTransProFormaInvoiceTrans custInvoiceTransProFormaInvoiceTrans;
+        CustInvoiceJour custInvoiceJour;
+
+        select firstonly RecId from custInvoiceTransProforma
+        where custInvoiceTransProforma.InventTransId  == salesLine.InventTransId
+            join InvoiceId from custInvoiceJourProforma
+            where custInvoiceJourProforma.InvoiceId == custInvoiceTransProforma.InvoiceId
+            && custInvoiceJourProforma.InvoiceDate == custInvoiceTransProforma.InvoiceDate
+            && custInvoiceJourProforma.NumberSequenceGroup == custInvoiceTransProforma.NumberSequenceGroup
+            && custInvoiceJourProforma.SalesId == custInvoiceTransProforma.SalesId
+            && custInvoiceJourProforma.IsProFormaInvoiceActive
+                notexists join custInvoiceJour
+                where  custInvoiceJour.InvoiceAccount == custInvoiceJourProforma.InvoiceAccount
+                &&     custInvoiceJour.InvoiceId == custInvoiceJourProforma.InvoiceId
+                &&     custInvoiceJour.LedgerVoucher == custInvoiceJourProforma.LedgerVoucher;
+
+        if (custInvoiceJourProforma.InvoiceId)
+        {
+            return checkFailed(strFmt("@DNR:InvoiceProrosalExistsForCurrentLine", custInvoiceJourProforma.InvoiceId));
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canLineAmountBeUpdated</Name>
+				<Source><![CDATA[
+    boolean canLineAmountBeUpdated()
+    {
+        boolean ret = next canLineAmountBeUpdated();
+
+        ret = ret && salesLine.FINValidateActiveInvoiceProposal(true);
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    public boolean validateWrite(boolean _skipCreditLimitCheck)
+    {
+        boolean ret = next validateWrite(_skipCreditLimitCheck);
+
+        if (ret && salesTable.salesType == SalesType::RORRental)
+        {
+           if (!salesLine.FINValidateActiveInvoiceProposal(true))
+            {
+                if (salesLine.dataSource())
+                {
+                    salesLine.dataSource().reread();
+                }
+
+                return false;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateInvoicePeriod</Name>
+				<Source><![CDATA[
+    private static void FINUpdateInvoicePeriod(SalesLineType _salesLineType, SalesLine _salesLine)
+    {
+        if (_salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            INVInvoicePeriodHost invoicePeriodHost = _salesLineType.RORParmSalesLine();
+            INVInvoicePeriodHost origBuffer = _salesLine;
+
+            if (invoicePeriodHost.RentQty != origBuffer.RentQty)
+            {
+                Qty deltaQty = (invoicePeriodHost.RentQty - origBuffer.RentQty);
+                Map changesMap = new Map(Types::Enum, Types::Container);
+                changesMap.insert(FINInvoicePeriodPhysicalChange::Qty, [deltaQty]);
+                
+                FINInvoicePeriodManager_PhysicalChange invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::PhysicalChange, invoicePeriodHost);
+                invoicePeriodManager.setChanges(changesMap);
+                invoicePeriodManager.run();
+            }
+
+            boolean isKit = invoicePeriodHost.KitComponentType == RORKitComponentType::Kit || invoicePeriodHost.KitComponentType == RORKitComponentType::KitComponent;
+            boolean canChangePrice = !isKit || invoicePeriodHost.IsPriceFixed;
+            
+            if ((invoicePeriodHost.Price            != origBuffer.Price && canChangePrice)
+            ||  (invoicePeriodHost.LinePercent      != origBuffer.LinePercent && canChangePrice)
+            ||  invoicePeriodHost.RentalModeId      != origBuffer.RentalModeId
+            ||  invoicePeriodHost.CalendarId        != origBuffer.CalendarId)
+            {
+                RORRentalDateTimes rentalDateTimes = _salesLine.RORRentalDateTimes();
+                if (rentalDateTimes)
+                {
+                    FieldId onRentFieldId, expectedOffRentFieldId, offRentFieldId;
+
+                    [onRentFieldId, offRentFieldId, expectedOffRentFieldId] = RORRentalDateTimes::getPeriodFieldIds();
+
+                    TransDateTime effectiveDateTimeFrom = rentalDateTimes.(onRentFieldId);
+                    TransDateTime effectiveDateTimeTo   = rentalDateTimes.(offRentFieldId) ? rentalDateTimes.(offRentFieldId) : DateTimeUtil::maxValue();
+
+                    if (FINRentalInvoiceProfile::find(invoicePeriodHost.InvoiceProfileId).MultiplierPeriods == INVMultiplierPeriods::RangeCalendar
+                    &&  (!invoicePeriodHost.dataSource() || Box::yesNoCancel("@DNR:RangeTierRecalculation", DialogButton::Yes)))
+                    {
+                        FINPriceTierRangeRecalculate priceTierRangeRecalculate = new FINPriceTierRangeRecalculate();
+                        priceTierRangeRecalculate.parmIsManualRecalculation(true);
+                        priceTierRangeRecalculate.run(invoicePeriodHost);
+                    }
+                    else
+                    {
+                        Map changesMap = FINInvoicePeriodManager_FinancialChange::getChangesMap(invoicePeriodHost, origBuffer, effectiveDateTimeFrom, effectiveDateTimeTo);
+                        ROROrderAmendmentDialogType::runFinancialChanges(origBuffer, changesMap);
+                    }
+                    
+                    // ROROrderAmendmentDialogType::runFinancialChanges is updating an order line so we need to reread the value here.
+                    _salesLineType.parmSalesLine().reread();
+
+                    FINInvoicePeriodManager_FinancialChange invoicePeriodManager_Financial = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::FinancialChange, invoicePeriodHost);
+                    if (invoicePeriodManager_Financial.canProcessInvoicedPeriod(effectiveDateTimeFrom, effectiveDateTimeTo))
+                    {
+                        FINInvoicePeriodQtyFinancial::markUnMarkDateTimeForCreditWithoutSourceRecordUpdate(FINInvoiceTransPeriodStatus::PendingCredit, effectiveDateTimeFrom, effectiveDateTimeTo, invoicePeriodHost);
+                    }
+                }
+            }
+
+            if (invoicePeriodHost.InvoiceProfileId  != origBuffer.InvoiceProfileId
+             || invoicePeriodHost.CalendarId        != origBuffer.CalendarId)
+            {
+                FINRAGContractLineTier::syncContractLineTiers(_salesLineType.RORParmSalesLine());
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSyncContractLineTiersAsync</Name>
+				<Source><![CDATA[
+    public static void FINSyncContractLineTiersAsync(container _params, System.Threading.CancellationToken _cancellationToken)
+    {
+        using (FINSyncContractLineTierAsyncDisposableContext syncContractLineTierAsyncContext = new FINSyncContractLineTierAsyncDisposableContext())
+        {
+            SalesLine salesLine = con2Buf(conPeek(_params, 1));
+
+            RORRentalDateTimes rentalDateTimes = con2Buf(conPeek(_params, 2));
+            syncContractLineTierAsyncContext.parmRentalDateTimes(rentalDateTimes);
+
+            FINRAGContractLineTier::syncContractLineTiers(salesLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

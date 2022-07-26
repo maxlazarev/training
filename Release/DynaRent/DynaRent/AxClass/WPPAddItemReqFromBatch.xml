@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPAddItemReqFromBatch</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPAddItemReqFromBatch extends RunBaseBatch
+{
+    DaysBefore          daysInAdvance;
+
+    DialogField         dfDaysInAdvance;
+
+    QueryRun            queryRun;
+
+    #define.CurrentVersion(1)
+    #define.Version1(1)
+    #localmacro.CurrentList
+        daysInAdvance
+    #endmacro
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Returns a class that contains the methods that are described by the <c>RunBaseDialogable</c>
+    ///    interface.
+    /// </summary>
+    /// <returns>
+    ///    A class that contains the methods that are described by the <c>RunBaseDialogable</c> interface.
+    /// </returns>
+    /// <remarks>
+    ///    A dialog box can be either built by using the <c>Dialog</c> class or by using a class that is
+    ///    created in the Application Object Tree (AOT).
+    /// </remarks>
+    public Object dialog()
+    {
+        DialogRunbase   dialog;
+    
+        dialog = super();
+    
+        dfDaysInAdvance = dialog.addFieldValue(extendedTypeStr(DaysBefore), daysInAdvance, "@DNR8403");
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        boolean ret;
+    
+        ret = super();
+    
+        daysInAdvance = dfDaysInAdvance.value();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParmDefault</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Initializes the internal variables.
+    /// </summary>
+    /// <remarks>
+    ///    This method is called when a <c>SysLastValue</c> record cannot be found when the code calls the
+    ///    <c>SysLastValue.GetLast</c> method. Remember to call the <c>super</c> method.
+    /// </remarks>
+    public void initParmDefault()
+    {
+        this.initQuery();
+    
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initQuery</Name>
+				<Source><![CDATA[
+    private void initQuery()
+    {
+        Query                   query;
+        QueryBuildDataSource    qbdsObjectTable;
+        QueryBuildDataSource    qbdsWorkOrderTable;
+        QueryBuildDataSource    qbdsWorkOrderLine;
+        QueryBuildRange         qbrItemReqAdded;
+    
+        query = new Query();
+    
+        qbdsWorkOrderLine = query.addDataSource(tableNum(WPPWorkOrderLine));
+        qbdsWorkOrderLine.update(true);
+        qbrItemReqAdded = qbdsWorkOrderLine.addRange(fieldNum(WPPWorkOrderLine, ItemReqAdded));
+        qbrItemReqAdded.value(SysQuery::value(NoYes::No));
+        qbrItemReqAdded.status(RangeStatus::Locked);
+    
+        qbdsWorkOrderTable = qbdsWorkOrderLine.addDataSource(tableNum(WPPWorkOrderTable));
+        qbdsWorkOrderTable.relations(true);
+        qbdsWorkOrderTable.joinMode(JoinMode::ExistsJoin);
+    
+        qbdsObjectTable = qbdsWorkOrderTable.addDataSource(tableNum(BOBObjectTable));
+        qbdsObjectTable.relations(true);
+        qbdsObjectTable.joinMode(JoinMode::ExistsJoin);
+    
+        queryRun = new SysQueryRun(query);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [#CurrentVersion, #CurrentList, queryRun.pack()];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryRun</Name>
+				<Source><![CDATA[
+    public QueryRun queryRun()
+    {
+        return queryRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        QueryBuildDataSource    qbdsWorkOrderLine;
+        WPPWorkOrderLine        workOrderLine;
+        Set                     errorSet;
+        SetEnumerator           enumerator;
+        str                     dateRange;
+    
+        #OCCRetryCount
+    
+        super();
+    
+        dateRange = SysQuery::range(DateTimeUtil::minValue(), DateTimeUtil::addDays(DateTimeUtil::getSystemDateTime(), daysInAdvance));
+        errorSet = new Set(Types::Record);
+    
+        // Add a range based on the Days in advance field from the dialog
+        qbdsWorkOrderLine = queryRun.query().dataSourceTable(tableNum(WPPWorkOrderLine));
+        qbdsWorkOrderLine.addRange(fieldNum(WPPWorkOrderLine, RequestedStartDateTime)).value(dateRange);
+    
+        while (queryRun.next())
+        {
+            try
+            {
+                workOrderLine = queryRun.get(tableNum(WPPWorkOrderLine));
+    
+                if(!errorSet.in(workOrderLine))
+                {
+                    ttsBegin;
+    
+                    workOrderLine = queryRun.get(tableNum(WPPWorkOrderLine));
+                    workOrderLine.createItemReq(true);
+    
+                    ttsCommit;
+                }
+            }
+            catch (Exception::Deadlock)
+            {
+                retry;
+            }
+            catch (Exception::UpdateConflict)
+            {
+                if (appl.ttsLevel() == 0)
+                {
+                    if (xSession::currentRetryCount() >= #RetryNum)
+                    {
+                        throw Exception::UpdateConflictNotRecovered;
+                    }
+                    else
+                    {
+                        retry;
+                    }
+                }
+                else
+                {
+                    throw Exception::UpdateConflict;
+                }
+            }
+            catch
+            {
+                errorSet.add(workOrderLine);
+                queryRun.reset();
+                retry;
+            }
+        }
+    
+        if(!errorSet.empty())
+        {
+            enumerator = errorSet.getEnumerator();
+    
+            while(enumerator.moveNext())
+            {
+                workOrderLine = enumerator.current();
+                error(strFmt("@DNR8496", workOrderLine.WorkOrderId, workOrderLine.LineNumber));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showQueryValues</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Indicates whether to add a select button to the dialog box.
+    /// </summary>
+    /// <returns>
+    ///    Always returns true.
+    /// </returns>
+    /// <remarks>
+    ///    If you click this button, it will show the query form. Therefore, the <c>queryRun</c> method has to
+    ///    return a valid <c>queryRun</c> .If you change the return value to false the button will no longer
+    ///    be added.
+    /// </remarks>
+    public boolean showQueryValues()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version     version;
+        container   queryCon;
+    
+        version = RunBase::getVersion(_packedClass);
+    
+        switch (version)
+        {
+            case #CurrentVersion:
+                [version, #CurrentList, queryCon] = _packedClass;
+                if (SysQuery::isPackedOk(queryCon))
+                {
+                    queryRun = new QueryRun(queryCon);
+                }
+                else
+                {
+                    this.initQuery();
+                }
+                break;
+    
+            default:
+                return false;
+        }
+    
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static WPPAddItemReqFromBatch construct()
+    {
+        return new WPPAddItemReqFromBatch();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    client server static ClassDescription description()
+    {
+        return "@DNR8404";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args args)
+    {
+        WPPAddItemReqFromBatch  addItemReqFromBatch;
+    
+        addItemReqFromBatch = WPPAddItemReqFromBatch::construct();
+    
+        if (addItemReqFromBatch.prompt())
+        {
+            addItemReqFromBatch.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

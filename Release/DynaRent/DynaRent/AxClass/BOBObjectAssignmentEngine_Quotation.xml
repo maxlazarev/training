@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBObjectAssignmentEngine_Quotation</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBObjectAssignmentEngine_Quotation extends BOBObjectAssignmentEngine
+{
+    SalesQuotationLine salesQuotationLine;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>assign</Name>
+				<Source><![CDATA[
+    protected void assign()
+    {
+        InventDim                   inventDim;
+        BOBObjectTable              objectTable;
+        BOBRentalTrans              rentalTrans;
+        PurchLine                   purchLine;
+        InventLocationId            subRentalWarehouse;
+        InventTransOriginPurchLine  inventTransOrigin;
+        InventSerial                inventSerial;
+        ;
+    
+        objectTable = BOBObjectTable::findInventSerialId(newSerialNum);
+        
+        // Make sure the Serial Number is already created in the current company
+        inventSerial = InventSerial::BOBFindOrCreateSerialNumber(objectTable.RentalTypeId, newSerialNum);
+        
+        inventDim = salesQuotationLine.inventDim();
+        inventDim.inventSerialId = inventSerial.InventSerialId;
+    
+        if(objectTable.Category == BOBObjectCategory::SubRental)
+        {
+            // no intercompany processing for now
+            select firstonly PurchId, InventTransId from purchLine
+                exists join inventTransOrigin
+                where inventTransOrigin.PurchLineDataAreaId == purchLine.dataAreaId
+                &&    inventTransOrigin.PurchLineInventTransId == purchLine.InventTransId
+                    join TableId from rentalTrans
+                    where rentalTrans.ObjectId          == objectTable.ObjectId
+                    &&    rentalTrans.TransType         == BOBRentalTransType::SubRental
+                    &&    rentalTrans.CompanyId         == inventTransOrigin.PurchLineDataAreaId
+                    &&    rentalTrans.InventTransOrigin == inventTransOrigin.InventTransOrigin;
+    
+            if(purchLine)
+            {
+                salesQuotationLine.InventRefType    = InventRefType::Purch;
+                salesQuotationLine.InventRefId      = purchLine.PurchId;
+                salesQuotationLine.InventRefTransId = purchLine.InventTransId;
+            }
+    
+            salesQuotationLine.RORTradeType = RORTradeType::SubRental;
+            subRentalWarehouse = RORParameters::find().SubRentalWarehouse;
+    
+            if(subRentalWarehouse)
+            {
+                inventDim.InventLocationId  = subRentalWarehouse;
+                inventDim.InventSiteId      = InventLocation::find(subRentalWarehouse).InventSiteId;
+            }
+        }
+    
+        salesQuotationLine.InventDimId              = InventDim::findOrCreate(inventDim).InventDimId;
+        salesQuotationLine.BOBRentalTypeIdAssigned  = objectTable.RentalTypeId;
+        salesQuotationLine.BOBItemIdRequested       = salesQuotationLine.ItemId;
+        salesQuotationLine.ItemId                   = inventSerial.ItemId;
+    
+        if(!salesQuotationLine.RecId) // record is being created
+        {
+            salesQuotationLine.insert();
+        }
+    
+        if(salesQuotationLine.ItemId == salesQuotationLine.BOBItemIdRequested)
+        {
+            salesQuotationLine.update();
+        }
+        else // if a different item is assigned, first we need to drop the inventory, then manually recreate it
+        {
+            salesQuotationLine.update(true);
+            this.updateInventory();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setRentalLine</Name>
+				<Source><![CDATA[
+    protected void setRentalLine(RORRentalLine _rentalLine)
+    {
+        salesQuotationLine = _rentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unassign</Name>
+				<Source><![CDATA[
+    protected void unassign()
+    {
+        InventDim               inventDim;
+        BOBObjectTable          objectTable;
+        boolean                 mustDropInvent;
+        SalesQuotationTable     salesQuotationTable;
+        ;
+    
+        mustDropInvent = (salesQuotationLine.ItemId != salesQuotationLine.BOBItemIdRequested);
+    
+        select firstOnly InventLocationId, InventSiteId from salesQuotationTable
+        where salesQuotationTable.QuotationId == salesQuotationLine.QuotationId
+            join  inventDim
+            where inventDim.inventDimId == salesQuotationLine.InventDimId
+                join Category from objectTable
+                where objectTable.InventSerialId == currentSerialNum;
+    
+        inventDim.inventSerialId = '';
+    
+        if(objectTable.Category == BOBObjectCategory::SubRental)
+        {
+            salesQuotationLine.RORTradeType     = RORTradeType::Rental;
+            salesQuotationLine.InventRefType    = InventRefType::None;
+            salesQuotationLine.InventRefId      = '';
+            salesQuotationLine.InventRefTransId = '';
+    
+            if(salesQuotationTable.InventLocationId)
+            {
+                inventDim.InventLocationId  = salesQuotationTable.InventLocationId;
+                inventDim.InventSiteId      = salesQuotationTable.InventSiteId;
+            }
+        }
+    
+        salesQuotationLine.InventDimId              = InventDim::findOrCreate(inventDim).InventDimId;
+        salesQuotationLine.BOBRentalTypeIdAssigned  = '';
+        salesQuotationLine.ItemId                   = salesQuotationLine.BOBItemIdRequested ? salesQuotationLine.BOBItemIdRequested : salesQuotationLine.ItemId;
+        salesQuotationLine.BOBItemIdRequested       = '';
+    
+        // if a different item was assigned, first we need to drop the inventory, then manually recreate it
+        if(mustDropInvent)
+        {
+            salesQuotationLine.update(true);
+            this.updateInventory();
+        }
+        else
+        {
+            salesQuotationLine.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean         ret;
+        BOBRentalType   rentalType;
+        ;
+    
+        ret = true;
+        rentalType = BOBRentalType::find(salesQuotationLine.BOBRentalTypeIdAssigned ?
+                                         salesQuotationLine.BOBRentalTypeIdAssigned :
+                                         salesQuotationLine.BOBRentalTypeIdRequested);
+    
+        if(!rentalType)
+        {
+            ret = checkFailed(strFmt("@DNR6076", salesQuotationLine.ItemId));
+        }
+    
+        if(rentalType.Classification != BOBRentalTypeClassification::Serialized)
+        {
+            ret = checkFailed(strFmt("@DNR1762", rentalType.Classification));
+        }
+    
+        if(currentSerialNum) // validate unassign
+        {
+            if((salesQuotationLine.QuotationStatus == SalesQuotationStatus::Confirmed
+                || salesQuotationLine.QuotationStatus == SalesQuotationStatus::Lost
+                || salesQuotationLine.QuotationStatus == SalesQuotationStatus::Cancelled
+                || salesQuotationLine.QuotationStatus == SalesQuotationStatus::Reset
+                || salesQuotationLine.QuotationStatus == SalesQuotationStatus::Modified
+                || salesQuotationLine.QuotationStatus == SalesQuotationStatus::Submitted
+                || salesQuotationLine.QuotationStatus == SalesQuotationStatus::Approved
+                || salesQuotationLine.QuotationStatus == SalesQuotationStatus::Revised)
+               && salesQuotationLine.RORCanUnassignObject())
+            {
+                ret = checkFailed(strFmt("@DNR4985", SalesQuotationStatus::Sent));
+            }
+        }
+    
+        ret = ret && super(_calledFrom);
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

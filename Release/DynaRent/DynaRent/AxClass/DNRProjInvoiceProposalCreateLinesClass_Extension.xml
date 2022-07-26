@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRProjInvoiceProposalCreateLinesClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(ProjInvoiceProposalCreateLines))]
+public final class DNRProjInvoiceProposalCreateLinesClass_Extension
+{
+    private Map processProjIdMap;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createSalesLineQuery</Name>
+				<Source><![CDATA[
+    protected Query createSalesLineQuery(ProjInvoiceProjId _projInvoiceProjId, ProjId _projId)
+    {
+        Query ret = next createSalesLineQuery(_projInvoiceProjId, _projId);
+
+        if (proposalCreateLinesParams.parmInvoiceTypeSelection() == ProjInvoiceTypeSelection::Both || proposalCreateLinesParams.parmInvoiceTypeSelection() == ProjInvoiceTypeSelection::Creditnotes)
+        {
+            if (!RORParameters::find().RentalProjectInvoicing)
+            {
+                QueryBuildDataSource qbdsSalesLine = ret.dataSourceTable(tableNum(SalesLine));
+                qbdsSalesLine.addRange(fieldNum(SalesLine, SalesType)).value(queryValue(SalesType::RORRental));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINDoEmpl</Name>
+				<Source><![CDATA[
+    public void FINDoEmpl(ProjEmplTrans _projEmplTrans, boolean _isCreate, PSAContractLineNum _contractLineNum)
+    {
+        this.doEmpl(_projEmplTrans, _isCreate, _contractLineNum);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getQuery</Name>
+				<Source><![CDATA[
+    public Query getQuery(ProjInvoiceProjId _projInvoiceProjId, ProjId _projId, TableId _tableIdTrans, TableId _tableIdSales)
+    {
+        Query                ret        = next getQuery(_projInvoiceProjId, _projId, _tableIdTrans, _tableIdSales);
+        QueryBuildDataSource qbdsTrans  = ret.dataSourceTable(_tableIdSales);
+
+        if (_tableIdTrans == tableNum(ProjRevenueTrans))
+        {
+            if (proposalCreateLinesParams.BSAparmInvoiceGroupId() && (qbdsTrans != null))
+            {
+                QueryBuildDataSource qbdsSMASubscriptionTable   = qbdsTrans.addDataSource(tableNum(SMASubscriptionTable));
+
+                qbdsSMASubscriptionTable.addRange(fieldNum(SMASubscriptionTable, BSAInvoiceGroupId)).value(proposalCreateLinesParams.BSAparmInvoiceGroupId());
+                qbdsSMASubscriptionTable.joinMode(JoinMode::ExistsJoin);
+                qbdsSMASubscriptionTable.addLink(fieldNum(ProjRevenueTrans, SMASubscriptionId), fieldNum(SMASubscriptionTable, SubscriptionId));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    void run()
+    {
+        processProjIdMap = new Map(Types::String, Types::Integer); // the value is actually a boolean
+
+        next run();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runTransactions</Name>
+				<Source><![CDATA[
+    protected void runTransactions(ProjInvoiceProjId _projInvoiceProjId, ProjId _projId, boolean _isFixedPrice)
+    {
+        #DNRConstants
+
+        ProjTable           projTable;
+        WPPWorkOrderLine    workOrderLine;
+        WPPWorkOrderTable   workOrderTable;
+        SalesLine           salesLine;
+        SalesTable          salesTable;
+        RORVenueTable       venueTable;
+        WPPParameters       parameters  = WPPParameters::find();
+        Set                 projIdSet   = new Set(Types::String);
+
+        ProjId projIdLocal = _projId;
+
+        if (processProjIdMap.exists(_projId))
+        {
+            if (!processProjIdMap.lookup(_projId))
+            {
+                // We don't want to process the project in question.
+                projIdLocal = #DNRvalueNoMatch;
+            }
+        }
+        else
+        {
+            select firstonly projTable
+                where projTable.ProjId == _projId
+                outer join Status, RecId, WorkOrderId from workOrderLine
+                where workOrderLine.ProjId == projTable.ProjId
+                    outer join TableId from workOrderTable
+                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    &&    workOrderTable.OrderRecId
+                    &&    workOrderTable.OrderTableId
+                        outer join TableId from salesLine
+                        where salesLine.TableId == workOrderTable.OrderTableId
+                        &&    salesLine.RecId   == workOrderTable.OrderRecId
+                            outer join TableId from salesTable
+                            where salesTable.SalesId == salesLine.SalesId
+                            ||   (salesTable.TableId == workOrderTable.OrderTableId && salesTable.RecId == workOrderTable.OrderRecId)
+                                outer join RecId from venueTable
+                                where venueTable.WPPProjId == salesTable.ProjId;
+            if (projTable)
+            {
+                boolean processProjId = true;
+
+                if ((!workOrderLine                                                             ||
+                     venueTable.RecId                                                           ||
+                     parameters.WorkOrderStatusToInvoice == WPPWorkOrderLineStatusNone::None    ||
+                     workOrderLine.Status                == WPPWorkOrderLineStatus::Closed      ||
+                     workOrderLine.Status                >= enum2int(parameters.WorkOrderStatusToInvoice) - 1)
+                    && !projIdSet.in(projTable.ProjId) // only proces once a specific project
+                    && projTable.status().checkRule(ProjStatusRule::CreateInvoiceProposal))
+                {
+                    if (proposalCreateLinesParams.BSAparmWorkOrderId() && workOrderLine.WorkOrderId != proposalCreateLinesParams.BSAparmWorkOrderId())
+                    {
+                        projIdLocal = #DNRvalueNoMatch;
+                        processProjId = false;
+                    }
+                }
+
+                processProjIdMap.insert(_projId, processProjId);
+            }
+            else
+            {
+                projIdLocal = #DNRvalueNoMatch;
+                processProjIdMap.insert(_projId, false);
+            }
+        }
+
+        next runTransactions(_projInvoiceProjId, projIdLocal, _isFixedPrice);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjTableForInvoiceProposal</Name>
+				<Source><![CDATA[
+    protected Query getProjTableForInvoiceProposal(ProjInvoiceTable _projInvoiceTable)
+    {
+        Query ret = next getProjTableForInvoiceProposal(_projInvoiceTable);
+        ret.dataSourceTable(tableNum(ProjTable)).addOrderByField(fieldNum(ProjTable, ProjId));
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

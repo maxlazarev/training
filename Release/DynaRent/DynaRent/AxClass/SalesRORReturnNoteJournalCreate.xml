@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>SalesRORReturnNoteJournalCreate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[DocumentStatusFactoryAttribute(DocumentStatus::RORReturnNote)]
+class SalesRORReturnNoteJournalCreate extends FormletterJournalCreate
+{
+    CustRORReturnNoteJour       returnNoteJour;
+    CustRORReturnNoteTrans      returnNoteTrans;
+
+    SalesTable                  salesTable;
+    SalesParmTable              salesParmTable;
+    SalesParmUpdate             salesParmUpdate;
+
+    SalesTotals                 salesTotals;
+    RecordSortedList            recordListSalesParmLine;
+    NoYes                       creditNote;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>allocateNumAndVoucher</Name>
+				<Source><![CDATA[
+    protected NumberSeq allocateNumAndVoucher()
+    {
+        NumberSequenceDatatype  numberDatatype = NumberSequenceDatatype::find(RORParameters::numRefReturnNote_Rental().NumberSequenceDatatype);
+        NumberSequenceDatatype  voucherDatatype = NumberSequenceDatatype::find(RORParameters::numRefReturnNoteVoucher_Rental().NumberSequenceDatatype);
+        RefRecId                scopeId = NumberSeqScopeFactory::createDefaultScope().getId();
+        RefRecId                returnNoteNumber;
+        RefRecId                returnNoteVoucher;
+    
+        boolean                 voucherEqualsNumber;
+    
+        if (salesTable.NumberSequenceGroup)
+        {
+            returnNoteNumber = NumberSequenceGroupRef::findNaturalKey(numberDatatype.RecId, scopeId, salesTable.NumberSequenceGroup).NumberSequenceId;
+    
+            if (!returnNoteNumber)
+            {
+                returnNoteNumber = RORParameters::numRefReturnNote_Rental().NumberSequenceId;
+            }
+    
+            if (RORParameters::numRefReturnNoteVoucher_Rental().AllowSameAs)
+            {
+                voucherEqualsNumber = true;
+                returnNoteVoucher   = returnNoteNumber;
+            }
+            else
+            {
+                returnNoteVoucher = NumberSequenceGroupRef::findNaturalKey(voucherDatatype.RecId, scopeId, salesTable.NumberSequenceGroup).NumberSequenceId;
+    
+                if (!returnNoteVoucher)
+                {
+                    returnNoteVoucher = RORParameters::numRefReturnNoteVoucher_Rental().NumberSequenceId;
+                }
+            }
+    
+            return NumberSeq::newGetNumAndVoucherFromId(returnNoteNumber, returnNoteVoucher, voucherEqualsNumber);
+        }
+    
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalHeader</Name>
+				<Source><![CDATA[
+    protected void createJournalHeader()
+    {
+        returnNoteJour.initValue();
+    
+        returnNoteJour.ReturnNoteId         = this.getJournalNumber();
+        returnNoteJour.LedgerVoucher        = this.getVoucher();
+        returnNoteJour.DeliveryDate         = salesParmTable.Transdate;
+        returnNoteJour.DocumentDate         = salesParmTable.DocumentDate;
+        returnNoteJour.initFromSalesTable(salesTable);
+    
+        this.setDeliveryFields();
+    
+        returnNoteJour.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalLine</Name>
+				<Source><![CDATA[
+    protected void createJournalLine(Common _salesParmLine)
+    {
+        SalesParmLine       salesParmLine = _salesParmLine as SalesParmLine;
+        SalesLine           salesLine     = salesParmLine.salesLine();
+        RORRentalDateTimes  rentalDateTimes;
+    
+        this.initJournalLine(salesParmLine);
+    
+        returnNoteTrans.Qty             = salesParmLine.DeliverNow;
+        returnNoteTrans.InventQty       = salesParmLine.InventNow;
+        returnNoteTrans.Remain          = salesParmLine.RemainAfter;
+        returnNoteTrans.RemainInvent    = salesParmLine.RemainAfterInvent;
+        returnNoteTrans.ValueMST        = salesParmLine.lineAmountExclTax(returnNoteJour.DeliveryDate);
+    
+        if (salesTable.CurrencyCode)
+        {
+            returnNoteTrans.ValueMST = CurrencyExchangeHelper::mstAmount(returnNoteTrans.ValueMST, salesTable.CurrencyCode, returnNoteJour.DeliveryDate,
+                                                           Currency::noYes2UnknownNoYes(salesTable.euroTriangulation(returnNoteJour.DeliveryDate)),
+                                                           salesTable.exchRate(returnNoteJour.DeliveryDate),
+                                                           salesTable.exchRateSecondary(returnNoteJour.DeliveryDate));
+    
+            returnNoteTrans.StatValueMST = CurrencyExchangeHelper::mstAmount(returnNoteTrans.StatValueMST, salesTable.CurrencyCode, returnNoteJour.DeliveryDate,
+                                                           Currency::noYes2UnknownNoYes(salesTable.euroTriangulation(returnNoteJour.DeliveryDate)),
+                                                           salesTable.exchRate(returnNoteJour.DeliveryDate),
+                                                           salesTable.exchRateSecondary(returnNoteJour.DeliveryDate));
+        }
+    
+        // cancellation of created packing slip
+        if (!returnNoteTrans.Qty)
+        {
+            returnNoteTrans.FullyMatched = NoYes::Yes;
+        }
+    
+        this.insertJournalLine(returnNoteTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalLink</Name>
+				<Source><![CDATA[
+    protected void createJournalLink(Common _salesParmLine)
+    {
+        SalesParmLine               salesParmLine = _salesParmLine as SalesParmLine;
+        CustRORReturnNoteSalesLink  returnNoteSalesLink;
+    
+        returnNoteSalesLink.initFromSalesParmLine  (salesParmLine);
+        returnNoteSalesLink.initFromSalesTable     (SalesTable::find(salesParmLine.OrigSalesId));
+        returnNoteSalesLink.initFromCustRORReturnNoteJour(returnNoteJour);
+        this.insertJournalLink(returnNoteSalesLink);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>formletterType</Name>
+				<Source><![CDATA[
+    protected FormletterType formletterType()
+    {
+        return FormletterType::Sales;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getJournal</Name>
+				<Source><![CDATA[
+    public Common getJournal()
+    {
+        return returnNoteJour;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initJournalHeader</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Sets correctable fields on journal header.
+    /// </summary>
+    protected void initJournalHeader()
+    {
+        returnNoteJour.Qty                = salesTotals.totalQty();
+        returnNoteJour.Weight             = salesTotals.totalWeight();
+        returnNoteJour.Volume             = salesTotals.totalVolume();
+        returnNoteJour.ParmId             = salesParmUpdate.ParmId;
+        returnNoteJour.InterCompanyPosted = this.parmInterCompanyPosted();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initJournalLine</Name>
+				<Source><![CDATA[
+    public Common initJournalLine(Common _parmLine)
+    {
+        SalesParmLine   salesParmLine = _parmLine as SalesParmLine;
+        SalesLine       salesLine = salesParmLine.salesLine();
+        Label           label = new Label(returnNoteJour.LanguageId);
+        SalesTable      salesTableLocal = salesLine.salesTable();
+    
+        returnNoteTrans.clear();
+        returnNoteTrans.initValue();
+    
+        returnNoteTrans.initFromSalesLine(salesLine);
+        returnNoteTrans.initFromReturnNoteJour(returnNoteJour);
+        returnNoteTrans.setLineNum(this.getLineNum());
+    
+        returnNoteTrans.Scrap = salesParmLine.Scrap;
+    
+        returnNoteTrans.LineHeader = label.extractString(literalStr("@DNR1539"))  + ' ' + salesLine.SalesId       + ' '
+                                        + label.extractString(literalStr("@SYS24704")) + ' ' + salesTableLocal.CustAccount  + ' '
+                                        + (salesTableLocal.PurchOrderFormNum ? (label.extractString(literalStr("@SYS9452"))  + ' ' + salesTableLocal.PurchOrderFormNum + ' ') : '')
+                                        + returnNoteTrans.LineHeader;
+    
+        returnNoteTrans.SourceDocumentLine = SourceDocumentLine::createSourceDocumentLine(tableNum(CustRORReturnNoteTrans));
+    
+        return returnNoteTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSourceTable</Name>
+				<Source><![CDATA[
+    protected void initSourceTable()
+    {
+        salesTable = salesParmTable.salesTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initTotals</Name>
+				<Source><![CDATA[
+    protected void initTotals()
+    {
+        salesTotals = SalesTotals::construct(salesParmTable, salesParmUpdate.SpecQty, salesParmUpdate.SumBy, salesParmUpdate.ParmId, salesParmUpdate.SumSalesId, documentStatus);
+        salesTotals.prepareTotalAmountCalculation();
+        salesTotals.prepareQuantitiesCalculation();
+        this.parmTax(salesTotals.tax());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalLineTableId</Name>
+				<Source><![CDATA[
+    protected tableId journalLineTableId()
+    {
+        return tableNum(CustRORReturnNoteTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linksTableId</Name>
+				<Source><![CDATA[
+    protected tableId linksTableId()
+    {
+        return tableNum(CustRORReturnNoteSalesLink);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>noLinesForPosting</Name>
+				<Source><![CDATA[
+    protected void noLinesForPosting(boolean _throwError = false)
+    {
+        if (this.linesExists())
+        {
+            // Credit card failed w/error message already, just announce posting failure
+            this.showPostingCanceledError(_throwError);
+        }
+        else
+        {
+            super(_throwError);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>numberSequenceReferenceNum</Name>
+				<Source><![CDATA[
+    protected NumberSequenceReference numberSequenceReferenceNum()
+    {
+        return RORParameters::numRefReturnNote_Rental();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>numberSequenceReferenceVoucher</Name>
+				<Source><![CDATA[
+    protected NumberSequenceReference numberSequenceReferenceVoucher()
+    {
+        return RORParameters::numRefReturnNoteVoucher_Rental();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmParmTable</Name>
+				<Source><![CDATA[
+    public Common parmParmTable(Common _parmTable = salesParmTable)
+    {
+        salesParmTable = _parmTable as SalesParmTable;
+        return salesParmTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmParmUpdate</Name>
+				<Source><![CDATA[
+    public Common parmParmUpdate(Common _parmUpdate = salesParmUpdate)
+    {
+        salesParmUpdate = _parmUpdate as SalesParmUpdate;
+        return salesParmUpdate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>proforma</Name>
+				<Source><![CDATA[
+    protected boolean proforma()
+    {
+        return salesParmUpdate.Proforma;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>recordListParmLine</Name>
+				<Source><![CDATA[
+    protected RecordSortedList recordListParmLine()
+    {
+        return salesTotals.recordSortedListLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDeliveryFields</Name>
+				<Source><![CDATA[
+    protected void setDeliveryFields()
+    {
+        SalesLine           localSalesLine;
+        SalesParmLine       salesParmLine;
+        ProjTable           projTable;
+        ProjInvoiceTable    projInvoiceTable;
+        ProjFundingSource   projFundingSource;
+    
+        select firstonly salesParmLine
+        where salesParmLine.ParmId     == salesParmTable.ParmId
+        &&    salesParmLine.TableRefId == salesParmTable.TableRefId;
+    
+        localSalesLine = salesParmLine.salesLine();
+    
+        returnNoteJour.DeliveryPostalAddress = salesParmTable.DeliveryPostalAddress ? salesParmTable.DeliveryPostalAddress
+                                                                                         : localSalesLine.DeliveryPostalAddress;
+    
+        returnNoteJour.DeliveryName      = salesParmTable.DeliveryName    ? salesParmTable.DeliveryName
+                                                                               : localSalesLine.defaultDeliveryName();
+        returnNoteJour.DlvMode           = salesParmTable.DlvMode         ? salesParmTable.DlvMode
+                                                                               : (localSalesLine.DlvMode ? localSalesLine.DlvMode : localSalesLine.salesTable().DlvMode);
+    
+        returnNoteJour.PrintMgmtSiteId    = salesParmTable.InventSiteId    ? salesParmTable.InventSiteId : '';
+    
+        // Set the invoicing Address of the Packing Slip Journal with the address on the Project Funding source that contains the project
+        // associated with the project above
+        projTable = salesTable.projTable();
+        if (projTable)
+        {
+            projInvoiceTable = projTable.projInvoice();
+            if (projInvoiceTable)
+            {
+                select firstonly InvoiceLocation from projFundingSource
+                where projFundingSource.ContractId == projInvoiceTable.ProjInvoiceProjId
+                &&    projFundingSource.FundingType == ProjFundingType::Customer;
+            }
+        }
+    
+        if (projInvoiceTable
+        && (projFundingSource.InvoiceLocation || projInvoiceTable.Description))
+        {
+            returnNoteJour.InvoicingName          = projInvoiceTable.Description;
+            returnNoteJour.InvoicePostalAddress = LogisticsLocationEntity::location2PostalAddress(projFundingSource.InvoiceLocation, returnNoteJour.deliveryDateTime()).RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>sourceTable</Name>
+				<Source><![CDATA[
+    protected Common sourceTable()
+    {
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>totals</Name>
+				<Source><![CDATA[
+    protected Object totals()
+    {
+        return salesTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>typeParmLine</Name>
+				<Source><![CDATA[
+    protected Common typeParmLine()
+    {
+        SalesParmLine   salesParmLine;
+        return salesParmLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static SalesRORReturnNoteJournalCreate construct()
+    {
+        return new SalesRORReturnNoteJournalCreate();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

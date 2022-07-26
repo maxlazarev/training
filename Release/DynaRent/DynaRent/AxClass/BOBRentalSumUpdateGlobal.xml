@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalSumUpdateGlobal</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBRentalSumUpdateGlobal
+{
+    BOBTmpRentalTransDelta  tmpDelta;
+    boolean                 hasData; // used to prevent unnecessary database roundtrips when the tmp table is empty
+    TransDateTime           maxDateTime; // maximum DateTime value without timezone correction
+    Map                     syncData;
+
+    private static BOBRentalSumUpdateGlobal singleton;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>aggregateDelta</Name>
+				<Source><![CDATA[
+    private void aggregateDelta(Map _deltaMap)
+    {
+        MapEnumerator           enumerator;
+        BOBTmpRentalTransDelta  deltaRaw;
+        container               keyCon;
+        BOBRentalQty            dateTimeQty;
+        ;
+    
+        enumerator = _deltaMap.getEnumerator();
+    
+        while(enumerator.moveNext())
+        {
+            deltaRaw.data(enumerator.currentValue());
+            keyCon = deltaRaw.getKeyContainer();
+            dateTimeQty = deltaRaw.Qty;
+    
+            // add to syncData
+            if(syncData.exists(keyCon))
+            {
+                dateTimeQty += syncData.lookup(keyCon);
+            }
+    
+            syncData.insert(keyCon, dateTimeQty);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>commit</Name>
+				<Source><![CDATA[
+    public void commit()
+    {
+        BOBRentalType           rentalType;
+        BOBPostingPolicy        postingPolicy;
+        BOBPostingPolicyRule    postingPolicyRule;
+        Map                     roundedDeltaMap;
+        Counter                 cnt = 1;
+        ;
+    
+        if(hasData)
+        {
+            roundedDeltaMap = new Map(Types::Integer, Types::Record);
+            syncData        = new Map(Types::Container, Types::Real);
+    
+            // We need to check whether the posting policy requires us to sync BOBRentalSum.
+            // That data cannot be cached since this class instance lives globally per client session,
+            // and updates to the BOBPostingPolicy(Rule) table would then cause all sessions to have to
+            // flush their caches
+    
+            while select tmpDelta
+            order by RentalTypeId, InventLocationId, TransDateTime
+                join TableId from rentalType
+                where rentalType.RentalTypeId == tmpDelta.RentalTypeId
+                    join RentalSumRounding from postingPolicy
+                    where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                    &&    postingPolicy.IncludeInAvailabilityOverview
+                        join TableId from postingPolicyRule
+                        where postingPolicyRule.PostingPolicyRecId == postingPolicy.RecId
+                        &&    postingPolicyRule.SubStatus == tmpDelta.SubStatus
+                        &&  ((tmpDelta.TransType == BOBRentalTransType::Sales        && postingPolicyRule.IsAvailableSales)     ||
+                             (tmpDelta.TransType == BOBRentalTransType::Purch        && postingPolicyRule.IsAvailablePurchase)  ||
+                             (tmpDelta.TransType == BOBRentalTransType::Rental       && postingPolicyRule.IsAvailableRental)    ||
+                             (tmpDelta.TransType == BOBRentalTransType::SubRental    && postingPolicyRule.IsAvailableSubRental) ||
+                             (tmpDelta.TransType == BOBRentalTransType::WPPWorkOrder && postingPolicyRule.IsAvailableWorkOrder) ||
+                             (tmpDelta.TransType == BOBRentalTransType::InventCounting) ||
+                             (tmpDelta.TransType == BOBRentalTransType::Invent) ||
+                             (tmpDelta.TransType == BOBRentalTransType::Asset))
+            {
+                if(tmpDelta.Qty)
+                {
+                    tmpDelta.TransDateTime = BOBRentalTrans::roundOffDateTime(tmpDelta.TransDateTime, postingPolicy.RentalSumRounding);
+                    roundedDeltaMap.insert(cnt, tmpDelta);
+                    cnt ++;
+                }
+            }
+    
+            this.aggregateDelta(roundedDeltaMap);
+            this.insertRentalTransDelta();
+            this.reset();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteRentalTrans</Name>
+				<Source><![CDATA[
+    public void deleteRentalTrans(BOBRentalTrans _rentalTrans)
+    {
+        if(_rentalTrans.Active == BOBRentalTransActive::Active && _rentalTrans.Qty)
+        {
+            // from
+            tmpDelta.clear();
+            tmpDelta.initFromRentalTrans(_rentalTrans);
+            tmpDelta.Qty            = -_rentalTrans.Qty;
+            tmpDelta.TransDateTime  = _rentalTrans.FromDateTime;
+            tmpDelta.insert();
+    
+            // to
+            if(_rentalTrans.ToDateTime < maxDateTime && _rentalTrans.CertaintyTo != BOBDateTimeCertainty::Tentative)
+            {
+                tmpDelta.Qty            = _rentalTrans.Qty;
+                tmpDelta.TransDateTime  = _rentalTrans.ToDateTime;
+                tmpDelta.insert();
+            }
+    
+            hasData = true;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertRentalTrans</Name>
+				<Source><![CDATA[
+    public void insertRentalTrans(BOBRentalTrans _rentalTrans)
+    {
+        if(_rentalTrans.Active == BOBRentalTransActive::Active && _rentalTrans.Qty)
+        {
+            // from
+            tmpDelta.clear();
+            tmpDelta.initFromRentalTrans(_rentalTrans);
+            tmpDelta.Qty            = _rentalTrans.Qty;
+            tmpDelta.TransDateTime  = _rentalTrans.FromDateTime;
+            tmpDelta.insert();
+    
+            // to
+            if(_rentalTrans.ToDateTime < maxDateTime && _rentalTrans.CertaintyTo != BOBDateTimeCertainty::Tentative)
+            {
+                tmpDelta.Qty            = -_rentalTrans.Qty;
+                tmpDelta.TransDateTime  = _rentalTrans.ToDateTime;
+                tmpDelta.insert();
+            }
+    
+            hasData = true;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertRentalTransDelta</Name>
+				<Source><![CDATA[
+    private void insertRentalTransDelta()
+    {
+        MapEnumerator       enumerator;
+        BOBRentalQty        deltaQty;
+        BOBRentalTypeId     rentalTypeId;
+        InventLocationId    inventLocationId;
+        TransDateTime       transDateTime;
+        RecordInsertList    insertList;
+        BOBRentalTransDelta rentalTransDelta;
+        ;
+    
+        enumerator = syncData.getEnumerator();
+        insertList = new RecordInsertList(tableNum(BOBRentalTransDelta));
+    
+        while(enumerator.moveNext())
+        {
+            deltaQty = enumerator.currentValue();
+    
+            if(deltaQty)
+            {
+                [ rentalTypeId, inventLocationId, transDateTime ] = enumerator.currentKey();
+    
+                rentalTransDelta.clear();
+                rentalTransDelta.InventLocationId = inventLocationId;
+                rentalTransDelta.RentalTypeId = rentalTypeId;
+                rentalTransDelta.TransDateTime = transDateTime;
+                rentalTransDelta.Qty = deltaQty;
+    
+                insertList.add(rentalTransDelta);
+            }
+        }
+    
+        insertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        maxDateTime = DateTimeUtil::addDays(DateTimeUtil::maxValue(), -1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reset</Name>
+				<Source><![CDATA[
+    public void reset()
+    {
+        delete_from tmpDelta;
+        tmpDelta = null;
+        hasData = false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalTrans</Name>
+				<Source><![CDATA[
+    public void updateRentalTrans(BOBRentalTrans _rentalTrans)
+    {
+        BOBRentalTrans rentalTransOrig = _rentalTrans.orig();
+        ;
+    
+        if(this.wasRentalTransChanged(_rentalTrans, rentalTransOrig))
+        {
+            this.deleteRentalTrans(rentalTransOrig);
+            this.insertRentalTrans(_rentalTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>wasRentalTransChanged</Name>
+				<Source><![CDATA[
+    private boolean wasRentalTransChanged(BOBRentalTrans _newTrans, BOBRentalTrans _origTrans)
+    {
+        return (_origTrans.Active           != _newTrans.Active             ||
+                // apparently, CertaintyFrom is never checked for this
+                _origTrans.CertaintyTo      != _newTrans.CertaintyTo        ||
+                // we don't care about CompanyId for now
+                _origTrans.FromDateTime     != _newTrans.FromDateTime       ||
+                _origTrans.InventLocationId != _newTrans.InventLocationId   ||
+                _origTrans.Qty              != _newTrans.Qty                ||
+                _origTrans.RentalTypeId     != _newTrans.RentalTypeId       ||
+                _origTrans.SubStatus        != _newTrans.SubStatus          ||
+                _origTrans.ToDateTime       != _newTrans.ToDateTime);
+                // TransType never changes
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>Instance</Name>
+				<Source><![CDATA[
+    public static BOBRentalSumUpdateGlobal Instance()
+    {
+        if(singleton == null)
+        {
+            singleton = new BOBRentalSumUpdateGlobal();
+        }
+
+        return singleton;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

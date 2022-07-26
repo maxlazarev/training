@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RTPInventTransferUpdShipClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(InventTransferUpdShip))]
+public final class RTPInventTransferUpdShipClass_Extension
+{
+    // chain-of-command wrapper methods
+
+    private boolean isRental; 
+    private InventTransferLine inventTransferLineLoc;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>updateInventTransferLine</Name>
+				<Source><![CDATA[
+    protected void updateInventTransferLine(InventTransferParmLine _inventTransferParmLine)
+    {
+        inventTransferLineLoc = InventTransferLine::findTransIdShip(_inventTransferParmLine.InventTransId, true);
+        
+        isRental = (inventTransferLineLoc.RORTradeType == RORTradeType::Rental || inventTransferLineLoc.RORTradeType == RORTradeType::SubRental);
+
+        next updateInventTransferLine(_inventTransferParmLine);
+
+        this.BOBUpdateObjects2(_inventTransferParmLine, inventTransferLineLoc);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createEstimatedTransitTransactions</Name>
+				<Source><![CDATA[
+    protected void createEstimatedTransitTransactions(InventMov_TransferTransitTo     _movementTransitTo,
+                                                      InventMov_TransferTransitFrom   _movementTransitFrom,
+                                                      InventDim						  _inventDimTransitReceipt,
+                                                      InventQty						  _qtyReceiveTransit,
+                                                      PdsCWInventQty				  _cwQtyReceiveTransit)
+    {
+        next createEstimatedTransitTransactions(_movementTransitTo, _movementTransitFrom, _inventDimTransitReceipt, _qtyReceiveTransit, _cwQtyReceiveTransit);
+
+        if(isRental)
+        {
+            InventMov_RTPTransferTransitTo     movementTransitTo = InventMov_RTPTransferTransitTo::newFromInventTransferLine(inventTransferLineLoc);
+            movementTransitTo.inventTransOriginId(_movementTransitTo.inventTransOriginId());
+
+            InventMov_RTPTransferTransitFrom   movementTransitFrom = InventMov_RTPTransferTransitFrom::newFromInventTransferLine(inventTransferLineLoc);
+            movementTransitFrom.inventTransOriginId(_movementTransitFrom.inventTransOriginId());
+
+            // create compensating transactions for the transit receipt and issue
+            InventUpd_Estimated estimatedTransitTo = InventUpd_Estimated::newInventMovement(movementTransitTo);
+            int transSign = -1;
+
+            estimatedTransitTo.parmPreEstimated(0);
+            estimatedTransitTo.parmEstimated(_qtyReceiveTransit * transSign);
+            estimatedTransitTo.parmCWPreEstimated(0);
+            estimatedTransitTo.parmPdsCWEstimated(_cwQtyReceiveTransit * movementTransitFrom.transSign());
+            estimatedTransitTo.parmSkipUpdateDimensionFieldChange(true);
+            estimatedTransitTo.parmInventDim(_inventDimTransitReceipt);
+            estimatedTransitTo.parmUseInventDimForNewTransactions(true);
+            estimatedTransitTo.parmSkipInventTransSumUp(true);
+            estimatedTransitTo.BOBParmIsCompensatingTrans(true);
+            estimatedTransitTo.updateNow();
+
+            InventUpd_Estimated estimatedTransitFrom = InventUpd_Estimated::newInventMovement(movementTransitFrom);
+            estimatedTransitFrom.parmPreEstimated(0);
+            estimatedTransitFrom.parmEstimated(-_qtyReceiveTransit * transSign);
+            estimatedTransitFrom.parmCWPreEstimated(0);
+            estimatedTransitFrom.parmPdsCWEstimated(-_cwQtyReceiveTransit * movementTransitFrom.transSign());
+            estimatedTransitFrom.parmInventDim(_inventDimTransitReceipt);
+            estimatedTransitFrom.parmUseInventDimForNewTransactions(true);
+            estimatedTransitFrom.parmSkipInventTransSumUp(true);
+            estimatedTransitFrom.BOBParmIsCompensatingTrans(true);
+            estimatedTransitFrom.updateNow();
+
+            InventDim       regInventDim;
+            InventDimParm   regInventDimParm;
+
+            regInventDim.data(_inventDimTransitReceipt.data());
+            regInventDimParm.initFromInventDim(regInventDim);
+
+            InventUpd_Registered regTransitFrom = InventUpd_Registered::newParameters(movementTransitFrom,regInventDim, 
+                                                                                      regInventDimParm, 
+                                                                                      regInventDim, 
+                                                                                      regInventDimParm,
+                                                                                      -_qtyReceiveTransit * transSign);
+            regTransitFrom.BOBParmIsCompensatingTrans(true);
+            regTransitFrom.parmAllowNegativePhysical(true);
+            regTransitFrom.updateNow();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateObjects2</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public void BOBUpdateObjects2(InventTransferParmLine _inventTransferParmLine, InventTransferLine _inventTransferLine)
+    {
+        InventTransferTable                 inventTransferTable;
+        InventDim                           inventDim;
+        BOBObjectTable                      objectTable;
+        TransDateTime                       postingDateTime;
+        LogisticsEntityPostalAddressView    addressView;
+        InventLocation                      inventLocation;
+        
+        inventTransferTable = _inventTransferLine.inventTransferTable();
+
+        if(inventTransferTable.RTPIsRental && _inventTransferLine.BOBRentalTypeId)
+        {
+            select firstOnly InventLocationId, RecId from inventDim
+            where inventDim.inventDimId == _inventTransferLine.InventDimId
+            &&    inventDim.inventSerialId // serialized items only
+                join  objectTable
+                where objectTable.InventSerialId == inventDim.inventSerialId
+                &&    objectTable.RentalTypeId   == _inventTransferLine.BOBRentalTypeId;
+    
+            if (!inventDim)
+            {
+                select firstOnly InventLocationId, RecId from inventDim
+                where inventDim.inventDimId == _inventTransferParmLine.InventDimId
+                &&    inventDim.inventSerialId // serialized items only
+                    join  objectTable
+                    where objectTable.InventSerialId == inventDim.inventSerialId
+                    &&    objectTable.RentalTypeId   == _inventTransferLine.BOBRentalTypeId;
+            }
+    
+            if (objectTable)
+            {
+                InventTransferParmTable inventTransferParmTable = _inventTransferParmLine.inventTransferParmTable();
+                postingDateTime = DateTimeUtil::newDateTime(inventTransferParmTable.TransDate,
+                                                            inventTransferParmTable.RTPTransTime,
+                                                            DateTimeUtil::getUserPreferredTimeZone());
+                
+                    
+                select firstonly PostalAddress from addressView
+                where addressView.IsPrimary == NoYes::Yes
+                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                    exists join inventLocation
+                    where inventLocation.RecId == addressView.Entity
+                    &&    inventLocation.InventLocationId == inventTransferTable.InventLocationIdTransit;
+    
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, addressView.PostalAddress, postingDateTime, inventTransferTable);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventMovTransferFrom</Name>
+				<Source><![CDATA[
+    protected InventMov_TransferFrom createInventMovTransferFrom(InventTransferLine _inventTransferLine)
+    {
+        InventMov_TransferFrom  ret =  next createInventMovTransferFrom(_inventTransferLine);
+        
+        if(isRental)
+        {
+            ret.BOBParmTransDate(inventTransferParmTable.TransDate);
+            ret.BOBParmTransTime(inventTransferParmTable.RTPTransTime);
+        }
+
+        return ret; 
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventMovTransferTransitTo</Name>
+				<Source><![CDATA[
+    protected InventMov_TransferTransitTo createInventMovTransferTransitTo(InventTransferLine _inventTransferLine)
+    {
+        InventMov_TransferTransitTo ret = next createInventMovTransferTransitTo(_inventTransferLine);
+
+        if(isRental)
+        {
+            ret.BOBParmTransDate(inventTransferParmTable.TransDate);
+            ret.BOBParmTransTime(inventTransferParmTable.RTPTransTime);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventMovTransferTransitFrom</Name>
+				<Source><![CDATA[
+    protected InventMov_TransferTransitFrom createInventMovTransferTransitFrom(InventTransferLine _inventTransferLine)
+    {
+        InventMov_TransferTransitFrom ret = next createInventMovTransferTransitFrom(_inventTransferLine);
+
+        if(isRental)
+        {
+            ret.BOBParmTransDate(inventTransferParmTable.TransDate);
+            ret.BOBParmTransTime(inventTransferParmTable.RTPTransTime);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

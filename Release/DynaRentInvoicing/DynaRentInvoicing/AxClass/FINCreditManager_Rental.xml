@@ -1,0 +1,396 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCreditManager_Rental</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINCreditManager_Rental extends FINCreditManager
+{    
+    CustInvoiceJour custInvoiceJour;
+    SalesFormLetter salesFormLetter;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>resetIsModifiedForAmendmentLog</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void resetIsModifiedForAmendmentLog(RecId _amendmentLogRecId)
+    {
+        if (_amendmentLogRecId)
+        {
+            ROROrderAmendmentLog        orderAmendmentLog;
+            ROROrderAmendmentLog        orderAmendmentLogOther;
+            SalesLine                   salesLine;
+                
+            update_recordSet salesLine
+            setting RORIsModified = NoYes::No
+            where salesLine.RORIsModified == NoYes::Yes
+                exists join orderAmendmentLog
+                where orderAmendmentLog.RecId == _amendmentLogRecId
+                &&    orderAmendmentLog.RefTableId == salesLine.TableId
+                &&    orderAmendmentLog.RefRecId == salesLine.RecId
+                    notexists join orderAmendmentLogOther
+                    where orderAmendmentLogOther.RefTableId == orderAmendmentLog.RefTableId
+                    &&    orderAmendmentLogOther.RefRecId   == orderAmendmentLog.RefRecId
+                    &&    orderAmendmentLogOther.RecId      != orderAmendmentLog.RecId
+                    &&    !orderAmendmentLogOther.ConfirmId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getExternalNote</Name>
+				<Source><![CDATA[
+    protected void getExternalNote()
+    {
+        FINCreditLine           creditParmLineLocal;
+        FINCreditLineDetails    creditDetailsLocal;
+        CustInvoiceJour         custInvoiceJourLocal;
+        CustInvoiceTrans        custInvoiceTransLocal;
+    
+        select firstOnly ExternalNotes from creditDetailsLocal
+            exists join creditParmLineLocal
+            where (!callerCreditParmLine || creditParmLineLocal.RecId == callerCreditParmLine.RecId)
+            &&    creditParmLineLocal.RecId          == creditDetailsLocal.CreditLineRefRecId
+            &&    creditParmLineLocal.JourRefTableId == callerCreditParmLine.JourRefTableId
+            &&    creditParmLineLocal.JourRefRecId   == callerCreditParmLine.JourRefRecId
+                join TableId from custInvoiceTransLocal
+                where custInvoiceTransLocal.TableId == creditParmLineLocal.RefTableId
+                &&    custInvoiceTransLocal.RecId   == creditParmLineLocal.RefRecId
+                    join RecId from custInvoiceJourLocal
+                    where custInvoiceJourLocal.SalesId             == custInvoiceTransLocal.SalesId
+                    &&    custInvoiceJourLocal.InvoiceId           == custInvoiceTransLocal.InvoiceId
+                    &&    custInvoiceJourLocal.InvoiceDate         == custInvoiceTransLocal.InvoiceDate
+                    &&    custInvoiceJourLocal.numberSequenceGroup == custInvoiceTransLocal.numberSequenceGroup;
+    
+        externalNote = creditDetailsLocal.ExternalNotes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromCreditParmLine</Name>
+				<Source><![CDATA[
+    public void initFromCreditParmLine(FINCreditLine _creditParmLine)
+    {
+        super(_creditParmLine);
+    
+        custInvoiceJour = CustInvoiceJour::findRecId(_creditParmLine.JourRefRecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>restoreOrigRecords</Name>
+				<Source><![CDATA[
+    public void restoreOrigRecords()
+    {
+        // For callerCreditParmLine just delete records based on references in FINCreditPendingChangesReference.
+        // Delete actions should delete corresponding records
+        FINCreditPendingChangesReference::deleteForCreditParmLine(callerCreditParmLine.RecId);        
+
+        if (callerCreditParmLine.RefRecId)
+        {
+            FINCustInvoiceTrans::changePeriodStatus(FINInvoiceTransPeriodStatus::FullyInvoiced, callerCreditParmLine.RefRecId);
+        }                   
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>saveAmendmentLog</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInsertMethodInLoop", "Cannot be refactored without altering functionality of method")]
+    public void saveAmendmentLog()
+    {
+        SalesLine               salesLine;
+        CustInvoiceJour         custInvoiceJourLocal;
+        FINCreditLine           creditParmLineLocal;
+        FINCreditLineDetails    creditParmLineDetailsLocal;
+        boolean                 firstRecord = true;
+            
+        while select forupdate salesLine
+            join creditParmLineLocal
+            where (!callerCreditParmLine || creditParmLineLocal.RecId == callerCreditParmLine.RecId)
+            &&    creditParmLineLocal.JourRefTableId == callerCreditParmLine.JourRefTableId
+            &&    creditParmLineLocal.JourRefRecId == callerCreditParmLine.JourRefRecId 
+            &&    creditParmLineLocal.InventTransId == salesLine.InventTransId
+                join custInvoiceJourLocal
+                where custInvoiceJourLocal.TableId == creditParmLineLocal.JourRefTableId
+                &&    custInvoiceJourLocal.RecId == creditParmLineLocal.JourRefRecId
+                    join creditParmLineDetailsLocal
+                    where creditParmLineDetailsLocal.CreditLineRefRecId == creditParmLineLocal.RecId
+        {
+            ROROrderAmendmentLog orderAmendmentLog;
+        
+            orderAmendmentLog.clear();
+            orderAmendmentLog.initValue();
+            orderAmendmentLog.DNRReasonType = DNRReasonType::Credit;
+    
+            orderAmendmentLog.DNRReasonCode = creditParmLineDetailsLocal.DNRReasonCode;
+            orderAmendmentLog.LogTxt = creditParmLineDetailsLocal.ReasonText;
+            orderAmendmentLog.ContactPersonId = creditParmLineDetailsLocal.ContactPersonId;
+    
+            orderAmendmentLog.initFromSalesPurchLine(salesLine);
+            creditFormClass.setOrderAmendmentLog(orderAmendmentLog);
+            str creditText = creditFormClass.setCreditText(creditParmLineLocal, creditParmLineDetailsLocal);
+            orderAmendmentLog.LogTxtGenerated = creditText + ' ' + strFmt("@DNR7139", custInvoiceJourLocal.InvoiceId);
+            orderAmendmentLog.InvoiceId = custInvoiceJourLocal.InvoiceId;
+
+            orderAmendmentLog.insert();
+    
+            creditParmLineDetailsLocal.selectForUpdate(true);
+            creditParmLineDetailsLocal.Description = creditText;
+            creditParmLineDetailsLocal.update();
+
+            FINCreditPendingChangesReference::createReference(creditParmLineDetailsLocal, orderAmendmentLog, creditParmLineLocal.DocumentState, creditParmLineDetailsLocal.FromDateTime, creditParmLineDetailsLocal.ToDateTime);
+            
+            if (firstRecord && !salesLine.RORIsModified)
+            {
+                salesLine.RORIsModified = NoYes::Yes;    
+                salesLine.setSalesStatus();
+                salesLine.type().RORsetRentalStatus(salesLine);
+                salesLine.update();                
+            }
+            firstRecord = false;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSalesPurchTable</Name>
+				<Source><![CDATA[
+    public Common getSalesPurchTable()
+    {
+        CustInvoiceJour custInvoiceJourLocal = CustInvoiceJour::findRecId(callerCreditParmLine.JourRefRecId);
+        return SalesTable::find(custInvoiceJourLocal.SalesId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>saveOrigRecords</Name>
+				<Source><![CDATA[
+    protected void saveOrigRecords()
+    {
+        // 1. Save custInvoiceTrans.RecId to reverse pendingCredit
+        // 2. Save FINInvoicePeriodAmendment to restore state before credit changes
+        
+        // 1. it is stored in FINCreditLine
+        // 2. we don't remove old amendments only add a new one. They are picked during calculations based on creation dateTime.
+        // After credit is confirmed then amendment records can be cleaned up
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void updateRentalLine()
+    {
+        RORParameters           rorParameters = RORParameters::find();
+        SalesLine               salesLine;
+        CustInvoiceTrans        custInvoiceTrans;
+        Set                     salesRecIdSet = new Set(Types::Int64);
+        
+        update_recordSet salesLine
+        setting SalesDeliverNow = 0
+        where salesLine.SalesId == creditFormClass.orderId()
+        &&    (!callerCreditParmLine || salesLine.InventTransId == callerCreditParmLine.InventTransId);
+        
+        while select forUpdate salesLine
+        where salesLine.RORTradeType != RORTradeType::SalesPurch
+            join RecId from custInvoiceTrans
+            where custInvoiceTrans.InventTransId == salesLine.inventTransId
+                join creditParmLine
+                where (!callerCreditParmLine || creditParmLine.RecId == callerCreditParmLine.RecId)
+                &&    creditParmLine.JourRefTableId == callerCreditParmLine.JourRefTableId
+                &&    creditParmLine.JourRefRecId   == callerCreditParmLine.JourRefRecId
+                &&    creditParmLine.RefTableId     == custInvoiceTrans.TableId
+                &&    creditParmLine.RefRecId       == custInvoiceTrans.RecId
+                &&    (creditParmLine.DocumentState == VersioningDocumentState::Draft || creditParmLine.DocumentState == VersioningDocumentState::Approved)
+                    join creditParmLineDetails
+                    where creditParmLineDetails.CreditLineRefRecId == creditParmLine.RecId
+        {
+            if (!this.canProcessCredit(salesLine.TableId, salesLine.RecId, creditParmLineDetails))
+            {
+                continue;
+            }
+
+            boolean updateOrderLine = this.runDirectChange(salesLine, creditParmLine, creditParmLineDetails);
+
+            if (!salesRecIdSet.in(salesLine.RecId))
+            {
+                salesLine.SalesDeliverNow = salesLine.deliveredInTotal();
+                updateOrderLine = true;
+                salesRecIdSet.add(salesLine.RecId);
+            }
+
+            if (updateOrderLine)
+            {
+                salesLine.update();                    
+            }
+
+            ToDateTime toDateTime = creditParmLineDetails.ToDateTime;
+            FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+            select maxof(PeriodEndDateTime) from journalizedInvoicePeriod
+            where journalizedInvoicePeriod.RefTableId == custInvoiceTrans.TableId
+            &&    journalizedInvoicePeriod.RefRecId == custInvoiceTrans.RecId;        
+                    
+            calculationDateTime = max(journalizedInvoicePeriod.PeriodEndDateTime, toDateTime);
+
+            this.runIndirectChange(salesLine, creditParmLine, creditParmLineDetails);
+
+            FINCustInvoiceTrans::changePeriodStatus(FINInvoiceTransPeriodStatus::PendingCredit, custInvoiceTrans.RecId);
+        }           
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runInsuranceCredit</Name>
+				<Source><![CDATA[
+    protected void runInsuranceCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+        // Credit contract element as a manual component
+        this.createManualComponentForCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails, creditParmLineDetails.AmountCurCredit, FINRentalAccountType::Insurance, "@DNR:CreditInsurance");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runDeliveryCredit</Name>
+				<Source><![CDATA[
+    protected void runDeliveryCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+        // Credit contract element as a manual component
+        this.createManualComponentForCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails, creditParmLineDetails.AmountCurCredit, FINRentalAccountType::DeliveryTransport, "@DNR:CreditDelivery");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runReturnCredit</Name>
+				<Source><![CDATA[
+    protected void runReturnCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+        // Credit contract element as a manual component
+        this.createManualComponentForCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails, creditParmLineDetails.AmountCurCredit, FINRentalAccountType::ReturnTransport, "@DNR:CreditReturn");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSalesPurchLines</Name>
+				<Source><![CDATA[
+    protected void updateSalesPurchLines()
+    {
+        RORParameters       rorParameters = RORParameters::find();
+        SalesLine           salesLine;        
+        CustInvoiceTrans    custInvoiceTrans;
+        boolean             isFirstRecord = true;
+    
+        while select salesLine
+        where salesLine.RORTradeType == RORTradeType::SalesPurch
+            join TableId from custInvoiceTrans
+            where custInvoiceTrans.TableId == callerCreditParmLine.RefTableId
+            &&    custInvoiceTrans.RecId == callerCreditParmLine.RefRecId
+            &&    custInvoiceTrans.InventTransId == salesLine.inventTransId
+                join DocumentState from creditParmLine
+                where (!callerCreditParmLine || creditParmLine.RecId == callerCreditParmLine.RecId)
+                &&    creditParmLine.JourRefTableId == callerCreditParmLine.JourRefTableId
+                &&    creditParmLine.JourRefRecId   == callerCreditParmLine.JourRefRecId
+                &&    creditParmLine.RefTableId     == custInvoiceTrans.TableId
+                &&    creditParmLine.RefRecId       == custInvoiceTrans.RecId
+                &&    ((!rorParameters.FINIsRentalCreditWorkflowActive && creditParmLine.DocumentState == VersioningDocumentState::Approved) ||
+                       creditParmLine.DocumentState == VersioningDocumentState::Draft)
+                    join creditParmLineDetails
+                    where creditParmLineDetails.CreditLineRefRecId == creditParmLine.RecId
+        {
+            SalesLine salesLineCredit;
+            salesLineCredit.data(salesLine.data());
+            salesLineCredit.clearInventReference();
+            salesLineCredit.LineNum = 0;
+            salesLineCredit.LineCreationSequenceNumber = 0;
+            salesLineCredit.InventTransId = '';
+            salesLineCredit.RecId = 0;
+            salesLineCredit.SalesQty = salesLine.SalesQty * -1;
+            salesLineCredit.QtyOrdered = salesLine.QtyOrdered * -1;
+            salesLineCredit.LineAmount = creditParmLineDetails.AmountCurCredit * -1;
+            salesLineCredit.RORRentalGrossAmount = salesLineCredit.LineAmount;
+            // prices and discounts are reset when LineAmount is set directly
+            salesLineCredit.modifiedField(fieldNum(salesLine, LineAmount));
+            // we still want to see salesPrice in custInvoiceTrans
+            salesLineCredit.SalesPrice = salesLineCredit.SalesQty ? salesLineCredit.LineAmount / salesLineCredit.SalesQty : 0;
+            salesLineCredit.SalesDeliverNow = salesLineCredit.SalesQty;
+            salesLineCredit.InventTransIdReturn = salesLine.InventTransId;
+            salesLineCredit.createLine();
+    
+            FINCreditPendingChangesReference::createReference(creditParmLineDetails, salesLineCredit, creditParmLine.DocumentState, creditParmLineDetails.FromDateTime, creditParmLineDetails.ToDateTime); 
+           
+            if (isFirstRecord) 
+            {
+                SalesTable salesTable = SalesTable::find(salesLine.SalesId, true);
+
+                if (!salesTable.RORIsModified)
+                {
+                    salesTable.RORIsModified = NoYes::Yes;
+                    salesTable.update();
+                }
+            }
+            isFirstRecord = false;
+        }            
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearRentalStop</Name>
+				<Source><![CDATA[
+    [SysObsolete("The method is not being used anywhere", true)]
+    public void clearRentalStop(TableId _jourTableId, RecId _jourRecId)
+    {
+
+        // Clear rental stop for credited days
+        SalesLine salesLine;
+        CustInvoiceTrans custInvoiceTrans;
+        Map changesMap = new Map(Types::Container, Types::Container);
+        SalesLine currentSalesLine;
+
+        while select salesLine
+            join custInvoiceTrans
+            where custInvoiceTrans.InventTransId == SalesLine.InventTransId
+                join creditParmLineDetails
+                where creditParmLineDetails.CreditType == FINCreditType::Days
+                    exists join creditParmLine
+                    where creditParmLine.JourRefTableId == _jourTableId
+                    &&    creditParmLine.JourRefRecId == _jourRecId
+                    &&    creditParmLine.Recid == creditParmLineDetails.CreditLineRefRecId
+                    
+        {
+            if (currentSalesLine && currentSalesLine.InventTransId != salesLine.InventTransId)
+            {
+                FINInvoicePeriodManager_FinancialChange::runFromMap(currentSalesLine, changesMap, false);
+                changesMap = new Map(Types::Container, Types::Container);
+            }
+
+            currentSalesLine.data(salesLine);
+
+            changesMap.insert([creditParmLineDetails.FromDateTime, creditParmLineDetails.ToDateTime, FINInvoicePeriodPriceComponent::CalendarId], [currentSalesLine.DNRCalendarId]);
+        }
+        
+        if (currentSalesLine)
+        {
+            FINInvoicePeriodManager_FinancialChange::runFromMap(currentSalesLine, changesMap, false);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

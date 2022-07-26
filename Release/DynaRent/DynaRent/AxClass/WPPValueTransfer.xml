@@ -1,0 +1,1131 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPValueTransfer</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPValueTransfer extends RunBaseBatch
+{
+    // Tables
+    InventJournalTable          inventJournalTable;
+    LedgerJournalTable          ledgerJournalTable;
+    WPPWorkOrderLine            workOrderLine;
+    WPPWorkOrderTable           workOrderTable;
+    ProjTable                   projTable;
+    BOBObjectView               objectView;
+    BOBObjectTable              objectTable;
+
+    // Tmp storage
+    Map                         projGroupMap;
+
+    // Query
+    SysQueryRun                 queryRun;
+
+    // Variables
+    WPPMinimumValueTransfer     minimumValueTransfer;
+    ItemId                      itemId;
+    boolean                     priceFound;
+    boolean                     journalTransCreated;
+
+    #DEFINE.CurrentVersion(1)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createAssetTable</Name>
+				<Source><![CDATA[
+    protected AssetTable createAssetTable()
+    {
+        AssetTable      mainAssetTable,
+                        newAssetTable;
+        NumberSeq       assetIdNumberSeq;
+        WPPParameters   parameters;
+    
+        mainAssetTable = this.findAssetTable();
+    
+        if (mainAssetTable)
+        {
+            parameters = WPPParameters::find();
+    
+            if (!parameters.ValueRevisionsAssetGroup)
+            {
+                throw error("@DNR2820", new DictType(extendedTypeNum(WPPValueRevisionsAssetGroup)).label());
+            }
+    
+            newAssetTable.initValue();
+            newAssetTable.AssetGroup       = parameters.ValueRevisionsAssetGroup;
+            assetIdNumberSeq               = newAssetTable.initAssetNumberSeq();
+            newAssetTable.AssetId          = assetIdNumberSeq.num();
+            newAssetTable.SerialNum        = mainAssetTable.SerialNum;
+            newAssetTable.NameAlias        = mainAssetTable.NameAlias;
+            newAssetTable.MainAssetId      = mainAssetTable.AssetId;
+            newAssetTable.AssetType        = AssetType::Tangible;
+            newAssetTable.Name             = mainAssetTable.Name;
+            newAssetTable.NameAlias        = mainAssetTable.Name;
+            newAssetTable.BOBValueTransfer = NoYes::Yes;
+    
+            if (newAssetTable.validateWrite())
+            {
+                newAssetTable.insert();
+            }
+        }
+    
+        return newAssetTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventJournalTable</Name>
+				<Source><![CDATA[
+    private void createInventJournalTable()
+    {
+        InventOnhand        inventOnhand;
+        InventJournalName   inventJournalName;
+    
+        inventOnhand = this.createInventOnhand();
+    
+        if (inventOnhand.postedQty() && inventOnhand.availPhysical())
+        {
+            inventJournalName = InventJournalName::find(InventJournalName::standardJournalName(InventJournalType::Movement));
+    
+            if (inventJournalName)
+            {
+                inventJournalTable.JournalId = JournalTableData::newTable(inventJournalTable).nextJournalId();
+                inventJournalTable.initFromInventJournalName(inventJournalName);
+                inventJournalTable.WPPinitFromProjTable(projTable);
+    
+                if (inventJournalTable.validateWrite())
+                {
+                    inventJournalTable.insert();
+    
+                    if (inventJournalTable)
+                    {
+                        info(strFmt("@DNR2536", inventJournalTable.JournalId, curext()));
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventJournalTrans</Name>
+				<Source><![CDATA[
+    private void createInventJournalTrans(boolean       _reverseTrans,
+                                          SalesAmount   _salesAmount)
+    {
+        InventJournalTrans  inventJournalTrans;
+        InventDim           inventDim;
+        CostPriceAverage    inventoryValue;
+        JournalTableData    journalTableData;
+        JournalTransData    journalTransData;
+    
+        if (inventJournalTable)
+        {
+            journalTableData = JournalTableData::newTable(inventJournalTable);
+    
+            inventJournalTrans.initValue();
+            inventJournalTrans.initFromInventJournalTable(inventJournalTable);
+    
+            inventJournalTrans.TransDate             = workOrderTable.ActualPostingDate;
+            inventJournalTrans.ItemId                = itemId;
+            inventJournalTrans.Qty                   = _reverseTrans ? -1 : 1;
+            inventJournalTrans.AssetTransType        = AssetTransTypeJournal::Acquisition;
+    
+            inventDim                                = this.findOrCreateInventDim();
+            inventJournalTrans.InventDimId           = inventDim.inventDimId;
+    
+            inventoryValue                           = this.inventoryValue(inventDim);
+            inventJournalTrans.CostAmount            = _reverseTrans ? inventoryValue : inventoryValue + _salesAmount;
+    
+            inventJournalTrans.initFromInventTable(InventTable::find(itemId), false, false, true); // Called after the qty has been set
+            inventJournalTrans.initFromProjTable(projTable);
+    
+            if (inventJournalTrans.validateWrite())
+            {
+                journalTransData = journalTableData.journalStatic().newJournalTransData(inventJournalTrans, journalTableData);
+    
+                if (journalTableData.journalVoucherNum()
+                &&  journalTableData.journalTable().VoucherDraw == JournalVoucherDraw::Entering)
+                {
+                    journalTransData.initVoucher('', false, false);
+                }
+    
+                inventJournalTrans.insert();
+    
+                if (_reverseTrans)
+                {
+                    this.pickInventJournalTrans(inventJournalTrans, inventDim);
+                }
+                else
+                {
+                    this.registerInventJournalTrans(inventJournalTrans, inventDim);
+                }
+            }
+    
+            // Update number of lines on the journal table
+            inventJournalTable.NumOfLines++;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventOnhand</Name>
+				<Source><![CDATA[
+    private InventOnhand createInventOnhand()
+    {
+        InventDimParm   inventDimParm;
+        InventDim       inventDim;
+    
+        inventDimParm.clear();
+        inventDimParm.InventSerialIdFlag = NoYes::Yes;
+        inventDim.inventSerialId         = objectTable.InventSerialId;
+        itemId                           = this.getItemId();
+    
+        return InventOnhand::newItemDim(itemId, inventDim, inventDimParm);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createLedgerJournalTable</Name>
+				<Source><![CDATA[
+    private void createLedgerJournalTable(LedgerJournalType _ledgerJournalType)
+    {
+        LedgerJournalName   ledgerJournalName;
+        JournalTableData    journalTableData;
+    
+        ledgerJournalTable = null;
+        ledgerJournalName  = LedgerJournalName::WPPFindValueTransferJournal(_ledgerJournalType);
+    
+        if (ledgerJournalName)
+        {
+            if (ledgerJournalName.OffsetLedgerDimension)
+            {
+                journalTableData              = JournalTableData::newTable(ledgerJournalTable);
+                ledgerJournalTable.JournalNum = journalTableData.nextJournalId();
+                ledgerJournalTable.initFromLedgerJournalName(ledgerJournalName.JournalName);
+    
+                if (ledgerJournalTable.validateWrite())
+                {
+                    ledgerJournalTable.insert();
+    
+                    if (ledgerJournalTable)
+                    {
+                        info(strFmt("@DNR2538", new DictEnum(enumNum(LedgerJournalType)).value2Label(_ledgerJournalType), ledgerJournalTable.JournalNum, curext()));
+                    }
+                }
+            }
+            else
+            {
+                error(strFmt("@SYS26332", fieldId2PName(tableNum(LedgerJournalName), fieldNum(LedgerJournalName, OffsetLedgerDimension))));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createLedgerJournalTrans</Name>
+				<Source><![CDATA[
+    private void createLedgerJournalTrans(SalesAmount           _salesAmount,
+                                          AssetTable            _assetTable,
+                                          AssetBookId           _assetBookId,
+                                          LedgerJournalACType   _journalACType,
+                                          CompanyId             _companyId = curext())
+    {
+        LedgerJournalTrans          ledgerJournalTrans;
+        LedgerJournalTrans_Asset    ledgerJournalTrans_Asset;
+        LedgerJournalTrans_Project  ledgerJournalTrans_Project;
+        LedgerJournalEngine         ledgerJournalEngine;
+        JournalTableData            journalTableData;
+        JournalTransData            journalTransData;
+        RecId                       recId;
+    
+        if (ledgerJournalTable)
+        {
+            journalTableData = JournalTableData::newTable(ledgerJournalTable);
+    
+            ledgerJournalTrans                       = null;
+            ledgerJournalTrans.initValue();
+            ledgerJournalTrans.JournalNum            = ledgerJournalTable.JournalNum;
+            ledgerJournalTrans.AccountType           = _journalACType;
+            ledgerJournalTrans.TransDate             = workOrderTable.ActualPostingDate ? workOrderTable.ActualPostingDate : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+    
+            ledgerJournalTrans.OffsetLedgerDimension = LedgerDimensionFacade::serviceCreateLedgerDimension(
+                LedgerJournalName::find(ledgerJournalTable.JournalName).OffsetLedgerDimension,
+                ledgerJournalTrans.DefaultDimension);
+    
+            ledgerJournalTrans.OffsetCompany         = _companyId;
+            ledgerJournalTrans.AmountCurDebit        = decround(_salesAmount, 2);
+    
+            switch (_journalACType)
+            {
+                case LedgerJournalACType::FixedAssets:
+                    ledgerJournalTrans_Asset      = null;
+    
+                    ledgerJournalTrans.Txt        = strFmt("@DNR2530", _assetTable.AssetId, _companyId);
+                    ledgerJournalTrans.OffsetTxt  = strFmt("@DNR2530", _assetTable.AssetId, _companyId);
+    
+                    recId = LedgerDynamicAccountHelper::getDynamicAccountFromAccountNumber(_assetTable.AssetId, LedgerJournalACType::FixedAssets);
+                    ledgerJournalTrans.LedgerDimension = DimensionAttributeValueCombination::find(recId).RecId;
+    
+                    if (ledgerJournalTrans.validateWrite())
+                    {
+                        journalTransData = journalTableData.journalStatic().newJournalTransData(ledgerJournalTrans, journalTableData);
+    
+                        if (journalTableData.journalVoucherNum())
+                        {
+                            journalTransData.initVoucher('', false, false);
+                        }
+    
+                        ledgerJournalTrans.insert();
+    
+                        // Setup LedgerJouranlTrans_Asset
+                        ledgerJournalTrans_Asset.RefRecId  = ledgerJournalTrans.RecId;
+                        ledgerJournalTrans_Asset.AssetId   = _assetTable.AssetId;
+                        ledgerJournalTrans_Asset.BookId    = _assetBookId;
+                        ledgerJournalTrans_Asset.TransType = _assetTable.BOBValueTransfer ? AssetTransTypeJournal::Acquisition : AssetTransTypeJournal::AcquisitionAdj;
+                        ledgerJournalTrans_Asset.Company   = ledgerJournalTrans.Company;
+    
+                        ledgerJournalTrans_Asset.insert();
+                        journalTransCreated = true;
+                    }
+                    break;
+    
+                case LedgerJournalACType::Project:
+                    ledgerJournalTrans_Project           = null;
+                    ledgerJournalTrans.Company           = workOrderTable.CompanyId;
+                    ledgerJournalTrans.OffsetAccountType = LedgerJournalACType::Ledger;
+                    ledgerJournalTrans.Txt               = strFmt("@DNR6794", workOrderLine.ProjId, _companyId);
+                    ledgerJournalTrans.OffsetTxt         = strFmt("@DNR6794", workOrderLine.ProjId, _companyId);
+    
+                    recId = LedgerDynamicAccountHelper::getDynamicAccountFromAccountNumber(workOrderLine.projId, LedgerJournalACType::Project);
+                    ledgerJournalTrans.LedgerDimension = DimensionAttributeValueCombination::find(recId).RecId;
+    
+    
+                    ledgerJournalEngine = LedgerJournalEngine::construct(LedgerJournalType::Daily);
+    
+                    if (ledgerJournalTrans.validateWrite())
+                    {
+                        ledgerJournalTrans_Project.ProjId = workOrderLine.ProjId;
+    
+                        ledgerJournalEngine.initFromProjTable(ledgerJournalTrans, ledgerJournalTrans_Project);
+                        ledgerJournalEngine.setProjAmount(ledgerJournalTrans, ledgerJournalTrans_Project);
+    
+                        ledgerJournalTrans.insert();
+    
+                        ledgerJournalTrans_Project.RefRecId = ledgerJournalTrans.RecId;
+                        LedgerJournalEngine::setProjCostSalesPrice(ledgerJournalTrans, ledgerJournalTrans_Project, LedgerJournalEngine.parmSalesPrice());
+                        ledgerJournalTrans_Project.insert();
+                        journalTransCreated = true;
+                    }
+                    break;
+    
+                default:
+                    break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createWorkOrderLineLedgerJournalLink</Name>
+				<Source><![CDATA[
+    private void createWorkOrderLineLedgerJournalLink(LedgerJournalId _ledgerJournalId)
+    {
+        WPPWorkOrderLineLedgerJournalLink   workOrderLineLedgerJournalLink;
+    
+        if (_ledgerJournalId)
+        {
+            workOrderLineLedgerJournalLink.WorkOrderLineRecId = workOrderLine.RecId;
+            workOrderLineLedgerJournalLink.LedgerJournalId    = _ledgerJournalId;
+            workOrderLineLedgerJournalLink.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findAssetTable</Name>
+				<Source><![CDATA[
+    protected AssetTable findAssetTable()
+    {
+        AssetTable assetTable;
+        AssetId assetId = objectTable.assetId();
+        
+        if (assetId)
+        {
+            assetTable = AssetTable::find(assetId);
+        }
+
+        return assetTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findOrCreateInventDim</Name>
+				<Source><![CDATA[
+    private InventDim findOrCreateInventDim()
+    {
+        InventSerialId  inventSerialId;
+        InventDim       inventDim;
+        InventSum       inventSum;
+    
+        inventSerialId             = objectTable.InventSerialId;
+        inventSum                  = this.getOnhandInventory(inventSerialId);
+        inventDim.inventSerialId   = inventSerialId;
+        inventDim.InventLocationId = inventSum ? inventSum.inventLocationId() : DNRUserDefaults::find(curUserId()).InventLocationId;
+    
+        return InventDim::findOrCreate(inventDim);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findOrCreateProjGroupMap</Name>
+				<Source><![CDATA[
+    private ProjGroup findOrCreateProjGroupMap()
+    {
+        ProjGroup projGroup;
+    
+        if (projGroupMap.exists(workOrderTable.ProjGroupId))
+        {
+            projGroup = projGroupMap.lookup(workOrderTable.ProjGroupId);
+        }
+        else
+        {
+            projGroup = workOrderTable.projGroup();
+    
+            projGroupMap.insert(projGroup.ProjGroupId, projGroup);
+        }
+    
+        return ProjGroup;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getAssetCompanies</Name>
+				<Source><![CDATA[
+    private container getAssetCompanies()
+    {
+        container   assetCompanyCont;
+        CompanyId   assetCompanyId;
+    
+        //Build a container of searcheable companies, including the current company
+        assetCompanyCont += curExt();
+    
+        assetCompanyId = AssetParameters::find().BOBAssetCompanyId;
+        if (assetCompanyId
+        && !conFind(assetCompanycont, assetCompanyId)
+        &&  XDataArea::exist(assetCompanyId))
+        {
+            assetCompanyCont += assetCompanyId;
+        }
+    
+        return assetCompanyCont;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getAssetTable</Name>
+				<Source><![CDATA[
+    private AssetTable getAssetTable()
+    {
+        WPPParameters   parameters = WPPParameters::find();
+        AssetTable      assetTable;
+    
+        switch (parameters.ValueTransferMethod)
+        {
+            case WPPValueTransferMethod::AddedOnAsset:
+                assetTable = this.findAssetTable();
+                break;
+    
+            case WPPValueTransferMethod::RevisionAsset:
+                assetTable = this.createAssetTable();
+                break;
+    
+            case WPPValueTransferMethod::ProcessDetermined :
+                assetTable = this.findAssetTable();
+    
+                if (assetTable
+                &&  assetTable.BOBDepreciateUntil)
+                {
+                    assetTable = this.createAssetTable();
+                }
+                break;
+    
+            default:
+                throw error(Error::missingParameter(null));
+        }
+    
+        return assetTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getItemId</Name>
+				<Source><![CDATA[
+    private ItemId getItemId()
+    {
+        InventSerial inventSerial;
+    
+        select firstonly ItemId from inventSerial
+        where inventSerial.InventSerialId == objectTable.InventSerialId;
+    
+        return inventSerial.ItemId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOnhandInventory</Name>
+				<Source><![CDATA[
+    private InventSum getOnhandInventory(InventSerialId _inventSerialId)
+    {
+        InventDim   inventDim;
+        InventSum   inventSum;
+    
+        select firstonly inventSum
+        where inventSum.AvailPhysical > 0
+            exists join inventDim
+            where inventDim.inventSerialId == _inventSerialId
+            &&    inventDim.inventDimId    == inventSum.InventDimId;
+    
+        return inventSum;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjEmplTransCostAmount</Name>
+				<Source><![CDATA[
+    private SalesAmount getProjEmplTransCostAmount()
+    {
+        ProjEmplTrans       projEmplTrans;
+        ProjEmplTransCost   projEmplTransCost;
+        SalesAmount         salesAmount;
+    
+        // No sum because of Quantities against different Cost prices
+        while select TransId, ProjId, Qty from projEmplTrans
+        where projEmplTrans.ProjId == workOrderLine.ProjId
+            join CostPrice from projEmplTransCost
+            where projEmplTransCost.TransId == projEmplTrans.TransId
+            &&    projEmplTransCost.TransStatus != ProjTransStatus::Adjusted
+        {
+            if (projEmplTransCost.CostPrice)
+            {
+                salesAmount += (projEmplTrans.Qty * projEmplTransCost.CostPrice);
+            }
+            else
+            {
+                priceFound = false;
+    
+                error(strFmt("@DNR10140",
+                            fieldId2PName(tableNum(ProjEmplTransCost), fieldNum(ProjEmplTransCost, CostPrice)),
+                            tableId2PName(tableNum(ProjEmplTrans)),
+                            projEmplTrans.TransId,
+                            projEmplTrans.ProjId));
+                break;
+            }
+        }
+    
+        return salesAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjEmplTransSalesAmount</Name>
+				<Source><![CDATA[
+    private SalesAmount getProjEmplTransSalesAmount()
+    {
+        ProjEmplTrans       projEmplTrans;
+        ProjEmplTransSale   projEmplTransSale;
+        SalesAmount         salesAmount;
+    
+        // No sum because of Quantities against different Sales prices
+        while select TransId, ProjId, Qty from projEmplTrans
+        where projEmplTrans.ProjId == workOrderLine.ProjId
+            join SalesPrice from projEmplTransSale
+            where projEmplTransSale.TransId     == projEmplTrans.TransId
+            &&    projEmplTransSale.TransStatus != ProjTransStatus::Adjusted
+        {
+            if (projEmplTransSale.SalesPrice)
+            {
+                salesAmount += (projEmplTrans.Qty * projEmplTransSale.SalesPrice);
+            }
+            else
+            {
+                priceFound = false;
+    
+                error(strFmt("@DNR10140",
+                            fieldId2PName(tableNum(projEmplTransSale), fieldNum(projEmplTransSale, SalesPrice)),
+                            tableId2PName(tableNum(ProjEmplTrans)),
+                            projEmplTrans.TransId,
+                            projEmplTrans.ProjId));
+                break;
+            }
+        }
+    
+        return salesAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjItemTransCostAmount</Name>
+				<Source><![CDATA[
+    private SalesAmount getProjItemTransCostAmount()
+    {
+        ProjItemTrans       projItemTrans;
+        ProjItemTransCost   projItemTransCost;
+        SalesAmount         salesAmount;
+        ProjCostAmount      projCostAmount;
+    
+        // No sum because of Quantities against different Cost prices
+        while select ProjTransId, ProjId, InventTransId, ProjAdjustRefId from projItemTrans
+        where projItemTrans.ProjId == workOrderLine.ProjId
+            exists join projItemTransCost
+            where projItemTransCost.ProjAdjustRefId == projItemTrans.ProjAdjustRefId
+            &&    projItemTransCost.InventTransId   == projItemTrans.InventTransId
+            &&    projItemTransCost.TransStatus     != ProjTransStatus::Adjusted
+        {
+            projCostAmount = projItemTrans.costAmountTotal();
+            if (projCostAmount)
+            {
+                salesAmount += projCostAmount;
+            }
+            else
+            {
+                priceFound = false;
+    
+                error(strFmt("@DNR10140",
+                            new DictType(extendedTypeNum(ProjCostAmount)).label(),
+                            tableId2PName(tableNum(ProjItemTrans)),
+                            projItemTrans.ProjTransId,
+                            projItemTrans.ProjId));
+                break;
+            }
+        }
+    
+        return salesAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjItemTransSalesAmount</Name>
+				<Source><![CDATA[
+    private SalesAmount getProjItemTransSalesAmount()
+    {
+        ProjItemTrans       projItemTrans;
+        ProjItemTransSale   projItemTransSale;
+        SalesAmount         salesAmount;
+    
+        // No sum because of Quantities against different Sales prices
+        while select projItemTrans
+        where projItemTrans.ProjId == workOrderLine.ProjId
+            join SalesPrice from projItemTransSale
+            where projItemTransSale.ProjTransId == projItemTrans.ProjTransId
+            &&    projItemTransSale.TransStatus != ProjTransStatus::Adjusted
+        {
+            if (projItemTransSale.SalesPrice)
+            {
+                salesAmount += projItemTrans.salesAmount(projItemTrans, dateNull(), dateMax());
+            }
+            else
+            {
+                priceFound = false;
+    
+                error(strFmt("@DNR10140",
+                            fieldId2PName(tableNum(ProjItemTrans), fieldNum(projItemTransSale, SalesPrice)),
+                            tableId2PName(tableNum(ProjItemTrans)),
+                            projItemTrans.ProjTransId,
+                            projItemTrans.ProjId));
+                break;
+            }
+        }
+    
+        return salesAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getQueryDatasources</Name>
+				<Source><![CDATA[
+    private void getQueryDatasources()
+    {
+        // Will probably always change
+        if (queryRun.changed(tableNum(WPPWorkOrderLine)))
+        {
+            workOrderLine  = queryRun.get(tableNum(WPPWorkOrderLine));
+            workOrderTable = workOrderLine.workOrderTable();
+            projTable      = workOrderLine.projTable();
+            objectTable    = BOBObjectTable::findRecId(workOrderTable.BOBObjectTableRecId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTotalSalesAmount</Name>
+				<Source><![CDATA[
+    private SalesAmount getTotalSalesAmount(ProjGroup   _projGroup)
+    {
+        SalesAmount     salesAmount;
+    
+        priceFound = true;
+    
+        switch (_projGroup.WPPTransferValueType)
+        {
+            case WPPTransferValueType::CostPrice:
+                salesAmount = this.getProjEmplTransCostAmount();
+                if (priceFound)
+                {
+                    salesAmount += this.getProjItemTransCostAmount();
+                }
+                break;
+    
+            case WPPTransferValueType::SalesPrice:
+                salesAmount = this.getProjEmplTransSalesAmount();
+                if (priceFound)
+                {
+                    salesAmount += this.getProjItemTransSalesAmount();
+                }
+                break;
+    
+            // This will never happen
+            default:
+                break;
+        }
+    
+        return salesAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParmDefault</Name>
+				<Source><![CDATA[
+    public void initParmDefault()
+    {
+        super();
+    
+        this.queryBuild();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventoryAvailable</Name>
+				<Source><![CDATA[
+    private boolean inventoryAvailable(DataAreaId       _receivingCompany,
+                                       ItemId           _itemId,
+                                       InventSerialId   _inventSerialId)
+    {
+        InventSum       inventSum;
+        InventDim       inventDim;
+        InventSerial    inventSerial;
+    
+        changeCompany (_receivingCompany)
+        {
+            inventSum = null;
+    
+            select firstonly RecId from inventSum
+            where inventSum.AvailPhysical == 1
+                join TableId from inventDim
+                where inventDim.inventDimId == inventSum.InventDimId
+                    join TableId from inventSerial
+                    where inventSerial.InventSerialId == inventDim.inventSerialId
+                    &&    inventSerial.InventSerialId == _inventSerialId
+                    &&    inventSerial.ItemId         == _itemId;
+        }
+    
+        return inventSum.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventoryValue</Name>
+				<Source><![CDATA[
+    private CostPriceAverage inventoryValue(InventDim   _inventDim)
+    {
+        InventSum   inventSum;
+    
+        select firstonly inventSum
+        where inventSum.ItemId      == itemId
+        &&    inventSum.InventDimId == _inventDim.inventDimId;
+    
+        return inventSum.costPricePcs();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+    
+        projGroupMap         = new Map(Types::String, Types::Record);
+        minimumValueTransfer = WPPParameters::find().MinimumValueTransfer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        container pack = conNull();
+    
+        if (queryRun)
+        {
+            pack = queryRun.pack();
+        }
+    
+        return [#CurrentVersion] + [pack];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pickInventJournalTrans</Name>
+				<Source><![CDATA[
+    private void pickInventJournalTrans(InventJournalTrans  _inventJournalTrans,
+                                        InventDim           _inventDim)
+    {
+        InventMovement      inventMovement;
+        InventDimParm       inventDimParm;
+        InventUpd_Picked    inventUpd_Picked;
+    
+        inventMovement = InventMovement::construct(_inventJournalTrans);
+        inventMovement.inventDimGroupSetup().inventDimParmActive(inventDimParm);
+    
+        InventUpd_Picked = InventUpd_Picked::newParameters(inventMovement, _inventDim, inventDimParm, _inventDim, inventDimParm, _inventJournalTrans.Qty);
+        InventUpd_Picked.updateNow();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryBuild</Name>
+				<Source><![CDATA[
+    public QueryRun queryBuild()
+    {
+        //queryRun = new QueryRun(queryStr(WPPValueTransfer));
+        queryRun = new SysQueryRun(queryStr(WPPValueTransfer));
+    
+        return queryRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryRun</Name>
+				<Source><![CDATA[
+    public QueryRun queryRun()
+    {
+        return queryrun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>registerInventJournalTrans</Name>
+				<Source><![CDATA[
+    private void registerInventJournalTrans(InventJournalTrans  _inventJournalTrans,
+                                            InventDim           _inventDim)
+    {
+        InventMovement          inventMovement;
+        InventDimParm           inventDimParm;
+        InventUpd_Registered    inventUpd_Registered;
+    
+        inventMovement = InventMovement::construct(_inventJournalTrans);
+        inventMovement.inventDimGroupSetup().inventDimParmActive(inventDimParm);
+    
+        inventUpd_Registered = InventUpd_Registered::newParameters(inventMovement, _inventDim, inventDimParm, _inventDim, inventDimParm, _inventJournalTrans.Qty);
+        inventUpd_Registered.updateNow();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        SalesAmount     salesAmount;
+        AssetTable      assetTable;
+        ProjGroup       projGroup;
+        AssetBook       assetBook;
+        AssetBookTable  assetBookTable;
+        AssetId         assetId;
+        Container       assetCompanyCont;
+        Counter         i;
+        CompanyId       assetCompanyId;
+    
+        #OCCRetryCount
+    
+        try
+        {
+            // Get a container of companies to search (including the current company)
+            assetCompanyCont = this.getAssetCompanies();
+    
+            ttsBegin;
+            while (queryRun.next())
+            {
+                // Clear the tables
+                inventJournalTable = null;
+                ledgerJournalTable = null;
+    
+                this.getQueryDatasources();
+                projGroup = this.findOrCreateProjGroupMap();
+    
+                // Check as early as possible to waste no time on calculations
+                // that are not used at all.
+                if (projGroup.WPPTransferValueType != WPPTransferValueType::None
+                &&  projGroup.WPPReceivingCompany)
+                {
+                    // Get the total amount of the project
+                    salesAmount = this.getTotalSalesAmount(projGroup);
+    
+                    // Perform a check whether a journal should be created
+                    // Can't be checked earlier because salesAmount has to be calculated
+                    if (priceFound
+                    &&  salesAmount >= minimumValueTransfer)
+                    {
+                        assetTable = this.getAssetTable();
+    
+                        // Create ledger journal if an asset exists
+                        if (assetTable.AssetId)
+                        {
+                            // Loop through the searcheable asset companies (the current company first)
+                            // and create LedgerJournalTable- and LedgerJournalTrans records in the company
+                            // if a value model (assetbook) is found.
+                            assetId = assetTable.BOBValueTransfer ? assetTable.MainAssetId : assetTable.AssetId;
+    
+                            for (i = 1; i <= conLen(assetCompanyCont); i++)
+                            {
+                                assetCompanyId = conPeek(assetCompanyCont, i);
+                                assetBook      = null;
+                                assetBookTable = null;
+    
+                                changeCompany(assetCompanyId)
+                                {
+                                    assetBook.clear();
+                                    assetBookTable.clear();
+    
+                                    select firstonly BookId from assetBook
+                                    where assetBook.AssetId == assetId
+                                        exists join assetBookTable
+                                        where assetBookTable.BookId                 == assetBook.BookId
+                                        &&    assetBookTable.CurrentOperationsTax   == CurrentOperationsTax::Current
+                                        && ((!projGroup.WPPIncludeNotObtainedAsset  && assetBook.Status == AssetStatus::Open)
+                                        ||   (projGroup.WPPIncludeNotObtainedAsset
+                                        &&   (assetBook.Status == AssetStatus::Open || assetBook.Status == AssetStatus::NoAcquisition)));
+    
+                                    if (assetBook.BookId)
+                                    {
+                                        this.createLedgerJournalTable(LedgerJournalType::Assets);
+                                        this.createLedgerJournalTrans(salesAmount, assetTable, assetBook.BookId, LedgerJournalACType::FixedAssets, objectView.PhysicalOwner);
+                                        this.setNumOfLines(true);
+                                        this.createWorkOrderLineLedgerJournalLink(ledgerJournalTable.JournalNum);
+    
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        // No assetId: Create inventJournal if no asset exists and 'Include not obtained asset' is checked.
+                        else
+                        {
+                            if (this.inventoryAvailable(projGroup.WPPReceivingCompany, this.getItemId(), objectTable.ObjectId))
+                            {
+                                if (projGroup.WPPIncludeNotObtainedAsset)
+                                {
+                                    changeCompany(projGroup.WPPReceivingCompany)
+                                    {
+                                        this.createInventJournalTable();
+                                        this.createInventJournalTrans(true, salesAmount);    // One reverse journal line
+                                        this.createInventJournalTrans(false, salesAmount);   // One actual journal line
+                                        this.setNumOfLines(false);
+                                        this.createWorkOrderLineLedgerJournalLink(inventJournalTable.JournalId);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                journalTransCreated = false;
+                                changeCompany(projGroup.WPPReceivingCompany)
+                                {
+                                    this.createLedgerJournalTable(LedgerJournalType::Daily);
+                                    this.createLedgerJournalTrans(salesAmount, null, '', LedgerJournalACType::Project, projGroup.WPPReceivingCompany);
+                                    this.setNumOfLines(true);
+                                }
+    
+                                if (journalTransCreated)
+                                {
+                                    this.createWorkOrderLineLedgerJournalLink(ledgerJournalTable.JournalNum);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ttsCommit;
+        }
+        catch (Exception::Deadlock)
+        {
+            retry;
+        }
+        catch (Exception::UpdateConflict)
+        {
+            if (appl.ttsLevel() == 0)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::UpdateConflictNotRecovered;
+                }
+                else
+                {
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::UpdateConflict;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setNumOfLines</Name>
+				<Source><![CDATA[
+    private void setNumOfLines(boolean  _updateLedger)
+    {
+        if (_updateLedger
+        &&  ledgerJournalTable)
+        {
+            ledgerJournalTable.selectForUpdate(true);
+            LedgerJournalTable::WPPInitTotal(ledgerJournalTable);
+            ledgerJournalTable.update();
+        }
+        else
+        if (inventJournalTable)
+        {
+            inventJournalTable.selectForUpdate(true);
+            inventJournalTable::initTotal(inventJournalTable);
+            inventJournalTable.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showQueryValues</Name>
+				<Source><![CDATA[
+    public boolean showQueryValues()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    boolean unpack(container _packedClass)
+    {
+        Version     version = RunBase::getVersion(_packedClass);
+        container   packedQuery;
+    
+        switch (version)
+        {
+            case #CurrentVersion:
+                [version, packedQuery] = _packedClass;
+                if (SysQuery::isPackedOk(packedQuery))
+                {
+                    //queryRun = new QueryRun(packedQuery);
+                    queryRun = new SysQueryRun(packedQuery);
+                }
+                else
+                {
+                    //queryRun = this.queryBuild();
+                    queryRun = new SysQueryRun(this.queryBuild());
+                }
+                break;
+    
+            default:
+                return false;
+        }
+    
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static server WPPValueTransfer construct()
+    {
+        return new WPPValueTransfer();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    static ClassDescription description()
+    {
+        return "@DNR2523";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static server void main(Args args)
+    {
+        WPPValueTransfer    valueTransfer;
+    
+        valueTransfer = WPPValueTransfer::construct();
+    
+        if (valueTransfer.prompt())
+        {
+            valueTransfer.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

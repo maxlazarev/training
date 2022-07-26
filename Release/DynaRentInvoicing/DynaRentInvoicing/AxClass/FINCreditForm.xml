@@ -1,0 +1,1365 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCreditForm</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class FINCreditForm
+{
+    Num                             orderId;
+    CustInvoiceAccount              invoiceAccount;
+    InvoiceId                       invoiceId;
+    InvoiceId                       newestInvoiceId;
+    boolean                         reInvoiceAll;
+    boolean                         periodsUpdated;
+    AddUpdate                       openMode;
+
+    Common                          callerBuffer;
+    FINCreditLineDetails            callerCreditParmLineDetails;
+    FINCreditLineDetails            callerCreditParmLineDetailsCopy;
+    FormRun                         creditFormRun;
+
+    FINCreditManager                creditManager;
+
+    public Map                      markedCreditLineDetailsMap;
+    ROROrderAmendmentLog            orderAmendmentLog;
+          
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>approveCredit</Name>
+				<Source><![CDATA[
+    public void approveCredit(TableId _jourTableId, RecId _jourRecId)
+    {
+        this.setDocumentState(_jourTableId, _jourRecId, VersioningDocumentState::Approved);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rejectCredit</Name>
+				<Source><![CDATA[
+    public void rejectCredit(TableId _jourTableId, RecId _jourRecId)
+    {
+        this.setDocumentState(_jourTableId, _jourRecId, VersioningDocumentState::Rejected);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCreditState</Name>
+				<Source><![CDATA[
+    public void setCreditState(TableId _jourTableId, RecId _jourRecId, VersioningDocumentState _newDocumentState)
+    {
+        this.setDocumentState(_jourTableId, _jourRecId, _newDocumentState);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDocumentState</Name>
+				<Source><![CDATA[
+    protected void setDocumentState(TableId _jourTableId, RecId _jourRecId, VersioningDocumentState _newDocumentState)
+    {
+        ttsbegin;
+        FINCreditLine creditParmLine;
+
+        while select forupdate creditParmLine
+        where creditParmLine.JourRefTableId == _jourTableId
+        &&    creditParmLine.JourRefRecId == _jourRecId
+        {
+            FINCreditPendingChangesReference changesReference;
+
+            update_recordset changesReference
+            setting DocumentState = _newDocumentState
+            where changesReference.CreditParmLineRecId == creditParmLine.RecId;
+
+            creditParmLine.DocumentState = _newDocumentState;
+            creditParmLine.update();
+
+            if (_newDocumentState == VersioningDocumentState::Rejected)
+            {
+                creditParmLine.setRejected();
+            }
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canAddCredit</Name>
+				<Source><![CDATA[
+    private boolean canAddCredit()
+    {
+        boolean ret;
+    
+        ret = !this.hasCreditParmLine(true);
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canEditCredit</Name>
+				<Source><![CDATA[
+    private boolean canEditCredit()
+    {
+        boolean ret;
+    
+        ret = this.hasCreditParmLine();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>confirmPendingParmLine</Name>
+				<Source><![CDATA[
+    public void confirmPendingParmLine(TmpFrmVirtual _tmpFrmVirtual)
+    {
+        TmpFrmVirtual  tmpFrmVirtual;
+    
+        if (!creditManager)
+        {
+            creditManager = this.createCreditManager();
+        }
+    
+        tmpFrmVirtual.setTmpData(_tmpFrmVirtual);
+    
+        ttsBegin;
+        
+        Set selectedCreditLineRecId = new Set(Types::Int64);
+
+        while select tmpFrmVirtual
+        {
+            FINCreditLine creditLine = FINCreditLine::findRecId(tmpFrmVirtual.RecordNo);
+
+            if (creditLine)
+            {
+                this.saveChangesForTotals(creditLine);
+            }
+
+            selectedCreditLineRecId.add(tmpFrmVirtual.RecordNo);
+        }
+       
+        // remove all records created in drop dialog that are not actually credited
+        this.deleteUnselectedCreditLines(selectedCreditLineRecId);
+        this.unlockCreditLines();
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>saveChangesForTotals</Name>
+				<Source><![CDATA[
+    protected void saveChangesForTotals(FINCreditLine _creditParmLine)
+    {
+        creditManager.formRun(creditFormRun);
+        creditManager.initFromCreditParmLine(_creditParmLine);
+        creditManager.setCreditFormClass(this);
+        creditManager.runPost();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createCreditManager</Name>
+				<Source><![CDATA[
+    protected abstract FINCreditManager createCreditManager()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>creditTypeChanged</Name>
+				<Source><![CDATA[
+    public void creditTypeChanged(FINCreditType _creditType, FormRealControl _amountControl, FormStringControl _rentalModeControl)
+    {
+        switch (_creditType)
+        {
+            case FINCreditType::Amount :
+            case FINCreditType::Insurance :
+            case FINCreditType::Delivery :
+            case FINCreditType::Return :
+                _amountControl.allowEdit(true);
+                _rentalModeControl.allowEdit(false);
+                break;
+    
+            case FINCreditType::RentalMode :
+                _amountControl.allowEdit(false);
+                _rentalModeControl.allowEdit(true);
+                break;
+    
+            case FINCreditType::Days :
+                _amountControl.allowEdit(false);
+                _rentalModeControl.allowEdit(false);
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteCreditParmLineDetailsForCreditLine</Name>
+				<Source><![CDATA[
+    public void deleteCreditParmLineDetailsForCreditLine(FINCreditLine _creditLine)
+    {
+        FINCreditLineDetails creditParmLineDetails;
+        
+        ttsbegin;
+        RefRecId refCreditLineDetailsRecId = markedCreditLineDetailsMap.lookup(_creditLine.RecId);
+        if (refCreditLineDetailsRecId)
+        {
+            FINCreditPendingChangesReference::deleteForCreditParmLineDetails(refCreditLineDetailsRecId);
+            
+            delete_from creditParmLineDetails where creditParmLineDetails.RecId == refCreditLineDetailsRecId;
+
+            select firstonly RecId from creditParmLineDetails
+            where creditParmLineDetails.RecId != refCreditLineDetailsRecId
+            &&    creditParmLineDetails.CreditLineRefRecId == _creditLine.RecId;
+        }
+
+        if (!creditParmLineDetails.RecId
+        &&  _creditLine.RefTableId == tableNum(CustInvoiceTrans))
+        {
+            // Change status but do not delete FINCreditLine - it will be deleted outside the method.
+            FINCustInvoiceTrans::changePeriodStatus(FINInvoiceTransPeriodStatus::FullyInvoiced, _creditLine.RefRecId);
+        }
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteMultipleCreditParmLineDetails</Name>
+				<Source><![CDATA[
+    public void deleteMultipleCreditParmLineDetails(FINCreditLineDetails _creditLineDetails, FINCreditLine _creditLine)
+    {
+        FINCreditLineDetails    creditLineDetails;
+        FINCreditLine           creditLine = _creditLine;
+        boolean                 isFirstRecord = true;
+        MultiSelectionHelper    helper = MultiSelectionHelper::construct();
+    
+        helper.parmDatasource(_creditLineDetails.dataSource());
+        
+        creditLineDetails = helper.getFirst();
+
+        ttsbegin;
+
+        while (creditLineDetails.RecId != 0)
+        {
+            // Most of the time there will be only one record selected in DS so no need to reselect FINCreditLine buffer.
+            if (!isFirstRecord
+            ||  !creditLine
+            ||  creditLineDetails.CreditLineRefRecId != creditLine.RecId)
+            {
+                creditLine = creditLineDetails.creditLine(true);
+            }
+
+            this.deleteCreditParmLineDetails(creditLineDetails, creditLine);
+
+            creditLineDetails = helper.getNext();
+            isFirstRecord = false;
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteCreditParmLineDetails</Name>
+				<Source><![CDATA[
+    public void deleteCreditParmLineDetails(FINCreditLineDetails _creditLineDetails, FINCreditLine _creditLine)
+    {
+        ttsbegin;
+
+        FINCreditPendingChangesReference::deleteForCreditParmLineDetails(_creditLineDetails.RecId);
+
+        FINCreditLineDetails creditLineDetailsOther;
+
+        select count(RecId) from creditLineDetailsOther
+        where creditLineDetailsOther.CreditLineRefRecId == _creditLineDetails.CreditLineRefRecId;
+                
+        if (creditLineDetailsOther.RecId <= 1)
+        {
+            // delete also FINCreditLine if no more details.
+            if (_creditLine.RefTableId == tableNum(CustInvoiceTrans))
+            {
+                FINCustInvoiceTrans::changePeriodStatus(FINInvoiceTransPeriodStatus::FullyInvoiced, _creditLine.RefRecId);
+            }
+            
+            _creditLine.delete();
+        }
+        else
+        {
+            _creditLineDetails.delete();
+
+            if (!creditManager)
+            {
+                FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+                select maxof(PeriodEndDateTime) from journalizedInvoicePeriod
+                where journalizedInvoicePeriod.RefTableId == _creditLine.RefTableId
+                &&    journalizedInvoicePeriod.RefRecId ==  _creditLine.RefRecId;
+                    
+                TransDateTime calculationDateTime = max(journalizedInvoicePeriod.PeriodEndDateTime, _creditLineDetails.ToDateTime);
+
+                creditManager = this.createCreditManager();
+                creditManager.parmCalculationDateTime(calculationDateTime);
+            }
+
+            creditManager.initFromCreditParmLine(_creditLine);
+            creditManager.calculateCreditAmount();
+        }
+
+        FINCreditLine creditLineOther;
+        
+        while select forupdate creditLineOther
+        where creditLineOther.RecId          != _creditLine.RecId
+        &&    creditLineOther.JourRefTableId == _creditLine.JourRefTableId
+        &&    creditLineOther.JourRefRecId   == _creditLine.JourRefRecId
+        {
+            creditLineOther.setDocumentStateBasedOnCreditAmount();
+            creditLineOther.update();
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deletePendingParmLine</Name>
+				<Source><![CDATA[
+    public void deletePendingParmLine(TmpFrmVirtual _tmpFrmVirtual)
+    {
+        TmpFrmVirtual tmpFrmVirtual;
+        Set selectedCreditLineRecId = new Set(Types::Int64);
+
+        ttsbegin;
+        tmpFrmVirtual.setTmpData(_tmpFrmVirtual);
+
+        while select tmpFrmVirtual
+        {
+            boolean deleteCreditLine = true;
+            FINCreditLine creditLine = FINCreditLine::findRecId(tmpFrmVirtual.RecordNo, true);
+
+            if (creditLine
+            && (!callerCreditParmLineDetails || callerCreditParmLineDetails.CreditLineRefRecId != creditLine.RecId))
+            {
+                if (markedCreditLineDetailsMap.exists(creditLine.RecId))
+                {
+                    FINCreditLineDetails dependentCreditLineDetails;
+                    FINCreditLineDetails creditLineDetailsDel;
+                    RefRecId creditLineDetailsRecId = markedCreditLineDetailsMap.lookup(creditLine.RecId);
+
+                    select firstonly RecId from dependentCreditLineDetails
+                    where dependentCreditLineDetails.RecId != creditLineDetailsRecId
+                    &&    dependentCreditLineDetails.CreditLineRefRecId == creditLine.RecId;
+                    
+                    if (dependentCreditLineDetails.RecId)
+                    {
+                        deleteCreditLine = false;
+                        FINCreditPendingChangesReference::deleteForCreditParmLineDetails(creditLineDetailsRecId);
+
+                        delete_from creditLineDetailsDel where creditLineDetailsDel.RecId == creditLineDetailsRecId;
+                    }
+                }
+
+                if (deleteCreditLine)
+                {
+                    creditLine.delete();
+                }
+            }
+           
+            selectedCreditLineRecId.add(tmpFrmVirtual.RecordNo);
+        }
+
+        if (callerCreditParmLineDetails)
+        {
+            // restore orig value
+            callerCreditParmLineDetails = FINCreditLineDetails::findRecId(callerCreditParmLineDetails.RecId, true);
+            
+            if (callerCreditParmLineDetails)
+            {
+                buf2Buf(callerCreditParmLineDetailsCopy, callerCreditParmLineDetails);
+                callerCreditParmLineDetails.update();
+            }
+        }
+
+        this.deleteUnselectedCreditLines(selectedCreditLineRecId);
+        this.unlockCreditLines();
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteUnselectedCreditLines</Name>
+				<Source><![CDATA[
+    protected void deleteUnselectedCreditLines(Set _selectedCreditLineRecId)
+    {
+        FINCreditLine creditParmLine;
+
+        if (callerCreditParmLineDetails)
+        {
+            FINCreditLineDetails dependentCreditLineDetails;
+
+            select firstonly RecId from dependentCreditLineDetails
+            where dependentCreditLineDetails.RecId != callerCreditParmLineDetails.RecId
+                exists join creditParmLine
+                where creditParmLine.RecId == dependentCreditLineDetails.CreditLineRefRecId;
+
+            if (!dependentCreditLineDetails.RecId)
+            {
+                creditParmLine = callerCreditParmLineDetails.creditLine(true);
+
+                if (creditParmLine && !_selectedCreditLineRecId.in(creditParmLine.RecId))
+                {
+                    creditParmLine.delete();
+                }
+            }
+        }
+        else if (callerBuffer)
+        {
+            // callerBuffer is a CustinvoiceJour
+            while select forupdate creditParmLine
+            where creditParmLine.JourRefTableId == callerBuffer.TableId
+            &&    creditParmLine.JourRefRecId == callerBuffer.RecId
+            // If we add more credits to the same journal then we want to delete only those created for currently open dialog.
+            &&    creditParmLine.Locked
+            {
+                if (!_selectedCreditLineRecId.in(creditParmLine.RecId))
+                {
+                    creditParmLine.delete();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>excludedLines</Name>
+				<Source><![CDATA[
+    public Set excludedLines()
+    {
+        return new Set(Types::Int64);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unlockCreditLines</Name>
+				<Source><![CDATA[
+    protected void unlockCreditLines()
+    {
+        FINCreditLine creditParmLine;
+
+        if (callerCreditParmLineDetails)
+        {
+            update_recordset creditParmLine
+            setting Locked = NoYes::No
+            where creditParmLine.RecId == callerCreditParmLineDetails.CreditLineRefRecId;
+        }
+        else if (callerBuffer)
+        {
+            // callerBuffer is a CustinvoiceJour
+            update_recordset creditParmLine
+            setting Locked = NoYes::No
+            where creditParmLine.JourRefTableId == callerBuffer.TableId
+            &&    creditParmLine.JourRefRecId == callerBuffer.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteCreditLineDetails</Name>
+				<Source><![CDATA[
+    public void deleteCreditLineDetails(FINCreditLineDetails _creditLineDetails, FINCreditLine _creditLine)
+    {
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>extendQuery</Name>
+				<Source><![CDATA[
+    abstract public void extendQuery(QueryBuildDataSource _queryBuildDataSource)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMainInstruction</Name>
+				<Source><![CDATA[
+    public str getMainInstruction(AddUpdate _openMode)
+    {
+        str mainInstruction;
+        ;
+    
+        if (_openMode == AddUpdate::Update)
+        {
+            mainInstruction = "@DNR7129";
+        }
+        else
+        {
+            mainInstruction = "@DNR7130";
+        }
+    
+        return mainInstruction;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasCreditParmLine</Name>
+				<Source><![CDATA[
+    abstract protected boolean hasCreditParmLine(boolean _checkOtherInvoices = false, boolean _excludePendingLines = false)
+    {
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCallerBuffer</Name>
+				<Source><![CDATA[
+    public void initCallerBuffer(Common _callerBuffer)
+    {
+        callerBuffer = _callerBuffer;
+
+        if (callerBuffer && callerBuffer is FINCreditLineDetails)
+        {
+            callerCreditParmLineDetails = callerBuffer as FINCreditLineDetails;
+        
+            if (openMode == AddUpdate::Update)
+            {
+                // Use this copy if Edit canceled.
+                callerCreditParmLineDetailsCopy.data(callerCreditParmLineDetails);
+                markedCreditLineDetailsMap.insert(callerCreditParmLineDetails.CreditLineRefRecId, callerCreditParmLineDetails.RecId);
+
+                ttsbegin;
+                FINCreditLine creditLine = callerCreditParmLineDetails.creditLine(true);
+                creditLine.Locked = NoYes::No;
+                creditLine.DocumentState = VersioningDocumentState::Draft;
+                creditLine.update();
+                ttscommit;
+            }
+        }
+        else
+        {
+            callerCreditParmLineDetails = null;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isLockedForEdition</Name>
+				<Source><![CDATA[
+    public boolean isLockedForEdition()
+    {
+        boolean ret = false;
+
+        if (callerCreditParmLineDetails)
+        {
+            FINCreditLine creditLine, creditLineOther;
+
+            select firstonly RecId from creditLineOther
+            where creditLineOther.Locked
+                exists join creditLine
+                where creditLine.JourRefTableId == creditLineOther.JourRefTableId
+                &&    creditLine.JourRefRecId == creditLineOther.JourRefRecId
+                &&    creditLine.RecId == callerCreditParmLineDetails.CreditLineRefRecId;
+
+            if (creditLineOther)
+            {
+                ret = true;
+            }
+        }
+        else if (callerBuffer)
+        {
+            FINCreditLine creditLine;
+
+            select firstonly RecId from creditLine
+                where creditLine.JourRefTableId == callerBuffer.TableId
+                &&    creditLine.JourRefRecId == callerBuffer.RecId
+                &&    creditLine.Locked;
+
+            if (creditLine)
+            {
+                ret = true;
+            }
+        }
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>invoiceAccount</Name>
+				<Source><![CDATA[
+    public CustInvoiceAccount invoiceAccount(CustInvoiceAccount _invoiceAccount = invoiceAccount)
+    {
+        invoiceAccount = _invoiceAccount;
+        return invoiceAccount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>invoiceId</Name>
+				<Source><![CDATA[
+    public InvoiceId invoiceId(InvoiceId _invoiceId = invoiceId)
+    {
+        invoiceId = _invoiceId;
+        return invoiceId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newCreditParmLineDetails</Name>
+				<Source><![CDATA[
+    public FINCreditLineDetails newCreditParmLineDetails(FINCreditLine _creditParmLine, boolean _initDates)
+    {
+        FINCreditLineDetails creditParmLineDetails;
+            
+        creditParmLineDetails.initValue();
+        creditParmLineDetails.CreditLineRefRecId = _creditParmLine.RecId;
+        creditParmLineDetails.OrderId = orderId;
+    
+        if (_initDates)
+        {
+            creditParmLineDetails.setMaxFromToDates(_creditParmLine);
+        }
+    
+        switch (_creditParmLine.TradeType)
+        {
+            case RORTradeType::SalesPurch:
+                creditParmLineDetails.CreditType = FINCreditType::Amount;
+                creditParmLineDetails.AmountCurCredit = _creditParmLine.InvoicedAmount;
+                break;
+    
+            default:
+            // Do nothing
+        }
+    
+        creditParmLineDetails.insert();
+    
+        markedCreditLineDetailsMap.insert(creditParmLineDetails.CreditLineRefRecId, creditParmLineDetails.RecId);
+
+        return creditParmLineDetails;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>orderId</Name>
+				<Source><![CDATA[
+    public Num orderId(Num _orderId = orderId)
+    {
+        orderId = _orderId;
+        return orderId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCreditFormRun</Name>
+				<Source><![CDATA[
+    public FormRun parmCreditFormRun(FormRun _creditFormRun = creditFormRun)
+    {
+        if (!prmisDefault(_creditFormRun))
+        {
+            creditFormRun = _creditFormRun;
+        }
+    
+        return creditFormRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmOpenMode</Name>
+				<Source><![CDATA[
+    public AddUpdate parmOpenMode(AddUpdate _openMode = openMode)
+    {
+        openMode = _openMode;
+        return openMode;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmPeriodsUpdated</Name>
+				<Source><![CDATA[
+    public boolean parmPeriodsUpdated(boolean _periodsUpdated = periodsUpdated)
+    {
+        periodsUpdated = _periodsUpdated;
+        return periodsUpdated;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmReInvoiceAll</Name>
+				<Source><![CDATA[
+    public boolean parmReInvoiceAll(boolean _reInvoiceAll = reInvoiceAll)
+    {
+        reInvoiceAll = _reInvoiceAll;
+        return reInvoiceAll;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateParmLine</Name>
+				<Source><![CDATA[
+    abstract public void populateParmLine()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>salesPurch</Name>
+				<Source><![CDATA[
+    public SalesPurch salesPurch()
+    {
+        return SalesPurch::Sales;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCreditText</Name>
+				<Source><![CDATA[
+    public str setCreditText(FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+        str                     creditText;
+        AmountCur               invoicedAmount;
+        INVPeriodStartDateTime  fromDateTime = DateTimeUtil::minValue();
+        INVPeriodendDateTime    toDateTime = DateTimeUtil::maxValue();
+    
+        AmountCur getInvoiceAmount()
+        {
+            AmountCur creditAmount;
+                
+            if (_creditParmLineDetails.AmountCurCredit)
+            {
+                creditAmount = _creditParmLineDetails.AmountCurCredit;
+            }
+            // when entire period is credited
+            else if (_creditParmLineDetails.DateRangeType == FINCreditDateRangeType::DateRange
+                  || _creditParmLineDetails.DateRangeType == FINCreditDateRangeType::SingleDay)
+            {
+                //TODO: think how to calculate credited values upfront
+                creditAmount = _creditParmLine.TradeType == RORTradeType::SalesPurch ? _creditParmLine.InvoicedAmount : 0;//_creditParmLine.CreditAmount;
+            }
+    
+            return creditAmount;
+        }
+        
+        orderAmendmentLog.AmendmentAction = DNRAmendmentAction::Created;
+        orderAmendmentLog.CurrencyCode = _creditParmLine.CurrencyCode;
+        orderAmendmentLog.LineNum = _creditParmLine.LineRefNum;
+        orderAmendmentLog.AmendmentEventType = DNRAmendmentEventType::CreditInvoiceLine;
+
+        switch (_creditParmLineDetails.DateRangeType)
+        {
+            case FINCreditDateRangeType::SingleDay :
+                invoicedAmount = getInvoiceAmount();
+    
+                if (_creditParmLineDetails.CreditType == FINCreditType::RentalMode)
+                {
+                    creditText = strFmt("@DNR:CreditSingleDayRentalMode",
+                        _creditParmLine.LineRefNum,
+                        _creditParmLineDetails.RentalModeId,
+                        _creditParmLineDetails.FromDate);
+
+                    orderAmendmentLog.AmendmentAction = DNRAmendmentAction::Changed;
+                    orderAmendmentLog.StrValue = _creditParmLineDetails.RentalModeId;
+                }
+                else
+                {
+                    creditText = strFmt("@DNR:CreditSingleDay",
+                        _creditParmLine.LineRefNum,
+                        _creditParmLineDetails.FromDate);
+                }
+
+                fromDateTime = DateTimeUtil::newDateTime(_creditParmLineDetails.FromDate, 0);
+                toDateTime = DateTimeUtil::newDateTime(_creditParmLineDetails.FromDate, 0);
+
+                break;
+    
+            case FINCreditDateRangeType::DateRange :
+                invoicedAmount = getInvoiceAmount();
+                
+                fromDateTime = _creditParmLineDetails.FromDateTime;
+                toDateTime = _creditParmLineDetails.ToDateTime;
+    
+                if (_creditParmLineDetails.CreditType == FINCreditType::RentalMode)
+                {
+                    
+                    creditText = strFmt("@DNR:CreditDateRangeRentalMode",
+                        _creditParmLine.LineRefNum,
+                        _creditParmLineDetails.RentalModeId,
+                        DateTimeUtil::applyTimeZoneOffset(fromDateTime, DateTimeUtil::getUserPreferredTimeZone()),
+                        DateTimeUtil::applyTimeZoneOffset(toDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+
+                    orderAmendmentLog.StrValue = _creditParmLineDetails.RentalModeId;
+                }
+                else
+                {
+                    if (_creditParmLine.TradeType == RORTradeType::SalesPurch)
+                    {
+                        creditText = strFmt("@DNR7134",
+                            _creditParmLine.LineRefNum,
+                            _creditParmLine.CurrencyCode,
+                            invoicedAmount);
+
+                        orderAmendmentLog.RealValue = invoicedAmount;
+                    }
+                    else
+                    {
+                        creditText = strFmt("@DNR:CreditDateRange",
+                            _creditParmLine.LineRefNum,
+                            DateTimeUtil::applyTimeZoneOffset(fromDateTime, DateTimeUtil::getUserPreferredTimeZone()),
+                            DateTimeUtil::applyTimeZoneOffset(toDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+                    }
+                }
+                break;
+    
+            case FINCreditDateRangeType::EntirePeriod :
+                if (_creditParmLineDetails.CreditType == FINCreditType::RentalMode)
+                {
+                    creditText = strFmt("@DNR7136",
+                        _creditParmLine.LineRefNum,
+                        _creditParmLineDetails.RentalModeId,
+                        _creditParmLine.CurrencyCode,
+                        _creditParmLine.CreditAmount);
+
+                    orderAmendmentLog.StrValue = _creditParmLineDetails.RentalModeId;
+                    orderAmendmentLog.RealValue = _creditParmLine.CreditAmount;
+                }
+                else if (_creditParmLineDetails.CreditType == FINCreditType::Days)
+                {
+                    invoicedAmount = _creditParmLine.TradeType == RORTradeType::SalesPurch ? _creditParmLineDetails.AmountCurCredit : _creditParmLine.InvoicedAmount;
+                    creditText = strFmt("@DNR7137",
+                        _creditParmLine.LineRefNum,
+                        _creditParmLine.CurrencyCode,
+                        invoicedAmount);
+
+                    orderAmendmentLog.RealValue = invoicedAmount;
+                }
+                else
+                {
+                    creditText = strFmt("@DNR7138",
+                        _creditParmLine.LineRefNum,
+                        _creditParmLine.CurrencyCode,
+                        _creditParmLineDetails.AmountCurCredit);
+
+                    orderAmendmentLog.RealValue = _creditParmLineDetails.AmountCurCredit;
+                }
+                break;
+        }
+
+        orderAmendmentLog.FromDateTime = fromDateTime;
+        orderAmendmentLog.ToDateTime = toDateTime;
+
+        return creditText;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateCreditParmLineDetails</Name>
+				<Source><![CDATA[
+    public boolean validateCreditParmLineDetails(TmpFrmVirtual _tmpFrmVirtual)
+    {
+        FINCreditLine           creditParmLinePending;
+        FINCreditLineDetails    creditParmLineDetails;
+        boolean                 ret;
+        TmpFrmVirtual           tmpFrmVirtual;
+        ;
+    
+        ret = true;
+    
+        tmpFrmVirtual.setTmpData(_tmpFrmVirtual);
+    
+        while select tmpFrmVirtual
+        {
+            creditParmLinePending = FINCreditLine::findRecId(tmpFrmVirtual.RecordNo, true);
+    
+            if (creditParmLinePending)
+            {
+                while select creditParmLineDetails
+                where creditParmLineDetails.CreditLineRefRecId  == creditParmLinePending.RecId
+                {
+                    ret = this.validateWriteCreditParmLineDetails(creditParmLineDetails);
+    
+                    if (!ret)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWriteCreditParmLineDetails</Name>
+				<Source><![CDATA[
+    public boolean validateWriteCreditParmLineDetails(FINCreditLineDetails _creditParmLineDetails)
+    {
+        boolean ret;
+        int     minYear;
+    
+        ret = true;
+        minYear = year(dateNull()) + 1;
+    
+        if (_creditParmLineDetails.DateRangeType != FINCreditDateRangeType::EntirePeriod
+        && (DateTimeUtil::year(_creditParmLineDetails.FromDateTime) < minYear || DateTimeUtil::year(_creditParmLineDetails.ToDateTime) < minYear)
+        &&  _creditParmLineDetails.creditLine().TradeType != RORTradeType::SalesPurch)
+        {
+            ret = checkFailed(strFmt("@SYS84378", fieldId2pname(tableNum(FINCreditLineDetails), _creditParmLineDetails.FromDateTime ? fieldNum(FINCreditLineDetails, ToDateTime) : fieldNum(FINCreditLineDetails, FromDateTime))));
+        }
+    
+        if (_creditParmLineDetails.ToDateTime && _creditParmLineDetails.ToDateTime < _creditParmLineDetails.FromDateTime)
+        {
+            ret = checkFailed("@SYS91020");
+        }
+    
+        if (_creditParmLineDetails.CreditType == FINCreditType::RentalMode && !_creditParmLineDetails.RentalModeId)
+        {
+            ret = checkFailed(strFmt("@SYS26332", fieldId2pname(tableNum(FINCreditLineDetails), fieldNum(FINCreditLineDetails, RentalModeId))));
+        }
+    
+        if (_creditParmLineDetails.CreditType == FINCreditType::Amount && !_creditParmLineDetails.AmountCurCredit)
+        {
+            ret = checkFailed(strFmt("@SYS26332", fieldId2pname(tableNum(FINCreditLineDetails), fieldNum(FINCreditLineDetails, AmountCurCredit))));
+        }
+    
+        if (!_creditParmLineDetails.ContactPersonId)
+        {
+            ret = checkFailed(strFmt("@SYS26332", fieldId2pname(tableNum(FINCreditLineDetails), fieldNum(FINCreditLineDetails, ContactPersonId))));
+        }
+    
+        if (!_creditParmLineDetails.DNRReasonCode)
+        {
+            ret = checkFailed(strFmt("@SYS26332", fieldId2pname(tableNum(FINCreditLineDetails), fieldNum(FINCreditLineDetails, DNRReasonCode))));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotalCreditAvailable</Name>
+				<Source><![CDATA[
+    private Map calculateTotalCreditAvailable(SalesLine _salesLine, FINCreditLineDetails _creditLineDetails)
+    {
+        Map accountTypeCreditMap = new Map(Types::Enum, Types::Real);
+        FINCustInvoiceTrans finCustInvoiceTrans;
+        CustInvoiceTrans custInvoiceTrans;
+
+        while select finCustInvoiceTrans
+            exists join custInvoiceTrans
+            where custInvoiceTrans.RecId == finCustInvoiceTrans.CustInvoiceTransRecId
+            &&    custInvoiceTrans.InventTransId == _salesLine.InventTransId
+        {
+            Map chargedPerMarkupMap = finCustInvoiceTrans.getChargedValuesPerMarkup(true);
+            MapEnumerator chargedPerMarkupMapEnum = chargedPerMarkupMap.getEnumerator();
+
+            while (chargedPerMarkupMapEnum.moveNext())
+            {
+                AmountCur creditAvailable;
+                Set chargedValuesSet = chargedPerMarkupMapEnum.currentValue();
+                SetEnumerator chargedValuesSetEnum = chargedValuesSet.getEnumerator();
+
+                while(chargedValuesSetEnum.moveNext())
+                {
+                    FINRentalAccountType accountType;
+                    AmountCur amount;
+                    Description description;
+
+                    [accountType, amount, description] = chargedValuesSetEnum.current();
+
+                    boolean addToPriceAccountType = (_creditLineDetails.creditType == FINCreditType::Days
+                                                 && (accountType == FINRentalAccountType::Insurance || (_creditLineDetails.DateRangeType == FINCreditDateRangeType::EntirePeriod && accountType != FINRentalAccountType::CostPrice)));
+
+                    if (!addToPriceAccountType
+                    &&  (accountType == FINRentalAccountType::DeliveryTransport || accountType == FINRentalAccountType::ReturnTransport))
+                    {
+                        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+                        FINCreditLine creditLine;
+
+                        if (accountType == FINRentalAccountType::DeliveryTransport)
+                        {
+                            select firstonly RecId from journalizedInvoicePeriod
+                            where journalizedInvoicePeriod.RefRecId == finCustInvoiceTrans.CustInvoiceTransRecId
+                            &&    journalizedInvoicePeriod.RefTableId == tableNum(CustInvoiceTrans)
+                            &&    journalizedInvoicePeriod.PeriodStartDateTime == _creditLineDetails.FromDateTime
+                            &&    journalizedInvoicePeriod.PeriodEndDateTime <= _creditLineDetails.ToDateTime
+                                exists join creditLine
+                                where creditLine.RecId == _creditLineDetails.CreditLineRefRecId
+                                &&    creditLine.RefTableId == journalizedInvoicePeriod.RefTableId
+                                &&    creditLine.RefRecId == journalizedInvoicePeriod.RefRecId
+                                &&    (creditLine.DocumentState == VersioningDocumentState::Draft || creditLine.DocumentState == VersioningDocumentState::Approved);
+                        }
+                        else
+                        {
+                            select firstonly RecId from journalizedInvoicePeriod
+                            where journalizedInvoicePeriod.RefRecId == finCustInvoiceTrans.CustInvoiceTransRecId
+                            &&    journalizedInvoicePeriod.RefTableId == tableNum(CustInvoiceTrans)
+                            &&    journalizedInvoicePeriod.PeriodStartDateTime >= _creditLineDetails.FromDateTime 
+                            &&    journalizedInvoicePeriod.PeriodEndDateTime == _creditLineDetails.ToDateTime
+                                exists join creditLine
+                                where creditLine.RecId == _creditLineDetails.CreditLineRefRecId
+                                &&    creditLine.RefTableId == journalizedInvoicePeriod.RefTableId
+                                &&    creditLine.RefRecId == journalizedInvoicePeriod.RefRecId
+                                &&    (creditLine.DocumentState == VersioningDocumentState::Draft || creditLine.DocumentState == VersioningDocumentState::Approved);
+                        }
+                        if (journalizedInvoicePeriod.RecId)
+                        {
+                            addToPriceAccountType = true;
+                        }
+                    }
+
+                    if (accountType == FINRentalAccountType::Price
+                    ||  accountType == FINRentalAccountType::Discount
+                    ||  accountType == FINRentalAccountType::Manual
+                    ||  addToPriceAccountType)
+                    {
+                        accountType = FINRentalAccountType::Price;
+                    }
+
+                    if (accountTypeCreditMap.exists(accountType))
+                    {
+                        creditAvailable = accountTypeCreditMap.lookup(accountType);
+                    }
+
+                    creditAvailable += amount;
+                    accountTypeCreditMap.insert(accountType, creditAvailable);
+                }
+            }
+        }
+
+        return accountTypeCreditMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotalCreditPending</Name>
+				<Source><![CDATA[
+    private Map calculateTotalCreditPending(SalesLine _salesLine, RefRecId _creditLineRefRecId, toDateTime _toDateTime)
+    {
+        FINSalesTotals              finSalesTotals;
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+        CustInvoiceTrans            custInvoiceTrans;
+        FINCreditLine               creditLine;
+        Set                         creditSet = new Set(Types::Container);
+        Map                         accountTypeCreditMap = new Map(Types::Enum, Types::Real);
+
+        select maxof(PeriodEndDateTime) from journalizedInvoicePeriod
+            join RecId from custInvoiceTrans
+            where custInvoiceTrans.TableId == journalizedInvoicePeriod.RefTableId
+            &&    custInvoiceTrans.RecId == journalizedInvoicePeriod.RefRecId
+            &&    custInvoiceTrans.InventTransId == _salesLine.inventTransId
+                exists join creditLine
+                where creditLine.RecId == _creditLineRefRecId
+                &&    creditLine.RefTableId == custInvoiceTrans.TableId
+                &&    creditLine.RefRecId == custInvoiceTrans.RecId
+                &&    (creditLine.DocumentState == VersioningDocumentState::Draft || creditLine.DocumentState == VersioningDocumentState::Approved);
+                    
+        TransDateTime calculationDateTime = max(journalizedInvoicePeriod.PeriodEndDateTime, _toDateTime);
+
+        finSalesTotals = new FINSalesTotals();
+        finSalesTotals.calculationDateTime(calculationDateTime);
+        finSalesTotals.specQty(SalesUpdate::DeliverNow);
+        finSalesTotals.mustPrepareInvoicedData = false;
+              
+        FINInvoicingOptions invoicingOptions = FINInvoicingOptions::construct();
+        invoicingOptions.includeUninvoiced = NoYes::Yes;
+        invoicingOptions.includeCredited = NoYes::Yes;
+        invoicingOptions.calculationDateTime = finSalesTotals.calculationDateTime();
+        invoicingOptions.isCreditPreview = NoYes::Yes;
+        finSalesTotals.setInvoicingOptionsForCredit(invoicingOptions);
+
+        finSalesTotals.parmCreditJourRefRecId(FINCreditLine::findRecId(_creditLineRefRecId).JourRefRecId);
+        finSalesTotals.parmCallerBuffer(_salesLine);
+        finSalesTotals.prepareDataForTotals();
+                                    
+        if (finSalesTotals.getParmTable())
+        {
+            FINInvoiceCalculatorParm invoiceCalculatorParm;
+            SalesParmLine   salesParmLine;
+            SalesParmTable  salesParmTable = finSalesTotals.getParmTable();
+
+            select firstonly invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmId == salesParmTable.ParmId
+                exists join salesParmLine
+                where salesParmLine.TableId == invoiceCalculatorParm.ParmLineTableId
+                &&    salesParmLine.RecId == invoiceCalculatorParm.ParmLineRecId
+                &&    salesParmLine.ParmId == salesParmTable.parmId
+                &&    salesParmLine.InventTransId == _salesLine.InventTransId;
+            
+            if (invoiceCalculatorParm)
+            {
+                creditSet = invoiceCalculatorParm.getChargedValuesPerEngine();
+            }
+
+            salesParmTable.selectForUpdate(true);
+            salesParmTable.delete();
+        }
+         
+        FINMarkupTransGenerator::deleteMarkupTransForSet(finSalesTotals.recIdSet());
+
+        SetEnumerator creditSetEnumerator = creditSet.getEnumerator();
+
+        while (creditSetEnumerator.moveNext())
+        {
+            FINRentalAccountType    accountType;
+            AmountCur               amount;
+            AmountCur               creditAmount;
+            Description             description;
+            boolean                 isCredit;
+            FINRentalAccountType    creditAccountType;
+            Counter                 idx;
+
+            [accountType, amount, description, isCredit, creditAccountType, idx] = creditSetEnumerator.current();
+
+            if (accountType != FINRentalAccountType::CostPrice)
+            {
+                accountType = creditAccountType;
+                accountType = (accountType == FINRentalAccountType::Discount ? FINRentalAccountType::Price : accountType);
+
+                if (accountTypeCreditMap.exists(accountType))
+                {
+                    creditAmount = accountTypeCreditMap.lookup(accountType);
+                }
+
+                accountTypeCreditMap.insert(accountType, creditAmount + amount);
+            }
+        }
+
+        return accountTypeCreditMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRentalAccountType</Name>
+				<Source><![CDATA[
+    private FINRentalAccountType getRentalAccountType(FINCreditType _creditType)
+    {
+        FINRentalAccountType rentalAccountType;
+
+        switch (_creditType)
+        {
+            case FINCreditType::Amount :
+            case FINCreditType::Days :
+            case FINCreditType::RentalMode :
+                rentalAccountType = FINRentalAccountType::Price;
+                break;
+
+            case FINCreditType::Insurance :
+                rentalAccountType = FINRentalAccountType::Insurance;
+                break;
+
+            case FINCreditType::Delivery :
+                rentalAccountType = FINRentalAccountType::DeliveryTransport;
+                break;
+
+            case FINCreditType::Return :
+                rentalAccountType = FINRentalAccountType::ReturnTransport;
+                break;
+        }
+
+        return rentalAccountType;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateCreditDays</Name>
+				<Source><![CDATA[
+    public boolean validateCreditDays(FINCreditLineDetails _creditLineDetails)
+    {
+        boolean ret = true;
+
+        if (_creditLineDetails.CreditType == FINCreditType::Days)
+        {
+            FINInvoicePeriodAmendment amendment;
+            RORParameters parameters =  RORParameters::find();
+            SalesLine salesLine;
+            FINCreditLine creditLine;
+
+            select count(RecId) from amendment
+            where amendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+            &&    amendment.StrValue == parameters.RentalStopCalendar
+            &&    amendment.FromDateTime < _creditLineDetails.ToDateTime
+            &&    amendment.ToDateTime > _creditLineDetails.FromDateTime
+            &&    (amendment.DocumentState == FINAmendmentDocumentState::None || amendment.DocumentState == FINAmendmentDocumentState::Confirmed)
+                exists join salesLine
+                where salesLine.TableId == amendment.RefTableId
+                &&    salesLine.RecId == amendment.RefRecId
+                    join TableId from creditLine
+                    where creditLine.InventTransId == salesLine.InventTransId
+                    &&    creditLine.RecId == _creditLineDetails.CreditLineRefRecId;
+            
+            if (amendment.RecId > 1)
+            {
+                ret = checkFailed(strFmt("@DNR:CreditDaysValidation",
+                    parameters.RentalStopCalendar,
+                    DateTimeUtil::applyTimeZoneOffset(_creditLineDetails.FromDateTime, DateTimeUtil::getUserPreferredTimeZone()),
+                    DateTimeUtil::applyTimeZoneOffset(_creditLineDetails.ToDateTime, DateTimeUtil::getUserPreferredTimeZone())));
+
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateCreditLimit</Name>
+				<Source><![CDATA[
+    public boolean validateCreditLimit(FINCreditLineDetails _creditLineDetails)
+    {
+        SalesLine       salesLine;
+        FINCreditLine   curCreditLine;
+        boolean         ret;
+
+        select firstonly salesLine
+            join RefTableId, RefRecId from curCreditLine
+            where curCreditLine.InventTransId == salesLine.InventTransId
+            &&    curCreditLine.RecId == _creditLineDetails.CreditLineRefRecId;
+        
+        ret = (salesLine.RORTradeType == RORTradeType::SalesPurch && _creditLineDetails.CreditType == FINCreditType::Amount);
+
+        if (!salesLine.LineAmount && _creditLineDetails.CreditType == FINCreditType::Days)
+        {
+            FINCreditLine creditLine;
+            FINCreditLineDetails creditLineDetails;
+
+            select firstonly RecId from creditLineDetails
+            where creditLineDetails.RecId != _creditLineDetails.RecId
+            &&    creditLineDetails.FromDateTime == _creditLineDetails.FromDateTime
+            &&    creditLineDetails.ToDateTime == _creditLineDetails.ToDateTime
+                exists join creditLine
+                where creditLine.RecId == creditLineDetails.CreditLineRefRecId
+                &&    creditLine.InventTransId == salesLine.InventTransId
+                &&    creditLine.RefTableId == curCreditLine.RefTableId
+                &&    creditLine.RefRecId == curCreditLine.RefRecId;
+
+            if (!creditLineDetails.RecId)
+            {
+                ret = true;
+            }
+        }
+
+        Map creditedAmountMap = this.calculateTotalCreditAvailable(salesLine, _creditLineDetails);
+        FINRentalAccountType rentalAccountType = this.getRentalAccountType(_creditLineDetails.CreditType);
+
+        if (creditedAmountMap.exists(rentalAccountType))
+        {
+            AmountCur creditAvailable = creditedAmountMap.lookup(rentalAccountType);
+
+            if (creditAvailable)
+            {
+                Map pendingCreditsMap = this.calculateTotalCreditPending(salesLine, _creditLineDetails.CreditLineRefRecId, _creditLineDetails.ToDateTime);
+                if (pendingCreditsMap.exists(rentalAccountType))
+                {
+                    AmountCur creditPending = abs(pendingCreditsMap.lookup(rentalAccountType));
+                    ret = (creditAvailable >= creditPending);
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINCreditForm construct(SalesPurch _salesPurch)
+    {
+        FINCreditForm formClass;
+        ;
+    
+        if (_salesPurch == SalesPurch::Purch)
+        {
+            formClass = new FINCreditForm_SubRental();
+        }
+        else
+        {
+            formClass = new FINCreditForm_Rental();
+        }
+    
+        return formClass;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linkedCredtLineDetailsRecId</Name>
+				<Source><![CDATA[
+    public RefRecId linkedCredtLineDetailsRecId(RefRecId _creditLineRecId)
+    {
+        RefRecId refCreditLineDetailsRecId;
+
+        if (!markedCreditLineDetailsMap.empty())
+        {
+            refCreditLineDetailsRecId = markedCreditLineDetailsMap.lookup(_creditLineRecId);
+        }
+
+        return refCreditLineDetailsRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        markedCreditLineDetailsMap = new Map(Types::Int64, Types::Int64);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setOrderAmendmentLog</Name>
+				<Source><![CDATA[
+    public void setOrderAmendmentLog(ROROrderAmendmentLog _orderAmendmentLog)
+    {
+        orderAmendmentLog = _orderAmendmentLog;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

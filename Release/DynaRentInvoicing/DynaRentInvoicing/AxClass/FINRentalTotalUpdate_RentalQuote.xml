@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINRentalTotalUpdate_RentalQuote</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINRentalTotalUpdate_RentalQuote extends FINRentalTotalUpdate
+{
+    SalesQuotationTable     salesQuotationTable;
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(SalesQuotationTable _salesQuotationTable)
+    {
+        salesQuotationTable = _salesQuotationTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotals</Name>
+				<Source><![CDATA[
+    protected void calculateTotals()
+    {
+        container           totals;
+        SalesQuotationLine  salesQuotationLine;
+
+        try
+        {
+            if (this.parmCalculateAllLines())
+            {
+                while select salesQuotationLine
+                where salesQuotationLine.QuotationId == salesQuotationTable.QuotationId
+                {
+                    totals = this.calculateTotalsForRentalQuotationLine(salesQuotationLine);
+                    this.createOrUpdateSalesQuotationLineCalculatedTotals(totals, salesQuotationLine);
+                }
+            }
+            else if (this.parmCalculateOnlyForSpecificLine())
+            {
+                salesQuotationLine = this.parmRentalLine() as salesQuotationLine;
+                totals = this.calculateTotalsForRentalQuotationLine(salesQuotationLine);
+                this.createOrUpdateSalesQuotationLineCalculatedTotals(totals, salesQuotationLine);
+            }
+
+            totals = this.calculateTotalsForRentalQuotationHeader();
+            this.createOrUpdateSalesQuotationCalculatedTotals(totals);
+            salesQuotationTable.FINUpdateRecalculateRentalTotals(false);
+
+            info(strFmt("@DNR:RentalQuotationTotalUpdateSuccessMsg",salesQuotationTable.QuotationId));
+        }
+        catch
+        {
+            info(strFmt("@DNR:RentalQuotationTotalsUpdateError",salesQuotationTable.QuotationId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotalsForRentalQuotationHeader</Name>
+				<Source><![CDATA[
+    public container calculateTotalsForRentalQuotationHeader()
+    {
+        SalesQuotationTotals    totals;
+        container               headerTotals;
+        FINSalesQuotationTotals finSalesQuotationTotals = new FINSalesQuotationTotals();
+
+        finSalesQuotationTotals.parmCallerBuffer(salesQuotationTable);
+        finSalesQuotationTotals.prepareDataForTotals();
+        SalesQuotationParmTable salesQuotationParmTableLocal = finSalesQuotationTotals.getParmTable();
+
+        if (salesQuotationParmTableLocal.RecId)
+        {
+            totals = SalesQuotationTotals::construct(salesQuotationParmTableLocal, SalesUpdate::All, AccountOrder::None, salesQuotationParmTableLocal.ParmId, '', salesQuotationParmTableLocal.Ordering);
+        }
+        else
+        {
+            totals = SalesQuotationTotals::construct(salesQuotationTable, SalesUpdate::All);
+        }
+
+        totals.callerModuleType(0);
+        totals.calc();
+
+        container   displayFields = totals.displayFieldsCurrency();
+        headerTotals = [conPeek(displayFields, TradeTotals::posTotalAmount()),
+                        conPeek(displayFields, TradeTotals::posEndDisc()),
+                        conPeek(displayFields, TradeTotals::posMarkup()),
+                        conPeek(displayFields, TradeTotals::posTaxTotal())];
+
+        finSalesQuotationTotals.cleanupPrecalculatedData();
+
+        return headerTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createOrUpdateSalesQuotationCalculatedTotals</Name>
+				<Source><![CDATA[
+    public void createOrUpdateSalesQuotationCalculatedTotals(container _headerTotals)
+    {
+        SalesQuotationCalculatedTotals quotationTotals  = SalesQuotationCalculatedTotals::find(salesQuotationTable.QuotationId, true);
+
+        quotationTotals.QuotationTotalAmount            = conPeek(_headerTotals, 1);
+        quotationTotals.QuotationTotalDiscountAmount    = conPeek(_headerTotals, 2);
+        quotationTotals.QuotationTotalChargesAmount     = conPeek(_headerTotals, 3);
+        quotationTotals.QuotationTotalTaxAmount         = conPeek(_headerTotals, 4);
+        quotationTotals.LastUpdatedDateTime             = DateTimeUtil::utcNow();
+        quotationTotals.QuotationId                     = salesQuotationTable.QuotationId;
+        quotationTotals.write();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotalsForRentalQuotationLine</Name>
+				<Source><![CDATA[
+    public container calculateTotalsForRentalQuotationLine(SalesQuotationLine _quotationLine)
+    {
+        container               lineTotals;
+        SalesQuotationTotals    totals;
+        FINSalesQuotationTotals finSalesQuotationTotals = new FINSalesQuotationTotals();
+
+        finSalesQuotationTotals.parmCallerBuffer(_quotationLine);
+        finSalesQuotationTotals.prepareDataForTotals();
+        SalesQuotationParmTable salesQuotationParmTableLocal = finSalesQuotationTotals.getParmTable();
+        SalesQuotationParmLine salesQuotationParmLine;
+
+        if (_quotationLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            delete_from salesQuotationParmLine
+            where salesQuotationParmLine.InventTransId != _quotationLine.InventTransId
+            &&    salesQuotationParmLine.ParmId == salesQuotationParmTableLocal.ParmId;
+
+            if (salesQuotationParmTableLocal.RecId)
+            {
+                totals = SalesQuotationTotals::construct(salesQuotationParmTableLocal, SalesUpdate::All, AccountOrder::None, salesQuotationParmTableLocal.ParmId, '', salesQuotationParmTableLocal.Ordering);
+            }
+            else
+            {
+                totals = SalesQuotationTotals::construct(salesQuotationTable, SalesUpdate::All);
+            }
+
+            totals.callerModuleType(0);
+            totals.calc();
+            container  displayFields = totals.displayFieldsCurrency();
+            lineTotals = [conPeek(displayFields, TradeTotals::posTotalAmount()),
+                          conPeek(displayFields, TradeTotals::posEndDisc()),
+                          conPeek(displayFields, TradeTotals::posTaxTotal())];
+        }
+        else
+        {
+            select firstonly salesQuotationParmLine
+            where salesQuotationParmLine.InventTransId == _quotationLine.InventTransId
+            &&    salesQuotationParmLine.ParmId == salesQuotationParmTableLocal.ParmId;
+
+            FINRentalInvoiceDetailHelper helperClass = FINRentalInvoiceDetailHelper::getRentalInvoiceDetails(salesQuotationParmLine, false);
+            lineTotals = [helperClass.totalChargedAmount,
+                          helperClass.discountAmount, 0];
+        }
+
+        finSalesQuotationTotals.cleanupPrecalculatedData();
+
+        return lineTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createOrUpdateSalesQuotationLineCalculatedTotals</Name>
+				<Source><![CDATA[
+    public void createOrUpdateSalesQuotationLineCalculatedTotals(container _lineTotals, SalesQuotationLine _quotationLine)
+    {
+        SalesQuotationLineCalculatedTotals  quotationLineTotals = SalesQuotationLineCalculatedTotals::find(_quotationLine.InventTransId, true);
+
+        quotationLineTotals.TotalChargesAmount  = conPeek(_lineTotals, 1);
+        quotationLineTotals.TotalDiscountAmount = abs(conPeek(_lineTotals, 2));
+        quotationLineTotals.TotalTaxAmount      = conPeek(_lineTotals, 3);
+        quotationLineTotals.LastUpdatedDateTime = DateTimeUtil::utcNow();
+        quotationLineTotals.QuotationId = _quotationLine.QuotationId;
+        quotationLineTotals.InventTransId = _quotationLine.InventTransId;
+        quotationLineTotals.write();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

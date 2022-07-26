@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCostPriceCalcEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINCostPriceCalcEngine implements FINIInvoiceCalculatorGenericEngine
+{
+    FINInvoiceCalculatorParm        invoiceCalculatorParm;
+    Common                          parmLine;
+    RORRentalLine                   rentalLine;
+    FINInvoicingOptions             invoicingOptions;
+    FINCostPriceJournalizer         journalizedData;
+    #define.engineId('Cost price')
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>mustBeActive</Name>
+				<Source><![CDATA[
+    public boolean mustBeActive()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINCostPriceCalcEngine construct(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        FINCostPriceCalcEngine calcEngine = new FINCostPriceCalcEngine();
+        calcEngine.initParameters(_invoiceCalculatorParm);
+        return calcEngine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParameters</Name>
+				<Source><![CDATA[
+    public void initParameters(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        invoiceCalculatorParm = _invoiceCalculatorParm;
+        parmLine = invoiceCalculatorParm.parmLine();
+        rentalLine = invoiceCalculatorParm.rentalLine();
+        invoicingOptions = invoiceCalculatorParm.getInvoicingOptions();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustRunEngine</Name>
+				<Source><![CDATA[
+    protected boolean mustRunEngine()
+    {
+        boolean ret;
+        PurchLine purchLine = rentalLine as PurchLine;
+
+        if (invoicingOptions.includeUninvoiced 
+        && !purchLine
+        && UnitOfMeasure::find(rentalLine.PriceTimeUnit).FINInvoiceCostPriceEngine)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    public void process()
+    {
+        if (this.mustRunEngine())
+        {
+            // Add result to a list storing a result of all engines.
+            List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            journalizedData = new FINCostPriceJournalizer();
+
+            FINPeriodSpecificationManager periodSpecificationManager = FINPeriodSpecificationManager::construct();
+            periodSpecificationManager.populate(invoiceCalculatorParm, rentalLine, invoicingOptions);
+            
+            int numOfChargeablePeriods = periodSpecificationManager.getTotalChargeablePeriods();
+
+            AmountCur costAmount;
+
+            if (numOfChargeablePeriods && periodSpecificationManager.mustBeInvoiced())
+            {
+                BOBObjectTable  objectTable;
+                InventDim       inventDim;
+                BOBRentalType   rentalType = BOBRentalType::findFromItemId(rentalLine.ItemId);
+    
+                switch(rentalType.Classification)
+                {
+                    case BOBRentalTypeClassification::Serialized:
+                    select firstOnly ObjectId from objectTable
+                    where objectTable.InventSerialId
+                        join TableId from inventDim
+                        where inventDim.inventDimId == rentalLine.inventDimId
+                        &&    inventDim.inventSerialId == objectTable.InventSerialId;
+                        break;
+    
+                    case BOBRentalTypeClassification::Bulk:
+                        objectTable = BOBObjectTable::findBulkObject(rentalType.RentalTypeId);
+                        break;
+                }
+
+                UnitOfMeasureFromRecId unitOfMeasureForPeriods = periodSpecificationManager.getChargeablePeriodUnit();
+                // Cost price directly into period unit (day or minute), no need to convert first into order line price unit.
+                AmountCur costPriceInPeriodsUnit = FINRentalCostPrice::findCostPrice(objectTable.ObjectId, rentalLine.ItemId, DateTimeUtil::date(invoicingOptions.calculationDateTime), unitOfMeasureForPeriods);
+
+
+                // Map( [InvoicePeriodQtyRecId, invoiceQty], Map([ FromDateTime, ToDateTime ] , List(FINPeriodSpecification)))
+                Map specificationMap = periodSpecificationManager.getSpecificationMap();
+                MapEnumerator enumerator = specificationMap.getEnumerator();
+
+                while (enumerator.moveNext())
+                {
+                    Map periodDefinitionMap = enumerator.currentValue();
+                    MapEnumerator specificationEnumerator = periodDefinitionMap.getEnumerator();
+                
+                    while (specificationEnumerator.moveNext())
+                    {
+                        List            specificationList = specificationEnumerator.currentValue();
+                        ListEnumerator  listEnumerator = specificationList.getEnumerator();
+                
+                        while (listEnumerator.moveNext())
+                        {
+                            FINPeriodSpecification periodSpec = listEnumerator.current();
+
+                            if (periodSpec.numOfCalendarPeriods > 0)
+                            {
+                                costAmount += periodSpec.numOfChargedPeriods * costPriceInPeriodsUnit * periodSpec.lineQty ;
+                            }
+                        }
+                    }
+                }
+
+                journalizedData.addResult([objectTable.ObjectId, rentalLine.ItemId, DateTimeUtil::date(invoicingOptions.calculationDateTime), unitOfMeasureForPeriods, costPriceInPeriodsUnit, numOfChargeablePeriods, costAmount]);
+            }
+
+            if (costAmount)
+            {
+                resultList.addEnd(FINInvoiceCalcResult::construct(FINRentalAccountType::CostPrice, costAmount));
+            }
+
+            invoiceCalculatorParm.WasAnyEngineExecuted = NoYes::Yes;
+            invoiceCalculatorParm.PeriodSpecificationPacked = periodSpecificationManager.getSpecificationMap().pack();
+            invoiceCalculatorParm.IsPeriodSpecificationCalculated = NoYes::Yes;
+            invoiceCalculatorParm.InvoiceCalcResultListPacked = resultList.pack();
+            invoiceCalculatorParm.CostPriceCalcPacked = journalizedData.pack();
+        }
+    }
+    
+]]></Source>
+			</Method>
+			<Method>
+				<Name>engineId</Name>
+				<Source><![CDATA[
+    public Num engineId()
+    {
+        return #engineId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public Description description()
+    {
+        return "@DNR:CostPriceEngineDescr";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>publisher</Name>
+				<Source><![CDATA[
+    public Name publisher()
+    {
+        return "@DNR:ToIncreasePublisher";
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

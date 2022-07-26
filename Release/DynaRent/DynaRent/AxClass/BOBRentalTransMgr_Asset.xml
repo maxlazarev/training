@@ -1,0 +1,565 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalTransMgr_Asset</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBRentalTransMgr_Asset extends BOBRentalTransManager
+{
+    AssetTrans assetTrans;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>acquireAssetFromPurchInvoice</Name>
+				<Source><![CDATA[
+    public void acquireAssetFromPurchInvoice(AssetTrans _assetTrans, InventTransOriginId _originId)
+    {
+        #TimeConstants
+    
+        AssetTable          assetTable;
+        VendInvoiceInfoLine invoiceLine;
+        InventDim           inventDim;
+        BOBRentalTrans      rentalTrans;
+        BOBObjectTable      objectTable;
+        BOBObjectAssetLog   objectAssetLog;
+        InventQty           qtyUpdated;
+        FromDateTime        fromDateTime;
+        PurchLine           purchLine;
+        InventTransOrigin   origin;
+        BOBRentalType       rentalType;
+        ;
+    
+        select firstOnly InventNow, RecId from invoiceLine
+            join ItemId from purchLine
+            where purchLine.RecId == invoiceLine.PurchLineRecId
+                join TableId from origin
+                where origin.RecId == _originId
+                &&    origin.InventTransId == purchLine.InventTransId
+                    join RentalTypeId, Classification from rentalType
+                    where rentalType.RentalTypeId == purchLine.BOBRentalTypeId
+                    &&    rentalType.Classification != BOBRentalTypeClassification::Virtual
+                        join InventLocationId from inventDim
+                        where inventDim.inventDimId == purchLine.InventDimId;
+
+        date assetDate = max(_assetTrans.TransDate, DateTimeUtil::date(DateTimeUtil::getSystemDateTime()));
+    
+        if(invoiceLine)
+        {
+            objectTable = BOBObjectTable::findByAssetId(_assetTrans.AssetId, assetDate);
+        }
+    
+        if(objectTable.ObjectId && objectTable.RentalTypeId)
+        {
+            ttsBegin;
+    
+            // update any rental transactions that were created during packing slip updates
+            while select forUpdate rentalTrans
+            where rentalTrans.InventTransOrigin == _originId
+            &&    rentalTrans.AssetTransRecId   == 0
+            &&    rentalTrans.AssetId           == _assetTrans.AssetId
+            &&    rentalTrans.SubStatus         == BOBRentalSubStatus::Delivered
+            &&    rentalTrans.TransType         == BOBRentalTransType::Asset
+            &&    rentalTrans.Active            == BOBRentalTransActive::Inactive
+            {
+                rentalTrans.Active              = BOBRentalTransActive::Active;
+                rentalTrans.SubStatus           = BOBRentalSubStatus::Invoiced;
+                rentalTrans.CertaintyFrom       = BOBDateTimeCertainty::Fixed;
+                rentalTrans.AssetTransRecId     = _assetTrans.RecId;
+                rentalTrans.update();
+    
+                qtyUpdated += rentalTrans.Qty;
+            }
+    
+            // create a new rental transaction for the (remaining) invoice quantity
+            if(qtyUpdated < invoiceLine.InventNow)
+            {
+                fromDateTime = DateTimeUtil::newDateTime(assetDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+    
+                rentalTrans.Active              = BOBRentalTransActive::Active;
+                rentalTrans.AssetId             = _assetTrans.AssetId;
+                rentalTrans.AssetTransRecId     = _assetTrans.RecId;
+                rentalTrans.CertaintyFrom       = BOBDateTimeCertainty::Fixed;
+                rentalTrans.CertaintyTo         = this.certaintyTo();
+                rentalTrans.CompanyId           = this.companyId();
+                rentalTrans.FromDateTime        = fromDateTime;
+                rentalTrans.InventLocationId    = inventDim.InventLocationId;
+                rentalTrans.InventTransOrigin   = _originId;
+                rentalTrans.ObjectId            = objectTable.ObjectId;
+                rentalTrans.Qty                 = (invoiceLine.InventNow - qtyUpdated);
+                rentalTrans.RentalTypeId        = objectTable.RentalTypeId;
+                rentalTrans.SubStatus           = qtyUpdated ? this.subStatus() : BOBRentalSubStatus::Invoiced;
+                rentalTrans.ToDateTime          = this.toDateTime();
+                rentalTrans.TransType           = this.transType();
+                rentalTrans.insert();
+            }
+
+            this.updateInventToAssetCostPrice(_assetTrans.AssetId);
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventToAssetCostPrice</Name>
+				<Source><![CDATA[
+    private void updateInventToAssetCostPrice(AssetId _assetId)
+    {
+        InventJournalTrans inventJournalTrans;
+        InventJournalTable inventJournalTable;
+
+        while select forupdate inventJournalTrans
+        where inventJournalTrans.AssetId == _assetId
+            exists join inventJournalTable
+            where inventJournalTrans.JournalId == inventJournalTable.JournalId
+            && !inventJournalTable.Posted
+            && inventJournalTable.JournalType           == InventJournalType::Asset
+            && inventJournalTable.BOBInventJournalType  == BOBInventJournalType::AssetToInvent
+        {
+            inventJournalTrans.DNRSetAssetCostPrice();
+            inventJournalTrans.update();
+        }
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>active</Name>
+				<Source><![CDATA[
+    protected BOBRentalTransActive active()
+    {
+        return (inventTrans.StatusReceipt == StatusReceipt::Purchased ?
+                BOBRentalTransActive::Active :
+                BOBRentalTransActive::Inactive);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyFrom</Name>
+				<Source><![CDATA[
+    protected BOBDateTimeCertainty certaintyFrom()
+    {
+        return 255;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyTo</Name>
+				<Source><![CDATA[
+    protected BOBDateTimeCertainty certaintyTo(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+        return BOBDateTimeCertainty::Fixed;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>conversionJournalPostTrans</Name>
+				<Source><![CDATA[
+    public void conversionJournalPostTrans(InventJournalTrans _journalTrans)
+    {
+        #TimeConstants
+    
+        BOBObjectTable      objectTable;
+        BOBObjectAssetLog   objectAssetLog;
+        BOBRentalType       rentalType;
+        BOBRentalTrans      rentalTrans, rentalTransOrig;
+        InventJournalTable  inventJournalTable;
+        InventDim           inventDim;
+        TransDateTime       transDateTime;
+        EcoResProduct       ecoResProduct;
+        InventTable         inventTable;
+        ;
+    
+        select firstOnly BOBInventJournalType from inventJournalTable
+        where inventJournalTable.JournalId == _journalTrans.JournalId
+            join TableId from inventDim
+            where inventDim.inventDimId == _journalTrans.InventDimId
+                join TableId from inventTable
+                where inventTable.ItemId == _journalTrans.ItemId
+                    join RecId from ecoResProduct
+                    where ecoResProduct.RecId == inventTable.Product
+                        join Classification from rentalType
+                        where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                            outer join TableId from objectAssetLog
+                            where objectAssetLog.AssetCompanyId == _journalTrans.DataAreaId
+                            &&    objectAssetLog.AssetId == _journalTrans.AssetId
+                                outer join RecId from objectTable
+                                where objectTable.InventSerialId == inventDim.inventSerialId
+                                &&    objectTable.ObjectId == objectAssetLog.ObjectId
+                                &&  (!objectTable.InventSerialId || (objectAssetLog.ValidFrom <= _journalTrans.TransDate && (!objectAssetLog.ValidTo || objectAssetLog.ValidTo >= _journalTrans.TransDate)));
+    
+        // at this point we should always have either a serialized or bulk rental type
+        // this has been validated in the InventJournalCheckPost classes
+    
+        if(!inventJournalTable
+        ||  inventJournalTable.BOBInventJournalType == BOBInventJournalType::Standard
+        || (rentalType.Classification == BOBRentalTypeClassification::Serialized && !objectTable.RecId))
+        {
+            throw error("@DNR6063");
+        }            
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAssetFromPurchPackingSlip</Name>
+				<Source><![CDATA[
+    public void createAssetFromPurchPackingSlip(PurchParmLine _purchParmLine, AssetId _assetId)
+    {
+        #TimeConstants
+    
+        PurchParmTable      purchParmTable;
+        InventDim           inventDim;
+        InventTransOrigin   inventTransOrigin;
+        BOBRentalTrans      rentalTrans;
+        BOBObjectTable      objectTable;
+        FromDateTime        fromDateTime;
+        BOBObjectAssetLog   objectAssetLog;
+        AssetTable          assetTable;
+        InventTable         inventTable;
+        EcoResProduct       ecoResProduct;
+        BOBRentalType       rentalType;
+        ;
+    
+        select firstOnly TransDate, BOBTransTime, RecId from purchParmTable
+        where purchParmTable.ParmId == _purchParmLine.ParmId
+        &&    purchParmTable.TableRefId == _purchParmLine.TableRefId
+            join RecId from inventTransOrigin
+            where inventTransOrigin.InventTransId == _purchParmLine.InventTransId
+                join InventLocationId from inventDim
+                where inventDim.inventDimId == _purchParmLine.InventDimId
+                    join TableId from inventTable
+                    where inventTable.ItemId == _purchParmLine.ItemId
+                        join TableId from ecoResProduct
+                        where ecoResProduct.RecId == inventTable.Product
+                            join RentalTypeId, Classification from rentalType
+                            where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                            &&    rentalType.Classification != BOBRentalTypeClassification::Virtual;
+    
+        date fromDate = max(purchParmTable.TransDate, DateTimeUtil::date(DateTimeUtil::getSystemDateTime()));
+            
+        if(purchParmTable)
+        {
+            objectTable = BOBObjectTable::findByAssetId(_assetId, fromDate);
+        }
+    
+        if(objectTable)
+        { 
+            fromDateTime = DateTimeUtil::newDateTime(fromDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+
+            ttsBegin;
+    
+            rentalTrans.Active              = BOBRentalTransActive::Inactive;
+            rentalTrans.AssetId             = _assetId;
+            rentalTrans.CertaintyFrom       = BOBDateTimeCertainty::Firm;
+            rentalTrans.CertaintyTo         = this.certaintyTo();
+            rentalTrans.CompanyId           = this.companyId();
+            rentalTrans.FromDateTime        = fromDateTime;
+            rentalTrans.InventLocationId    = inventDim.InventLocationId;
+            rentalTrans.InventTransOrigin   = inventTransOrigin.RecId;
+            rentalTrans.ObjectId            = objectTable.ObjectId;
+            rentalTrans.Qty                 = _purchParmLine.InventNow;
+            rentalTrans.RentalTypeId        = objectTable.RentalTypeId;
+            rentalTrans.SubStatus           = this.subStatus();
+            rentalTrans.ToDateTime          = this.toDateTime();
+            rentalTrans.TransType           = this.transType();
+            rentalTrans.insert();
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAssetFromPurchConfirm</Name>
+				<Source><![CDATA[
+    public void createAssetFromPurchConfirm(PurchLine _purchLine, PurchParmTable _purchParmTable)
+    {    
+        InventTransOrigin   inventTransOrigin;
+        BOBRentalTrans      rentalTrans;
+        BOBObjectTable      objectTable;
+        FromDateTime        fromDateTime;
+            
+        date fromDate = max(_purchParmTable.TransDate, DateTimeUtil::date(DateTimeUtil::getSystemDateTime()));
+
+        objectTable = BOBObjectTable::findByAssetId(_purchLine.AssetId, fromDate);
+    
+        if(objectTable)
+        {
+            fromDateTime = DateTimeUtil::newDateTime(fromDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+
+            select firstonly RecId from inventTransOrigin
+                where inventTransOrigin.InventTransId == _purchLine.InventTransId;
+
+            ttsBegin;
+    
+            rentalTrans.Active              = BOBRentalTransActive::Inactive;
+            rentalTrans.AssetId             = _purchLine.AssetId;
+            rentalTrans.CertaintyFrom       = BOBDateTimeCertainty::Firm;
+            rentalTrans.CertaintyTo         = this.certaintyTo();
+            rentalTrans.CompanyId           = this.companyId();
+            rentalTrans.FromDateTime        = fromDateTime;
+            rentalTrans.InventLocationId    = _purchLine.inventDim().InventLocationId;
+            rentalTrans.InventTransOrigin   = inventTransOrigin.RecId;
+            rentalTrans.ObjectId            = objectTable.ObjectId;
+            rentalTrans.Qty                 = _purchLine.PurchQty;
+            rentalTrans.RentalTypeId        = objectTable.RentalTypeId;
+            rentalTrans.SubStatus           = this.subStatus();
+            rentalTrans.ToDateTime          = this.toDateTime();
+            rentalTrans.TransType           = this.transType();
+            rentalTrans.insert();
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteInventTrans</Name>
+				<Source><![CDATA[
+    public void deleteInventTrans()
+    {
+        throw error(Error::missingOverride(funcName()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fromDateTime</Name>
+				<Source><![CDATA[
+    protected FromDateTime fromDateTime()
+    {
+        throw error(Error::missingOverride(funcName()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromBuffer</Name>
+				<Source><![CDATA[
+    protected void initFromBuffer()
+    {
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventLocationId</Name>
+				<Source><![CDATA[
+    protected InventLocationId inventLocationId()
+    {
+        return '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postAssetTrans</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void postAssetTrans(AssetTrans       _assetTrans,
+                               InventLocationId _inventLocationId,
+                               InventQtyJournal _qty,
+                               RecId            _callerI2AConvJourTransRecId = 0)
+    {
+        #TimeConstants
+    
+        BOBRentalTrans                  rentalTrans;
+        BOBObjectTable                  objectTable;
+        FromDateTime                    fromDateTime;
+        InventQty                       qty;
+        InventTransOriginJournalTrans   origin;
+        InventJournalTrans              inventJournalTrans;
+        ;
+
+        if(_assetTrans.TransType == AssetTransType::DisposalSale && _callerI2AConvJourTransRecId)
+        {
+            select firstonly inventJournalTrans where inventJournalTrans.RecId == _callerI2AConvJourTransRecId;
+
+            if(inventJournalTrans.RORRefRecId)
+            {
+                SalesLine           salesLine;
+                InventTransOrigin   inventTransOrigin;
+
+                objectTable = BOBObjectTable::findByAssetId(_assetTrans.AssetId, _assetTrans.TransDate);
+
+                // DeActivate the rental transaction originated from the SalesLine
+                update_recordset rentalTrans
+                setting Active = BOBRentalTransActive::Inactive
+                where rentalTrans.ObjectId == objectTable.ObjectId
+                &&    rentalTrans.Active == BOBRentalTransActive::Active
+                &&    rentalTrans.TransType == BOBRentalTransType::Sales
+                    join TableId from inventTransOrigin
+                    where inventTransOrigin.RecId == rentalTrans.InventTransOrigin
+                        join TableId from salesLine
+                        where salesLine.RecId == inventJournalTrans.RORRefRecId
+                        &&    salesLine.InventTransId == inventTransOrigin.InventTransId ;
+
+                // Activate the rental transaction originated from the conversion journal
+                update_recordset rentalTrans
+                setting Active = BOBRentalTransActive::Active
+                where rentalTrans.ObjectId == objectTable.ObjectId
+                &&    rentalTrans.Active == BOBRentalTransActive::Inactive
+                &&    rentalTrans.TransType == BOBRentalTransType::Asset
+                    join TableId from inventTransOrigin
+                    where inventTransOrigin.RecId == rentalTrans.InventTransOrigin
+                    &&    inventTransOrigin.InventTransId == inventJournalTrans.InventTransId;
+            }
+        }
+    
+        if(_assetTrans.TransType == AssetTransType::DisposalScrap)
+        {
+            objectTable = BOBObjectTable::findByAssetId(_assetTrans.AssetId, _assetTrans.TransDate);
+    
+            if (objectTable)
+            {
+                if(!_inventLocationId)
+                {
+                    warning(strFmt("@DNR4370", "@SYS6437"));
+                    throw error("@SYS78886");
+                }
+    
+                qty = _qty;
+                fromDateTime = DateTimeUtil::newDateTime(_assetTrans.TransDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+    
+                if(_callerI2AConvJourTransRecId && _assetTrans.TransType == AssetTransType::Acquisition)
+                {
+                    // we're in the process of posting an inventory to asset conversion journal
+                    // don't create a new rental transaction, but update the existing one
+    
+                    update_recordSet rentalTrans
+                    setting AssetTransRecId = _assetTrans.RecId, SubStatus = BOBRentalSubStatus::Invoiced
+                    where rentalTrans.AssetId == _assetTrans.AssetId
+                    &&    rentalTrans.ObjectId == objectTable.ObjectId
+                    &&    rentalTrans.Active == BOBRentalTransActive::Active
+                    &&    rentalTrans.TransType == BOBRentalTransType::Asset
+                        exists join inventTrans
+                        where inventTrans.RecId == rentalTrans.InventTransRecId
+                        &&    inventTrans.InventTransOrigin == rentalTrans.InventTransOrigin
+                            join TableId from origin
+                            where origin.InventTransOrigin == inventTrans.InventTransOrigin
+                                join TableId from inventJournalTrans
+                                where inventJournalTrans.dataAreaId == origin.InventJournalDataAreaId
+                                &&    inventJournalTrans.JournalId == origin.InventJournalId
+                                &&    inventJournalTrans.LineNum == origin.InventJournalLineNum
+                                &&    inventJournalTrans.RecId == _callerI2AConvJourTransRecId;
+                }
+                else
+                {
+                    ttsBegin;
+    
+                    rentalTrans.Active              = BOBRentalTransActive::Active;
+                    rentalTrans.AssetId             = _assetTrans.AssetId;
+                    rentalTrans.AssetTransRecId     = _assetTrans.RecId;
+                    rentalTrans.CertaintyFrom       = BOBDateTimeCertainty::Fixed;
+                    rentalTrans.CertaintyTo         = this.certaintyTo();
+                    rentalTrans.CompanyId           = this.companyId();
+                    rentalTrans.FromDateTime        = fromDateTime;
+                    rentalTrans.InventLocationId    = _inventLocationId;
+                    rentalTrans.ObjectId            = objectTable.ObjectId;
+                    rentalTrans.Qty                 = qty;
+                    rentalTrans.RentalTypeId        = objectTable.RentalTypeId;
+                    rentalTrans.SubStatus           = this.subStatus();
+                    rentalTrans.ToDateTime          = this.toDateTime();
+                    rentalTrans.TransType           = this.transType();
+                    rentalTrans.insert();
+    
+                    ttsCommit;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalTypeId</Name>
+				<Source><![CDATA[
+    protected BOBRentalTypeId rentalTypeId()
+    {
+        return '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>splitInventTrans</Name>
+				<Source><![CDATA[
+    public void splitInventTrans(RecId _inventTransCopyRecId, InventQty _splitQty, BOBInventSplitReason _splitReason)
+    {
+        throw error(Error::missingOverride(funcName()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>subStatus</Name>
+				<Source><![CDATA[
+    protected BOBRentalSubStatus subStatus()
+    {
+        return BOBRentalSubStatus::Delivered;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>synchronize</Name>
+				<Source><![CDATA[
+    public void synchronize()
+    {
+        throw error(Error::missingOverride(funcName()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>toDateTime</Name>
+				<Source><![CDATA[
+    protected ToDateTime toDateTime(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+        return DateTimeUtil::maxValue();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transType</Name>
+				<Source><![CDATA[
+    protected BOBRentalTransType transType()
+    {
+        return BOBRentalTransType::Asset;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBuffer</Name>
+				<Source><![CDATA[
+    protected void updateBuffer(boolean _doUpdateBuffer)
+    {
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSubStatus</Name>
+				<Source><![CDATA[
+    public InventQty updateSubStatus(InventQty _qtyUpdate)
+    {
+        throw error(Error::missingOverride("@SYS133275"));
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

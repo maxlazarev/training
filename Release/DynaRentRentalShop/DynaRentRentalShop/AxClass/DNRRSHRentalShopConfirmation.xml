@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRRSHRentalShopConfirmation</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Rental shop card confirmation
+/// </summary>
+class DNRRSHRentalShopConfirmation
+{
+    RorRshShopCardId shopCardId;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>parmshopCardId</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Shop card id parm method
+    /// </summary>
+    /// <param name = "_shopCardId">Shop card id</param>
+    /// <returns>ShopCardId</returns>
+    public RorRshShopCardId parmshopCardId(RorRshShopCardId _shopCardId = shopCardId)
+    {
+        shopCardId = _shopCardId;
+        return  shopCardId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Validates shop card 
+    /// </summary>
+    /// <returns>'True' if valid shop card</returns>
+    protected boolean validate()
+    {
+        return shopCardId && this.validateSerializedRentalItems();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateSerializedRentalItems</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Validates the serialized rental items in the relevant rental shop cart. 
+    /// </summary>
+    /// <returns>'True' if the validations pass for all the serialized rental items, otherwise, 'false'.</returns>
+    private boolean validateSerializedRentalItems()
+    {
+        boolean         ret = true;
+        RorRshShopTrans selectedRentalShopTrans;
+        InventDim       inventDim;
+        BOBRentalType   rentalType;
+        boolean         curRecValid;
+
+        while select selectedRentalShopTrans
+        where selectedRentalShopTrans.ShopCardId == shopCardId
+        &&    selectedRentalShopTrans.TradeType  == RORTradeType::Rental
+            join InventSerialId from inventDim
+            where inventDim.inventDimId == selectedRentalShopTrans.InventDimId
+                join TableId from rentalType   
+                where selectedRentalShopTrans.RentalTypeId == rentalType.RentalTypeId
+                &&    rentalType.Classification == BOBRentalTypeClassification::Serialized
+        {
+            curRecValid = true;
+
+            if (!inventDim.inventSerialId)
+            {
+                curRecValid = checkFailed(strFmt("@DNR:SerialNoValidation", selectedRentalShopTrans.ItemId));
+            }
+
+            if (curRecValid)
+            {
+                BOBObjectAssignmentEngine bobAssignmentEngine = BOBObjectAssignmentEngine::construct(selectedRentalShopTrans, inventDim.inventSerialId);
+                curRecValid = bobAssignmentEngine.validate();
+
+                if (curRecValid)
+                {
+                    InventDim                 rentalShopTransInventDim;
+                    RorRshShopTrans           rentalShopTrans;
+                    RorRshShopTrans           rentalShopTransRetun;
+
+                    select firstonly RecId, ShopCardId from rentalShopTrans
+                    where rentalShopTrans.RecId     != selectedRentalShopTrans.RecId
+                    &&    rentalShopTrans.ItemId    == selectedRentalShopTrans.ItemId
+                    &&    rentalShopTrans.TransType == RorRshShopTransType::Delivery
+                    &&    rentalShopTrans.TradeType == RORTradeType::Rental
+                        join TableId from rentalShopTransInventDim
+                        where rentalShopTransInventDim.InventDimId    == rentalShopTrans.InventDimId
+                        &&    rentalShopTransInventDim.InventSerialId == inventDim.inventSerialId
+                            notexists join rentalShopTransRetun
+                            where  rentalShopTransRetun.TransType == RorRshShopTransType::Return
+                            &&     rentalShopTransRetun.TradeType == RORTradeType::Rental
+                            &&     rentalShopTransRetun.ShopCardId == rentalShopTrans.ShopCardId
+                            &&     rentalShopTransRetun.ItemID == rentalShopTrans.ItemId
+                            &&     rentalShopTransRetun.InventDimId == rentalShopTrans.InventDimId;
+
+                    if (rentalShopTrans.RecId)
+                    {
+                        curRecValid = checkFailed(strFmt("@DNR:SerializedConfirmValidationError", inventDim.inventSerialId, rentalShopTrans.ShopCardId));
+                    }
+                }
+            }
+            ret = ret && curRecValid;
+        }
+
+        return ret;                
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Run confirmation
+    /// </summary>
+    public void run()
+    {
+        #OCCRetryCount
+
+        try
+        {
+            if (this.validate())
+            {
+                RorRshShopCardTable shopCardTable = RorRshShopCardTable::find(shopCardId, true);
+
+                ttsbegin;
+                shopCardTable.IsConfirmed = NoYes::Yes;
+
+                if (shopCardTable.validateWrite())
+                {
+                    shopCardTable.update();
+                }
+                else
+                {
+                    throw Exception::Error;
+                }
+                ttscommit;
+            }
+            else
+            {
+                throw Exception::Error;
+            }
+        }
+        catch (Exception::Deadlock)
+        {
+            retry;
+        }
+        catch (Exception::UpdateConflict)
+        {
+            if (appl.ttsLevel() == 0)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::UpdateConflictNotRecovered;
+                }
+                else
+                {
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::UpdateConflict;
+            }
+        }
+        catch
+        {
+            throw error("@SYS319214");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>refreshCallerFormDateSource</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Refresh caller datasource
+    /// </summary>
+    /// <param name = "_buffer">Common buffer</param>
+    private void refreshCallerFormDateSource(Common _buffer)
+    {
+        FormDataSource  formDS = FormDataUtil::getFormDataSource(_buffer);
+
+        if(formDS)
+        {
+            formDS.reread();
+            formDS.research(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        DNRRSHRentalShopConfirmation shopCardConfirmation = new DNRRSHRentalShopConfirmation();
+        Common                       callerBuffer;
+
+        if (_args.record())
+        {
+            callerBuffer = _args.record();
+
+            if (callerBuffer.TableId == tableNum(RorRshShopCardTable))
+            {
+                RorRshShopCardTable shopCardTable = callerBuffer;
+
+                shopCardConfirmation.parmshopCardId(shopCardTable.ShopCardId);
+            }
+        }
+
+        shopCardConfirmation.run();
+        shopCardConfirmation.refreshCallerFormDateSource(callerBuffer);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

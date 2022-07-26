@@ -1,0 +1,1129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchLineTypeClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchLineType))]
+public final class DNRPurchLineTypeClass_Extension
+{
+    private boolean                     isCompensatingTrans;
+    private InventTransOriginId         originId;
+    private boolean                     createParameter;
+    private PurchLine                   purchLineParameter;
+    private DNRPurchLineTypeStrategy    strategy;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setPurchStatusNonStocked</Name>
+				<Source><![CDATA[
+    protected void setPurchStatusNonStocked(PurchLine _purchLine)
+    {
+        next setPurchStatusNonStocked(_purchLine);
+
+        if (_purchLine.PurchQty != 0 && _purchLine.RemainPurchPhysical  == 0 && _purchLine.RemainPurchFinancial == 0
+        && (_purchLine.PurchStatus != PurchStatus::Canceled)
+        && (_purchLine.RORTradeType == RORTradeType::SalesPurch
+        &&  (_purchLine.PurchTable().ProjId ||
+            RORVenueTable::find(_purchLine.PurchTable().RORVenueCode).WPPProjId)))
+        {
+            _purchLine.PurchStatus = PurchStatus::Invoiced;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setPurchStatusStocked</Name>
+				<Source><![CDATA[
+    protected void setPurchStatusStocked(PurchLine _purchLineOrig, InventTransIdSum _inventTransIdSum)
+    {
+        next setPurchStatusStocked(_purchLineOrig, _inventTransIdSum);
+        PurchLine purchLineLocal = purchLine;
+
+        if (purchLineLocal.QtyOrdered != 0)
+        {
+            if (purchLineLocal.RemainPurchPhysical  == 0 &&
+                    purchLineLocal.RemainPurchFinancial == 0)
+            {
+                if ((!_inventTransIdSum || _inventTransIdSum.financial() == 0) && purchLineLocal.RORTradeType == RORTradeType::SalesPurch && RORVenueTable::find(purchLineLocal.PurchTable().RORVenueCode).WPPProjId)
+                {
+                    purchLineLocal.PurchStatus = PurchStatus::Invoiced;
+                }
+                else if (purchLineLocal.RORTradeType != RORTradeType::SalesPurch &&
+                    (purchLineLocal.RORRemainPurchReturn || !this.INVhasNoMoreLinesToInvoice(purchLineLocal)))
+                {
+                    purchLineLocal.PurchStatus = PurchStatus::Received;
+                }
+                else if (purchLineLocal.PurchStatus != PurchStatus::Canceled
+                     && (purchLineLocal.RORTradeType == RORTradeType::SalesPurch || purchLineLocal.PurchStatus != PurchStatus::Backorder))
+                {
+                    purchLineLocal.PurchStatus = PurchStatus::Invoiced;
+                }
+            }
+            else
+            {
+                boolean isReturnedSubRental;
+                
+                if (purchLineLocal.RORTradeType != RORTradeType::SalesPurch
+                &&  purchLineLocal.RecId
+                &&  purchLineLocal.PurchStatus != PurchStatus::Backorder
+                &&  !purchLineLocal.RORRemainPurchReturn)
+                {
+                    isReturnedSubRental = true;
+                }
+
+                if (isReturnedSubRental
+                &&  this.INVhasNoMoreLinesToInvoice(purchLineLocal)
+                &&  !this.RORIsUnregisterdHourOrderLine())
+                {
+                    purchLineLocal.PurchStatus = PurchStatus::Invoiced;
+                }
+                else if (isReturnedSubRental
+                // Sometimes we need to set statuse back from fully invoiced. For instance when changing a price that results in pending credit.
+                && purchLineLocal.PurchStatus == PurchStatus::Invoiced)
+                {
+                    purchLineLocal.PurchStatus = PurchStatus::Received;
+                }                
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>instantiateInventUpd_DeleteMovement</Name>
+				<Source><![CDATA[
+    protected InventUpd_DeleteMovement instantiateInventUpd_DeleteMovement(InventMovSubType _inventMovSubType, boolean _showInfoDelReserv)
+    {
+        InventUpd_DeleteMovement estimated = next instantiateInventUpd_DeleteMovement(_inventMovSubType, _showInfoDelReserv);
+
+        if (isCompensatingTrans)
+        {
+            estimated.BOBParmIsCompensatingTrans(true);
+        }
+
+        if (!originId)
+        {
+            originId = estimated.movement().inventTransOriginId();
+        }
+
+        return estimated;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>instantiateInventUpd_Estimated</Name>
+				<Source><![CDATA[
+    protected InventUpd_Estimated instantiateInventUpd_Estimated(InventMovSubType _inventMovSubType)
+    {
+        InventUpd_Estimated estimated = next instantiateInventUpd_Estimated(_inventMovSubType);
+
+        if (isCompensatingTrans)
+        {
+            estimated.BOBParmIsCompensatingTrans(true);
+        }
+
+        return estimated;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>instantiateInventMovement</Name>
+				<Source><![CDATA[
+    protected InventMovement instantiateInventMovement(InventMovSubType _inventMovSubType)
+    {
+        InventMovement movement = next instantiateInventMovement(_inventMovSubType);
+
+        if (originId)
+        {
+            // RLAM - We reuse InventTransOriginId, so we don't end up with duplicates in the `InventTransOrigin' table.
+            movement.inventTransOriginId(originId);
+        }
+
+        return movement;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventoryOnInsert</Name>
+				<Source><![CDATA[
+    public InventUpd_Estimated updateInventoryOnInsert()
+    {
+        InventUpd_Estimated estimated = next updateInventoryOnInsert();
+
+        if (purchLine.RORTradeType == RORTradeType::SubRental)
+        {
+            if (!originId)
+            {
+                originId = estimated.movement().inventTransOriginId();
+            }
+
+            isCompensatingTrans = true;
+            
+            estimated = this.instantiateInventUpd_Estimated(InventMovSubType::BOBCompensatingTrans);
+            
+            isCompensatingTrans = false;
+
+            if (estimated)
+            {
+                estimated.updateNow();
+            }
+        }
+        
+        originId = 0;
+
+        return estimated;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventoryOnUpdate</Name>
+				<Source><![CDATA[
+    public InventUpd_Estimated updateInventoryOnUpdate()
+    {
+        InventUpd_Estimated estimated = next updateInventoryOnUpdate();
+        PurchLine purchLineLocal = PurchLine::findRecId(this.parmPurchLine().RecId);
+
+        if (purchLineLocal && purchLineLocal.recVersion != this.parmPurchLine().recVersion)
+        {
+            purchLineLocal.selectForUpdate(true);
+
+            if (purchLineLocal.InventDimId != estimated.movement().inventDim().inventDimId)
+            {
+                purchLineLocal.InventDimId = estimated.movement().inventDim().inventDimId;
+                purchLineLocal.doUpdate();
+            }
+        }
+
+        if (purchLine.RORTradeType == RORTradeType::SubRental)
+        {
+            if (!originId)
+            {
+                originId = estimated.movement().inventTransOriginId();
+            }
+
+            isCompensatingTrans = true;
+
+            estimated = this.instantiateInventUpd_Estimated(InventMovSubType::BOBCompensatingTrans);
+
+            isCompensatingTrans = false;
+
+            if (estimated)
+            {
+                estimated.updateNow();
+            }
+        }
+        
+        originId = 0;
+
+        return estimated;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventoryOnDelete</Name>
+				<Source><![CDATA[
+    public InventUpd_DeleteMovement updateInventoryOnDelete(boolean _showInfoDelReserv)
+    {
+        InventUpd_DeleteMovement ret = next updateInventoryOnDelete(_showInfoDelReserv);
+
+        if (purchLine.RORTradeType == RORTradeType::SubRental)
+        {
+            isCompensatingTrans = true;
+
+            InventUpd_DeleteMovement deleteMovement = this.instantiateInventUpd_DeleteMovement(InventMovSubType::BOBCompensatingTrans, _showInfoDelReserv);
+
+            isCompensatingTrans = false;
+
+            if (deleteMovement)
+            {
+                deleteMovement.updateNow();
+            }
+        }
+
+        originId = 0;
+
+        // RLAM - We intentionally return MSFT's instance here, because it is used later on in the code.
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventory</Name>
+				<Source><![CDATA[
+    protected void updateInventory()
+    {
+        next updateInventory();
+
+        if (purchLine.isStocked() 
+        &&  purchTable.ChangeRequestRequired
+        &&  !purchLine.IsDeleted)
+        {
+            if (purchLine.RORTradeType == RORTradeType::SubRental)
+            {
+                isCompensatingTrans = true;
+
+                InventUpd_Estimated DNRestimated = this.instantiateInventUpd_Estimated(InventMovSubType::BOBCompensatingTrans);
+
+                isCompensatingTrans = false;
+
+                if (DNRestimated)
+                {
+                    DNRestimated.updateNow();
+                }
+            }
+        }
+
+        originId = 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateApprovedLine</Name>
+				<Source><![CDATA[
+    public void updateApprovedLine()
+    {
+        next updateApprovedLine();
+
+        this.RORUpdateInventTrans();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleting</Name>
+				<Source><![CDATA[
+    public void deleting()
+    {
+        next deleting();
+
+        this.BOBDeleteInventSerial();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromInventTable</Name>
+				<Source><![CDATA[
+    public void initFromInventTable(
+        InventTable     _inventTable,
+        boolean         _searchPrice,
+        boolean         _setAddressFromInventDim,
+        boolean         _initDateFields,
+        boolean         _executeOnlyIfProductIsFullySpecified)
+    {
+        using (DNRPrimitiveDisposableContext context = new DNRPrimitiveDisposableContext())
+        {
+            context.DNRparmBoolean(true);   // We dont want to have the defaulting logic to be trigged from the next call. It will be called in RORInitFromInventTable method
+            next initFromInventTable(_inventTable, _searchPrice, _setAddressFromInventDim, _initDateFields, _executeOnlyIfProductIsFullySpecified);
+        }
+
+        this.RORInitFromInventTable(_inventTable);
+        this.BOBInitFromInventTable(_inventTable);
+        this.WPPInitFromInventTable(_inventTable);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromPurchTable</Name>
+				<Source><![CDATA[
+    void initFromPurchTable(PurchTable _purchTable, boolean _ignoreInventDim)
+    {
+        next initFromPurchTable(_purchTable, _ignoreInventDim);
+
+        PurchLine purchLine = this.RORParmPurchLine();
+        purchLine.RORRentalLine::initFromHeaderBuffer(_purchTable);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    void initValue()
+    {
+        next initValue();
+
+        this.RORInitValue();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inserting</Name>
+				<Source><![CDATA[
+    public void inserting()
+    {
+        next inserting();
+
+        this.RORsetRentalStatus(purchLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inserted</Name>
+				<Source><![CDATA[
+    public void inserted()
+    {
+        next inserted();
+
+        this.RORCreateRentalDates();
+
+        // To avoid RAG based recalcluation if its done at the source i.e. RLE
+        if (!purchLine.INVSkipTierMultiplierCalcOnCreation)
+        {
+            this.INVSetTierMultiplierRateOnCreation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updating</Name>
+				<Source><![CDATA[
+    public void updating()
+    {
+        next updating();
+
+        this.RORsetRentalStatus(purchLine);
+
+        PurchLine purchLineOrig = purchLine.orig();
+
+        if (this.isClearContractDataCacheNeeded(purchLine, purchLineOrig))
+        {
+            RAGContractData::clearContractCacheData(purchLine.TableId, purchLine.RecId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isClearContractDataCacheNeeded</Name>
+				<Source><![CDATA[
+    protected boolean isClearContractDataCacheNeeded(PurchLine _purchLine, PurchLine _purchLineOrig)
+    {
+        return  _purchLine.INVInvoiceProfileId   != _purchLineOrig.INVInvoiceProfileId
+            ||  _purchLine.DNRCalendarId         != _purchLineOrig.DNRCalendarId
+            ||  _purchLine.RORPriceTimeUnit      != _purchLineOrig.RORPriceTimeUnit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updated</Name>
+				<Source><![CDATA[
+    public void updated(PurchLine _purchLineOrig)
+    {
+        next updated(_purchLineOrig);
+
+        this.INVSetTierMultiplierRateOnCreation();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePurchLine</Name>
+				<Source><![CDATA[
+    public void updatePurchLine(InventTransIdSum _inventTransIdSum)
+    {
+        next updatePurchLine(_inventTransIdSum);
+
+        this.RORsetRentalStatus(purchLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateModifyInventDim</Name>
+				<Source><![CDATA[
+    public boolean validateModifyInventDim(InventDim _inventDim, FieldId _dimFieldId)
+    {
+        boolean ret = next validateModifyInventDim(_inventDim, _dimFieldId);
+
+        if(ret && _dimFieldId == fieldNum(InventDim, InventSerialId))
+        {
+            ret = this.WPPValidateModifySerialNum(_inventDim);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    public boolean validateWrite()
+    {
+        boolean ret = next validateWrite();
+
+        ret = ret && this.RORValidateWrite();
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateDelete</Name>
+				<Source><![CDATA[
+    boolean validateDelete(boolean _interCompanyForce)
+    {
+        boolean ret = next validateDelete(_interCompanyForce);
+
+        if(ret)
+        {
+            PurchLineType purchLineType;
+            PurchLine childrenLines;
+
+            // Allow delete parent only if all children can be deleted as well.
+            while select childrenLines
+                where childrenLines.RORParentLineRecId == purchLine.RecId
+            {
+                purchLineType = childrenLines.type();
+                ret = purchLineType.validateDelete(_interCompanyForce);
+    
+                if (!ret)
+                {
+                    break;
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORInitFromInventTable</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private void RORInitFromInventTable(InventTable _inventTable)
+    {
+        purchLine.RORAllowQtyEdit = !_inventTable.BOBIsSerializedRentalItem();
+
+        purchLine.RORRentalLine::initFromInventTable(
+            _inventTable,
+            purchLine.purchTable().PurchaseType == PurchaseType::RORSubRental,
+            purchLine.PurchaseType == PurchaseType::RORSubRental && (purchLine || purchLine.RORTradeType != RORTradeType::SalesPurch));
+    
+        purchLine.RORRentalLine::initFromRentalType(_inventTable.ItemId);
+
+        this.RORInitFromInventSetup(_inventTable);
+
+        if (purchLine.RORTradeType == RORTradeType::SubRental)
+        {
+            purchLine.MatchingPolicy = PurchMatchingPolicyOption::NoMatch;
+            purchLine.RORKitComponentType = _inventTable.BOBRentalType().RORKitStandalone == RORKitStandalone::Kit ? RORKitComponentType::Kit : RORKitComponentType::Standalone;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORInitFromInventSetup</Name>
+				<Source><![CDATA[
+    private void RORInitFromInventSetup(InventTable _inventTable = purchLine.InventTable())
+    {
+        
+        if (purchLine.RORTradeType == RORTradeType::SubRental)
+        {
+            InventDim       inventDim = purchLine.inventDim();
+            
+            if (RORParameters::find().SubRentalWarehouse)
+            {
+                inventDim.InventLocationId = RORParameters::find().SubRentalWarehouse;
+            }
+            else if(purchLine.RORParentLineRecId)
+            {
+                inventDim.InventLocationId = InventDim::find(purchLine.RORGetParentLine().InventDimId).InventLocationId;
+            }
+    
+            if (inventDim.InventLocationId)
+            {
+                inventDim.InventSiteId = InventLocation::find(inventDim.InventLocationId).InventSiteId;
+            }
+            
+            purchLine.setInventDimIdFromInventDim(inventDim);
+        }
+        
+        InventDistinctProductDimensionSpecificDefaultingArgsPurchLine defaultingArgs = InventDistinctProductDimensionSpecificDefaultingArgsPurchLine::construct(_inventTable, true, true, true, false);
+        
+        defaultingArgs.ItemOrderSetupType = (purchLine.RORTradeType == RORTradeType::SubRental ? InventItemOrderSetupType::RORSubRental : InventItemOrderSetupType::Purch);
+
+        InventDistinctProductOrderDefaultingController::itemIdModified(this, defaultingArgs);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBInitFromInventTable</Name>
+				<Source><![CDATA[
+    private void BOBInitFromInventTable(InventTable _inventTable)
+    {
+        PurchLine purchLine = this.RORParmPurchLine();
+        AssetParameters parameters = AssetParameters::find();
+        boolean setAssetFields = (parameters.AssetAllowAcqPostingPO &&
+                                  parameters.AssetAllowCreate &&
+                                 purchLine.RORTradeType == RORTradeType::SalesPurch);
+    
+        purchLine.CreateFixedAsset = (setAssetFields ? _inventTable.BOBAutoAssetConvertPurch : NoYes::No);
+        purchLine.AssetGroup       = (setAssetFields ? _inventTable.BOBAssetGroupId : '');
+        purchLine.BOBRentalTypeId  = _inventTable.BOBRentalType().RentalTypeId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPInitFromInventTable</Name>
+				<Source><![CDATA[
+    private void WPPInitFromInventTable(InventTable _inventTable)
+    {
+        PurchLine purchLine = this.RORParmPurchLine();
+        InventTableModule  inventTableModule = InventTableModule::find(_inventTable.ItemId, ModuleInventPurchSales::Purch);
+    
+        purchLine.WPPWorkOrderTemplateId = RORInventItemSetup::getWorkOrderTemplateId(purchLine, _inventTable);
+        purchLine.TaxItemGroup           = RORInventItemSetup::getTaxItemGroup(purchLine, inventTableModule);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORInitValue</Name>
+				<Source><![CDATA[
+    private void RORInitValue()
+    {
+        PurchLine purchLine = this.RORParmPurchLine();
+        purchLine.RORRentalLine::initValue();
+    
+        // When creating from this form, make it rental by default when the PurchTable.PurchaseType is RORSubRental
+        // when item has been chosen then update the RORTradeType from the InventTable
+        purchLine.RORTradeType = (purchLine.purchTable().PurchaseType == PurchaseType::RORSubRental ? RORTradeType::SubRental : RORTradeType::SalesPurch);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCreateRentalDates</Name>
+				<Source><![CDATA[
+    private void RORCreateRentalDates()
+    {
+        PurchLine               purchLine = this.RORParmPurchLine();
+        RORRentalDateTimes      rentalDateTimes;
+            
+        if (isConfigurationkeyEnabled(configurationKeyNum(RORRentalDateTimes)))
+        {
+            rentalDateTimes = purchLine.RORRentalLine::createRentalDateTimes();
+        }            
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetTierMultiplierRateOnCreation</Name>
+				<Source><![CDATA[
+    private void INVSetTierMultiplierRateOnCreation()
+    {
+        PurchLine purchLine = this.RORParmPurchLine();
+        purchLine.SkipUpdate = InterCompanySkipUpdate::Both;
+        purchLine.INVSetTierMultiplierRateOnCreation();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPValidateModifySerialNum</Name>
+				<Source><![CDATA[
+    private boolean WPPValidateModifySerialNum(InventDim _inventDim)
+    {
+        PurchLine   purchLine = this.RORParmPurchLine();
+        boolean     ret = true;
+    
+        if(purchLine.RecId
+        && !_inventDim.inventSerialId)
+        {
+            WPPWorkOrderTable   workOrderTable;
+            WPPWorkOrderLine    workOrderLine;
+
+            // There can be more than 1 work order
+            select firstOnly RecId from workOrderTable
+            where workOrderTable.OrderTableId == purchLine.TableId
+            &&    workOrderTable.OrderRecId   == purchLine.RecId
+                exists join workOrderLine
+                where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                &&    workOrderLine.Status       > WPPWorkOrderLineStatus::Created;
+    
+            if(workOrderTable)
+            {
+                ret = checkFailed("@DNR8598");
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORValidateWrite</Name>
+				<Source><![CDATA[
+    private boolean RORValidateWrite()
+    {
+        boolean ret = true;
+
+        PurchLine purchLine = this.RORParmPurchLine();
+
+        if(purchLine.RORKitComponentType == RORKitComponentType::Kit)
+        {
+            ret = checkFailed(strFmt("@DNR:KitItemsNotSupported", purchLine.purchTable().PurchaseType == PurchaseType::RORSubRental ? "@DNR3227" : "@DNR:PurchaseOrders"));
+        }
+
+        return (ret && purchLine.RORRentalLine::validateWrite() && purchLine.RORCheckTradeType());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBCheckUpdateRentalTrans</Name>
+				<Source><![CDATA[
+    public void BOBCheckUpdateRentalTrans()
+    {
+        PurchLine purchLine = this.RORParmPurchLine();
+
+        InventTrans                 inventTrans;
+        InventTransOriginPurchLine  origin;
+        InventMovement              movement;
+    
+        movement = InventMovement::construct(purchLine);
+    
+        while select TableId from origin
+        where origin.PurchLineDataAreaId == purchLine.dataAreaId
+        &&    origin.PurchLineInventTransId == purchLine.InventTransId
+            join  inventTrans
+            where inventTrans.InventTransOrigin == origin.InventTransOrigin
+        {
+            BOBRentalTransManager::newInventMovement(movement, inventTrans).synchronize();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVhasNoMoreLinesToInvoice</Name>
+				<Source><![CDATA[
+    public boolean INVhasNoMoreLinesToInvoice(PurchLine _purchLine)
+    {
+        boolean ret;
+        ;
+    
+        if (_purchLine.discPercent() == 100)
+        {
+            ret = true;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVsetPriceMultiplier</Name>
+				<Source><![CDATA[
+    public void INVsetPriceMultiplier(
+        TransDateTime   _fromDateTime = DateTimeUtil::minValue(),
+        TransDateTime   _toDateTime = DateTimeUtil::minValue(),
+        boolean         _updatePeriods = true,
+        PurchLine       _purchLineParent = null)
+    {
+        PurchLine purchLine = this.RORParmPurchLine();
+
+        purchLine.RORRentalLine::updateCalendarPeriodsMultiplierRate(
+            purchLine.RORRentalDateTimesHost::rentalDateTimes(),
+            FINRentalInvoiceProfile::find(purchLine.INVInvoiceProfileId),
+            RAGAgreementType::PriceTier,
+            purchLine,
+            _updatePeriods,
+            _fromDateTime,
+            _toDateTime);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORInitFromPurchLine</Name>
+				<Source><![CDATA[
+    public void RORInitFromPurchLine(PurchLine   _purchLine)
+    {
+        PurchLine purchLine = this.RORParmPurchLine();
+        
+        purchLine.RORRentalLine::initFromLineBuffer(_purchLine);
+        purchLine.BOBRentalTypeId = _purchLine.BOBRentalTypeId;
+        purchLine.WPPWorkOrderTemplateId = _purchLine.WPPWorkOrderTemplateId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORIsUnregisterdHourOrderLine</Name>
+				<Source><![CDATA[
+    public boolean RORIsUnregisterdHourOrderLine()
+    {
+        PurchLine purchLine = this.RORParmPurchLine();
+
+        boolean             ret;
+            
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORParmPurchLine</Name>
+				<Source><![CDATA[
+    public PurchLine RORParmPurchLine(PurchLine _purchLine = purchLine)
+    {
+        if (!prmisDefault(_purchLine))
+        {
+            purchLine = _purchLine;
+        }
+    
+        return purchLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORsetRentalStatus</Name>
+				<Source><![CDATA[
+    public void RORsetRentalStatus(PurchLine _purchLine)
+    {
+        boolean                     isReturned;
+        boolean                     isTerminated, wasTerminated;
+        BOBRentalTrans              rentalTrans;
+        InventTrans                 inventTrans;
+        InventTransOrigin           inventTransOrigin;
+        InventTransOriginPurchLine  originPurchLine;
+        InventMovement              inventMovement;
+        BOBRentalTransManager       transManager;
+        RORRentalStatus             origStatus;
+    
+        origStatus = _purchLine.RORRentalStatus;
+    
+        if (_purchLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            if (_purchLine.RemainPurchPhysical) // Some or all not yet delivered
+            {
+                if (!_purchLine.RORRemainPurchReturn
+                &&  this.INVhasNoMoreLinesToInvoice(_purchLine)
+                &&  _purchLine.RecId
+                &&  _purchLine.RORRentalStatus != RORRentalStatus::OnOrder
+                &&  !this.RORIsUnregisterdHourOrderLine())
+                {
+                    _purchLine.RORRentalStatus = RORRentalStatus::Terminated; // Fully returned, full invoiced
+                }
+                else
+                if (_purchLine.RemainPurchPhysical == _purchLine.QtyOrdered) // None delivered
+                {
+                    _purchLine.RORRentalStatus = RORRentalStatus::OnOrder;
+                }
+                else // Partially delivered
+                {
+                    _purchLine.RORRentalStatus = RORRentalStatus::PartiallyDelivered;
+                }
+            }
+            else // No remaining for delivery
+            {
+                select firstonly RecId from rentalTrans
+                where rentalTrans.SubStatus == BOBRentalSubStatus::Returned
+                    exists join inventTrans
+                    where inventTrans.RecId == rentalTrans.InventTransRecId
+                        join TableId from inventTransOrigin
+                        where inventTransOrigin.RecId             == inventTrans.InventTransOrigin
+                        &&    inventTransOrigin.ReferenceId       == _purchLine.PurchId
+                        &&    inventTransOrigin.InventTransId     == _purchLine.InventTransId
+                        &&    inventTransOrigin.ReferenceCategory == InventTransType::Purch;
+    
+                isReturned = rentalTrans.RecId;
+    
+                if (_purchLine.RORRemainPurchReturn) // Some or all not yet returned
+                {
+                    if (_purchLine.RORRemainPurchReturn == (_purchLine.receivedInTotal() + _purchLine.RemainPurchPhysical) // None returned
+                    || (_purchLine.BOBRentalSubStatus >= BOBRentalSubStatus::Delivered && !isReturned))
+                    {
+                        _purchLine.RORRentalStatus = RORRentalStatus::Delivered;
+                    }
+                    else // Partially returned
+                    {
+                        _purchLine.RORRentalStatus = RORRentalStatus::PartiallyReturned;
+                    }
+                }
+                else // None undelivered/unreturned
+                {
+                    if (this.INVhasNoMoreLinesToInvoice(_purchLine)
+                    &&  _purchLine.RORRentalStatus != RORRentalStatus::OnOrder
+                    && !this.RORIsUnregisterdHourOrderLine())
+                    {
+                        _purchLine.RORRentalStatus = RORRentalStatus::Terminated; // Fully returned, full invoiced
+                    }
+                    else
+                    {
+                        _purchLine.RORRentalStatus = RORRentalStatus::Returned; // Not yet full invoiced
+                    }
+                }
+            }
+    
+            isTerminated    = (_purchLine.RORRentalStatus == RORRentalStatus::Terminated && origStatus != RORRentalStatus::Terminated);
+            wasTerminated   = (_purchLine.RORRentalStatus != origStatus && origStatus == RORRentalStatus::Terminated);
+    
+            if (isTerminated || wasTerminated)
+            {
+                while select TableId from originPurchLine
+                where originPurchLine.PurchLineDataAreaId == _purchLine.dataAreaId
+                &&    originPurchLine.PurchLineInventTransId == _purchLine.InventTransId
+                    join  inventTrans
+                    where inventTrans.InventTransOrigin == originPurchLine.InventTransOrigin
+                    && !inventTrans.BOBIsCompensatingTrans
+                {
+                    inventMovement = InventMovement::construct(_purchLine);
+    
+                    if (isTerminated)
+                    {
+                        transManager = BOBRentalTransManager::newInventMovement(inventMovement, inventTrans, BOBRentalSubStatus::Invoiced);
+                        transManager.parmDoUpdateBuffer(true);
+                        transManager.updateSubStatus(inventTrans.Qty);
+                    }
+                    else
+                    if (wasTerminated)
+                    {
+                        transManager = BOBRentalTransManager::newInventMovement(inventMovement, inventTrans);
+                        transManager.parmDoUpdateBuffer(true);
+                        transManager.synchronize();
+                    }
+                }
+            }
+        }
+        else
+        {
+            _purchLine.RORRentalStatus = RORRentalStatus::NotApplicable;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateInventTrans</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void RORUpdateInventTrans()
+    {
+        InventTrans                 inventTrans;
+        InventTransOriginPurchLine  inventTransOriginPurchLine;
+    
+        update_recordSet inventTrans
+        setting InventDimId = purchLine.InventDimId
+        exists join inventTransOriginPurchLine
+            where inventTransOriginPurchLine.InventTransOrigin == inventTrans.InventTransOrigin
+            &&    inventTransOriginPurchLine.PurchLineDataAreaId == purchLine.dataAreaId
+            &&    inventTransOriginPurchLine.PurchLineInventTransId == purchLine.InventTransId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDeleteInventSerial</Name>
+				<Source><![CDATA[
+    public void BOBDeleteInventSerial()
+    {
+        this.parmPurchLineTypeStrategy().BOBDeleteInventSerial();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORDeleteChildren</Name>
+				<Source><![CDATA[
+    public boolean RORDeleteChildren()
+    {
+        return this.parmPurchLineTypeStrategy().RORDeleteChildren();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORupdateAmendmentLog</Name>
+				<Source><![CDATA[
+    public void RORupdateAmendmentLog(ConfirmId _confirmId)
+    {
+        this.parmPurchLineTypeStrategy().RORupdateAmendmentLog(_confirmId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORmayReturnNoteBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean RORmayReturnNoteBeUpdated()
+    {
+        return this.parmPurchLineTypeStrategy().RORmayReturnNoteBeUpdated();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmPurchLineTypeStrategy</Name>
+				<Source><![CDATA[
+    private DNRPurchLineTypeStrategy parmPurchLineTypeStrategy()
+    {
+        if(!strategy)
+        {
+            strategy = DNRPurchLineTypeStrategy::construct(this);
+        }
+        return strategy;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_constructBasedOnPurchaseTypeDelegate</Name>
+				<Source><![CDATA[
+    // event handler methods
+
+    [SubscribesTo(classStr(PurchLineType), staticDelegateStr(PurchLineType, constructBasedOnPurchaseTypeDelegate))]
+    public static void DNREvent_constructBasedOnPurchaseTypeDelegate(PurchLine _purchLine, PurchTable _purchTable, EventHandlerResult _eventHandlerResult)
+    {
+        if (_purchLine.PurchaseType == PurchaseType::RORSubRental)
+        {
+            _eventHandlerResult.result(PurchLineType_RORRental::construct(_purchLine, _purchTable));
+        }
+    }
+
+    /*
+    public InventUpd_Estimated updateInventoryOnInsert()
+    {
+        InventUpd_Estimated estimated = next updateInventoryOnInsert();
+        boolean isRental = (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental);
+
+        if(isRental)
+        {
+            isCompensatingTrans = true;
+            next updateInventoryOnInsert(_childBuffer);
+            isCompensatingTrans = false;
+        }
+
+        originId = 0;
+        // RLAM - Return MSFT estimated instance because it is used later in the insert method
+        return estimated
+    }
+
+    public InventUpd_Estimated updateInventoryOnUpdate()
+    {
+        InventUpd_Estimated estimated = next updateInventoryOnUpdate();
+
+        // RLAM - Be careful! We only want to execute the following if-block if called from purchLine.update, not when called from PurchLineType.updateInventory()
+        if (PurchLine::findRecId(purchLine.RecId).recVersion != purchLine.recVersion)
+        {
+            PurchLine purchLineLocal = PurchLine::findRecId(purchLine.RecId, true);
+            if (purchLineLocal.InventDimId != estimated.movement().inventDim().inventDimId)
+            {
+                purchLineLocal.InventDimId = estimated.movement().inventDim().inventDimId;
+                purchLineLocal.doUpdate();
+            }
+        }
+
+        boolean isRental = (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental);
+        if(isRental)
+        {
+            isCompensatingTrans = true;
+            next updateInventoryOnInsert(_childBuffer);
+            isCompensatingTrans = false;
+        }
+
+        originId = 0;
+        // RLAM - Return MSFT estimated instance because it is used later in the update method
+        return estimated
+    }
+
+    public void updateInventoryOnDelete(boolean _showInfoDelReserv)
+    {
+        next updateInventoryOnDelete(_showInfoDelReserv);
+        
+        boolean isRental = (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental);
+        if(isRental && purchLine.isStocked())
+        {
+            isCompensatingTrans = true;
+            next updateInventoryOnDelete(_showInfoDelReserv);
+            isCompensatingTrans = false;
+        }
+
+        originId = 0;
+    }
+
+    public InventUpd_Estimated instantiateInventUpd_Estimated(InventMovSubType _inventMovSubType)
+    {
+        InventUpd_Estimated estimated = next instantiateInventUpd_Estimated(_inventMovSubType);
+
+        if(isCompensatingTrans)
+        {
+            estimated.BOBParmIsCompensatingTrans(true);
+        }
+
+        return estimated;
+    }
+
+    public InventUpd_DeleteMovement instantiateInventUpd_DeleteMovement(InventMovSubType _inventMovSubType)
+    {
+        InventUpd_Estimated deleteMovement = next instantiateInventUpd_DeleteMovement(_inventMovSubType);
+
+        if(isCompensatingTrans)
+        {
+            deleteMovement.BOBParmIsCompensatingTrans(true);
+        }
+
+        return deleteMovement;
+    }
+
+    protected InventMovement instantiateInventMovement(InventMovSubType _inventMovSubType)
+    {
+        InventMovSubType localInventMovSubType = _inventMovSubType;
+
+        if(isCompensatingTrans)
+        {
+            localInventMovSubType = InventMovSubType::BOBCompensatingTrans;
+        }
+
+        InventMovement movement = next instantiateInventMovement(localInventMovSubType);
+        
+        if(!originId)
+        {
+            originId = movement.inventTransOriginId();
+        }
+        else
+        {
+            // RLAM - we reuse InventTransOriginId so we don't end up with duplicates in table InventTransOrigin
+            movement.inventTransOriginId(originId);
+        }
+
+        return movement;
+    }
+    */
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

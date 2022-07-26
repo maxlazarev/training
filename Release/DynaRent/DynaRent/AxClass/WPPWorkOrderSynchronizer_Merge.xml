@@ -1,0 +1,622 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPWorkOrderSynchronizer_Merge</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPWorkOrderSynchronizer_Merge extends WPPWorkOrderSynchronizer
+{
+    WPPWorkOrderTable   workOrderTable;
+    BOBObjectTable      objectTable;
+    Set                 workOrderTemplateTableSet;
+    boolean             workOrderCreated;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkFillProjectContract</Name>
+				<Source><![CDATA[
+    protected boolean checkFillProjectContract(ProjType _type)
+    {
+        boolean ret = super(_type);
+    
+        if (workOrderTable.CompanyId == curExt())
+        {
+            ret = ret && !workOrderTable.ProjInvoiceProjId;
+        }
+        else
+        {
+            WPPWorkOrderLine workOrderLine;
+
+            select firstonly RecId from workOrderLine
+            where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+            &&    workOrderLine.ProjCompanyId == curExt();
+
+            ret = ret && !workOrderLine.RecId;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkObjectSubGroup</Name>
+				<Source><![CDATA[
+    protected boolean checkObjectSubGroup(SalesPurchLine _salesLine, WPPWorkOrderTemplateLine _workOrderTemplateLine)
+    {
+        boolean ret;
+    
+        if (_salesLine)
+        {
+            if ((!_workOrderTemplateLine.BOBObjectGroupId && !_workOrderTemplateLine.BOBObjectGroupId)
+            || ((_workOrderTemplateLine.BOBObjectGroupId || _workOrderTemplateLine.BOBObjectSubGroupId)
+            &&   _salesLine.BOBcheckContainsObjectGroupSubGroup(_workOrderTemplateLine.BOBObjectGroupId, _workOrderTemplateLine.BOBObjectSubGroupId)))
+            {
+                ret = true;
+            }
+        }
+        else
+        {
+            if ((!_workOrderTemplateLine.BOBObjectGroupId && !_workOrderTemplateLine.BOBObjectGroupId)
+            || ((_workOrderTemplateLine.BOBObjectGroupId || _workOrderTemplateLine.BOBObjectGroupId)
+                &&   BOBRentalType::checkContainsObjGroupSubGroup(objectTable.RentalTypeId, _workOrderTemplateLine.BOBObjectGroupId, _workOrderTemplateLine.BOBObjectSubGroupId)))
+            {
+                ret = true;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generateWorkOrder_OrderLinked</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    private void generateWorkOrder_OrderLinked()
+    {
+        SetEnumerator               enumerator;
+        WPPWorkOrderTemplateLine    workOrderTemplateLine;
+        WPPWorkOrderTaskTable       workOrderTaskTable;
+        WPPWorkOrderLine            workOrderLine;
+        ProjGroup                   projGroup;
+        ProjTable                   projTable;
+        SalesLine                   salesLine;
+        boolean                     projectCreated;
+        ProjInvoiceProjId           projInvoiceProjId;
+        boolean                     canCreateInvoiceProject;
+        boolean                     registrationAllowed;
+        PriceGroupId                priceGroupId;
+        ProjLinePropertyId          linePropertyId;
+        ProjLinePropertySetup       projLinePropertySetup;
+    
+        this.initMaps();
+    
+        projTable = callerProjTable;
+    
+        if (!projTable && !workOrderTable.OrderRecId && RORVenueTable::find(workOrderTable.RORVenueCode).WPPProjId)
+        {
+            projTable = ProjTable::find(RORVenueTable::find(workOrderTable.RORVenueCode).WPPProjId);
+        }
+        salesLine   = SalesLine::findRecId(workOrderTable.OrderRecId);
+        enumerator  = workOrderTemplateTableSet.getEnumerator();
+    
+        projInvoiceProjId = BSAContractTable::findActiveContract(smmBusRelTable::findCust(custTable.AccountNum).BusRelAccount, workOrderTable.StartDate, workOrderTable.EndDate).ProjInvoiceProjId;
+    
+        if (!projInvoiceProjId)
+        {
+            projInvoiceProjId = NumberSeq::newGetNum(ProjParameters::numRefProjInvoiceProjId()).num();
+        }
+    
+        while (enumerator.moveNext())
+        {
+            this.updateAdditionalNotes(enumerator.current());
+    
+            while select workOrderTemplateLine
+            order by LineNumber
+            where workOrderTemplateLine.TemplateId == enumerator.current()
+                join WorkOrderStatusGroupId from workOrderTaskTable
+                where workOrderTaskTable.TaskId == workOrderTemplateLine.TaskId
+            {
+                lineNumber++;
+    
+                // if registrations are allowed then create a new ax project
+                registrationAllowed = WPPWorkOrderStatusRegistration::registrationAllowed(workOrderTaskTable.WorkOrderStatusGroupId);
+    
+                // Linked to a Purchase order cannot contain a project
+                if (workOrderTable.OrderTableId == tableNum(SalesLine))
+                {
+                    if (!projTable)
+                    {
+                        // Try to find a Project
+                        select firstOnly projTable
+                            exists join workOrderLine
+                            where workOrderLine.ProjId
+                            &&    workOrderLine.ProjId      == projTable.ProjId
+                            &&    workOrderLine.WorkOrderId == workOrderTable.WorkOrderId;
+                    }
+    
+                    if (!projTable)
+                    {
+                        if (!projectCreated)
+                        {
+                            projGroup = workOrderTable.projGroup();
+                            // Check whether an invoice project must be created
+                            canCreateInvoiceProject = this.checkFillProjectContract(projGroup.projType);
+    
+                            [priceGroupId, linePropertyId] = BSAContractData::getApplicablePricing(WPPWorkOrderTaskTable::find(workOrderTemplateLine.TaskId),
+                                                                                                   workOrderTable.BOBObjectTable(),
+                                                                                                   workOrderTable.StartDate,
+                                                                                                   workOrderTable.EndDate,
+                                                                                                   custTable);
+    
+                            // Create one invoice project for all projects
+                            // Create new projects (one per order line)
+                            projTable = this.createProject(projGroup.projType,
+                                                           projGroup.ProjGroupId,
+                                                           '',
+                                                           canCreateInvoiceProject,
+                                                           canCreateInvoiceProject ? projInvoiceProjId : '',
+                                                           '',
+                                                           custTable.AccountNum,
+                                                           '',
+                                                           '',
+                                                           true,
+                                                           custTable.TaxGroup);
+                            projTable.WPPCopyAddressFromWorkOrder(workOrderTable);
+                            projTable.ProjPriceGroup  = (priceGroupId ? priceGroupId : projTable.ProjPriceGroup);
+                            projTable.update();
+    
+                            //Create line property
+                            if (linePropertyId)
+                            {
+                                projLinePropertySetup.ProjCode          = TableGroupAll::Table;
+                                projLinePropertySetup.ProjRelation      = projTable.ProjId;
+                                projLinePropertySetup.CategoryCode      = TableGroupAll::All;
+                                projLinePropertySetup.LinePropertyId    = linePropertyId;
+                                projLinePropertySetup.insert();
+                            }
+    
+                            projectCreated = true;
+                        }
+                    }
+                }
+    
+                if (projTable && this.checkCreateActivity())
+                {
+                    // Create activities
+                    this.createActivity(projTable, workOrderTemplateLine.TaskId);
+                }
+    
+                // Create new work order lines
+                workOrderLine = this.createWorkOrderLine(registrationAllowed ? projTable : null,
+                                                         workOrderTable,
+                                                         workOrderTemplateLine,
+                                                         this.checkObjectSubGroup(salesLine, workOrderTemplateLine),
+                                                         salesLine);
+    
+                this.copyTaskRequirements(workOrderLine, workOrderTable, null, null, workOrderTable.RORVenueCode);
+    
+                workOrderCreated = true;
+            }
+        }
+    
+        this.updateWorkOrderTable(projInvoiceProjId);
+        workOrderTable.update();
+    
+        this.updateWorkOrderLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generateWorkOrder_OrderNotLinked</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    private void generateWorkOrder_OrderNotLinked()
+    {
+        SetEnumerator               enumerator;
+        WPPWorkOrderTemplateLine    workOrderTemplateLine;
+        WPPWorkOrderTaskTable       workOrderTaskTable;
+        ProjGroup                   projGroup;
+        ProjTable                   projTable;
+        boolean                     createInvoiceProject;
+        ProjInvoiceProjId           projInvoiceProjId;
+        boolean                     canCreateInvoiceProject;
+        PriceGroupId                priceGroupId;
+        ProjLinePropertyId          linePropertyId;
+        ProjLinePropertySetup       projLinePropertySetup;
+        WPPWorkOrderLine            workOrderLine;
+    
+        this.initMaps();
+    
+        projGroup  = workOrderTable.projGroup();
+        enumerator = workOrderTemplateTableSet.getEnumerator();
+    
+        // Check whether an invoice project must be created
+        createInvoiceProject    = true;
+        canCreateInvoiceProject = this.checkFillProjectContract(projGroup.projType);
+    
+        if (canCreateInvoiceProject)
+        {
+            projInvoiceProjId = BSAContractTable::findActiveContract(smmBusRelTable::findCust(custTable.AccountNum).BusRelAccount, workOrderTable.StartDate, workOrderTable.EndDate).ProjInvoiceProjId;
+        }
+    
+        if (!projInvoiceProjId)
+        {
+            if (workOrderTable.CompanyId == curExt())
+            {
+                projInvoiceProjId = workOrderTable.ProjInvoiceProjId;
+            }
+            else
+            {
+                ProjTable projTableLoc;
+
+                select firstonly ProjInvoiceProjId from projTableLoc
+                    exists join workOrderLine
+                    where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                    &&    workOrderLine.ProjId == projTableLoc.ProjId;
+
+                projInvoiceProjId = projTableLoc.ProjInvoiceProjId;
+            }
+
+            if (canCreateInvoiceProject && !projInvoiceProjId)
+            {
+                projInvoiceProjId = NumberSeq::newGetNum(ProjParameters::numRefProjInvoiceProjId()).num();
+            }
+        }
+    
+        lineNumber = WPPWorkOrderLine::lastLineNumber(workOrderTable.WorkOrderId);
+    
+        while (enumerator.moveNext())
+        {
+            this.updateAdditionalNotes(enumerator.current());
+    
+            while select workOrderTemplateLine
+            order by LineNumber
+            where workOrderTemplateLine.TemplateId == enumerator.current()
+                join WorkOrderStatusGroupId from workOrderTaskTable
+                where workOrderTaskTable.TaskId == workOrderTemplateLine.TaskId
+            {
+                lineNumber++;
+    
+                if (parameters.SeparateProjectPerWorkOrderLine)
+                {
+                    projTable.clear();
+                }
+    
+                // When the account on the work order is Customer and
+                // if registrations are allowed then create a new ax project
+                if (!projTable
+                &&   workOrderTable.CustVendAccountType == CustVendACType::Cust
+                &&   WPPWorkOrderStatusRegistration::registrationAllowed(workOrderTaskTable.WorkOrderStatusGroupId))
+                {
+                    [priceGroupId, linePropertyId]  = BSAContractData::getApplicablePricing(WPPWorkOrderTaskTable::find(workOrderTemplateLine.TaskId),
+                                                                                            workOrderTable.BOBObjectTable(),
+                                                                                            workOrderTable.StartDate,
+                                                                                            workOrderTable.EndDate,
+                                                                                            custTable);
+    
+                    // Create one invoice project for all projects
+                    // Create new projects (one per task)
+                    projTable = this.createProject(projGroup.projType,
+                                                   projGroup.ProjGroupId,
+                                                   '',
+                                                   (createInvoiceProject && canCreateInvoiceProject),
+                                                   projInvoiceProjId,
+                                                   '',
+                                                   custTable.AccountNum,
+                                                   '',
+                                                   '',
+                                                   true,
+                                                   custTable.TaxGroup);
+                    projTable.WPPCopyAddressFromWorkOrder(workOrderTable);
+                    projTable.ProjPriceGroup  = (priceGroupId ? priceGroupId : projTable.ProjPriceGroup);
+                    projTable.update();
+    
+                    //Create line property
+                    if (linePropertyId)
+                    {
+                        projLinePropertySetup.ProjCode          = TableGroupAll::Table;
+                        projLinePropertySetup.ProjRelation      = projTable.ProjId;
+                        projLinePropertySetup.CategoryCode      = TableGroupAll::All;
+                        projLinePropertySetup.LinePropertyId    = linePropertyId;
+                        projLinePropertySetup.insert();
+                    }
+    
+                    // When an invoice project has been created then a new invoice project
+                    // must not be created. Once the variable createInvoiceProject is set to false
+                    // it will not be set to true anymore
+                    if (canCreateInvoiceProject)
+                    {
+                        createInvoiceProject = false;
+                    }
+                }
+    
+                if (projTable && this.checkCreateActivity())
+                {
+                    // Create activities
+                    this.createActivity(projTable, workOrderTemplateLine.TaskId);
+                }
+    
+                // Create new work order lines
+                workOrderLine = this.createWorkOrderLine(projTable, workOrderTable, workOrderTemplateLine, this.checkObjectSubGroup(null, workOrderTemplateLine));
+    
+                this.copyTaskRequirements(workOrderLine, workOrderTable, null, null, workOrderTable.RORVenueCode);
+    
+                workOrderCreated = true;
+            }
+        }
+    
+        this.updateWorkOrderTable(projInvoiceProjId);
+        workOrderTable.update();
+    
+        this.updateWorkOrderLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isOrderLinkedToProject</Name>
+				<Source><![CDATA[
+    private boolean isOrderLinkedToProject()
+    {
+        boolean     ret;
+        SalesTable  salesTable;
+        SalesLine   salesLine;
+        PurchTable  purchTable;
+        PurchLine   purchLine;
+    
+        switch (workOrderTable.OrderTableId)
+        {
+            case tableNum(SalesTable):
+                salesTable = SalesTable::findRecId(workOrderTable.OrderRecId);
+                ret = salesTable.WPPIsRentalProject && salesTable.ProjId;
+                break;
+    
+            case tableNum(SalesLine):
+                select firstOnly RecId from salesTable
+                where salesTable.WPPIsRentalProject
+                &&    salesTable.ProjId
+                    exists join salesLine
+                    where salesLine.SalesId == salesTable.SalesId
+                    &&    salesLine.RecId   == workOrderTable.OrderRecId;
+    
+                ret = salesTable.RecId;
+                break;
+    
+            case tableNum(PurchTable):
+                purchTable = PurchTable::findRecId(workOrderTable.OrderTableId);
+                ret = purchTable.WPPIsRentalProject && purchTable.ProjId;
+                break;
+    
+            case tableNum(PurchLine):
+                select firstonly RecId from purchTable
+                where purchTable.WPPIsRentalProject
+                &&    purchTable.ProjId
+                    exists join purchLine
+                    where purchLine.PurchId == purchTable.PurchId
+                    &&    purchLine.RecId   == workOrderTable.OrderRecId;
+    
+                ret = purchTable.RecId;
+                break;
+    
+            default:
+                ret = false;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(WPPWorkOrderTable _workOrderTable, Set _workOrderTemplateTableSet, ProjTable _callerProjTable)
+    {
+        super();
+    
+        workOrderTable            = _workOrderTable;
+        workOrderTemplateTableSet = _workOrderTemplateTableSet;
+        callerProjTable           = _callerProjTable;
+        lineNumber                = WPPWorkOrderLine::lastLineNumber(workOrderTable.WorkOrderId);
+        custTable                 = CustTable::findByPartyRecId(workOrderTable.OrganizationParty);
+        objectTable               = workOrderTable.BOBObjectTable();
+    
+        workOrderIdSet.add(_workOrderTable.WorkOrderId);
+    
+        workOrderTable.selectForUpdate(true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCommon</Name>
+				<Source><![CDATA[
+    public Common parmCommon(Common _workOrderTable = workOrderTable)
+    {
+        workOrderTable = _workOrderTable as WPPWorkOrderTable;
+    
+        return workOrderTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        ttsBegin;
+        if ((workOrderTable.OrderRecId &&  this.isOrderLinkedToProject())
+        || (!workOrderTable.OrderRecId && RORVenueTable::find(workOrderTable.RORVenueCode).WPPProjId))
+        {
+            this.generateWorkOrder_OrderLinked();
+        }
+        else
+        {
+            this.generateWorkOrder_OrderNotLinked();
+        }
+    
+        super();
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateAdditionalNotes</Name>
+				<Source><![CDATA[
+    private void updateAdditionalNotes(WPPWorkOrderTemplateId _templateId)
+    {
+        DNRAdditionalNoteTable  additionalNoteTable;
+        str                     internalNote;
+        DictField               dictField;
+    
+        additionalNoteTable = DNRAdditionalNoteTable::find(workOrderTable.TableId, workOrderTable.RecId, true);
+    
+        if (additionalNoteTable)
+        {
+            if (additionalNoteTable.InternalNote)
+            {
+                internalNote = additionalNoteTable.InternalNote;
+                internalNote += '\n\n';
+                internalNote += DNRAdditionalNoteTable::find(tableNum(WPPWorkOrderTemplateTable), WPPWorkOrderTemplateTable::find(_templateId).RecId).InternalNote;
+    
+                dictField = new DictField(tableNum(DNRAdditionalNoteTable), fieldNum(DNRAdditionalNoteTable, InternalNote));
+    
+                if (strLen(internalNote) > dictField.stringLen())
+                {
+                    internalNote = strPoke(internalNote, "@SYS117314", dictField.stringLen() - 2);
+                }
+            }
+            else
+            {
+                internalNote = DNRAdditionalNoteTable::find(tableNum(WPPWorkOrderTemplateTable), WPPWorkOrderTemplateTable::find(_templateId).RecId).InternalNote;
+            }
+    
+            additionalNoteTable.InternalNote = internalNote;
+            additionalNoteTable.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSalesLineForShipment</Name>
+				<Source><![CDATA[
+    protected SalesLine getSalesLineForShipment(RecId _recId)
+    {
+        SalesLine salesLine;
+        return salesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateWorkOrderLine</Name>
+				<Source><![CDATA[
+    protected void updateWorkOrderLine()
+    {
+        SalesLine                       salesLine;
+        MapEnumerator                   workOrderLineMapEnumerator;
+        WPPWorkOrderLine                workOrderLine;
+        WPPWorkOrderTemplateLine        workOrderTemplateLine;
+        WPPWorkOrderDateTimeTemplate    workOrderDateTimeTemplate;
+        RORRentalDateTimes              rentalDateTimes;
+    
+        workOrderLineMapEnumerator = workOrderLineMap.getEnumerator();
+
+        if (workOrderTable.OrderTableId == tableNum(WHSShipmentTable))
+        {
+            salesLine = this.getSalesLineForShipment(workOrderTable.OrderRecId) as SalesLine;
+        }
+        else
+        {
+            salesLine = salesLine::findRecId(workOrderTable.OrderRecId);
+        }
+
+        if (salesLine)
+        {
+            rentalDateTimes = salesLine.RORRentalDateTimesHost::rentalDateTimes();
+        }
+    
+        while ((rentalDateTimes || workOrderTable.OrderTableId != tableNum(WHSShipmentTable))
+        &&    workOrderLineMapEnumerator.moveNext())
+        {
+            workOrderLine = WPPWorkOrderLine::findRecId(workOrderLineMapEnumerator.currentKey(), true);
+            workOrderTemplateLine = workOrderLineMapEnumerator.currentValue();
+            workOrderDateTimeTemplate = WPPWorkOrderDateTimeTemplate::find(workOrderTemplateLine.RecId);
+    
+            // Only synchronize when a new work order is created and SynchMode is not None
+            // or when no work order is created and according to the setup the dates should be synchronized
+            if (( workOrderCreated && workOrderDateTimeTemplate.SynchMode != WPPDateTimeSynchMode::None)
+            ||  (!workOrderCreated && workOrderDateTimeTemplate.SynchMode == WPPDateTimeSynchMode::KeepSynchronized))
+            {
+                workOrderLine.updateDate(fieldNum(WPPWorkOrderLine, RequestedStartDateTime),
+                                         workOrderTemplateLineMap,
+                                         workOrderTemplateLine,
+                                         workOrderDateTimeTemplate,
+                                         rentalDateTimes,
+                                         workOrderTable);
+    
+                workOrderLine.updateDate(fieldNum(WPPWorkOrderLine, RequestedEndDateTime),
+                                         workOrderTemplateLineMap,
+                                         workOrderTemplateLine,
+                                         workOrderDateTimeTemplate,
+                                         rentalDateTimes,
+                                         workOrderTable);
+    
+                workOrderLine.updateTime(fieldNum(WPPWorkOrderLine, RequestedStartDateTime),
+                                         workOrderTemplateLineMap,
+                                         workOrderTemplateLine,
+                                         workOrderDateTimeTemplate,
+                                         rentalDateTimes);
+    
+                workOrderLine.updateTime(fieldNum(WPPWorkOrderLine, RequestedEndDateTime),
+                                         workOrderTemplateLineMap,
+                                         workOrderTemplateLine,
+                                         workOrderDateTimeTemplate,
+                                         rentalDateTimes);
+                
+                // Update the map with current values as these may be used by referencing lines to calculate date time values
+                workOrderTemplateLineMap.insert(workOrderTemplateLine, workOrderLine);
+    
+                if (workOrderTemplateLine.ParentLineRecId)
+                {
+                    workOrderLine.updateParentLineNumber(workOrderTemplateLine.TemplateId,
+                                                         workOrderTemplateLine.ParentLineRecId,
+                                                         workOrderTemplateLineMap);
+                }
+    
+                this.checkUpdateWorkOrderLine(workOrderLine, true);
+            }
+        }
+    
+        // At the very end, because, for example, in the previous loop
+        // line 5 can be updated before 3, then the root is not set correctly
+        this.updateRootLineRecId();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateWorkOrderTable</Name>
+				<Source><![CDATA[
+    private void updateWorkOrderTable(ProjInvoiceProjId _projInvoiceProjId)
+    {
+        if (!workOrderTable.ProjInvoiceProjId
+        &&  _projInvoiceProjId)
+        {
+            workOrderTable.ProjInvoiceProjId = _projInvoiceProjId;
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

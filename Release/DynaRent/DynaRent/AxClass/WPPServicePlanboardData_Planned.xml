@@ -1,0 +1,804 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPServicePlanboardData_Planned</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class WPPServicePlanboardData_Planned extends WPPServicePlanboardData
+{
+    WrkCtrGroupWrkCtr   planBy;
+    Counter             resourceAvailabilityCounter;
+    WPPTaskRequirements taskRequirements;
+    Map                 rowPlannedEventsMap;    
+    Map                 rowItemsMap;
+    Map                 dataElementMapAbsence, backgroundColorMapAbsence, iconMapAbsence;
+    QueryRun            queryRun;
+    Set                 refreshOnlyResourceSet = new Set(Types::String);
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createPlannedEvent</Name>
+				<Source><![CDATA[
+    protected HiGHPlanBoardPlannedEvent createPlannedEvent(WrkCtrId             _resourceAccount,
+                                                           WPPWorkOrderTaskId   _taskId,
+                                                           utcdatetime          _startDateTime,
+                                                           utcdatetime          _endDateTime,
+                                                           RefTableId           _refTableId,
+                                                           RefRecId             _refRecId)
+    {
+        return HiGHPlanBoardPlannedEvent::newParameters(_resourceAccount, 
+                                                        _taskId, 
+                                                        _startDateTime, 
+                                                        _endDateTime,
+                                                        planBoard.parmPeriods(), 
+                                                        _refTableId, 
+                                                        _refRecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRowItem</Name>
+				<Source><![CDATA[
+    protected HiGHPlanBoardRowItem createRowItem(WPPResourceId               _id,
+                                                 Name                        _displayName,
+                                                 RefRecId                    _refRecId,
+                                                 List                        _plannedEvents,
+                                                 WPPCapabilityTest           _capabilityTest,
+                                                 WPPServicePlanboardSettings _settings)
+    {
+        int rowItemColor;
+        
+        switch (_capabilityTest)
+        {
+            case WPPCapabilityTest::All:
+                rowItemColor = #ColorGreen;
+                break;
+
+            case WPPCapabilityTest::Some:
+                rowItemColor = #ColorBlue;
+                break;
+
+            case WPPCapabilityTest::None:
+                rowItemColor = #ColorRed;
+                break;
+
+            default:                
+                rowItemColor = #ColorBlack;
+                break;
+        }
+
+        HiGHPlanBoardRowItem rowItem = HiGHPlanBoardRowItem::newParameters(_id, _displayName, rowItemColor, planBoard.parmPeriods(), _plannedEvents, tableNum(WPPResourceTable), _refRecId);
+        Map workingTimesMap = this.getEntityAvailability(_id, _settings.RegionCalendarId);
+
+        this.setEntityAvailability(rowItem, workingTimesMap);
+
+        return rowItem;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCacheKey</Name>
+				<Source><![CDATA[
+    protected anytype getCacheKey(Common _common)
+    {
+        switch(_common.TableId)
+        {
+            case tableNum(WPPTmpServicePlanboardData): // for retrieving from the cache
+                WPPTmpServicePlanboardData tmpServicePlanboardData = _common as WPPTmpServicePlanboardData;
+                return tmpServicePlanboardData.WPPLineStatus;
+
+            case tableNum(WPPCellBackgroundColor): // for populating the cache
+                WPPCellBackgroundColor cellBackgroundColor = _common as WPPCellBackgroundColor;
+                return cellBackgroundColor.Status;
+
+            default:
+                throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getEntityAvailability</Name>
+				<Source><![CDATA[
+    public Map getEntityAvailability(WPPResourceId _resourceId, WPPRegionCalendarId _calendarId)
+    {
+        Map workingTimesMap;
+
+        resourceAvailabilityCounter = 0;
+
+        if (parameters.SPBAvailabilityMode != WPPResourceAvailabilityMode::Disabled)
+        {
+            WPPGetResourceAvailability getResourceAvailability = WPPGetResourceAvailability::construct(planBy, callerFromDateTime /*calendar.get_ViewStartDate()*/, callerToDateTime /*calendar.get_ViewEndDate()*/, _calendarId);
+            getResourceAvailability.run(_resourceId);
+
+            workingTimesMap = getResourceAvailability.parmWorkingTimesMap();
+            resourceAvailabilityCounter = getResourceAvailability.getCounter();
+        }
+
+        return workingTimesMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpResources</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    private DNRTmpIdList getTmpResources(WPPServicePlanboardSettings _settings)
+    {
+        DNRTmpIdList            ret;
+        QueryBuildDataSource    qbdsResourceTable;
+        QueryBuildDataSource    qbdsResourceCalendar;
+        TransDateTime           calendarFromDateTime, calendarToDateTime;
+        Map                     targetToSourceMap = new Map(Types::String, Types::Container);
+        Query                   query = new Query();
+
+        qbdsResourceTable = query.addDataSource(tableNum(WPPResourceTable));
+        qbdsResourceTable.addSelectionField(fieldNum(WPPResourceTable, RecId));
+
+        if (refreshOnlyResourceSet.elements())
+        {
+            SetEnumerator setEnumerator = refreshOnlyResourceSet.getEnumerator();
+
+            while (setEnumerator.moveNext())
+            {
+                qbdsResourceTable.addRange(fieldNum(WPPResourceTable, ResourceId)).value(setEnumerator.current());
+            }
+        }
+        else
+        {
+            qbdsResourceTable.addRange(fieldNum(WPPResourceTable, ResourceTypeId)).value(_settings.ResourceTypeId);
+
+            if (_settings.RegionCalendarId)
+            {
+                calendarFromDateTime = callerFromDateTime; 
+                calendarToDateTime   = callerToDateTime; 
+
+                query.validTimeStateDateTimeRange(calendarFromDateTime, calendarToDateTime);
+                qbdsResourceCalendar = qbdsResourceTable.addDataSource(tableNum(WPPResourceCalendarResource));
+                qbdsResourceCalendar.relations(true);
+
+                str qvalue = strFmt('((%1.%2 == "%5") || (%3.%4 == "%5"))',
+                    qbdsResourceTable.name(),
+                    fieldStr(WPPResourceTable, RegionCalendarId),
+                    qbdsResourceCalendar.name(),
+                    fieldStr(WPPResourceCalendarResource, CalendarId),
+                    _settings.RegionCalendarId);          
+
+                qbdsResourceCalendar.addRange(fieldNum(WPPResourceTable, DataAreaId)).value(qvalue);
+
+                qbdsResourceCalendar.addSelectionField(fieldNum(WPPResourceCalendarResource, TableId));
+                targetToSourceMap.insert(fieldStr(DNRTmpIdList, TableId), [qbdsResourceCalendar.uniqueId(), fieldStr(WPPResourceCalendarResource, TableId)]);
+            }
+        }
+        
+        targetToSourceMap.insert(fieldStr(DNRTmpIdList, RefRecId), [qbdsResourceTable.uniqueId(), fieldStr(WPPResourceTable, RecId)]);
+
+        Query::insert_recordset(ret, targetToSourceMap, query);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcItemStartDateTime</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    protected TransDateTime calcItemStartDateTime(WPPTmpServicePlanboardData _tmpData, WPPWorkOrderLineResource _plannedTask, BOBRentalTrans _rentalTrans)
+    {
+        TransDateTime  itemStartDateTime;
+
+        if (_tmpData.WPPResourcePlanningRecId)
+        {
+            itemStartDateTime   = DateTimeUtil::applyTimeZoneOffset(_plannedTask.PlannedFromDateTime, userPrefTimeZone);
+        }
+        else if (_tmpData.BOBRentalTransRecId)
+        {
+            itemStartDateTime   = DateTimeUtil::applyTimeZoneOffset(_rentalTrans.FromDateTime, userPrefTimeZone);
+        }
+
+        return itemStartDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcItemEndtDateTime</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    protected TransDateTime calcItemEndtDateTime(WPPTmpServicePlanboardData _tmpData, WPPWorkOrderLineResource _plannedTask, BOBRentalTrans _rentalTrans)
+    {
+        TransDateTime  itemEndDateTime;
+
+        if (_tmpData.WPPResourcePlanningRecId)
+        {
+            itemEndDateTime     = DateTimeUtil::applyTimeZoneOffset(_plannedTask.PlannedToDateTime, userPrefTimeZone);
+        }
+        else if (_tmpData.BOBRentalTransRecId)
+        {
+            itemEndDateTime     = DateTimeUtil::applyTimeZoneOffset(_rentalTrans.ToDateTime, userPrefTimeZone);
+        }
+
+        return itemEndDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildQueryRun</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    protected QueryRun buildQueryRun()
+    {
+        Query query = new Query();
+        
+        QueryBuildDataSource qbdsTmpData = query.addDataSource(tableNum(WPPTmpServicePlanboardData));
+        qbdsTmpData.addOrderByField(fieldNum(WPPTmpServicePlanboardData, WPPCapabilityTest), SortOrder::Descending);
+        qbdsTmpData.addOrderByField(fieldNum(WPPTmpServicePlanboardData, WPPSortingNumber));
+        qbdsTmpData.addOrderByField(fieldNum(WPPTmpServicePlanboardData, WPPResourceAccount));
+
+        QueryBuildDataSource qbdsPlannedTask = qbdsTmpData.addDataSource(tableNum(WPPWorkOrderLineResource));
+        qbdsPlannedTask.relations(false);
+        qbdsPlannedTask.joinMode(JoinMode::OuterJoin);
+        qbdsPlannedTask.addLink(fieldNum(WPPTmpServicePlanboardData, WPPResourcePlanningRecId), fieldNum(WPPWorkOrderLineResource, RecId));
+
+        QueryBuildDataSource qbdsWorkOrderLine = qbdsPlannedTask.addDataSource(tableNum(WPPWorkOrderLine));
+        qbdsWorkOrderLine.relations(false);
+        qbdsWorkOrderLine.joinMode(JoinMode::OuterJoin);
+        qbdsWorkOrderLine.addLink(fieldNum(WPPWorkOrderLineResource, WorkOrderLineRecId), fieldNum(WPPWorkOrderLine, RecId));
+
+        QueryBuildDataSource qbdsRentalTrans = qbdsWorkOrderLine.addDataSource(tableNum(BOBRentalTrans));
+        qbdsRentalTrans.relations(false);
+        qbdsRentalTrans.joinMode(JoinMode::OuterJoin);
+        qbdsRentalTrans.addRange(fieldNum(BOBRentalTrans, DataAreaId)).value(strFmt('(%1 == %2.%3)',
+                                                                                    fieldStr(BOBRentalTrans, RecId),
+                                                                                    qbdsTmpData.name(),
+                                                                                    fieldStr(WPPTmpServicePlanboardData, BOBRentalTransRecId)));
+
+        queryRun = new QueryRun(query);
+        queryRun.setRecord(this.getTmpData());
+        return queryRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onQueryRunNextResult</Name>
+				<Source><![CDATA[
+    delegate void onQueryRunNextResult(WPPServicePlanboardData_Planned _object)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>layoutManagerCode</Name>
+				<Source><![CDATA[
+    protected WPPLayoutManagerCode layoutManagerCode(WPPTmpServicePlanboardData _tmpData, WPPServicePlanboardSettings _settings)
+    {
+        if (_settings.LayoutMgrCodePlannedAbsence
+        && ((parameters.InternalWorkOrderId && parameters.InternalWorkOrderId == _tmpData.WPPWorkOrderId) || (parameters.ReservationTaskId && _tmpData.BOBRentalTransRecId)))
+        {
+            return _settings.LayoutMgrCodePlannedAbsence;
+        }
+        else
+        {
+            return _settings.LayoutMgrCodePlanned;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populatePlanboard</Name>
+				<Source><![CDATA[
+    public void populatePlanboard(WPPServicePlanboardSettings _settings)
+    {
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderLineResource    plannedTask;
+        BOBRentalTrans              rentalTrans;
+        WPPPlannedFromDateTime      itemStartDateTime;
+        WPPPlannedToDateTime        itemEndDateTime;
+        WrkCtrName                  topResourceName;
+        System.Exception            exception;
+        List                        rowPlannedEventsList;
+        Counter                     keyValue;
+        Set                         resourceSet;
+
+        #TimeConstants
+
+        //topResourceName = calendar.get_TopDisplayedEntityName();
+
+        // reset collection
+        rowItemsMap         = new Map(Types::Integer, Types::Container);
+        rowPlannedEventsMap = new Map(Types::String, Types::Class);
+        resourceSet         = new Set(Types::String);
+
+        if (parameters.SPBAvailabilityMode != WPPResourceAvailabilityMode::Disabled)
+        {
+            planBoard.parmEnforceAvailability(true);
+        }
+
+        // iterate data
+        this.buildQueryRun();
+        
+        while(queryRun.next())
+        {
+            this.onQueryRunNextResult(this);
+
+            tmpData         = queryRun.get(tableNum(WPPTmpServicePlanboardData));
+            plannedTask     = queryRun.get(tableNum(WPPWorkOrderLineResource));
+            workOrderLine   = queryRun.get(tableNum(WPPWorkOrderLine));
+            rentalTrans     = queryRun.get(tableNum(BOBRentalTrans));
+            
+            if (!resourceSet.in(tmpData.WPPResourceAccount))
+            {
+                keyValue += 1;
+                resourceSet.add(tmpData.WPPResourceAccount);
+                rowItemsMap.insert(keyValue, [tmpData.WPPResourceAccount, tmpData.WPPResourceName, tmpData.WPPResourceRecId, tmpData.WPPCapabilityTest]);
+            }
+            
+            Common buffer = null;
+            boolean allowEdit = (tmpData.WPPResourcePlanningRecId && tmpData.WPPLineStatus <= WPPWorkOrderLineStatus::Planned);
+            HiGHPlanBoardPlannedEvent rowPlannedEvent;
+            RefTableId plannedEventTableId;
+            RefRecId plannedEventRecId;
+
+            itemStartDateTime = this.calcItemStartDateTime(tmpData, plannedTask, rentalTrans);
+            itemEndDateTime   = this.calcItemEndtDateTime(tmpData, plannedTask, rentalTrans);
+
+            if (tmpData.WPPResourcePlanningRecId)
+            {
+                buffer              = workOrderLine;
+                plannedEventTableId = tableNum(WPPWorkOrderLineResource);
+                plannedEventRecId   = tmpData.WPPResourcePlanningRecId;
+            }
+            else if (tmpData.BOBRentalTransRecId)
+            {
+                buffer              = null; // The method setItemContent only expects a buffer of type WPPWorkOrderLine
+                plannedEventTableId = tableNum(BOBRentalTrans);
+                plannedEventRecId   = tmpData.BOBRentalTransRecId;
+            }
+
+            if(tmpData.WPPResourcePlanningRecId || tmpData.BOBRentalTransRecId)
+            {
+                rowPlannedEvent = this.createPlannedEvent(tmpData.WPPResourceAccount,
+                                                          tmpData.WPPTaskId,
+                                                          itemStartDateTime,
+                                                          itemEndDateTime,
+                                                          plannedEventTableId,
+                                                          plannedEventRecId);
+            }
+            else
+            {
+                rowPlannedEvent = null;
+            }
+
+            if (rowPlannedEvent)
+            {
+                rowPlannedEvent.parmAllowDrag(allowEdit);
+                rowPlannedEvent.parmAllowResize(allowEdit);
+                this.setItemContent(rowPlannedEvent, tmpData, buffer, _settings);
+
+                if (rowPlannedEventsMap.exists(tmpData.WPPResourceAccount))
+                {
+                    rowPlannedEventsList = rowPlannedEventsMap.lookup(tmpData.WPPResourceAccount);
+                    rowPlannedEventsList.addEnd(rowPlannedEvent);
+                }
+                else
+                {
+                    rowPlannedEventsList = new List(Types::Class);
+                    rowPlannedEventsList.addEnd(rowPlannedEvent);
+                    rowPlannedEventsMap.insert(tmpData.WPPResourceAccount, rowPlannedEventsList);
+                }
+            }
+        }
+
+        List            rowItems = new List(Types::Class);        
+        MapEnumerator   rowItemsEnum = rowItemsMap.getEnumerator();
+
+        while (rowItemsEnum.moveNext())
+        {
+            WrkCtrId                    resourceAccount;
+            WrkCtrName                  displayName;
+            RefRecId                    resourceRecId;
+            WPPCapabilityTest           capabilityTest;
+            
+            [resourceAccount, displayName, resourceRecId, capabilityTest] = rowItemsEnum.currentValue();
+            
+            rowPlannedEventsList = new List(Types::Class);
+
+            if (rowPlannedEventsMap.exists(resourceAccount))
+            {
+                rowPlannedEventsList = rowPlannedEventsMap.lookup(resourceAccount);                
+            }
+
+            HiGHPlanBoardRowItem rowItem = this.createRowItem(resourceAccount, displayName, resourceRecId, rowPlannedEventsList, capabilityTest, _settings);
+            
+            rowItems.addEnd(rowItem);
+        }
+
+        planBoard.refresh(rowItems);
+
+        //calendar.set_TopDisplayedEntityName(topResourceName);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpData</Name>
+				<Source><![CDATA[
+    public void populateTmpData(WPPServicePlanboardSettings _settings)
+    {
+        DNRTmpIdList                tmpResources;
+        WPPWorkOrderTable           workOrderTable;
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderTaskTable       taskTable;
+        WPPWorkOrderLineResource    plannedTask;
+        WPPResourceTable            resourceTable, resourceTableGroupResource;
+        WPPResourceGroupResource    resourceGroupResource;
+        BOBObjectTable              objectTable;
+        BOBObjectAvailabilityLog    objectAvailLog;
+        BOBCurrentAvailabilityView  objectAvailView;
+        BOBRentalTrans              rentalTrans;
+        LogisticsPostalAddress      dlvAddress;
+        EcoResProduct               ecoResProduct;
+        InventTable                 inventTable;
+        WPPResourceCapability       resourceCapability;
+        CustTable                   custTable;
+        VendTable                   vendTable;
+        SalesQuotationTable         salesQuotationTable;
+        SalesQuotationLine          salesQuotationLine;
+        InventTransOrigin           inventTransOrigin;
+        InventDim                   inventDim;
+        FromDateTime                calendarFromDateTime;
+        ToDateTime                  calendarToDateTime;
+        WPPWorkOrderTaskId          workOrderTaskId;
+        Description                 workOrderTaskDescription;
+        CustVendACType              custVendACType;
+        boolean                     isIndividualResource = (_settings.PlanBy == WrkCtrGroupWrkCtr::WrkCtrGroup ? NoYes::No : NoYes::Yes) ;
+
+        calendarFromDateTime    = callerFromDateTime; 
+        calendarToDateTime      = callerToDateTime;
+        planBy                  = _settings.PlanBy;
+
+        this.populateLayoutMgrCache(_settings);
+        
+        // The resource type filter allows for wildcards, therefore we need to build and run a dynamic query in order to
+        // retrieve all resources we need to display. Since we don't want to break our set-based inserts and updates in
+        // this method, we load the relevant resource RecIds into a tmp table first which we then join into our queries.
+        tmpResources.linkPhysicalTableInstance(this.getTmpResources(_settings));
+
+        if (refreshOnlyResourceSet.elements())
+        {
+            delete_from tmpData
+                exists join tmpResources
+                where tmpResources.RefRecId == tmpData.WPPResourceRecId;
+        }
+        else
+        {
+            delete_from tmpData;
+        }
+
+        // insert all resources that do NOT have any tasks assigned in the specified time range
+        insert_recordset tmpData (WPPResourceAccount, WPPResourceName, WPPSortingNumber, WPPResourceRecId)
+        select ResourceId, Name, SortingNumber from resourceTable
+        where resourceTable.IsIndividualResource == isIndividualResource
+            join RefRecId from tmpResources
+            where tmpResources.RefRecId == resourceTable.RecId
+                notExists join plannedTask
+                where plannedTask.ResourceId == resourceTable.ResourceId
+                &&    plannedTask.PlannedFromDateTime > dateTimeNull
+                &&    plannedTask.PlannedFromDateTime <= calendarToDateTime
+                &&    plannedTask.PlannedToDateTime > plannedTask.PlannedFromDateTime
+                &&    plannedTask.PlannedToDateTime >= calendarFromDateTime
+                &&    plannedTask.ResourceType == _settings.PlanBy;
+
+        // insert all resources that DO have tasks assigned -- populate work order and task information as well
+        insert_recordset tmpData (WPPWorkOrderId, WPPCompanyId, WPPWarehouse, WPPOrganizationParty, CustVendAccountType, BOBObjectTableRecId,
+                                  WPPVenueCode, WPPDeliveryAddress, WPPOrderTableId, WPPOrderRecId, WPPActualPostingDate, WPPMaintenanceDate,
+                                  WPPProjGroupId, WPPExecutionGroupId, WPPProjId, WPPTaskId, WPPReqStartDateTime, WPPReqEndDateTime,
+                                  WPPLineStatus, WPPWorkOrderLineRecId, WPPTaskDescription, WPPPlannedFromDateTime, WPPPlannedToDateTime, WPPInternalNote,
+                                  WPPResourcePlanningRecId, WPPResourceAccount, WPPResourceName, WPPSortingNumber, WPPResourceRecId)
+        select WorkOrderId, CompanyId, InventLocationId, OrganizationParty, CustVendAccountType, BOBObjectTableRecId, RORVenueCode,
+               LogisticsLocationRecId, OrderTableId, OrderRecId, ActualPostingDate, MaintenanceDateExpected, ProjGroupId from workOrderTable
+            join ExecutionGroupId, ProjId, TaskId, RequestedStartDateTime, RequestedEndDateTime, Status, RecId from workOrderLine
+            where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                join Description from taskTable
+                where taskTable.TaskId == workOrderLine.TaskId
+                &&    taskTable.TaskType == WPPTaskType::Service
+                    join PlannedFromDateTime, PlannedToDateTime, InternalNote, RecId from plannedTask
+                    where plannedTask.WorkOrderLineRecId == workOrderLine.RecId
+                    &&    plannedTask.PlannedFromDateTime > dateTimeNull
+                    &&    plannedTask.PlannedFromDateTime <= calendarToDateTime
+                    &&    plannedTask.PlannedToDateTime > plannedTask.PlannedFromDateTime
+                    &&    plannedTask.PlannedToDateTime >= calendarFromDateTime
+                    &&    plannedTask.ResourceType == _settings.PlanBy
+                        join ResourceId, Name, SortingNumber from resourceTable
+                        where resourceTable.ResourceId == plannedTask.ResourceId
+                        &&    resourceTable.IsIndividualResource == isIndividualResource
+                            join RefRecId from tmpResources
+                            where tmpResources.RefRecId == resourceTable.RecId;
+
+        // add reservation tasks in case the corresponding parameter setting is configured
+        if (parameters.ReservationTaskId)
+        {
+            // set some constants for use in the next insert_recordset statements
+            taskTable = WPPWorkOrderTaskTable::find(parameters.ReservationTaskId);
+            workOrderTaskId = taskTable.TaskId;
+            workOrderTaskDescription = taskTable.Description;
+            //custVendACType = CustVendACType::Cust;
+
+            if (_settings.PlanBy == WrkCtrGroupWrkCtr::WrkCtr)
+            {
+                // insert all resources and their reservation tasks -- linked to rental quotation
+                insert_recordset tmpData (WPPResourceRecId, WPPResourceAccount, WPPResourceName, WPPSortingNumber, BOBObjectTableRecId, 
+                                          WPPPlannedFromDateTime, WPPPlannedToDateTime, BOBRentalTransRecId, WPPTaskId, WPPTaskDescription)
+                select RefRecId from tmpResources
+                    join ResourceId, Name, SortingNumber from resourceTable
+                    where resourceTable.RecId == tmpResources.RefRecId
+                    &&    resourceTable.IsIndividualResource
+                    &&    resourceTable.ResourceCategory == WPPResourceCategory::BusinessObject
+                        join RecId from objectTable
+                        where objectTable.ObjectId == resourceTable.RelationAccount
+                            join FromDateTime, ToDateTime, RecId, workOrderTaskId, workOrderTaskDescription from rentalTrans
+                            where rentalTrans.ObjectId == objectTable.ObjectId
+                            &&    rentalTrans.TransType == BOBRentalTransType::RentalQuotation
+                            &&    rentalTrans.Active == BOBRentalTransActive::Active
+                            &&    rentalTrans.FromDateTime  > dateTimeNull
+                            &&    rentalTrans.FromDateTime  <= calendarToDateTime
+                            &&    rentalTrans.ToDateTime    > rentalTrans.FromDateTime
+                            &&    rentalTrans.ToDateTime    >= calendarFromDateTime;
+
+                // insert all resources and their reservation tasks -- linked to work order
+                insert_recordset tmpData (WPPResourceRecId, WPPResourceAccount, WPPResourceName, WPPSortingNumber, BOBObjectTableRecId, WPPPlannedFromDateTime, WPPPlannedToDateTime,
+                                          BOBRentalTransRecId, WPPTaskId, WPPTaskDescription, WPPWorkOrderLineRecId, WPPExecutionGroupId, WPPProjId, WPPReqStartDateTime, WPPReqEndDateTime,
+                                          WPPLineStatus, WPPWorkOrderId, WPPCompanyId, WPPWarehouse, WPPOrganizationParty, CustVendAccountType,
+                                          WPPVenueCode, WPPDeliveryAddress, WPPOrderTableId, WPPOrderRecId, WPPActualPostingDate, WPPMaintenanceDate, WPPProjGroupId)
+                select RefRecId from tmpResources
+                    join ResourceId, Name, SortingNumber from resourceTable
+                    where resourceTable.RecId == tmpResources.RefRecId
+                    &&    resourceTable.IsIndividualResource
+                    &&    resourceTable.ResourceCategory == WPPResourceCategory::BusinessObject
+                        join RecId from objectTable
+                        where objectTable.ObjectId == resourceTable.RelationAccount
+                            join FromDateTime, ToDateTime, RecId, workOrderTaskId, workOrderTaskDescription from rentalTrans
+                            where rentalTrans.ObjectId == objectTable.ObjectId
+                            &&    rentalTrans.TransType == BOBRentalTransType::WPPWorkOrder
+                            &&    rentalTrans.Active == BOBRentalTransActive::Active
+                            &&    rentalTrans.FromDateTime  > dateTimeNull
+                            &&    rentalTrans.FromDateTime  <= calendarToDateTime
+                            &&    rentalTrans.ToDateTime    > rentalTrans.FromDateTime
+                            &&    rentalTrans.ToDateTime    >= calendarFromDateTime
+                                join RecId, ExecutionGroupId, ProjId, RequestedStartDateTime, RequestedEndDateTime, Status from workOrderLine
+                                where workOrderLine.RecId == rentalTrans.WPPWorkOrderLineRecId
+                                    join WorkOrderId, CompanyId, InventLocationId, OrganizationParty, CustVendAccountType, RORVenueCode,
+                                         LogisticsLocationRecId, OrderTableId, OrderRecId, ActualPostingDate, MaintenanceDateExpected, ProjGroupId from workOrderTable
+                                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId;
+            }
+            else
+            {
+                // insert all resource groups and the reservation tasks associated with the individual resource -- linked to rental quotation
+                // in order to be able to only select TableId (prevents unnecessary traffic) from certain joined tables, we need to use a PlaceHolderTableId field in the target table
+                insert_recordset tmpData (WPPResourceRecId, WPPResourceAccount, WPPResourceName, WPPSortingNumber, BOBObjectTableRecId,
+                                          WPPPlannedFromDateTime, WPPPlannedToDateTime, BOBRentalTransRecId, WPPTaskId, WPPTaskDescription)
+                select RefRecId from tmpResources
+                    join ResourceId, Name, SortingNumber from resourceTable
+                    where resourceTable.RecId == tmpResources.RefRecId
+                    &&   !resourceTable.IsIndividualResource
+                        join resourceGroupResource
+                        where resourceGroupResource.ResourceGroup == resourceTable.ResourceId
+                            join resourceTableGroupResource
+                            where resourceTableGroupResource.ResourceId == resourceGroupResource.ResourceId
+                            &&    resourceTableGroupResource.IsIndividualResource
+                            &&    resourceTableGroupResource.ResourceCategory == WPPResourceCategory::BusinessObject
+                                join RecId from objectTable
+                                where objectTable.ObjectId == resourceTableGroupResource.RelationAccount
+                                    join FromDateTime, ToDateTime, RecId, workOrderTaskId, workOrderTaskDescription from rentalTrans
+                                    where rentalTrans.ObjectId == objectTable.ObjectId
+                                    &&    rentalTrans.TransType == BOBRentalTransType::RentalQuotation
+                                    &&    rentalTrans.Active == BOBRentalTransActive::Active
+                                    &&    rentalTrans.FromDateTime  > dateTimeNull
+                                    &&    rentalTrans.FromDateTime  <= calendarToDateTime
+                                    &&    rentalTrans.ToDateTime    > rentalTrans.FromDateTime
+                                    &&    rentalTrans.ToDateTime    >= calendarFromDateTime;
+
+                // insert all resource groups and the reservation tasks associated with the individual resource -- linked to work order
+                // in order to be able to only select TableId (prevents unnecessary traffic) from certain joined tables, we need to use a PlaceHolderTableId field in the target table
+                insert_recordset tmpData (WPPResourceRecId, WPPResourceAccount, WPPResourceName, WPPSortingNumber, BOBObjectTableRecId, WPPPlannedFromDateTime, WPPPlannedToDateTime,
+                                          BOBRentalTransRecId, WPPTaskId, WPPTaskDescription, WPPWorkOrderLineRecId, WPPExecutionGroupId, WPPProjId, WPPReqStartDateTime, WPPReqEndDateTime,
+                                          WPPLineStatus, WPPWorkOrderId, WPPCompanyId, WPPWarehouse, WPPOrganizationParty, CustVendAccountType,
+                                          WPPVenueCode, WPPDeliveryAddress, WPPOrderTableId, WPPOrderRecId, WPPActualPostingDate, WPPMaintenanceDate, WPPProjGroupId)
+                select RefRecId from tmpResources
+                    join ResourceId, Name, SortingNumber from resourceTable
+                    where resourceTable.RecId == tmpResources.RefRecId
+                    &&   !resourceTable.IsIndividualResource
+                            join resourceGroupResource
+                            where resourceGroupResource.ResourceGroup == resourceTable.ResourceId
+                                join resourceTableGroupResource
+                                where resourceTableGroupResource.ResourceId == resourceGroupResource.ResourceId
+                                &&    resourceTableGroupResource.IsIndividualResource
+                                &&    resourceTableGroupResource.ResourceCategory == WPPResourceCategory::BusinessObject
+                                    join RecId from objectTable
+                                    where objectTable.ObjectId == resourceTableGroupResource.RelationAccount
+                                        join FromDateTime, ToDateTime, RecId, workOrderTaskId, workOrderTaskDescription from rentalTrans
+                                        where rentalTrans.ObjectId == objectTable.ObjectId
+                                        &&    rentalTrans.TransType == BOBRentalTransType::WPPWorkOrder
+                                        &&    rentalTrans.Active == BOBRentalTransActive::Active
+                                        &&    rentalTrans.FromDateTime  > dateTimeNull
+                                        &&    rentalTrans.FromDateTime  <= calendarToDateTime
+                                        &&    rentalTrans.ToDateTime    > rentalTrans.FromDateTime
+                                        &&    rentalTrans.ToDateTime    >= calendarFromDateTime
+                                            join RecId, ExecutionGroupId, ProjId, RequestedStartDateTime, RequestedEndDateTime, Status from workOrderLine
+                                            where workOrderLine.RecId == rentalTrans.WPPWorkOrderLineRecId
+                                                join WorkOrderId, CompanyId, InventLocationId, OrganizationParty, CustVendAccountType, RORVenueCode,
+                                                     LogisticsLocationRecId, OrderTableId, OrderRecId, ActualPostingDate, MaintenanceDateExpected, ProjGroupId from workOrderTable
+                                                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId;
+            }
+        }
+
+        update_recordset tmpData
+        setting WPPWarehouse = inventDim.InventLocationId,
+                CustVendAccount = salesQuotationTable.CustAccount,
+                CustVendAccountType = CustVendACType::Cust,
+                WPPVenueCode = salesQuotationTable.RORVenueCode,
+                WPPDeliveryAddress = salesQuotationTable.DeliveryPostalAddress
+        where tmpData.BOBRentalTransRecId
+            join TableId from rentalTrans
+            where rentalTrans.RecId == tmpData.BOBRentalTransRecId
+                join TableId from inventTransOrigin
+                where inventTransOrigin.RecId == rentalTrans.InventTransOrigin
+                    join TableId from salesQuotationLine
+                    where salesQuotationLine.InventTransId == inventTransOrigin.InventTransId
+                        join InventLocationId from inventDim
+                        where inventDim.inventDimId == salesQuotationLine.InventDimId
+                            join CustAccount, RORVenueCode, DeliveryPostalAddress from salesQuotationTable
+                            where salesQuotationTable.QuotationId == salesQuotationLine.QuotationId;
+
+        update_recordset tmpData
+        setting CustVendAccount = custTable.AccountNum
+        where tmpData.WPPOrganizationParty
+        &&    tmpData.CustVendAccountType == CustVendACType::Cust
+            join AccountNum from custTable
+            where custTable.Party == tmpData.WPPOrganizationParty;
+
+        update_recordset tmpData
+        setting CustVendAccount = vendTable.AccountNum
+        where tmpData.WPPOrganizationParty
+            &&    tmpData.CustVendAccountType == CustVendACType::Vend
+            join AccountNum from vendTable
+            where vendTable.Party == tmpData.WPPOrganizationParty;
+
+        // populate business object information
+        update_recordSet tmpData
+        setting BOBObjectId = objectTable.ObjectId,
+                BOBFleetNumber = objectTable.FleetNumber,
+                BOBCategory = objectTable.Category,
+                BOBRentalTypeId = objectTable.RentalTypeId,
+                BOBOrganizationParty = objectTable.OrganizationParty,
+                BOBExternalId = objectTable.ExternalObjectId,
+                BOBInventSerialId = objectTable.InventSerialId,
+                BOBItemId = inventTable.ItemId,
+                BOBItemName = inventTable.NameAlias,
+                BOBIsAvailable = objectAvailLog.IsAvailable
+        where tmpData.BOBObjectTableRecId
+            join ObjectId, FleetNumber, Category, RentalTypeId, OrganizationParty, ExternalObjectId, InventSerialId from objectTable
+            where objectTable.RecId == tmpData.BOBObjectTableRecId
+                join TableId from ecoResProduct
+                where ecoResProduct.BOBRentalTypeId == objectTable.RentalTypeId
+                &&    ecoResProduct.DisplayProductNumber ==  ecoResProduct.BOBRentalTypeId
+                    join ItemId, NameAlias from inventTable
+                    where inventTable.Product == ecoResProduct.RecId
+                        join IsAvailable from objectAvailLog
+                        where objectAvailLog.ObjectId == objectTable.ObjectId
+                            exists join objectAvailView
+                            where objectAvailView.ObjectId == objectAvailLog.ObjectId
+                            &&    objectAvailView.MaxOfCreatedDateTime == objectAvailLog.createdDateTime;
+
+        // populate work order address information
+        update_recordSet tmpData
+        setting WPPDlvStreetNumber      = dlvAddress.StreetNumber,
+                WPPDlvStreet            = dlvAddress.Street,
+                WPPDlvZipCode           = dlvAddress.ZipCode,
+                WPPDlvCity              = dlvAddress.City,
+                WPPDlvCounty            = dlvAddress.County,
+                WPPDlvState             = dlvAddress.State,
+                WPPDlvCountryRegionId   = dlvAddress.CountryRegionId
+        where tmpData.WPPDeliveryAddress
+            join StreetNumber, Street, ZipCode, City, County, State, CountryRegionId from dlvAddress
+            where dlvAddress.RecId == tmpData.WPPDeliveryAddress;
+
+        if (callerWorkOrderLineRecId)
+        {
+            // When no task requirements exist then it should be possible to plan the task
+            select firstOnly RecId from taskRequirements
+            where taskRequirements.RefTableId == tableNum(WPPWorkOrderLine)
+            &&    taskRequirements.RefRecId   == callerWorkOrderLineRecId;
+
+            if (taskRequirements)
+            {
+                // First update to All for all cases that have at least one match on the requirements
+                update_recordSet tmpData
+                setting WPPCapabilityTest = WPPCapabilityTest::All
+                     exists join taskRequirements
+                     where taskRequirements.RefTableId == tableNum(WPPWorkOrderLine)
+                     &&    taskRequirements.RefRecId   == callerWorkOrderLineRecId
+                        join TableId from resourceCapability
+                        where resourceCapability.CapabilityId == taskRequirements.CapabilityId
+                        &&    resourceCapability.ResourceId == tmpData.WPPResourceAccount;
+
+                // Then update to Some for those cases that do not match all requirements
+                update_recordSet tmpData
+                setting WPPCapabilityTest = WPPCapabilityTest::Some
+                where tmpData.WPPCapabilityTest == WPPCapabilityTest::All
+                    join TableId from taskRequirements
+                     where taskRequirements.RefTableId == tableNum(WPPWorkOrderLine)
+                     &&    taskRequirements.RefRecId   == callerWorkOrderLineRecId
+                        notExists join resourceCapability
+                        where resourceCapability.CapabilityId == taskRequirements.CapabilityId
+                        &&    resourceCapability.ResourceId == tmpData.WPPResourceAccount;
+
+            }
+            else
+            {
+                update_recordSet tmpData
+                setting WPPCapabilityTest = WPPCapabilityTest::All;
+            }
+        }
+
+        super(_settings);
+
+        refreshOnlyResourceSet = new Set(Types::String);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setEntityAvailability</Name>
+				<Source><![CDATA[
+    public void setEntityAvailability(HiGHPlanBoardRowItem _rowItem, Map _workingTimesMap)
+    {
+        MapEnumerator   workingTimesMapEnumerator;
+        container       workingTimesMain, workingTimesSub;
+        Counter         workingTimesCounter, highlightRangeIdx;
+        FromDateTime    fromDateTime;
+        ToDateTime      toDateTime;
+
+        if (parameters.SPBAvailabilityMode != WPPResourceAvailabilityMode::Disabled)
+        {
+            workingTimesMapEnumerator = _workingTimesMap.getEnumerator();
+
+            while (workingTimesMapEnumerator.moveNext())
+            {
+                workingTimesMain = workingTimesMapEnumerator.currentValue();
+
+                for (workingTimesCounter = 1; workingTimesCounter <= conLen(workingTimesMain); workingTimesCounter++)
+                {
+                    workingTimesSub = conPeek(workingTimesMain, workingTimesCounter);
+                    [ fromDateTime, toDateTime ] = workingTimesSub;
+
+                    planBoard.openPeriod(_rowItem, fromDateTime, toDateTime);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setResourceIdSet</Name>
+				<Source><![CDATA[
+    public void setResourceIdSet(Set _refreshResourceId)
+    {
+        refreshOnlyResourceSet = _refreshResourceId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

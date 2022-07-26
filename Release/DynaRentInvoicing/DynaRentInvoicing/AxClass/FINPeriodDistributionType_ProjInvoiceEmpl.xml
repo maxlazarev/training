@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINPeriodDistributionType_ProjInvoiceEmpl</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[FINPeriodDistributionTypeAttribute(FINPeriodDistributionEngineType::ProjInvoiceEmpl)]
+class FINPeriodDistributionType_ProjInvoiceEmpl extends FINPeriodDistributionType
+{
+    LedgerPostingType   ledgerPostingTypeAccount;
+    DimensionDefault    defaultDimension;
+    ProjInvoiceEmpl     projInvoiceEmpl;
+    ProjJournalTrans    projJournalTrans;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>runPeriod</Name>
+				<Source><![CDATA[
+    protected void runPeriod(StartDate _startDate,
+        EndDate             _endDate,
+        TransDate           _postingDate,
+        AmountCur           _periodAmount,
+        AmountCur           _periodDisc,
+        FINAnalyticalDate   _analyticalDate = dateNull())
+    {
+        this.addTrans(ledgerPostingTypeAccount,
+            dimensionAccountAmount,
+            defaultDimension,
+            -_periodAmount,
+            _postingDate,
+            true,
+            _analyticalDate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParameters</Name>
+				<Source><![CDATA[
+    public void initParameters(GeneralJournalEntry _generalJournalEntry,
+        InvoiceDate                         _invoiceDate,
+        InvoiceId                           _invoiceId,
+        Common                              _ledgerRefBuffer,
+        AmountCur                           _amount,
+        AmountCur                           _amountDisc,
+        CurrencyCode                        _currencyCode,
+        LedgerDimensionDefaultAccount       _dimensionAccountAmount,
+        LedgerDimensionDefaultAccount       _dimensionAccountDisc,//for markup will be 0
+        DimensionDefault                    _defaultDimension,//for markup only
+        Common                              _sourceBuffer,//for markup only
+        LedgerPostingType                   _ledgerPostingTypeAccount)//for markup only
+    {
+        ledgerPostingTypeAccount    = _ledgerPostingTypeAccount;
+        defaultDimension            = _defaultDimension;
+
+        super(_generalJournalEntry,
+            _invoiceDate,
+            _invoiceId,
+            _ledgerRefBuffer,
+            _amount,
+            _amountDisc,
+            _currencyCode,
+            _dimensionAccountAmount,
+            _dimensionAccountDisc,
+            _defaultDimension,
+            _sourceBuffer,
+            _ledgerPostingTypeAccount);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runInit</Name>
+				<Source><![CDATA[
+    protected void runInit()
+    {
+        projInvoiceEmpl = ProjInvoiceEmpl::findRecId(ledgerRefBuffer.RecId);
+
+        select firstonly FINParentRefRecId, journalId from projJournalTrans
+        where projJournalTrans.TransId == projInvoiceEmpl.TransId;
+
+        if (projJournalTrans.FINParentRefRecId)
+        {
+            ProjJournalTrans projJournalTransCredit; 
+
+            select firstonly JournalId from projJournalTransCredit
+            where projJournalTransCredit.RecId == projJournalTrans.FINParentRefRecId;
+
+            projJournalTrans = projJournalTransCredit;
+        }
+
+        invoiceId = projJournalTrans.JournalId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkHasProjPeriods</Name>
+				<Source><![CDATA[
+    protected boolean checkHasProjPeriods()
+    {
+        FINProjJournalTransPeriod projJournalTransPeriod;
+
+        select firstOnly PeriodStartDateTime, PeriodEndDateTime, RecId from projJournalTransPeriod
+        where projJournalTransPeriod.ProjJournalTransRecId == projJournalTrans.RecId;
+
+        return projJournalTransPeriod.RecId != 0 && this.calcNumOfPeriods(DateTimeUtil::date(projJournalTransPeriod.PeriodStartDateTime), DateTimeUtil::date(projJournalTransPeriod.PeriodEndDateTime));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDaysChargeablePeriods</Name>
+				<Source><![CDATA[
+    protected container getDaysChargeablePeriods()
+    {
+        FINProjJournalTransPeriod   projJournalTransPeriod;
+        container                   ret;
+        Periods                     chargeablePeriods;
+        TransDateTime               lastPeriodEndDateTime;
+        Counter                     rentalCount = 0;
+        date                        startDate, endDate;
+
+        while select projJournalTransPeriod
+        order by PeriodEndDateTime
+        where projJournalTransPeriod.ProjJournalTransRecId == projJournalTrans.RecId
+        {
+            lastPeriodEndDateTime = projJournalTransPeriod.PeriodEndDateTime;
+
+            chargeablePeriods += projJournalTransPeriod.NumOfChargeablePeriods;
+
+            rentalCount += this.calcNumOfPeriods(DateTimeUtil::date(projJournalTransPeriod.PeriodStartDateTime), DateTimeUtil::date(projJournalTransPeriod.PeriodEndDateTime));
+
+            if (isMonthlyDistribution)
+            {
+                if (!startDate)
+                {
+                    startDate = DateTimeUtil::date(projJournalTransPeriod.PeriodStartDateTime);
+                }
+                endDate = max(endDate, DateTimeUtil::date(projJournalTransPeriod.PeriodEndDateTime));
+            }
+        }
+
+        switch (parameters.FINDistributionType)
+        {
+            case FINDistributionType::DistributionByDay:
+                ret = [0, chargeablePeriods, lastPeriodEndDateTime, documentSourceBuffer];
+                break;
+
+            case FINDistributionType::DistributionByRentalPeriod:
+                ret = [rentalCount, chargeablePeriods, lastPeriodEndDateTime, documentSourceBuffer];
+
+                if (!forceDistribution
+                && isMonthlyDistribution
+                && dateEndMth(startDate) == dateEndMth(endDate)
+                && dateEndMth(startDate) == dateEndMth(invoiceDate))
+                {
+                    // no need to distribute
+                    nothingToDistribute = true;
+                    return  [0,0];
+                }
+    
+                if(chargeablePeriods <= 0 && amount)
+                {
+                    throw error("@DNR3422");
+                }
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareCache</Name>
+				<Source><![CDATA[
+    protected void prepareCache(Counter         _rentalPeriodCount,
+                                Periods         _chargeablePeriods,
+                                TransDateTime   _lastPeriodEndDateTime,
+                                Common          _common)
+    {
+        FINProjJournalTransPeriod   projJournalTransPeriod;
+        utcdatetime startDateTime, endDateTime;
+        INVChargedPeriods numOfChargeablePeriods;
+
+        rentalPeriodCount = _rentalPeriodCount;
+
+        select firstonly PeriodStartDateTime from projJournalTransPeriod
+        order by PeriodStartDateTime
+        where projJournalTransPeriod.ProjJournalTransRecId == projJournalTrans.RecId;
+
+        startDateTime = projJournalTransPeriod.PeriodStartDateTime;
+
+        select firstonly PeriodEndDateTime from projJournalTransPeriod
+        order by PeriodEndDateTime desc
+        where projJournalTransPeriod.ProjJournalTransRecId == projJournalTrans.RecId;
+
+        endDateTime = projJournalTransPeriod.PeriodEndDateTime;
+
+        select sum(NumOfChargeablePeriods) from projJournalTransPeriod
+        where projJournalTransPeriod.ProjJournalTransRecId == projJournalTrans.RecId;
+
+        numOfChargeablePeriods = projJournalTransPeriod.NumOfChargeablePeriods;
+
+        this.prepareCacheForRentalPeriod(startDateTime,
+            endDateTime,
+            numOfChargeablePeriods,
+            projJournalTrans.RecId,
+            _chargeablePeriods,
+            _lastPeriodEndDateTime);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcNumOfPeriods</Name>
+				<Source><![CDATA[
+    private Periods calcNumOfPeriods(date _invPeriodStartDate, date _invPeriodEndDate)
+    {
+        ProjPeriodLine projPeriods;
+
+        select count(RecId) from projPeriods
+        where projPeriods.PeriodId == parameters.FINPeriodId
+        &&    projPeriods.PeriodFrom <= _invPeriodEndDate
+        &&    projPeriods.PeriodTo >= _invPeriodStartDate;
+
+        return projPeriods.RecId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

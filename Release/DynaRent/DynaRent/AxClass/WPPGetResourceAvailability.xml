@@ -1,0 +1,291 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPGetResourceAvailability</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPGetResourceAvailability
+{
+    WrkCtrGroupWrkCtr   wrkCtrGroupWrkCtr;
+    Map                 workingTimesMap;
+    FromDateTime        fromDateTime;
+    ToDateTime          toDateTime;
+    FromDate            fromDate;
+    ToDate              toDate;
+    Counter             counter;
+    WPPRegionCalendarId regionCalendarFilter;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getCounter</Name>
+				<Source><![CDATA[
+    public Counter getCounter()
+    {
+        return counter;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getResourceAvail_FilterRegion</Name>
+				<Source><![CDATA[
+    private void getResourceAvail_FilterRegion(WPPResourceId _resourceId)
+    {
+        WPPResourceCalendarResource resourceCalendar;
+        WPPResourceTable            resourceTable;
+        DNRWorkingTimesCalendar     wrkCtrWorkingTimesCalendar;
+        container                   workingTimes;
+        TransDateTime               validFrom, validTo;
+        Set                         resourceDeviationSet;
+        SetEnumerator               resourceDeviationSetEnumerator;
+        boolean                     firstRun;
+        DNRCalendarId               resourceCalendarId;
+        TransDateTime               validFromMax, validToMin;
+    
+        resourceTable = WPPResourceTable::find(_resourceId);
+        resourceDeviationSet = new Set(Types::Container);
+        firstRun = true;
+    
+        // Retrieve all calenders in the selected period
+        while select validTimeState (fromDateTime, toDateTime) CalendarId, ValidFrom, ValidTo from resourceCalendar
+        where resourceCalendar.ResourceId == _resourceId
+        {
+            validFrom = DateTimeUtil::applyTimeZoneOffset(resourceCalendar.ValidFrom, DateTimeUtil::getUserPreferredTimeZone());
+            validTo   = DateTimeUtil::applyTimeZoneOffset(resourceCalendar.ValidTo, DateTimeUtil::getUserPreferredTimeZone());
+    
+            //Check whether the region calender must be added (before the first resource calender record)
+            if (resourceTable.RegionCalendarId &&  firstRun)
+            {
+                if (fromDateTime <= validFrom &&  toDateTime >= validFrom)
+                {
+                    resourceDeviationSet.add([fromDateTime, validFrom, resourceTable.RegionCalendarId]);
+                }
+            }
+    
+            // Add the resource calender records
+            if (toDateTime >= validFrom)
+            {
+                resourceDeviationSet.add([validFrom, validTo, resourceCalendar.CalendarId]);
+            }
+    
+            firstRun = false;
+        }
+    
+        // Check whether the region calender must be added (after the last resource calender record)
+        if (resourceTable.RegionCalendarId &&  toDateTime > validTo)
+        {
+            resourceDeviationSet.add([validTo, toDateTime, resourceTable.RegionCalendarId]);
+        }
+    
+        resourceDeviationSetEnumerator = resourceDeviationSet.getEnumerator();
+    
+        while (resourceDeviationSetEnumerator.moveNext())
+        {
+            [validFrom, validTo, resourceCalendarId] = resourceDeviationSetEnumerator.current();
+    
+            // The resource is not available when he is assigned to a calendar
+            // different than the one in the filter
+            if (resourceCalendarId == regionCalendarFilter)
+            {
+                if (workingTimesMap.exists([resourceCalendarId, validFrom, validTo]))
+                {
+                    workingTimes = workingTimesMap.lookup([resourceCalendar.CalendarId, validFrom, validTo]);
+                }
+                else
+                {
+                    validFromMax = max(fromDateTime, validFrom);
+                    validToMin   = min(toDateTime, validTo);
+    
+                    wrkCtrWorkingTimesCalendar = DNRWorkingTimesCalendar::newCalendarId(resourceCalendarId,
+                                                                                        DateTimeUtil::date(validFromMax),
+                                                                                        DateTimeUtil::time(validFromMax),
+                                                                                        DateTimeUtil::date(validToMin),
+                                                                                        DateTimeUtil::time(validToMin),
+                                                                                        1000,
+                                                                                        true);
+    
+                    // 1 contains the start date/time and 2 contains the end date/time
+                    workingTimes = wrkCtrWorkingTimesCalendar.getWorkingTimes();
+                }
+    
+                // Simple caching
+                workingTimesMap.insert([resourceCalendarId, validFrom, validTo], workingTimes);
+                counter += conLen(workingTimes);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getResourceAvailability</Name>
+				<Source><![CDATA[
+    private void getResourceAvailability(WPPResourceId _resourceId)
+    {
+        WPPResourceCalendarResource resourceCalendar;
+        DNRWorkingTimesCalendar     wrkCtrWorkingTimesCalendar;
+        container                   workingTimes;
+        TransDateTime               validFrom, validTo;
+    
+        while select validTimeState (fromDateTime, toDateTime) CalendarId, ValidFrom, ValidTo from resourceCalendar
+        where resourceCalendar.ResourceId == _resourceId
+        {
+            validFrom = DateTimeUtil::applyTimeZoneOffset(resourceCalendar.ValidFrom, DateTimeUtil::getUserPreferredTimeZone());
+            validTo   = DateTimeUtil::applyTimeZoneOffset(resourceCalendar.ValidTo, DateTimeUtil::getUserPreferredTimeZone());
+    
+            if (workingTimesMap.exists([resourceCalendar.CalendarId, validFrom, validTo]))
+            {
+                workingTimes = workingTimesMap.lookup([resourceCalendar.CalendarId, validFrom, validTo]);
+            }
+            else
+            {
+                wrkCtrWorkingTimesCalendar = DNRWorkingTimesCalendar::newCalendarId(resourceCalendar.CalendarId,
+                                                                                       fromDateTime >= validFrom ? fromDate                         : DateTimeUtil::date(validFrom),
+                                                                                       fromDateTime >= validFrom ? DateTimeUtil::time(fromDateTime) : DateTimeUtil::time(validFrom),
+                                                                                       toDateTime   <= validTo   ? toDate                           : DateTimeUtil::date(validTo),
+                                                                                       toDateTime   <= validTo   ? DateTimeUtil::time(toDateTime)   : DateTimeUtil::time(validTo),
+                                                                                       1000,
+                                                                                       true);
+    
+                // 1 contains the start date/time and 2 contains the end date/time
+                workingTimes = wrkCtrWorkingTimesCalendar.getWorkingTimes();
+            }
+    
+            // Simple caching
+            workingTimesMap.insert([resourceCalendar.CalendarId, validFrom, validTo], workingTimes);
+            counter += conLen(workingTimes);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getIsAvailable</Name>
+				<Source><![CDATA[
+    public boolean getIsAvailable()
+    {
+        MapEnumerator       enumerator;
+        container           workingPeriod;
+        container           workingTime;
+        int                 workingTimeIndex;
+        FromDateTime        prevToDate;
+        boolean             firstDate = true;
+        BOBTmpRentalTrans   tmpDates;
+        ;
+    
+        Debug::assert(workingTimesMap != null); // run must be called prior to this
+        enumerator = workingTimesMap.getEnumerator();
+    
+        // place all dates in an orderable object
+        while(enumerator.moveNext())
+        {
+            workingPeriod = enumerator.currentValue();
+    
+            if (workingPeriod)
+            {
+                for (workingTimeIndex = 1; workingTimeIndex <= conLen(workingPeriod); workingTimeIndex ++)
+                {
+                    workingTime = conPeek(workingPeriod, workingTimeIndex);
+    
+                    tmpDates.clear();
+                    [ tmpDates.FromDateTime, tmpDates.ToDateTime ] = workingTime;
+                    tmpDates.insert();
+                }
+            }
+        }
+    
+        // check if requested period is available
+        while select FromDateTime, ToDateTime from tmpDates
+        order by FromDateTime
+        {
+            // check that the start of the requested period is on, or before the first start date
+            if (tmpDates.FromDateTime <= fromDateTime || !firstDate)
+            {
+                // if previous end date differs with more than 1 second from next start date AND the end date has not been reached yet, fail
+                if (prevToDate
+                &&  DateTimeUtil::getDifference(tmpDates.FromDateTime, prevToDate) > 1
+                &&  toDateTime >= tmpDates.ToDateTime)
+                {
+                    return false;
+                }
+            }
+            else // if not, return false immediately
+            {
+                return false;
+            }
+    
+            firstDate = false;
+            prevToDate = tmpDates.ToDateTime;
+        }
+    
+        return (toDateTime <= prevToDate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(WrkCtrGroupWrkCtr   _wrkCtrGroupWrkCtr,
+                    FromDateTime        _fromDateTime,
+                    ToDateTime          _toDateTime,
+                    WPPRegionCalendarId _regionCalendarIdFilter)
+    {
+        wrkCtrGroupWrkCtr    = _wrkCtrGroupWrkCtr;
+        fromDateTime         = _fromDateTime;
+        toDateTime           = _toDateTime;
+        fromDate             = DateTimeUtil::date(fromDateTime);
+        toDate               = DateTimeUtil::date(toDateTime);
+        regionCalendarFilter = _regionCalendarIdFilter;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmWorkingTimesMap</Name>
+				<Source><![CDATA[
+    public Map parmWorkingTimesMap(Map _workingTimesMap = workingTimesMap)
+    {
+        workingTimesMap = _workingTimesMap;
+    
+        return workingTimesMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run(WPPResourceId _resourceId)
+    {
+        workingTimesMap = new Map(Types::Container, Types::Container);
+        
+        if (regionCalendarFilter)
+        {
+            this.getResourceAvail_FilterRegion(_resourceId);
+        }
+        else
+        {
+            this.getResourceAvailability(_resourceId);
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static WPPGetResourceAvailability construct(WrkCtrGroupWrkCtr    _wrkCtrGroupWrkCtr,
+                                                       FromDateTime         _fromDateTime,
+                                                       ToDateTime           _toDateTime,
+                                                       WPPRegionCalendarId  _regionCalendarIdFilter = '')
+    {
+        return new WPPGetResourceAvailability(_wrkCtrGroupWrkCtr, _fromDateTime, _toDateTime, _regionCalendarIdFilter);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

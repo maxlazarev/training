@@ -1,0 +1,295 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRVendInvoiceInfoLineTable2_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(VendInvoiceInfoLine))]
+public final class DNRVendInvoiceInfoLineTable2_Extension
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    // chain-of-command wrapper methods
+    public void modifiedField(FieldId _fieldId)
+    {        
+        next modifiedField(_fieldId);
+
+        if (this.purchTable().PurchaseType == PurchaseType::RORSubRental
+        &&  this.purchLine().RORTradeType == RORTradeType::SalesPurch)
+        {
+            switch (_fieldId)
+            {
+                case fieldNum(VendInvoiceInfoLine, FINLineAmount) :
+                    // LineAmount field is not visible for rental order but in case of purchase line we need to update it to trigger accounting distribution variance calculation.
+                    this.LineAmount = this.FINLineAmount;
+                    this.modifiedField(fieldNum(VendInvoiceInfoLine, LineAmount));
+                    break;
+
+                case fieldNum(VendInvoiceInfoLine, PurchPrice) :
+                    // Line amount was updated by a standard code
+                    this.FINLineAmount = this.LineAmount;
+                    break;
+            }
+        }
+
+        if (_fieldId == fieldNum(VendInvoiceInfoLine, FINVariance))
+        {
+            this.FINUpdateVariance();
+        }
+
+        if (this.purchLine().RORTradeType != RORTradeType::SalesPurch)
+        {
+            switch (_fieldId)
+            {
+                case fieldNum(VendInvoiceInfoLine, TaxGroup):
+                case fieldNum(VendInvoiceInfoLine, TaxItemGroup):
+                    this.FINUpdateRentalMarkup();
+                    break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linePriceVarianceAmount</Name>
+				<Source><![CDATA[
+    public display LinePriceVarianceAmount linePriceVarianceAmount()
+    {
+        LinePriceVarianceAmount ret = next linePriceVarianceAmount();
+
+        return this.RORTradeType == RORTradeType::SalesPurch ? ret : 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>priceVariancePercent</Name>
+				<Source><![CDATA[
+    public PriceVariancePercent priceVariancePercent()
+    {
+        LinePriceVarianceAmount ret = next priceVariancePercent();
+
+        return this.RORTradeType == RORTradeType::SalesPurch ? ret : 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>extendedPriceVarianceAmount</Name>
+				<Source><![CDATA[
+    public display ExtendedPriceVarianceAmount extendedPriceVarianceAmount()
+    {
+        ExtendedPriceVarianceAmountMST ret = next extendedPriceVarianceAmount();
+
+        return this.RORTradeType == RORTradeType::SalesPurch ? ret : 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>extendedPriceVarianceAmountMST</Name>
+				<Source><![CDATA[
+    public display ExtendedPriceVarianceAmountMST extendedPriceVarianceAmountMST(VendInvoiceInfoTable _vendInvoiceInfoTable)
+    {
+        ExtendedPriceVarianceAmountMST ret = next extendedPriceVarianceAmountMST(_vendInvoiceInfoTable);
+
+        return this.RORTradeType == RORTradeType::SalesPurch ? ret : 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>defaultRow</Name>
+				<Source><![CDATA[
+    public void defaultRow(
+        PurchLine _purchLine,
+        PurchParmUpdate _purchParmUpdate,
+        PurchQty _receiveNow,
+        InventQty _inventNow,
+        PdsCWInventQty _cwReceiveNow,
+        Set _tableToLineFields,
+        PurchUpdate _specQty)
+    {
+        next defaultRow(_purchLine, _purchParmUpdate, _receiveNow, _inventNow, _cwReceiveNow, _tableToLineFields, _specQty);
+
+        this.RORTradeType = _purchLine.RORTradeType;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINDeleteChildVendInvoiceInfoLines</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    [SysObsolete('Method replaced by static method FINDeleteChildLine.', false)]
+    public void FINDeleteChildVendInvoiceInfoLines()
+    {
+                
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINDeleteChildLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void FINDeleteChildLine(PurchParmUpdate _purchParmUpdate, InventTransId _parentVendInvoiceInfoLineInventTransId, LineAmount _parentParmLineLineAmount)
+    {
+        PurchLine purchLineParent;
+        FINRentalInvoiceProfile invoiceProfile;
+                
+        select firstonly InvoiceChildLinesAfterParent from invoiceProfile
+            join purchLineParent
+            where purchLineParent.INVInvoiceProfileId == invoiceProfile.InvoiceProfileId
+            &&    purchLineParent.InventTransId == _parentVendInvoiceInfoLineInventTransId;
+
+        if (purchLineParent && invoiceProfile.InvoiceChildLinesAfterParent)
+        {
+            VendInvoiceInfoLine vendInvoiceInfoLine;
+            PurchLine purchLine;
+                    
+            while select RecId,  FINLineAmount from vendInvoiceInfoLine
+            where vendInvoiceInfoLine.ParmId == _purchParmUpdate.ParmId
+            // Don't discard any lines when this is a credit
+            &&      vendInvoiceInfoLine.ReceiveNow > 0
+            &&      vendInvoiceInfoLine.FINLineAmount >= 0
+                join RecId, TableId from purchLine
+                where purchLine.InventTransId == vendInvoiceInfoLine.InventTransId
+                &&    purchLine.RORParentLineRecId == purchLineParent.RecId
+            {
+                // Here we use delete_from inside the body of this WHILE SELECT. Even though that results in a database rountrip
+                // per record in the resultset, it's a better approach then selecting forupdate, thereby locking most of the table.
+                // There aren't too many results that meet that INVCanDeleteChildLine criterion anyway.
+
+                if (purchLineParent.RORRentalLine::INVCanDeleteChildLine(true,
+                                                                         INVInvoicingOptions::newPurchParmUpdate(_purchParmUpdate),
+                                                                         _purchParmUpdate.INVCalculationDateTime,
+                                                                         _purchParmUpdate.INVIncludeUninvoiced,
+                                                                         purchLine.TableId,
+                                                                         purchLine.RecId,
+                                                                         _parentParmLineLineAmount))
+                {
+                    VendInvoiceInfoLine vendInvoiceInfoLineDelete;
+                    delete_from vendInvoiceInfoLineDelete
+                    where vendInvoiceInfoLineDelete.RecId == vendInvoiceInfoLine.RecId;
+                }
+            }
+        }        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINEditAdjustedLineAmount</Name>
+				<Source><![CDATA[
+    public edit LineAmount FINEditAdjustedLineAmount(boolean _set, LineAmount _value)
+    {
+        if (_set)
+        {
+            this.FINVariance = _value - this.FINLineAmount;
+
+            this.FINUpdateVariance();
+        }
+
+        return this.FINLineAmount + this.FINVariance;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateVariance</Name>
+				<Source><![CDATA[
+    public void FINUpdateVariance()
+    {
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+        select firstonly forupdate invoiceCalculatorParm
+        where invoiceCalculatorParm.ParmId == this.ParmId
+        &&    invoiceCalculatorParm.ParmLineRecId == this.RecId
+        &&    invoiceCalculatorParm.ParmLineTableId == this.TableId;
+
+        if (invoiceCalculatorParm.RecId)
+        {
+            ttsbegin;
+
+            List calcResultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            List newCalcResultList = new List(Types::Class);
+            boolean varianceResultUpdated;
+
+            if (calcResultList.elements())
+            {
+                ListEnumerator enumerator = calcResultList.getEnumerator();
+
+                while (enumerator.moveNext())
+                {
+                    FINInvoiceCalcResult invoiceCalcResult = enumerator.current();
+
+                    if (invoiceCalcResult.accountType == FINRentalAccountType::Variance)
+                    {
+                        if (this.FINVariance == 0)
+                        {
+                            continue;
+                        }
+
+                        invoiceCalcResult.amountCur = this.FINVariance;
+                        varianceResultUpdated = true;
+                    }
+
+                    newCalcResultList.addEnd(invoiceCalcResult);
+                }
+            }
+            
+            if (!varianceResultUpdated && this.FINVariance != 0)
+            {
+                newCalcResultList.addEnd(FINInvoiceCalcResult::construct(FINRentalAccountType::Variance, this.FINVariance));
+            }
+
+            invoiceCalculatorParm.InvoiceCalcResultListPacked = newCalcResultList.pack();
+            FINMarkupTransGenerator::construct(invoiceCalculatorParm).getMarkupCodeForResult();
+
+            invoiceCalculatorParm.update();
+
+            this.FINUpdateRentalMarkup();
+
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateRentalMarkup</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void FINUpdateRentalMarkup()
+    {
+        //Regenerate markupTrans records
+        MarkupTrans markupTrans;
+
+        delete_from markupTrans
+            where markupTrans.TransTableId  == this.TableId
+            &&    markupTrans.TransRecId    == this.RecId;
+
+        FINMarkupTransGenerator::createVendDraftMarkupTrans(this.ParmId, this.purchLine(), this);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINExpectedLineAmount</Name>
+				<Source><![CDATA[
+    public display LineAmount FINExpectedLineAmount()
+    {
+        return this.RORTradeType == RORTradeType::SalesPurch ? this.expectedPOAmount() : this.FINLineAmount;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

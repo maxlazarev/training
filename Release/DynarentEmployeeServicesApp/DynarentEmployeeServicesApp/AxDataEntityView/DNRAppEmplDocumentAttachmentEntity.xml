@@ -1,0 +1,602 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxDataEntityView xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRAppEmplDocumentAttachmentEntity</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+using System.IO;
+
+public class DNRAppEmplDocumentAttachmentEntity extends common
+{
+    
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>insertEntityDataSource</Name>
+				<Source><![CDATA[
+    public boolean insertEntityDataSource(DataEntityRuntimeContext _entityCtx, DataEntityDataSourceRuntimeContext _dataSourceCtx)
+    {
+        boolean ret = true;
+
+        switch (_dataSourceCtx.name())
+        {
+            case dataEntityDataSourceStr(DNRAppEmplDocumentAttachmentEntity, DocuRef):
+                this.ParentLegalEntityId = this.ParentLegalEntityId ? this.ParentLegalEntityId : curExt();
+                ret = this.insertDatasourceDocuRef(_entityCtx, _dataSourceCtx);
+                break;
+
+            case dataEntityDataSourceStr(DNRAppEmplDocumentAttachmentEntity, DocuValue):
+                // This is called before DocuRef, but this record is created by DocumentManagement class if needed.
+                // Hence do nothing here.
+                break;
+
+            default:
+                ret = super(_entityCtx, _dataSourceCtx);
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertDatasourceDocuRef</Name>
+				<Source><![CDATA[
+    private boolean insertDatasourceDocuRef(DataEntityRuntimeContext _entityCtx, DataEntityDataSourceRuntimeContext _dataSourceCtx)
+    {
+        if (_dataSourceCtx.getDatabaseOperation() == DataEntityDatabaseOperation::Insert)
+        {
+            DocuType docuType = _entityCtx.getRuntimeContextByName(dataEntityDataSourceStr(DNRAppEmplDocumentAttachmentEntity, DocuType)).getBuffer();
+
+            DocuRef docuRef;
+
+            if (DNRAppEmplDocumentAttachmentEntity::hasAttachmentFile(docuType.TypeGroup))
+            {
+                docuRef = this.insertAttachmentWithFile(_entityCtx);
+            }
+            else
+            {
+                docuRef = this.insertAttachmentWithoutFile(docuType.TypeGroup);
+            }
+
+            if (docuRef.RecId == 0)
+            {
+                warning('@SCM:DNRDocumentAttachmentEntityAttachmentNotSaved');
+
+                return false;
+            }
+
+            _dataSourceCtx.setBuffer(docuRef);
+
+            this.remapEntityToDocuRef(_dataSourceCtx);
+
+            _dataSourceCtx.setDataSaved(true);
+
+            this.mapDataSourceToEntity(_entityCtx, _dataSourceCtx);
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>remapEntityToDocuRef</Name>
+				<Source><![CDATA[
+    private void remapEntityToDocuRef(DataEntityDataSourceRuntimeContext _dataSourceCtx)
+    {
+        DocuRef docuRef = _dataSourceCtx.getBuffer();
+
+        // Intentionally using binary OR (|) below, as all operands should be evaluated
+        if (this.setFieldIfDifferent(fieldNum(DNRAppEmplDocumentAttachmentEntity, AttachingUserId), docuRef, fieldNum(DocuRef, CreatedBy))
+            | this.setFieldIfDifferent(fieldNum(DNRAppEmplDocumentAttachmentEntity, AttachedDateTime), docuRef, fieldNum(DocuRef, CreatedDateTime)))
+        {
+            this.setFieldIfDifferent(fieldNum(DNRAppEmplDocumentAttachmentEntity, AccessRestriction), docuRef, fieldNum(DocuRef, Restriction));
+
+            // Not possible to modify created fields during update, so re-create the record:
+            DocuRef docuRefCopy;
+            docuRefCopy.overwriteSystemfields(true);
+            docuRefCopy.data(docuRef);
+
+            ttsbegin;
+            docuRef.doDelete();
+            docuRefCopy.doInsert();
+            ttscommit;
+
+            // Update the buffer as the record has changed
+            _dataSourceCtx.setBuffer(docuRefCopy);
+        }
+        else
+        {
+            if (this.setFieldIfDifferent(fieldNum(DNRAppEmplDocumentAttachmentEntity, AccessRestriction), docuRef, fieldNum(DocuRef, Restriction)))
+            {
+                docuRef.update();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasAttachmentFile</Name>
+				<Source><![CDATA[
+    private static boolean hasAttachmentFile(DocuTypeGroup _docuTypeGroup)
+    {
+        switch (_docuTypeGroup)
+        {
+            case DocuTypeGroup::Document:
+            case DocuTypeGroup::File:
+            case DocuTypeGroup::Image:
+            case DocuTypeGroup::Worksheet:
+                return true;
+
+            case DocuTypeGroup::Note:
+            case DocuTypeGroup::URL:
+                return false;
+
+            default:
+                throw error('@SCM:DNRDocumentAttachmentEntityUnknownAttachmentType'); // in case the enum is extended
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertAttachmentWithFile</Name>
+				<Source><![CDATA[
+    private DocuRef insertAttachmentWithFile(DataEntityRuntimeContext _entityCtx)
+    {
+        DocuRef docuRef;
+
+        try
+        {
+            Binary binary = Binary::constructFromContainer(this.Attachment);
+
+            using (MemoryStream memoryStream = binary.getMemoryStream())
+            {
+                docuRef = DocumentManagement::attachFile(
+                    this.ParentTableId,
+                    this.ParentRecordId,
+                    this.ParentLegalEntityId,
+                    this.DocumentAttachmentTypeCode,
+                    memoryStream,
+                    this.OriginalFileName,
+                    null,
+                    this.AttachmentDescription,
+                    this.Notes);
+            }
+
+            DocuValue docuValue = docuRef.docuValue();
+
+            if (docuValue)
+            {
+                DataEntityDataSourceRuntimeContext dataSourceCtxDocuValue =  _entityCtx.getRuntimeContextByName(dataEntityDataSourceStr(DNRAppEmplDocumentAttachmentEntity, DocuValue));
+
+                dataSourceCtxDocuValue.setBuffer(docuValue);
+                dataSourceCtxDocuValue.setDataSaved(true);
+
+                this.mapDataSourceToEntity(_entityCtx, dataSourceCtxDocuValue);
+            }
+            else
+            {
+                warning('@SCM:DNRDocumentAttachmentEntityAttachmentFileNotSaved');
+            }
+        }
+        catch
+        {
+            // The try logic here should record the error in infolog, but not stop execution.
+            // The calling methods will return false for insert() if this method returns a null
+            // docuRef buffer.
+            docuRef = null;
+            error('@SCM:DNRDocumentAttachmentEntitySaveError');
+        }
+
+        return docuRef;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertAttachmentWithoutFile</Name>
+				<Source><![CDATA[
+    private DocuRef insertAttachmentWithoutFile(DocuTypeGroup _docuTypeGroup)
+    {
+        DocuRef docuRef;
+
+        switch (_docuTypeGroup)
+        {
+            case DocuTypeGroup::Note:
+                docuRef = this.insertNote();
+                break;
+
+            case DocuTypeGroup::URL:
+                docuRef = this.insertURL();
+                break;
+
+            default:
+                throw error('@SCM:DNRDocumentAttachmentEntityUnknownAttachmentType'); // in case the enum is extended
+        }
+
+        return docuRef;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertNote</Name>
+				<Source><![CDATA[
+    private DocuRef insertNote()
+    {
+        DocuRef docuRef = DocumentManagement::attachNote(
+            this.ParentTableId,
+            this.ParentRecordId,
+            this.ParentLegalEntityId,
+            this.DocumentAttachmentTypeCode,
+            this.AttachmentDescription,
+            this.Notes);
+
+        return docuRef;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertURL</Name>
+				<Source><![CDATA[
+    private DocuRef insertURL()
+    {
+        DocuRef docuRef = DocumentManagement::attachUrl(
+            this.ParentTableId,
+            this.ParentRecordId,
+            this.ParentLegalEntityId,
+            this.DocumentAttachmentTypeCode,
+            this.Notes,
+            this.AttachmentDescription);
+
+        return docuRef;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setFieldIfDifferent</Name>
+				<Source><![CDATA[
+    private boolean setFieldIfDifferent(FieldId _entityFieldId, Common _datasource, FieldId _datasourceFieldId)
+    {
+        // Note that the below logic will not fire if a field is changed from something to it's default value.
+        if (this.isFieldSet(_entityFieldId) && this.(_entityFieldId) && this.(_entityFieldId) != _datasource.(_datasourceFieldId))
+        {
+            _datasource.(_datasourceFieldId) = this.(_entityFieldId);
+            return true;
+        }
+
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setAttachmentFile</Name>
+				<Source><![CDATA[
+    public void setAttachmentFile(Bitmap _attachmentFile)
+    {
+        this.Attachment = _attachmentFile;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getAttachmentFile</Name>
+				<Source><![CDATA[
+    public static void getAttachmentFile(Common _attachmentEntity, FieldId _attachmentFieldId, FieldId _docuTypeGroupFieldId, FieldId _docuStorageProviderTypeFieldId)
+    {
+        if (DNRAppEmplDocumentAttachmentEntity::hasAttachmentFile(_attachmentEntity.(_docuTypeGroupFieldId)))
+        {
+            if (_attachmentEntity.(_docuStorageProviderTypeFieldId) != DocuStorageProviderType::None)
+            {
+                DocuRef docuRef = DocuRef::findRecId(_attachmentEntity.RecId);
+
+                if (!docuRef)
+                {
+                    throw error('@SCM:DNRDocumentAttachmentEntityDocuRefNotFound');
+                }
+
+                try
+                {
+                    _attachmentEntity.(_attachmentFieldId) = DocumentManagement::getAttachmentAsContainer(docuRef);
+                }
+                catch
+                {
+                    throw error(strFmt('@SCM:DNRDocumentAttachmentEntityAttachmentFileNotLoaded',
+                        docuRef.TypeId,
+                        docuRef.RefRecId,
+                        docuRef.refTablename(),
+                        docuRef.RefCompanyId));
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update()
+    {
+        throw error('@SCM:DNRDocumentAttachmentEntityOperationNotSupported');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    public void initValue()
+    {
+        super();
+        //this.ParentLegalEntityId = curExt();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<ConfigurationKey>DNRAppEmpl</ConfigurationKey>
+	<DeveloperDocumentation>@DNR:DNRAppEmplDocumentAttachmentEntityDescrip</DeveloperDocumentation>
+	<FormRef>DocuView</FormRef>
+	<Label>@DNR:DNRAppEmplDocumentAttachmentEntityLabel</Label>
+	<Tags>Document</Tags>
+	<Modules>InventoryAndWarehouseManagement</Modules>
+	<PrimaryKey>EntityKey</PrimaryKey>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>ParentLegalEntityId</Name>
+			<DataField>RefCompanyId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>ParentTableId</Name>
+			<AccessModifier>Internal</AccessModifier>
+			<DataField>RefTableId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>ParentRecordId</Name>
+			<AccessModifier>Internal</AccessModifier>
+			<DataField>RefRecId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>AttachmentDescription</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<Mandatory>Yes</Mandatory>
+			<DataField>Name</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DocumentAttachmentTypeCode</Name>
+			<DataField>TypeId</DataField>
+			<DataSource>DocuType</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DocumentAttachmentTypeLegalEntityId</Name>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<Mandatory>Yes</Mandatory>
+			<DataField>DataAreaId</DataField>
+			<DataSource>DocuType</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>AttachmentType</Name>
+			<DataField>TypeGroup</DataField>
+			<DataSource>DocuType</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldContainer">
+			<Name>Attachment</Name>
+			<AllowEdit>Yes</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<ExtendedDataType>Bitmap</ExtendedDataType>
+			<IsComputedField>No</IsComputedField>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>Notes</Name>
+			<DataField>Notes</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>AccessRestriction</Name>
+			<DataField>Restriction</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>AttachingUserId</Name>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>CreatedBy</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>AttachedDateTime</Name>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>CreatedDateTime</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>FileType</Name>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>FileType</DataField>
+			<DataSource>DocuValue</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>OriginalFileName</Name>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>OriginalFileName</DataField>
+			<DataSource>DocuValue</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>FileLocation</Name>
+			<DataField>Path</DataField>
+			<DataSource>DocuValue</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DocumentStorageProviderType</Name>
+			<AccessModifier>Internal</AccessModifier>
+			<DataField>StorageProviderId</DataField>
+			<DataSource>DocuValue</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DocuRefRecId</Name>
+			<DataField>RecId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DocumentId</Name>
+			<DataField>DocumentId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+	</Fields>
+	<Keys>
+		<AxDataEntityViewKey>
+			<Name>EntityKey</Name>
+			<Fields>
+				<AxDataEntityViewKeyField>
+					<DataField>DocumentId</DataField>
+				</AxDataEntityViewKeyField>
+				<AxDataEntityViewKeyField>
+					<DataField>DocuRefRecId</DataField>
+				</AxDataEntityViewKeyField>
+			</Fields>
+		</AxDataEntityViewKey>
+	</Keys>
+	<Mappings />
+	<Ranges />
+	<Relations />
+	<StateMachines />
+	<ViewMetadata>
+		<Name>Metadata</Name>
+		<SourceCode>
+			<Methods>
+				<Method>
+					<Name>classDeclaration</Name>
+					<Source><![CDATA[
+[Query]
+public class Metadata extends QueryRun
+{
+}
+]]></Source>
+				</Method>
+			</Methods>
+		</SourceCode>
+		<DataSources>
+			<AxQuerySimpleRootDataSource>
+				<Name>DocuRef</Name>
+				<DynamicFields>Yes</DynamicFields>
+				<Table>DocuRef</Table>
+				<DataSources>
+					<AxQuerySimpleEmbeddedDataSource>
+						<Name>DocuType</Name>
+						<DynamicFields>Yes</DynamicFields>
+						<IsReadOnly>Yes</IsReadOnly>
+						<Table>DocuType</Table>
+						<DataSources />
+						<DerivedDataSources />
+						<Fields />
+						<Ranges>
+							<AxQuerySimpleDataSourceRange>
+								<Name>TypeGroup</Name>
+								<Field>TypeGroup</Field>
+								<Value>URL</Value>
+							</AxQuerySimpleDataSourceRange>
+						</Ranges>
+						<Relations>
+							<AxQuerySimpleDataSourceRelation>
+								<Name>QueryDataSourceRelation1</Name>
+								<Field>ActualCompanyId</Field>
+								<JoinDataSource>DocuRef</JoinDataSource>
+								<RelatedField>DataAreaId</RelatedField>
+							</AxQuerySimpleDataSourceRelation>
+							<AxQuerySimpleDataSourceRelation>
+								<Name>QueryDataSourceRelation2</Name>
+								<Field>TypeId</Field>
+								<JoinDataSource>DocuRef</JoinDataSource>
+								<RelatedField>TypeId</RelatedField>
+							</AxQuerySimpleDataSourceRelation>
+						</Relations>
+					</AxQuerySimpleEmbeddedDataSource>
+					<AxQuerySimpleEmbeddedDataSource>
+						<Name>DocuValue</Name>
+						<DynamicFields>Yes</DynamicFields>
+						<Table>DocuValue</Table>
+						<DataSources />
+						<DerivedDataSources />
+						<Fields />
+						<Ranges />
+						<JoinMode>OuterJoin</JoinMode>
+						<Relations>
+							<AxQuerySimpleDataSourceRelation>
+								<Name>QueryDataSourceRelation1</Name>
+								<JoinDataSource>DocuRef</JoinDataSource>
+								<JoinRelationName>DocuValue</JoinRelationName>
+							</AxQuerySimpleDataSourceRelation>
+						</Relations>
+					</AxQuerySimpleEmbeddedDataSource>
+				</DataSources>
+				<DerivedDataSources />
+				<Fields />
+				<Ranges>
+					<AxQuerySimpleDataSourceRange>
+						<Name>Notes</Name>
+						<Field>Notes</Field>
+						<Value>!''</Value>
+					</AxQuerySimpleDataSourceRange>
+				</Ranges>
+				<GroupBy />
+				<Having />
+				<OrderBy />
+			</AxQuerySimpleRootDataSource>
+		</DataSources>
+	</ViewMetadata>
+</AxDataEntityView>

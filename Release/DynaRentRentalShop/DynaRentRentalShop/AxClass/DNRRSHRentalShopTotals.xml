@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRRSHRentalShopTotals</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class DNRRSHRentalShopTotals
+{
+    DNRCalendarId calendarId;
+    Common        callerBuffer;
+    CurrencyCode  currency;
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static DNRRSHRentalShopTotals construct(Common _callerBuffer, CurrencyCode _currency)
+    {
+        DNRRSHRentalShopTotals rentalShopTotal = new DNRRSHRentalShopTotals();
+       
+        rentalShopTotal.parmCallerBuffer(_callerBuffer);
+        rentalShopTotal.parmCurrency(_currency);
+
+        return rentalShopTotal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCurrency</Name>
+				<Source><![CDATA[
+    public DNRCalendarId parmCurrency(CurrencyCode _currency = currency)
+    {
+        currency = _currency;
+        return currency;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerBuffer</Name>
+				<Source><![CDATA[
+    public Common parmCallerBuffer(Common _callerBuffer = callerBuffer)
+    {
+        callerBuffer = _callerBuffer;
+        return callerBuffer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>chargablePeriod</Name>
+				<Source><![CDATA[
+    private NumberOfDays chargablePeriod(DNRRSHFromDateTime _fromDateTime, DNRRSHToDateTime _toDateTime)
+    {
+        NumberOfDays ret = 0;
+        FromDate     fromDate = DateTimeUtil::date(_fromDateTime);
+        ToDate       toDate = DateTimeUtil::date(_toDateTime);
+               
+        if(calendarId && fromDate && toDate && toDate >= fromDate)
+        {
+            for(TransDate checkDate = fromDate; checkDate <= toDate; checkDate ++)
+            {
+                if(DNRCalendarDate::isDateOpen(calendarId, checkDate))
+                {
+                    ret ++;
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calc</Name>
+				<Source><![CDATA[
+    public container calc()
+    {
+        RorRshShopTrans shopCardTrans;
+        container       resultContainer = conNull();
+
+        switch (callerBuffer.TableId)
+        {
+            case tableNum(RorRshShopCardTable):
+                RorRshShopCardTable  shopCardTable = callerBuffer;
+                NumberOfDays         days;
+                RORRentalGrossAmount rentalGrossAmount;
+                RORRentalNetAmount   rentalNetAmount;
+                InventQty            rentalQty;
+                CurrencyExchangeRate excRate;
+                
+                calendarId = shopCardTable.calenderId();
+                
+                while select shopCardTrans 
+                where shopCardTrans.ShopCardId == shopCardTable.ShopCardId
+                &&    shopCardTrans.TradeType  == RORTradeType::Rental
+                &&    shopCardTrans.TransType == RorRshShopTransType::Delivery
+                {
+                    container results = this.calcTotalForRentalShopTrans(shopCardTrans);
+                    
+                    if(results != conNull())
+                    {
+                        rentalGrossAmount += conPeek(results, 1); 
+                        rentalQty         += conPeek(results, 3);
+                        rentalNetAmount   += conPeek(results, 4);
+                    }
+                }
+                excRate = CurrencyExchangeHelper::curAmount2CurAmount(100, 
+                                                                      currency,
+                                                                      Ledger::accountingCurrency(), 
+                                                                      DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), 
+                                                                      true);
+
+                resultContainer = [rentalGrossAmount, rentalGrossAmount - rentalNetAmount, rentalQty, rentalNetAmount, excRate, currency];
+                break;
+
+            case tableNum(RorRshShopTrans):
+                RorRshShopTrans rentalShopTrans = callerBuffer;
+
+                resultContainer = this.calcTotalForRentalShopTrans(rentalShopTrans);
+                break;
+        }
+        return resultContainer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcTotalForRentalShopTrans</Name>
+				<Source><![CDATA[
+    private container calcTotalForRentalShopTrans(RorRshShopTrans _shopCardTrans)
+    {
+        RORParameters parameters = RORParameters::find();
+        NumberOfDays  days;
+        Factor        factor = 1;
+                
+        calendarId = _shopCardTrans.CalendarId;            
+        days = this.chargablePeriod(_shopCardTrans.OnRentDateTime, _shopCardTrans.OffRentDateTime ? _shopCardTrans.OffRentDateTime : _shopCardTrans.ExpectedOffRentDateTime);
+        
+        if(_shopCardTrans.PriceTimeUnit != parameters.PriceRateDay)
+        {
+            factor = UnitOfMeasureConverter::convert(1, parameters.PriceRateDay, _shopCardTrans.PriceTimeUnit, NoYes::No);
+        }
+
+        if(_shopCardTrans.RentalGrossAmount && factor && days)
+        {
+            CurrencyExchangeRate exchangeRate      = CurrencyExchangeHelper::curAmount2CurAmount(1, 
+                                                                                                 _shopCardTrans.CurrencyCode, 
+                                                                                                 currency, 
+                                                                                                 DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()),
+                                                                                                 true);
+
+            RORRentalGrossAmount rentalGrossAmount = CurrencyExchangeHelper::amount(_shopCardTrans.RentalGrossAmount * factor * days * exchangeRate, currency);
+            RORRentalNetAmount   rentalNetAmount   = CurrencyExchangeHelper::amount(_shopCardTrans.LineAmount * factor * days * exchangeRate, currency);
+            
+            if (exchangeRate)
+            {
+                exchangeRate = CurrencyExchangeHelper::amount(1/exchangeRate);
+            }
+                    
+            return [rentalGrossAmount, rentalGrossAmount - rentalNetAmount, _shopCardTrans.Qty, rentalNetAmount, exchangeRate * 100, currency];
+        }
+        return conNull();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>SalesRORSubStatusJournalCreate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[DocumentStatusFactoryAttribute(DocumentStatus::RORSubStatus)]
+class SalesRORSubStatusJournalCreate extends FormletterJournalCreate
+{
+    CustRORSubStatusJour        subStatusJour;
+    CustRORSubStatusTrans       subStatusTrans;
+
+    SalesTable                  salesTable;
+    SalesParmTable              salesParmTable;
+    SalesParmUpdate             salesParmUpdate;
+    SalesLine                   salesLine;
+
+    SalesTotals                 salesTotals;
+    RecordSortedList            recordListSalesParmLine;
+    NoYes                       creditNote;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>calcLine</Name>
+				<Source><![CDATA[
+    protected void calcLine(SalesLine _salesLine, SalesParmLine _salesParmLine)
+    {
+        _salesLine          = this.getSalesLine(_salesParmLine);
+        updateNow           = _salesParmLine.DeliverNow;
+        updateNowInvent     = _salesParmLine.InventNow;
+        lineValue           = _salesLine.calcLineAmountExclTax(updateNow, this.updateDate(), salesTotals.tax());
+        lineValueInclTax    = _salesLine.calcLineAmount(updateNow);
+    
+        if (_salesParmLine.InventNow != _salesLine.RemainInventPhysical)
+        {
+            // verify that partly updates are allowed
+            if (!_salesParmLine.salesTable().type().canBePartlyConfirmed())
+            {
+                throw(error(strFmt("@SYS83692", _salesParmLine.OrigSalesId, _salesParmLine.ItemId)));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkDiscardLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Checks whether the sales update line should be discarded.
+    /// </summary>
+    /// <param name="_salesParmLine">
+    ///    The sales update line to be checked.
+    /// </param>
+    /// <returns>
+    ///    true if the sales update line should be discarded; otherwise, false.
+    /// </returns>
+    protected boolean checkDiscardLine(Common _salesParmLine)
+    {
+        SalesParmLine salesParmLine = _salesParmLine as SalesParmLine;
+        InventMovement inventMovement;
+    
+        if (salesParmLine.DeliverNow == 0)
+        {
+            return true;
+        }
+    
+        salesLine = salesParmLine.salesLine();
+        if (salesLine.isStocked())
+        {
+            inventMovement = InventMovement::construct(salesLine);
+            if (inventMovement.mustCheckOverDeliveryForQty(-salesParmLine.InventNow) && !inventMovement.checkNotOverDelivery(-salesParmLine.InventNow, false, 0))
+            {
+                return true;
+            }
+        }
+    
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalHeader</Name>
+				<Source><![CDATA[
+    protected void createJournalHeader()
+    {
+        this.setDeliveryFields();
+    
+        subStatusJour.LedgerVoucher     = this.getVoucher();
+        subStatusJour.SalesBalance      = salesTotals.totalBalance();
+        subStatusJour.CostValue         = salesTotals.totalCostValue();
+        subStatusJour.EndDisc           = salesTotals.totalEndDisc();
+        subStatusJour.SumLineDisc       = salesTotals.totalLineDisc();
+        subStatusJour.SumMarkup         = salesTotals.totalMarkup();
+        subStatusJour.SumTax            = salesTotals.totalTaxAmount();
+        subStatusJour.RoundOff          = salesTotals.totalRoundOff();
+        subStatusJour.Amount            = salesTotals.totalAmount();
+        subStatusJour.Qty               = salesTotals.totalQty();
+        subStatusJour.Weight            = salesTotals.totalWeight();
+        subStatusJour.Volume            = salesTotals.totalVolume();
+    
+        subStatusJour.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalLine</Name>
+				<Source><![CDATA[
+    protected void createJournalLine(Common _salesParmLine)
+    {
+        Label               label = new Label(subStatusJour.LanguageId);
+        RORRentalDateTimes  rentalDateTimes;
+    
+        subStatusTrans.clear();
+        subStatusTrans.initValue();
+    
+        subStatusTrans.initFromSalesLine(salesLine);
+    
+        this.calcLine(salesLine, _salesParmLine as SalesParmLine);
+    
+        subStatusTrans.setLinenum(this.getLineNum());
+    
+        subStatusTrans.SalesId        = subStatusJour.SalesId;
+        subStatusTrans.SubStatusId    = subStatusJour.SubStatusId;
+        subStatusTrans.Date           = subStatusJour.Date;
+    
+        subStatusTrans.Qty            = updateNow;
+        subStatusTrans.InventQty      = updateNowInvent;
+        subStatusTrans.LineAmount     = lineValue;
+        subStatusTrans.LineAmountTax  = lineValueInclTax - lineValue;
+    
+        subStatusTrans.TaxWriteCode   = this.parmTax().taxWriteCode();
+    
+        subStatusTrans.LineHeader = label.extractString(literalStr("@DNR1539"))  + ' ' + salesLine.SalesId       + ' '
+                                    + label.extractString(literalStr("@SYS24704")) + ' ' + salesLine.salesTable().CustAccount  + ' '
+                                    + (salesLine.salesTable().PurchOrderFormNum ? (label.extractString(literalStr("@SYS9452"))  + ' ' + salesLine.salesTable().PurchOrderFormNum + ' ') : '')
+                                    + subStatusTrans.LineHeader;
+    
+        this.insertJournalLine(subStatusTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalLink</Name>
+				<Source><![CDATA[
+    protected void createJournalLink(Common _salesParmLine)
+    {
+        SalesParmLine               salesParmLine = _salesParmLine as SalesParmLine;
+        CustRORSubStatusSalesLink   subStatusSalesLink;
+    
+        subStatusSalesLink.initFromSalesParmLine  (salesParmLine);
+        subStatusSalesLink.initFromSalesTable     (SalesTable::find(salesParmLine.OrigSalesId));
+        subStatusSalesLink.initFromCustRORSubStatusJour(subStatusJour);
+        this.insertJournalLink(subStatusSalesLink);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>formletterType</Name>
+				<Source><![CDATA[
+    protected FormletterType formletterType()
+    {
+        return FormletterType::Sales;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getJournal</Name>
+				<Source><![CDATA[
+    public Common getJournal()
+    {
+        return subStatusJour;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSalesLine</Name>
+				<Source><![CDATA[
+    protected SalesLine  getSalesLine(
+        SalesParmLine     _salesParmLine,
+        boolean           _forUpdate = false)
+    {
+        SalesLine  localSalesLine;
+    
+        localSalesLine.selectForUpdate(_forUpdate);
+    
+        select firstonly localSalesLine
+        where localSalesLine.RecId == _salesParmLine.SalesLineRecId;
+    
+        if (! SalesTable::exist(localSalesLine.SalesId))
+        {
+            throw error("@SYS16740");
+        }
+    
+        return localSalesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initJournalHeader</Name>
+				<Source><![CDATA[
+    protected void initJournalHeader()
+    {
+        subStatusJour.clear();
+        subStatusJour.initValue();
+    
+        subStatusJour.SubStatusId         = this.getJournalNumber();
+        subStatusJour.ParmId              = salesParmUpdate.ParmId;
+        subStatusJour.Date                = salesParmTable.Transdate;
+        subStatusJour.BOBRentalSubStatus  = this.RORparmRentalSubStatus();
+    
+        subStatusJour.initFromSalesTable(salesTable);
+        subStatusJour.setDocNum(salesTable);
+        subStatusJour.Deadline            = salesParmUpdate.RespiteDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSourceTable</Name>
+				<Source><![CDATA[
+    protected void initSourceTable()
+    {
+        salesTable = salesParmTable.salesTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initTotals</Name>
+				<Source><![CDATA[
+    protected void initTotals()
+    {
+        salesTotals = SalesTotals::construct(salesParmTable, salesParmUpdate.SpecQty, salesParmUpdate.SumBy, salesParmUpdate.ParmId, salesParmUpdate.SumSalesId, documentStatus);
+        salesTotals.prepareTotalAmountCalculation();
+        salesTotals.prepareQuantitiesCalculation();
+        this.parmTax(salesTotals.tax());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalLineTableId</Name>
+				<Source><![CDATA[
+    protected TableId journalLineTableId()
+    {
+        return tableNum(CustRORSubStatusTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linksTableId</Name>
+				<Source><![CDATA[
+    protected TableId linksTableId()
+    {
+        return tableNum(CustRORSubStatusSalesLink);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>numberSequenceReferenceNum</Name>
+				<Source><![CDATA[
+    protected NumberSequenceReference numberSequenceReferenceNum()
+    {
+        return RORParameters::numRefSubStatus_Rental();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>numberSequenceReferenceVoucher</Name>
+				<Source><![CDATA[
+    protected NumberSequenceReference numberSequenceReferenceVoucher()
+    {
+        return RORParameters::numRefSubStatus_Rental();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmParmTable</Name>
+				<Source><![CDATA[
+    public Common parmParmTable(Common _parmTable = salesParmTable)
+    {
+        salesParmTable = _parmTable as SalesParmTable;
+        return salesParmTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmParmUpdate</Name>
+				<Source><![CDATA[
+    public Common parmParmUpdate(Common _parmUpdate = salesParmUpdate)
+    {
+        salesParmUpdate = _parmUpdate as SalesParmUpdate;
+        return salesParmUpdate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>proforma</Name>
+				<Source><![CDATA[
+    protected boolean proforma()
+    {
+        return salesParmUpdate.Proforma;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>recordListParmLine</Name>
+				<Source><![CDATA[
+    protected RecordSortedList recordListParmLine()
+    {
+        return salesTotals.recordSortedListLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>salesLine</Name>
+				<Source><![CDATA[
+    public SalesLine salesLine()
+    {
+        return salesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>salesTable</Name>
+				<Source><![CDATA[
+    public SalesTable salesTable()
+    {
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDeliveryFields</Name>
+				<Source><![CDATA[
+    protected void setDeliveryFields()
+    {
+        SalesLine       localSalesLine;
+        SalesParmLine   salesParmLine;
+    
+        select firstonly salesParmLine
+        where salesParmLine.ParmId     == salesParmTable.ParmId
+        &&    salesParmLine.TableRefId == salesParmTable.TableRefId;
+    
+        localSalesLine = salesParmLine.salesLine();
+    
+        subStatusJour.DeliveryPostalAddress = salesParmTable.DeliveryPostalAddress ? salesParmTable.DeliveryPostalAddress
+                                                                                 : localSalesLine.DeliveryPostalAddress;
+        subStatusJour.DeliveryName      = salesParmTable.DeliveryName    ? salesParmTable.DeliveryName
+                                                                           : localSalesLine.defaultDeliveryName();
+        subStatusJour.DlvMode           = salesParmTable.DlvMode         ? salesParmTable.DlvMode
+                                                                           : (localSalesLine.DlvMode ? localSalesLine.DlvMode : localSalesLine.salesTable().DlvMode);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>sourceTable</Name>
+				<Source><![CDATA[
+    protected Common sourceTable()
+    {
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>totals</Name>
+				<Source><![CDATA[
+    protected Object totals()
+    {
+        return salesTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>typeParmLine</Name>
+				<Source><![CDATA[
+    protected Common typeParmLine()
+    {
+        SalesParmLine   salesParmLine;
+        return salesParmLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateDate</Name>
+				<Source><![CDATA[
+    protected TransDate  updateDate()
+    {
+        return salesParmTable.Transdate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static SalesRORSubStatusJournalCreate construct()
+    {
+        return new SalesRORSubStatusJournalCreate();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

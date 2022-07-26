@@ -1,0 +1,697 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalInventOnHand</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBRentalInventOnHand
+{
+    BOBTmpRentalSum tmpRentalSum;
+    boolean         showNegativeQtyOnly;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>availPhysicalQty</Name>
+				<Source><![CDATA[
+    public BOBRentalQtyAvailPhysical availPhysicalQty(BOBRentalTypeId   _rentalTypeId,
+                                                      InventLocationId  _inventLocationId,
+                                                      TransDateTime     _checkDateTime)
+    {
+        MapEnumerator               enumerator;
+        container                   keyCon;
+        TransDateTime               transDateTime;
+        BOBRentalQtyAvailPhysical   ret;
+        ;
+    
+        enumerator = this.getOnHandQtyMap(_rentalTypeId, _inventLocationId).getEnumerator();
+    
+        while(enumerator.moveNext())
+        {
+            keyCon = enumerator.currentKey();
+            transDateTime = conPeek(keyCon, 3);
+    
+            if(transDateTime <= _checkDateTime)
+            {
+                ret = enumerator.currentValue();
+            }
+            else
+            {
+                return ret;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>availPhysicalQtySerialized</Name>
+				<Source><![CDATA[
+    // This method calculates the onHand of a serialized object on a wareHouse
+    public BOBRentalQtyAvailPhysical availPhysicalQtySerialized(BOBObjectId         _objectId, 
+                                                                InventLocationId    _inventLocationId,
+                                                                TransDateTime       _transDateTime,
+                                                                boolean             _forCounting = false)
+    {
+        BOBRentalTrans          rentalTrans;
+        BOBRentalType           rentalType;
+        BOBPostingPolicy        postingPolicy;
+        BOBPostingPolicyRule    postingPolicyRule;
+
+        select sum(Qty) from rentalTrans
+        where   rentalTrans.Active == BOBRentalTransActive::Active
+        &&      rentalTrans.InventLocationId == _inventLocationId
+        &&      rentalTrans.ObjectId == _objectId
+        &&      rentalTrans.FromDateTime < _transDateTime
+                // If we want to calculate the on-hand rental quantity of a serialized rental item for rental counting, then the rental transaction
+                // should only be taken into account if the item has actually been delivered. This is based on the 'Start date/time certainty'
+                // (i.e., 'Fixed'). NOTE: There is one exception: Rental transactions of type 'Counting' have a 'Start date/time certainty' that
+                // is either 'Firm' (i.e., in case of a transfer) or 'Fixed' (i.e., in case of an adjustment). In both cases, the rental transaction
+                // should be taken into account.
+        &&      (!_forCounting || rentalTrans.CertaintyFrom == BOBDateTimeCertainty::Fixed || rentalTrans.TransType == BOBRentalTransType::InventCounting)
+        &&      ((rentalTrans.ToDateTime >= _transDateTime || !rentalTrans.ToDateTime) ||
+                 // If we want to calculate the on-hand rental quantity of a serialized rental item for rental counting, then that rental transaction
+                // should also be taken into account if the item should have been returned already, but it has not. This is based on the 'End
+                // date/time certainty'.
+                 (_forCounting && rentalTrans.ToDateTime < _transDateTime && rentalTrans.CertaintyTo != BOBDateTimeCertainty::Fixed))
+            join TableId from rentalType
+            where rentalType.RentalTypeId == rentalTrans.RentalTypeId
+            &&    rentalType.Classification == BOBRentalTypeClassification::Serialized
+                join RentalSumRounding from postingPolicy
+                where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                &&    postingPolicy.IncludeInAvailabilityOverview
+                    join TableId from postingPolicyRule
+                    where postingPolicyRule.PostingPolicyRecId == postingPolicy.RecId
+                    &&    postingPolicyRule.SubStatus == rentalTrans.SubStatus
+                    &&  ((rentalTrans.TransType == BOBRentalTransType::Sales            && postingPolicyRule.IsAvailableSales)      ||
+                         (rentalTrans.TransType == BOBRentalTransType::Purch            && postingPolicyRule.IsAvailablePurchase)   ||
+                         (rentalTrans.TransType == BOBRentalTransType::Rental           && postingPolicyRule.IsAvailableRental)     ||
+                         (rentalTrans.TransType == BOBRentalTransType::SubRental        && postingPolicyRule.IsAvailableSubRental)  ||
+                         (rentalTrans.TransType == BOBRentalTransType::WPPWorkOrder     && postingPolicyRule.IsAvailableWorkOrder)  ||
+                          rentalTrans.TransType == BOBRentalTransType::Invent ||
+                          rentalTrans.TransType == BOBRentalTransType::InventCounting ||
+                          rentalTrans.TransType == BOBRentalTransType::Asset);
+
+        return rentalTrans.Qty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>displayIssueCheck</Name>
+				<Source><![CDATA[
+    public boolean displayIssueCheck(SalesLine          _salesLine,
+                                     InventQty          _checkQty, // must be in inventory unit
+                                     RORRentalDateTimes _rentalDateTimes = _salesLine.RORRentalDateTimes())
+    {
+        InventDim               inventDim;
+        BOBRentalType           rentalType;
+        BOBPostingPolicy        postingPolicy;
+        BOBRentalQty            onHandQty;
+        ROROffRentDateTime      offRentDateTime;
+        boolean                 ret = true;
+        ItemId                  itemIdWarranty = RAGParameters::find().ItemIdWarranty;
+    
+        if(_salesLine.isStocked()
+        && _salesLine.RORTradeType != RORTradeType::SalesPurch
+        && _salesLine.ItemId != itemIdWarranty)
+        {
+            select firstOnly InventLocationId from inventDim
+            where inventDim.inventDimId == _salesLine.InventDimId
+                join RentalTypeId from rentalType
+                where rentalType.RentalTypeId == _salesLine.BOBRentalTypeId()
+                    join RecId from postingPolicy
+                    where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                    &&    postingPolicy.IncludeInAvailabilityOverview;
+    
+            if(postingPolicy)
+            {
+                offRentDateTime = (_rentalDateTimes.OffRentDateTime >= 1900-01-02T00:00:00 ?
+                                   _rentalDateTimes.OffRentDateTime :
+                                   _rentalDateTimes.ExpectedOffRentDateTime);
+    
+                onHandQty = this.getLowestQty(rentalType.RentalTypeId,
+                                              inventDim.InventLocationId,
+                                              _rentalDateTimes.OnRentDateTime,
+                                              offRentDateTime);
+    
+                ret = (onHandQty >= _checkQty);
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLowestQty</Name>
+				<Source><![CDATA[
+    private BOBRentalQty getLowestQty(BOBRentalTypeId   _rentalTypeId,
+                                      InventLocationId  _inventLocationId,
+                                      FromDateTime      _fromDateTime,
+                                      ToDateTime        _toDateTime)
+    {
+        Map                 onHandQtyMap;
+        MapEnumerator       enumerator;
+        container           keyCon;
+        TransDateTime       currDateTime;
+        BOBRentalQty        currQty, prevQty, lowestQty = intMax();
+        boolean             hasOverlap;
+        ;
+    
+        onHandQtyMap = this.getOnHandQtyMap(_rentalTypeId, _inventLocationId);
+        enumerator = onHandQtyMap.getEnumerator();
+    
+        while(enumerator.moveNext())
+        {
+            keyCon          = enumerator.currentKey();
+            currDateTime    = conPeek(keyCon, 3);
+            currQty         = enumerator.currentValue();
+    
+            if(currDateTime > _fromDateTime)
+            {
+                hasOverlap  = true;
+                lowestQty   = min(lowestQty, prevQty);
+            }
+    
+            if(currDateTime > _toDateTime)
+            {
+                lowestQty   = min(lowestQty, prevQty);
+                break;
+            }
+    
+            prevQty         = currQty;
+        }
+    
+        if(!hasOverlap)
+        {
+            lowestQty = prevQty;
+        }
+    
+        return lowestQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOnHandQtyMap</Name>
+				<Source><![CDATA[
+    private Map getOnHandQtyMap(BOBRentalTypeId _rentalTypeId, InventLocationId _inventLocationId)
+    {
+        BOBRentalSum        rentalSum;
+        BOBRentalTransDelta transDelta;
+        Map                 rentalSumMap, ret;
+        container           keyCon;
+        MapEnumerator       enumerator;
+        boolean             endOfMap;
+    
+        BOBRentalTypeId     sumRentalTypeId;
+        InventLocationId    sumInventLocationId;
+        TransDateTime       sumTransDateTime;
+        BOBRentalQty        sumRentalQty, prevRentalQty, newRentalQty;
+    
+        void nextMapEntry()
+        {
+            if(enumerator.moveNext())
+            {
+                [ sumRentalTypeId, sumInventLocationId, sumTransDateTime ] = enumerator.currentKey();
+                sumRentalQty = enumerator.currentValue();
+            }
+            else
+            {
+                endOfMap = true;
+            }
+        }
+        ;
+
+        rentalSumMap = new Map(Types::Container, Types::Real);
+        ret = new Map(Types::Container, Types::Real);
+
+        if(BOBRentalTransDelta::exist(_rentalTypeId, _inventLocationId))
+        {
+            // load all RentalSum's data into a preliminary map while transforming the absolute quantities into delta quantities
+            while select RentalTypeId, InventLocationId, TransDateTime, Available from rentalSum
+            order by TransDateTime asc
+            where rentalSum.RentalTypeId == _rentalTypeId
+            &&    rentalSum.InventLocationId == _inventLocationId
+            {
+                keyCon = [ rentalSum.RentalTypeId, rentalSum.InventLocationId, rentalSum.TransDateTime ];
+                newRentalQty = rentalSum.Available - prevRentalQty;
+    
+                if(newRentalQty)
+                {
+                    rentalSumMap.insert(keyCon, newRentalQty);
+                }
+    
+                prevRentalQty = rentalSum.Available;
+            }
+    
+            newRentalQty = 0;
+            endOfMap = rentalSumMap.empty();
+            enumerator = rentalSumMap.getEnumerator();
+            nextMapEntry(); // select first entry
+    
+            // combine data from RentalSum with data from RentalTransDelta to end up with the final absolute quantities
+            while select RentalTypeId, InventLocationId, TransDateTime, sum(Qty) from transDelta
+            group by RentalTypeId, InventLocationId, TransDateTime
+            where transDelta.RentalTypeId == _rentalTypeId
+            &&    transDelta.InventLocationId == _inventLocationId
+            {
+                while(!endOfMap && sumTransDateTime < transDelta.TransDateTime)
+                {
+                    keyCon = [ sumRentalTypeId, sumInventLocationId, sumTransDateTime ];
+                    newRentalQty = (ret.exists(keyCon) ? ret.lookup(keyCon) + sumRentalQty : newRentalQty + sumRentalQty);
+                    ret.insert(keyCon, newRentalQty);
+    
+                    nextMapEntry();
+                }
+    
+                keyCon = [ transDelta.RentalTypeId, transDelta.InventLocationId, transDelta.TransDateTime ];
+                newRentalQty += transDelta.Qty;
+                ret.insert(keyCon, newRentalQty);
+            }
+    
+            while(!endOfMap)
+            {
+                keyCon = [ sumRentalTypeId, sumInventLocationId, sumTransDateTime ];
+                newRentalQty += sumRentalQty;
+                ret.insert(keyCon, newRentalQty);
+    
+                nextMapEntry();
+            }
+        }
+        else
+        {
+            // there are no records in RentalTransDelta matching our criteria -- just return raw data from RentalSum
+            while select RentalTypeId, InventLocationId, TransDateTime, Available from rentalSum
+            order by TransDateTime asc
+            where rentalSum.RentalTypeId == _rentalTypeId
+            &&    rentalSum.InventLocationId == _inventLocationId
+            {
+                keyCon = [ rentalSum.RentalTypeId, rentalSum.InventLocationId, rentalSum.TransDateTime ];
+                ret.insert(keyCon, rentalSum.Available);
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populatePerWarehouse</Name>
+				<Source><![CDATA[
+    private Counter populatePerWarehouse(BOBRentalTypeId    _rentalTypeId,
+                                         InventLocationId   _inventLocationId,
+                                         FromDate           _fromDate,
+                                         ToDate             _toDate,
+                                         boolean            _showNegativeQtyOnly = false)
+    {
+        Map                 onHandQtyMap, minQtysMap, finalQtysMap;
+        MapEnumerator       enumerator;
+        TransDate           currentDate, prevDate;
+        TransDateTime       currentDateTime;
+        BOBRentalQty        currentQty, minQty, finalQty;
+        container           keyCon;
+        RecordInsertList    insertList;
+        Counter             recordCount;
+    
+        // get on-hand rental inventory quantities per date/time
+        onHandQtyMap = this.getOnHandQtyMap(_rentalTypeId, _inventLocationId);
+        enumerator = onHandQtyMap.getEnumerator();
+    
+        // translate the quantities into [ minimum quantities per date ] and [ final quantities per date ]
+        minQtysMap = new Map(Types::Date, Types::Real);
+        finalQtysMap = new Map(Types::Date, Types::Real);
+    
+        while(enumerator.moveNext())
+        {
+            keyCon = enumerator.currentKey();
+            currentQty = enumerator.currentValue();
+    
+            currentDateTime = conPeek(keyCon, 3);
+            currentDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(currentDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+    
+            if(currentDate != prevDate)
+            {
+                finalQtysMap.insert(prevDate, finalQty);
+            }
+    
+            minQty = (minQtysMap.exists(currentDate) ?
+                      min(currentQty, minQtysMap.lookup(currentDate)) :
+                      currentQty);
+    
+            minQtysMap.insert(currentDate, minQty);
+    
+            prevDate = currentDate;
+            finalQty = currentQty;
+        }
+    
+        if(!onHandQtyMap.empty())
+        {
+            finalQtysMap.insert(prevDate, finalQty); // don't forget the last one
+        }
+    
+        // initialize the finalQty -- the quantity to start off with on _fromDate
+        finalQty = 0;
+        enumerator = finalQtysMap.getEnumerator();
+        currentDate = dateNull();
+    
+        while(enumerator.moveNext())
+        {
+            currentDate = enumerator.currentKey();
+    
+            if(currentDate < _fromDate)
+            {
+                finalQty = enumerator.currentValue();
+            }
+            else
+            {
+                break;
+            }
+        }
+    
+        insertList = new RecordInsertList(tableNum(BOBTmpRentalSum), false, false, false, false, false, tmpRentalSum);
+
+        // enumerate the date range as indicated by _fromDate and _toDate and insert the records
+        for(currentDate = _fromDate; currentDate <= _toDate; currentDate ++)
+        {
+            if (minQtysMap.exists(currentDate))
+            {
+                finalQty = minQtysMap.lookup(currentDate);
+            }
+            else if (finalQtysMap.exists(currentDate))
+            {
+                finalQty = finalQtysMap.lookup(currentDate);
+            }
+
+            if (_showNegativeQtyOnly && finalQty >= 0)
+            {
+                continue;
+            }
+
+            tmpRentalSum.clear();
+            tmpRentalSum.RentalTypeId       = _rentalTypeId;
+            tmpRentalSum.InventLocationId   = _inventLocationId;
+            tmpRentalSum.TransDate          = currentDate;
+            tmpRentalSum.DateName           = dayName(dayOfWk(currentDate));
+            tmpRentalSum.LineNum            = (currentDate - _fromDate) + 1;
+            tmpRentalSum.Qty                = finalQty;
+    
+            insertList.add(tmpRentalSum);
+
+            recordCount += 1;
+        }
+
+        insertList.insertDatabase();
+        return recordCount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpRentalSum_Date</Name>
+				<Source><![CDATA[
+    public BOBTmpRentalSum populateTmpRentalSum_Date(BOBRentalTypeId    _rentalTypeId,
+                                                     InventLocationId   _inventLocationId,
+                                                     FromDate           _fromDate,
+                                                     ToDate             _toDate)
+    {
+        Set                 warehouseSet;
+        SetEnumerator       enumerator;
+        BOBRentalSum        rentalSum;
+        BOBRentalTransDelta rentalTransDelta;
+        TransDate           transDate;
+        RecordInsertList    insertList;
+        ;
+    
+        if(_rentalTypeId && _fromDate && _toDate && _fromDate <= _toDate && _toDate != dateMax())
+        {
+            delete_from tmpRentalSum;
+    
+            if(_inventLocationId)
+            {
+                this.populatePerWarehouse(_rentalTypeId, _inventLocationId, _fromDate, _toDate, showNegativeQtyOnly);
+            }
+            else
+            {
+                // load all relevant warehouses into a Set
+                warehouseSet = new Set(Types::String);
+    
+                while select InventLocationId from rentalSum
+                group by InventLocationId
+                where rentalSum.RentalTypeId == _rentalTypeId
+                {
+                    warehouseSet.add(rentalSum.InventLocationId);
+                }
+    
+                while select InventLocationId from rentalTransDelta
+                group by InventLocationId
+                where rentalTransDelta.RentalTypeId == _rentalTypeId
+                {
+                    warehouseSet.add(rentalTransDelta.InventLocationId);
+                }
+    
+                // enumerate the Set and populate the data per warehouse
+                enumerator = warehouseSet.getEnumerator();
+    
+                while(enumerator.moveNext())
+                {
+                    this.populatePerWarehouse(_rentalTypeId, enumerator.current(), _fromDate, _toDate, showNegativeQtyOnly);
+                }
+
+                insertList = new RecordInsertList(tableNum(BOBTmpRentalSum), false, false, false, false, false, tmpRentalSum);
+    
+                // insert 'separator' records
+                for(transDate = _fromDate + 1; transDate <= _toDate; transDate ++)
+                {
+                    tmpRentalSum.clear();
+                    tmpRentalSum.LineNum = (transDate - _fromDate) + 0.5;
+                    insertList.add(tmpRentalSum);
+                }
+
+                insertList.insertDatabase();
+            }
+        }
+    
+        return tmpRentalSum;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpRentalSum_DateTime</Name>
+				<Source><![CDATA[
+    public BOBTmpRentalSum populateTmpRentalSum_DateTime(Set                _rentalTypeIdSet,
+                                                         InventLocationId   _inventLocationId,
+                                                         FromDateTime       _fromDateTime,
+                                                         ToDateTime         _toDateTime)
+    {
+        #DNRConstants
+    
+        BOBRentalTypeId     prevRentalTypeId, currRentalTypeId;
+        InventLocationId    prevInventLocationId, currInventLocationId;
+        TransDateTime       prevTransDateTime, currTransDateTime;
+        BOBRentalQty        prevRentalQty, currRentalQty;
+    
+        FromDateTime        fromDateTime;
+        ToDateTime          toDateTime;
+    
+        InventLocation      inventLocation;
+        SetEnumerator       setEnumerator;
+        Map                 onHandQtyMap;
+        MapEnumerator       mapEnumerator;
+    
+        void insertTmpRentalSum(BOBRentalTypeId p1, InventLocationId p2, FromDateTime p3, ToDateTime p4, BOBRentalQty p5)
+        {
+            tmpRentalSum.clear();
+            tmpRentalSum.RentalTypeId       = p1;
+            tmpRentalSum.InventLocationId   = p2;
+            tmpRentalSum.FromDateTime       = p3;
+            tmpRentalSum.ToDateTime         = p4;
+            tmpRentalSum.Qty                = p5;
+            tmpRentalSum.insert();
+        }
+    
+        if(_rentalTypeIdSet && !_rentalTypeIdSet.empty() && _fromDateTime && _toDateTime && _fromDateTime <= _toDateTime && _toDateTime != DateTimeUtil::maxValue())
+        {
+            delete_from tmpRentalSum;
+            
+            fromDateTime = _fromDateTime;
+            toDateTime = _toDateTime;
+            
+            // iterate all relevant warehouses
+            while select InventLocationId from inventLocation
+            where (!_inventLocationId || inventLocation.InventLocationId == _inventLocationId)
+            &&    inventLocation.InventLocationType == InventLocationType::Standard
+            {
+                setEnumerator = _rentalTypeIdSet.getEnumerator();
+    
+                // iterate all relevant rental types
+                while(setEnumerator.moveNext())
+                {
+                    onHandQtyMap            = this.getOnHandQtyMap(setEnumerator.current(), inventLocation.InventLocationId);
+                    mapEnumerator           = onHandQtyMap.getEnumerator();
+                    prevRentalTypeId        = '';
+                    prevInventLocationId    = '';
+                    prevTransDateTime       = utcDateTimeNull();
+                    prevRentalQty           = 0;
+                    tmpRentalSum.clear();
+    
+                    // iterate on-hand rental inventory data
+                    while(mapEnumerator.moveNext())
+                    {
+                        [ currRentalTypeId, currInventLocationId, currTransDateTime ] = mapEnumerator.currentKey();
+                        currRentalQty = mapEnumerator.currentValue();
+    
+                        // only insert records that overlap with our [ _fromDate .. _toDate ] range
+                        if(currTransDateTime > fromDateTime)
+                        {
+                            if(prevRentalTypeId && prevInventLocationId)
+                            {
+                                insertTmpRentalSum(prevRentalTypeId, prevInventLocationId, prevTransDateTime, currTransDateTime, prevRentalQty);
+                            }
+                            else
+                            {
+                                insertTmpRentalSum(currRentalTypeId, currInventLocationId, utcDateTimeNull(), currTransDateTime, 0);
+                            }
+                        }
+    
+                        if(currTransDateTime >= toDateTime)
+                        {
+                            break;
+                        }
+    
+                        prevRentalTypeId = currRentalTypeId;
+                        prevInventLocationId = currInventLocationId;
+                        prevTransDateTime = currTransDateTime;
+                        prevRentalQty = currRentalQty;
+                    }
+    
+                    if (currTransDateTime)
+                    {
+                        if (currTransDateTime <= fromDateTime)
+                        {
+                            insertTmpRentalSum(currRentalTypeId, currInventLocationId, currTransDateTime, DateTimeUtil::maxValue(), prevRentalQty);
+                        }
+                        else
+                        {
+                            if (tmpRentalSum.ToDateTime > fromDateTime && tmpRentalSum.ToDateTime < toDateTime)
+                            {
+                                if (prevRentalQty && prevRentalQty != tmpRentalSum.Qty)
+                                {
+                                    insertTmpRentalSum(currRentalTypeId, currInventLocationId, currTransDateTime, DateTimeUtil::maxValue(), prevRentalQty);
+                                }
+                                else
+                                {
+                                    insertTmpRentalSum(currRentalTypeId, currInventLocationId, currTransDateTime, DateTimeUtil::maxValue(), 0);
+                                }
+                            }
+                        }
+                        currTransDateTime = utcDateTimeNull();
+                    }
+                }
+            }
+        }
+    
+        return tmpRentalSum;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateStatusUpdate</Name>
+				<Source><![CDATA[
+    public boolean validateStatusUpdate(SalesLine            _salesLine,
+                                        InventQty            _checkQty, // must be in inventory unit
+                                        BOBRentalSubStatus   _subStatus,
+                                        RORRentalDateTimes   _rentalDateTimes = _salesLine.RORRentalDateTimes())
+    {
+        InventDim               inventDim;
+        BOBRentalType           rentalType;
+        BOBPostingPolicy        postingPolicy;
+        BOBPostingPolicyRule    postingPolicyRule;
+        BOBRentalQty            availQty;
+        ROROffRentDateTime      offRentDateTime;
+        InventQty               actualCheckQty;
+        boolean                 ret = true;
+        ItemId                  itemIdWarranty = RAGParameters::find().ItemIdWarranty;
+    
+        if(_salesLine.isStocked()
+        && _salesLine.RORTradeType != RORTradeType::SalesPurch
+        && _salesLine.ItemId != itemIdWarranty)
+        {
+            select firstOnly InventLocationId from inventDim
+            where inventDim.inventDimId == _salesLine.InventDimId
+                join RentalTypeId from rentalType
+                where rentalType.RentalTypeId == _salesLine.BOBRentalTypeId()
+                    join AllowNegativeRentalInventory, RecId from postingPolicy
+                    where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                    &&    postingPolicy.IncludeInAvailabilityOverview
+                        join RecId from postingPolicyRule
+                        where postingPolicyRule.PostingPolicyRecId == postingPolicy.RecId
+                        &&    postingPolicyRule.SubStatus == _subStatus
+                        &&    postingPolicyRule.IsAvailableRental;
+    
+            if(postingPolicyRule)
+            {
+                offRentDateTime = (_rentalDateTimes.OffRentDateTime >= 1900-01-02T00:00:00 ?
+                                   _rentalDateTimes.OffRentDateTime :
+                                   _rentalDateTimes.ExpectedOffRentDateTime);
+    
+                if(_subStatus != BOBRentalSubStatus::Ordered && _subStatus != BOBRentalSubStatus::Confirmed)
+                {
+                    // in case this validation has already been performed during a previous sub status update,
+                    // we now only check whether the on-hand rental inventory doesn't drop below zero
+    
+                    select firstOnly RecId from postingPolicyRule
+                    where postingPolicyRule.PostingPolicyRecId == postingPolicy.RecId
+                    &&    postingPolicyRule.IsAvailableRental
+                    &&    postingPolicyRule.SubStatus < _subStatus;
+    
+                    actualCheckQty = (postingPolicyRule ? 0 : _checkQty);
+                }
+    
+                availQty = this.getLowestQty(rentalType.RentalTypeId,
+                                             inventDim.InventLocationId,
+                                             _rentalDateTimes.OnRentDateTime,
+                                             offRentDateTime);
+    
+                if(availQty < actualCheckQty)
+                {
+                    warning(strFmt("@DNR8714",
+                                    _checkQty,
+                                    rentalType.RentalTypeId,
+                                    inventDim.InventLocationId,
+                                    availQty,
+                                    DateTimeUtil::applyTimeZoneOffset(_rentalDateTimes.OnRentDateTime, DateTimeUtil::getUserPreferredTimeZone()),
+                                    DateTimeUtil::applyTimeZoneOffset(offRentDateTime, DateTimeUtil::getUserPreferredTimeZone())));
+    
+                    ret = postingPolicy.AllowNegativeRentalInventory; // in case negative inventory is allowed, do display the warning but pass the validation
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmShowNegativeQtyOnly</Name>
+				<Source><![CDATA[
+    public boolean parmShowNegativeQtyOnly(boolean _showNegativeQtyOnly = showNegativeQtyOnly)
+    {
+        showNegativeQtyOnly = _showNegativeQtyOnly;
+
+        return showNegativeQtyOnly;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

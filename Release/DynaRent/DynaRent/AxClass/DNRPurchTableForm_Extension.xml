@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchTableForm_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(formStr(PurchTable))]
+public final class DNRPurchTableForm_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void  init()
+    {
+        next init();
+
+        FINDimValueController::setEditableDimensionSet(tableNum(PurchTable), DimensionEntryControlHeader);
+        FINDimValueController::setEditableDimensionSet(tableNum(PurchLine), DimensionEntryControlLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORmodifyQueryBusRel</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public void RORmodifyQueryBusRel()
+    {
+        smmBusRelTable busRelTable = this.args().record();
+        VendAccount vendAccount = busRelTable.vendAccount();
+        
+        if (vendAccount)
+        {
+            QueryBuildDataSource qbds = purchTable_ds.query().dataSourceTable(tableNum(PurchTable));
+            qbds.clearDynalinks();
+            qbds.addRange(fieldNum(PurchTable, OrderAccount)).value(vendAccount);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>LBAContractsRange</Name>
+				<Source><![CDATA[
+    public str LBAContractsRange(InventSerialId _inventSerialId)
+    {
+        PurchLine   purchLineLocal;
+        InventDim   inventDimLocal;
+        str         purchIds = '';
+    
+        if (_inventSerialId)
+        {
+            while select PurchId from purchLineLocal
+                exists join inventDimLocal
+                where inventDimLocal.inventDimId == purchLineLocal.InventDimId
+                &&    inventDimLocal.inventSerialId == _inventSerialId
+            {
+                if (purchIds != '')
+                {
+                    purchIds += ',';
+                }
+    
+                purchIds += purchLineLocal.PurchId;
+            }
+        }
+    
+        if (purchIds)
+        {
+            return purchIds;
+        }
+        else
+        {
+            return '#nosuchorder#';
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORmodifyQueryBusRel_PurchTableDS</Name>
+				<Source><![CDATA[
+    // Access modifier changed to public (there was no explicit access modifier), since this method is now called from an event handler class. 
+    public void RORmodifyQueryBusRel_PurchTableDS()
+    {
+        smmBusRelTable busRelTable = this.args().record();
+        VendAccount vendAccount = busRelTable.vendAccount();
+        
+        if (vendAccount)
+        {
+            QueryBuildDataSource qbds = purchTable_ds.query().dataSourceTable(tableNum(PurchTable));
+            qbds.clearDynalinks();
+            qbds.addRange(fieldNum(PurchTable, OrderAccount)).value(vendAccount);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>PurchLineDS_ItemId_onLookup</Name>
+				<Source><![CDATA[
+    public void PurchLineDS_ItemId_onLookup(FormStringControl _callingControl)
+    {
+        InventLookup lookup;
+
+        if(purchTable.ProjId && WPPParameters::find().OnlyAllowServiceItems)
+        {
+            lookup = new WPPInventLookupItemType(_callingControl, new Query(), formStr(WPPInventItemIdLookupPurchase));
+            lookup.run();
+        }
+        // *** Repeated code
+        else if(isProductSearchLookupEnabled)
+        {
+            EcoResProductSearchLookup::lookupProduct(_callingControl as FormStringControl);
+        }
+        else
+        {
+            lookup = new InventLookup(_callingControl, new Query(), formStr(InventItemIdLookupPurchase));
+            lookup.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_PurchTableDS_OnInitialized</Name>
+				<Source><![CDATA[
+    // event handler methods
+
+    [FormDataSourceEventHandler(formDataSourceStr(PurchTable, PurchTable), FormDataSourceEventType::Initialized)]
+    public static void DNREvent_PurchTableDS_OnInitialized(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        FormRun                 formRun         = _sender.formRun() as FormRun;
+        Object                  hostObj         = formRun as Object;
+        QueryBuildDataSource    qbds            = _sender.queryBuildDataSource();
+        Args                    args            = formRun.args();
+        boolean                 isCallerRental;
+
+        switch (args.dataset())
+        {
+            case tableNum(WPPWorkOrderLine):
+                WPPWorkOrderLine workOrderLine = args.record() as WPPWorkOrderLine;
+                qbds.clearDynalinks();
+                qbds.addDynalink(fieldNum(PurchTable, ProjId), formRun.args().record(), fieldNum(WPPWorkOrderLine, ProjId));
+                break;
+        
+            case tableNum(LBAContractTable):
+                LBAContractTable contractTable = args.record() as LBAContractTable;
+                BOBObjectTable objectTable = BOBObjectTable::findObjectId(contractTable.BOBObjectId);
+                SysQuery::findOrCreateRange(qbds, fieldNum(PurchTable, PurchId)).value(formRun.LBAContractsRange(objectTable.InventSerialId));
+                break;
+        
+            case tableNum(smmBusRelTable):
+                hostObj.RORmodifyQueryBusRel();
+                break;
+        }
+        
+        if ((TradeFormHelper::isCalledFromForm(args, formStr(RORSalesTable))) && args.dataset() == tableNum(SalesTable))
+        {
+            isCallerRental = true;
+        }
+
+        if (isCallerRental || args.menuItemName() == menuItemDisplayStr(PurchTableListPage))
+        {
+            qbds.addRange(fieldNum(PurchTable, PurchaseType)).value(SysQuery::valueNot(PurchaseType::RORSubRental));
+
+            if (isCallerRental)
+            {
+                qbds = qbds.addDataSource(tableNum(InterCompanyPurchSalesReference));
+                qbds.relations(false);
+                qbds.joinMode(JoinMode::ExistsJoin);
+                qbds.addLink(fieldNum(PurchTable, PurchId), fieldNum(InterCompanyPurchSalesReference, PurchId));
+                qbds.addRange(fieldNum(InterCompanyPurchSalesReference, SalesId)).value(SysQuery::value(args.record().(fieldNum(SalesTable, SalesId))));
+            }
+        
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_PurchLineDS_OnInitialized</Name>
+				<Source><![CDATA[
+    // This data event is used to register override methods.
+    [FormDataSourceEventHandler(formDataSourceStr(PurchTable, PurchLine), FormDataSourceEventType::Initialized)]
+    public static void DNREvent_PurchLineDS_OnInitialized(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        var overrides = _sender.formRun() as FormRun;
+
+        _sender.object(fieldNum(PurchLine, ItemId)).registerOverrideMethod(methodStr(FormDataObject, lookup), methodStr(DNRPurchTableForm_Extension, PurchLineDS_ItemId_onLookup), overrides);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_PurchLineDS_OnActivated</Name>
+				<Source><![CDATA[
+    [FormDataSourceEventHandler(formDataSourceStr(PurchTable, PurchLine), FormDataSourceEventType::Activated)]
+    public static void DNREvent_PurchLineDS_OnActivated(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        FormRun         formRun         = _sender.formRun() as FormRun;
+        FormDataSource  PurchTable_ds   = formRun.dataSource(formDataSourceStr(PurchTable, PurchTable));
+
+        if (formRun.args().dataset() == tableNum(WPPWorkOrderLine))
+        {
+            PurchTable_ds.object(fieldNum(PurchTable, ProjId)).allowEdit(false);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

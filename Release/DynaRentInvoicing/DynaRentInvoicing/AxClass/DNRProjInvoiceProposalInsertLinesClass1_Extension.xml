@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRProjInvoiceProposalInsertLinesClass1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(ProjInvoiceProposalInsertLines))]
+public final class DNRProjInvoiceProposalInsertLinesClass1_Extension
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>calculateProjProposalJourTotals</Name>
+				<Source><![CDATA[
+    protected static ProjProposalJour calculateProjProposalJourTotals(ProjProposalTotalsParameters _parameters)
+    {
+        ProjProposalJour projProposalJour = ProjProposalJour::find(_parameters.parmProjProposalId());
+        Set recIdSet;
+
+        recIdSet = ProjInvoiceProposalInsertLines::FINCreateMarkupTrans(projProposalJour);
+
+        projProposalJour = next calculateProjProposalJourTotals(_parameters);
+
+        ProjInvoiceProposalInsertLines::FINDeleteMarkupTrans(projProposalJour, recIdSet);
+
+        return projProposalJour;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createProjProposalTotalsParameters</Name>
+				<Source><![CDATA[
+    protected ProjProposalTotalsParameters createProjProposalTotalsParameters(ProjProposalJour _projProposalJour)
+    {
+        this.FINUpdateCalcParmReference(_projProposalJour.ProposalId);
+        return next createProjProposalTotalsParameters(_projProposalJour);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(ProjInvoiceProposalInsertLines), methodStr(ProjInvoiceProposalInsertLines, run))]
+    public static void run_post(XppPrePostArgs _args)
+    {
+        ProjInvoiceProposalInsertLines projInvoiceProposalInsertLines = _args.getThis();
+        ProjProposalJour projProposalJour = projInvoiceProposalInsertLines.INVparmProjProposalJour();
+        ProjProposalItem projProposalItem;
+        ProjProposalItemDetail projProposalItemDetail;
+        SalesLine salesLine;
+        FINInvoiceCalculatorParm calcParm;
+
+        // Code for testing purpose controlled by a parameter.
+        // In production environment expected periods are created only when opening a form
+        if (RORParameters::find().FINTestingModeActive)
+        {
+            ttsbegin;
+            while select projProposalItemDetail
+                join projProposalItem
+                where projProposalItem.ProposalId == projProposalJour.ProposalId
+                && projProposalItem.RecId == projProposalItemDetail.ProposalRefRecId
+                    join salesLine
+                    where salesLine.InventTransId == projProposalItem.InventTransId
+                        join calcParm
+                        where calcParm.ParmId == projProposalItem.proposalId
+                        &&    ((calcParm.OrderLineRecId == projProposalItem.RecId && calcParm.OrderLineTableId == projProposalItem.TableId) ||
+                               (calcParm.OrderLineRecId == salesLine.RecId && calcParm.OrderLineTableId == salesLine.TableId))
+            {
+                FINInvoicePeriodManager_Invoice::createExpectedPeriods(projProposalJour.ProposalId, projProposalItem, projProposalItem);
+            }
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCreateMarkupTrans</Name>
+				<Source><![CDATA[
+    // extension method
+    public static Set FINCreateMarkupTrans(ProjProposalJour _projProposalJour)
+    {
+        Set recIdSet;
+
+        if (_projProposalJour 
+        && !_projProposalJour.ProjInvoiceId 
+        // Create markup trans only if there are any rental order lines in an invoice proposal.
+        && ProjProposalItem::FINExistRentalOrderLineWaiting(_projProposalJour.ProposalId))
+        {
+            if (!FINMarkupWorkTrans::existProposalId(_projProposalJour.ProposalId))
+            {
+                FINMarkupTransGenerator::createMarkupWorkTrans(_projProposalJour.ProposalId);
+            }
+           
+            recIdSet = FINMarkupTransGenerator::createMarkupTransForProposalId(_projProposalJour.ProposalId);
+        }
+
+        return recIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINDeleteMarkupTrans</Name>
+				<Source><![CDATA[
+    public static void FINDeleteMarkupTrans(ProjProposalJour _projProposalJour, Set _recIdSet)
+    {
+        FINMarkupTransGenerator::deleteMarkupTransForSet(_recIdSet);
+
+        if (_projProposalJour && !_projProposalJour.ProjInvoiceId)
+        {
+            FINMarkupWorkTransReference::deleteMarkupTransForParmId(_projProposalJour.ProposalId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateCalcParmReference</Name>
+				<Source><![CDATA[
+    private void FINUpdateCalcParmReference(ProjProposalId _projProposalId)
+    {
+        SalesLine salesLine;
+        SalesTable salesTable;
+        ProjProposalItem projProposalItem;
+        ProjProposalItemDetail projProposalItemDetail;
+        FINInvoiceCalculatorParm calcParm;
+        FINInvoiceCalculatorParm calcParmLinked;
+        ParmId invoiceCalcParmId = projInvoiceProposalCreateLines.parmProposalCreateLinesParams().FINInvoiceCalcParmId();
+
+        // This would be available only for Invoice proposals on Rental Orders
+        if (!invoiceCalcParmId)
+        {
+            return;
+        }
+
+        ttsbegin;
+        
+        ProjInvoiceProposalInsertLines::FINprocessProjHourMarkupWorkTrans(_projProposalId);
+
+        while select forupdate projProposalItemDetail
+            join RecId, ProposalId from projProposalItem
+            where projProposalItem.ProposalId == _projProposalId
+            &&    projProposalItem.RecId == projProposalItemDetail.ProposalRefRecId
+                join TableId from salesTable
+                where salesTable.SalesId == projProposalItem.SalesId
+                &&    salesTable.SalesType == SalesType::RORRental
+                    join RecId from salesLine
+                    where salesLine.InventTransId == projProposalItem.InventTransId
+                    &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                        // This method is called also when deleting projProposalItem,
+                        // in such case calcParm record with correct link already exists and we don't want to do anything with it.
+                        notexists join calcParmLinked
+                        where calcParmLinked.OrderLineRecId == projProposalItem.RecId
+                        &&    calcParmLinked.OrderLineTableId == projProposalItem.TableId
+                        &&    calcParmLinked.ParmId == projProposalItem.ProposalId
+        {
+            select forupdate calcParm
+            where calcParm.OrderLineRecId == salesLine.RecId
+            &&    calcParm.OrderLineTableId == salesLine.TableId
+            &&    calcParm.ParmId == invoiceCalcParmId;
+
+            if (calcParm)
+            {
+                projProposalItemDetail.FINLineAmount = calcParm.InvoiceAmount;
+                projProposalItemDetail.LineAmount = 0;
+                projProposalItemDetail.INVInvoicePeriods = calcParm.ChargedPeriods;
+                projProposalItemDetail.update();
+
+                FINMarkupWorkTrans  markupWorkTrans;
+
+                update_recordset markupWorkTrans
+                setting ParmLineTableId = projProposalItem.TableId,
+                        ParmLineRecId = projProposalItem.RecId,
+                        ParmId = projProposalItem.ProposalId
+                where markupWorkTrans.RefTableId == calcParm.OrderLineTableId
+                &&    markupWorkTrans.RefRecId == calcParm.OrderLineRecId;
+
+                FINProjInvoiceRun   projInvoiceRun;
+
+                update_recordset projInvoiceRun
+                setting ParmId = projProposalItem.ProposalId
+                where projInvoiceRun.ParmId == calcParm.ParmId;
+
+                calcParm.OrderLineRecId = projProposalItem.RecId;
+                calcParm.OrderLineTableId = projProposalItem.TableId;
+                calcParm.ParmId = projProposalItem.ProposalId;
+                calcParm.update();
+            }
+        }
+        
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINprocessProjHourMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    protected static void FINprocessProjHourMarkupWorkTrans(ProjProposalId _projProposalId)
+    {
+        ProjProposalEmpl    projProposalEmpl;
+        ProjEmplTrans       projEmplTrans;
+        RecId               prevLineRecId;
+        AmountCur           projHourAmount;
+        SalesTable          salesTable;
+        SalesLine           salesLine;
+        RecId               salesTableRecId, projEmplTransRefRecId;
+        TableId             projEmplTransRefTableId;
+
+        //update project hour markupWorkTrans records with amounts from selected records and move them on header level
+        while select projProposalEmpl
+        order by projEmplTrans.INVRefRecId
+        where projProposalEmpl.ProposalId == _projProposalId
+            join projEmplTrans
+            where projEmplTrans.TransId == projProposalEmpl.TransId
+                join CurrencyCode from salesLine
+                where salesLine.RORTradeType != RORTradeType::SalesPurch
+                &&    salesLine.RecId   == projEmplTrans.INVRefRecId
+                &&    salesLine.TableId == projEmplTrans.INVRefTableId
+                    join RecId from salesTable
+                    where salesTable.SalesId == salesLine.SalesId
+        {
+            salesTableRecId         = salesTable.RecId;
+            projEmplTransRefRecId   = projEmplTrans.INVRefRecId;
+            projEmplTransRefTableId = projEmplTrans.INVRefTableId;
+
+            if (prevLineRecId && prevLineRecId != projEmplTrans.INVRefRecId)
+            {
+                prevLineRecId = projEmplTrans.INVRefRecId;
+
+                ProjInvoiceProposalInsertLines::FINupdateMarkupWorkTransHeader(projHourAmount, _projProposalId, projEmplTransRefRecId, projEmplTransRefTableId, salesTableRecId, tableNum(SalesTable));
+
+                projHourAmount = 0;
+            }
+            else
+            {
+                AmountCur salesAmount = projEmplTrans.TotalSalesAmountCur;
+                projHourAmount += CurrencyExchangeHelper::curAmount2CurAmount(salesAmount, projEmplTrans.CurrencyId, salesLine.CurrencyCode);
+            }
+        }
+
+        if (projHourAmount)
+        {
+            ProjInvoiceProposalInsertLines::FINupdateMarkupWorkTransHeader(projHourAmount, _projProposalId, projEmplTransRefRecId, projEmplTransRefTableId, salesTableRecId, tableNum(SalesTable));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINupdateMarkupWorkTransHeader</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    public static void FINupdateMarkupWorkTransHeader(AmountCur _projHourAmount, ProjProposalId _projProposalId, RecId _refRecId, TableId _refTableId, RecId _headerRecId, TableId _headerTableId)
+    {
+        FINMarkupWorkTrans  markupWorkTrans;
+
+        while select forUpdate markupWorkTrans
+        where markupWorkTrans.RefTableId    == _refTableId
+        &&    markupWorkTrans.RefRecId      == _refRecId
+        &&    markupWorkTrans.IsProjHour    == true
+        {
+            MarkupTrans markupTransHeader;
+            MarkupTable markupTable;
+            AmountCur projHourMarkupAmount;
+
+            while select markupTransHeader
+            where markupTransHeader.TransRecId      == _headerRecId
+            &&    markupTransHeader.TransTableId    == _headerTableId
+            &&    markupTransHeader.MarkupCategory  == MarkupCategory::Percent
+                exists join markupTable
+                where markupTable.MarkupCode == markupWorkTrans.MarkupCode
+                &&    (markupTable.ModuleType == MarkupModuleType::Cust || markupTable.ModuleType == MarkupModuleType::Vend)
+                // Do not add to header totals internal charges like rental cost
+                &&   (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend)
+            {
+                projHourMarkupAmount += Markup::FINGetMarkupAmountFromMarkupCategory(markupTransHeader, 0, 0, _projHourAmount, _projHourAmount, DateTimeUtil::date(DateTimeUtil::getSystemDateTime()), 0, '', false, false);
+            }
+
+            markupWorkTrans.AmountCur       = projHourMarkupAmount;
+            markupWorkTrans.ParmLineRecId   = _refRecId;
+            markupWorkTrans.ParmLineTableId = _refTableId;
+            markupWorkTrans.RefRecId        = _headerRecId;
+            markupWorkTrans.RefTableId      = _headerTableId;
+            markupWorkTrans.ParmId          = _projProposalId;
+            markupWorkTrans.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

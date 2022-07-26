@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBUpdateBusinessObjectAvailability</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBUpdateBusinessObjectAvailability extends RunBaseBatch
+{
+    // Packed variables
+    DNRReasonCode   reasonCode;
+    SysQueryRun     queryRun;
+
+    // Dialog fields
+    DialogField     dfReasonCode;
+
+    #define.CurrentVersion(1)
+    #define.Version1(1)
+    #localmacro.CurrentList
+        reasonCode
+    #endmacro
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>buildQuery</Name>
+				<Source><![CDATA[
+    private Query buildQuery()
+    {
+        // Take the query the user defined using the SysQueryForm
+        Query query = new Query(queryRun.query().pack());
+    
+        QueryBuildDataSource qbdsBusObjMaint = query.dataSourceTable(tableNum(BOBObjectMaintenancePlan));
+    
+        QueryBuildRange qbr = qbdsBusObjMaint.addRange(fieldNum(BOBObjectMaintenancePlan, NextDate));
+        qbr.value(strFmt('((%1 > %2) && (%1 <= %3))',
+                            fieldStr(BOBObjectMaintenancePlan, NextDate),
+                            date2StrXpp(dateNull()),
+                            date2StrXpp(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))));
+    
+        qbr.status(RangeStatus::Locked);
+    
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Returns a class that contains the methods that are described by the <c>RunBaseDialogable</c>
+    ///    interface.
+    /// </summary>
+    /// <returns>
+    ///    A class that contains the methods that are described by the <c>RunBaseDialogable</c> interface.
+    /// </returns>
+    /// <remarks>
+    ///    A dialog box can be either built by using the <c>Dialog</c> class or by using a class that is
+    ///    created in the Application Object Tree (AOT).
+    /// </remarks>
+    public Object dialog()
+    {
+        DialogRunbase dialog;
+    
+        dialog = super();
+        dfReasonCode = dialog.addFieldValue(extendedTypeStr(DNRReasonCodeAvailability), reasonCode);
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        reasonCode = dfReasonCode.value();
+    
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParmDefault</Name>
+				<Source><![CDATA[
+    public void initParmDefault()
+    {
+        Query                   query;
+        QueryBuildDataSource    qbdsObjectTable, qbdsObjectView, qbdsBusObjMaint, qbdsDefaultMaint;
+        QueryBuildRange         qbr;
+    
+        query = new Query();
+    
+        // Added BOBObjectTable as well as BOBObjectView
+        // because the lookup on ObjectId does not work on the BOBObjectView
+        qbdsObjectTable = query.addDataSource(tableNum(BOBObjectTable));
+    
+        qbr = qbdsObjectTable.addRange(fieldNum(BOBObjectTable, ObjectId));
+    
+        qbdsObjectView = qbdsObjectTable.addDataSource(tableNum(BOBObjectView));
+        qbdsObjectView.addLink(fieldNum(BOBObjectTable, ObjectId), fieldNum(BOBObjectView, ObjectId));
+    
+        qbr = qbdsObjectView.addRange(fieldNum(BOBObjectView, IsAvailable));
+        qbr.value(SysQuery::value(NoYes::Yes));
+        qbr.status(RangeStatus::Locked);
+    
+        qbdsBusObjMaint = qbdsObjectView.addDataSource(tableNum(BOBObjectMaintenancePlan));
+        qbdsBusObjMaint.relations(true);
+    
+        qbr = qbdsBusObjMaint.addRange(fieldNum(BOBObjectMaintenancePlan, ObjectId));
+        qbr.status(RangeStatus::Hidden);
+    
+        qbr = qbdsBusObjMaint.addRange(fieldNum(BOBObjectMaintenancePlan, DefaultPlanRecId));
+        qbr.status(RangeStatus::Hidden);
+    
+        qbr = qbdsBusObjMaint.addRange(fieldNum(BOBObjectMaintenancePlan, EnableWarning));
+        qbr.value(SysQuery::value(NoYes::Yes));
+        qbr.status(RangeStatus::Locked);
+    
+        qbdsDefaultMaint = qbdsBusObjMaint.addDataSource(tableNum(BOBDefaultMaintenancePlan));
+        qbdsDefaultMaint.addLink(fieldNum(BOBObjectMaintenancePlan, DefaultPlanRecId), fieldNum(BOBDefaultMaintenancePlan, RecId));
+        qbdsDefaultMaint.joinMode(JoinMode::ExistsJoin);
+    
+        qbr = qbdsDefaultMaint.addRange(fieldNum(BOBDefaultMaintenancePlan, PlanType));
+        qbr.value(queryRangeConcat(SysQuery::value(BOBMaintenancePlanType::TimeBased), BOBMaintenancePlanType::TimeAndConsumptionBased));
+        qbr.status(RangeStatus::Locked);
+    
+        queryRun = new SysQueryRun(query);
+    
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [#CurrentVersion, #CurrentList, queryRun.pack()];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryRun</Name>
+				<Source><![CDATA[
+    public QueryRun queryRun(QueryRun _queryRun = queryRun)
+    {
+        queryRun = _queryRun;
+    
+        return queryRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Contains the code that does the actual job of the class.
+    /// </summary>
+    public void run()
+    {
+        #OCCRetryCount
+    
+        if (this.validate())
+        {
+            try
+            {
+                ttsBegin;
+                this.updateAvailability();
+                ttsCommit;
+            }
+            catch (Exception::Deadlock)
+            {
+                retry;
+            }
+            catch (Exception::UpdateConflict)
+            {
+                if (appl.ttsLevel() == 0)
+                {
+                    if (xSession::currentRetryCount() >= #RetryNum)
+                    {
+                        throw Exception::UpdateConflictNotRecovered;
+                    }
+                    else
+                    {
+                        retry;
+                    }
+                }
+                else
+                {
+                    throw Exception::UpdateConflict;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showQueryValues</Name>
+				<Source><![CDATA[
+    public boolean showQueryValues()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version     version;
+        container   packedQuery;
+    
+        version = RunBase::getVersion(_packedClass);
+    
+        switch (version)
+        {
+            case #CurrentVersion:
+                [version, #CurrentList, packedQuery] = _packedClass;
+    
+                if(packedQuery)
+                {
+                    queryRun = new SysQueryRun(packedQuery);
+                }
+                break;
+    
+            default:
+                return false;
+        }
+    
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateAvailability</Name>
+				<Source><![CDATA[
+    private void updateAvailability()
+    {
+        BOBObjectTable              objectTable;
+        BOBObjectMaintenancePlan    objectMaintenancePlan;
+        TransDate                   currentDate;
+        Query                       query;
+    
+        currentDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+    
+        query    = this.buildQuery();
+        queryRun = new SysQueryRun(query);
+    
+        while (queryRun.next())
+        {
+            if (queryRun.changed(tableNum(BOBObjectTable)))
+            {
+                objectTable = queryRun.get(tableNum(BOBObjectTable));
+                objectMaintenancePlan = queryRun.get(tableNum(BOBObjectMaintenancePlan));
+    
+                BOBObjectAvailabilityLog::changeAvailability(objectTable.ObjectId,
+                                                             NoYes::No,
+                                                             reasonCode,
+                                                             objectMaintenancePlan.displayOpenWorkOrder());
+    
+                info(strFmt("@DNR7635", objectTable.ObjectId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean ret;
+    
+        ret = true;
+    
+        if (!reasonCode)
+        {
+            ret = checkFailed(strFmt("@SYS26332", "@SYS63086"));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public server static BOBUpdateBusinessObjectAvailability construct()
+    {
+        return new BOBUpdateBusinessObjectAvailability();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    static ClassDescription description()
+    {
+        return "@DNR7599";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static server void main(Args args)
+    {
+        BOBUpdateBusinessObjectAvailability    updateBusinessObjectAvailability;
+    
+        updateBusinessObjectAvailability = BOBUpdateBusinessObjectAvailability::construct();
+    
+        if (updateBusinessObjectAvailability.prompt())
+        {
+            updateBusinessObjectAvailability.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

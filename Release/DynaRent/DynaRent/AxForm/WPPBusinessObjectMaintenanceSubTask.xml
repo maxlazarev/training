@@ -1,0 +1,538 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>WPPBusinessObjectMaintenanceSubTask</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class WPPBusinessObjectMaintenanceSubTask extends FormRun
+{
+    Common                  callerRecord;
+    BOBObjectTable          objectTable;
+    WPPSubTaskDefaultData   dataClass;
+
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        callerRecord = element.args().record();
+
+        super();
+
+        switch (callerRecord.TableId)
+        {
+            case tableNum(BOBObjectTable):
+                objectTable = callerRecord as BOBObjectTable;
+
+                break;
+
+            case tableNum(BOBObjectView):
+                BOBObjectView objectView = callerRecord as BOBObjectView;
+
+                objectTable = BOBObjectTable::findObjectId(objectView.ObjectId);
+
+                break;
+
+            case tableNum(BOBObjectViewV2):
+                BOBObjectViewV2 objectViewV2 = callerRecord as BOBObjectViewV2;
+
+                objectTable = BOBObjectTable::findObjectId(objectViewV2.ObjectId);
+
+                break;
+
+            default:
+                throw error(Error::missingRecord(element.design().caption()));
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="">
+			<DataSource>
+				<Name>WPPSubTaskDefault</Name>
+				<Methods>
+					<Method>
+						<Name>linkActive</Name>
+						<Source><![CDATA[
+        public void linkActive()
+        {
+            this.setTmpData();
+        
+            super();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            super();
+        
+            this.setTmpData();
+        
+            if (element.args().dataset() == tableNum(BOBObjectTable))
+            {
+                WPPSubTaskDefault_ds.allowCreate(false);
+                WPPSubTaskDefault_ds.allowEdit(false);
+                WPPSubTaskDefault_ds.allowDelete(false);
+            }
+        
+            this.cacheAddMethod(tableMethodStr(WPPSubTaskDefault, displaySubTaskGroupDescription));
+            this.cacheAddMethod(tableMethodStr(WPPSubTaskDefault, displaySourceLevel));
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>setTmpData</Name>
+						<Source><![CDATA[
+        private void setTmpData()
+        {
+            dataClass = WPPSubTaskDefaultData::construct(callerRecord);
+        
+            WPPSubTaskDefault_ds.queryBuildDataSource().clearDynalinks();
+            // BP Deviation documented - DynaRent
+            WPPSubTaskDefault.setTmp();
+            WPPSubTaskDefault.setTmpData(dataClass.populateTmpData());
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayLastDateTimeExecuted</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display DateTimeExecuted displayLastDateTimeExecuted(WPPSubTaskDefault _subTaskDefault)
+        {
+            DateTimeExecuted            dateTimeExecuted;
+            WPPWorkOrderLineResource    workOrderLineResource;
+            WPPWorkOrderLine            workOrderLine;
+            WPPWorkOrderTable           workOrderTable;
+            WPPWorkOrderLineSubTask     workOrderLineSubTask;
+        
+            // Retrieve the last executed date/time for a certain sub task
+            // First look on the WPPWorkOrderLineResource
+            select firstOnly ActualToDateTime from workOrderLineResource
+            order by ActualToDateTime desc
+                exists join workOrderLine
+                where workOrderLine.RecId  == workOrderLineResource.WorkOrderLineRecId
+                &&    workOrderLine.TaskId == _subTaskDefault.TaskId
+                    join TableId from workOrderTable
+                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    &&    workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        join TableId from workOrderLineSubTask
+                        where workOrderLineSubTask.WorkOrderLineRecId == workOrderLine.RecId
+                        &&    workOrderLineSubTask.SubTaskId          == _subTaskDefault.SubTaskId
+                        &&    workOrderLineSubTask.Executed;
+        
+            dateTimeExecuted = workOrderLineResource.ActualToDateTime;
+        
+            select firstOnly PlannedToDateTime from workOrderLineResource
+            order by PlannedToDateTime desc
+                exists join workOrderLine
+                where workOrderLine.RecId  == workOrderLineResource.WorkOrderLineRecId
+                &&    workOrderLine.TaskId == _subTaskDefault.TaskId
+                    join TableId from workOrderTable
+                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    &&    workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        join TableId from workOrderLineSubTask
+                        where workOrderLineSubTask.WorkOrderLineRecId == workOrderLine.RecId
+                        &&    workOrderLineSubTask.SubTaskId          == _subTaskDefault.SubTaskId
+                        &&    workOrderLineSubTask.Executed;
+        
+            if (workOrderLineResource.PlannedToDateTime > dateTimeExecuted)
+            {
+                dateTimeExecuted = workOrderLineResource.PlannedToDateTime;
+            }
+        
+            // Also check the WPPWorkOrderLine for a date later than the ones on the WPPWorkOrderLineResource
+            select firstOnly RequestedEndDateTime, WorkOrderId from workOrderLine
+            order by workOrderLine.RequestedEndDateTime desc
+            where workOrderLine.TaskId               == _subTaskDefault.TaskId
+                exists join workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                &&    workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                    join TableId from workOrderLineSubTask
+                    where workOrderLineSubTask.WorkOrderLineRecId == workOrderLine.RecId
+                    &&    workOrderLineSubTask.SubTaskId          == _subTaskDefault.SubTaskId
+                    &&    workOrderLineSubTask.Executed;
+        
+            if (workOrderLine.RequestedEndDateTime > dateTimeExecuted)
+            {
+                dateTimeExecuted = workOrderLine.RequestedEndDateTime;
+            }
+        
+            return dateTimeExecuted;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayLastWorkOrderId</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display WPPWorkOrderId displayLastWorkOrderId(WPPSubTaskDefault _subTaskDefault)
+        {
+            WPPWorkOrderId              workOrderId;
+            WPPWorkOrderLineResource    workOrderLineResource;
+            WPPWorkOrderLine            workOrderLine;
+            WPPWorkOrderTable           workOrderTable;
+            WPPWorkOrderLineSubTask     workOrderLineSubTask;
+            TransDateTime               lastDateTimeExecuted;
+        
+            // Retrieve the last executed date/time for a certain sub task
+            // First look on the WPPWorkOrderLineResource
+            select firstOnly ActualToDateTime from workOrderLineResource
+            order by ActualToDateTime desc
+                join WorkOrderId from workOrderLine
+                where workOrderLine.RecId  == workOrderLineResource.WorkOrderLineRecId
+                &&    workOrderLine.TaskId == _subTaskDefault.TaskId
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    &&    workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        join TableId from workOrderLineSubTask
+                        where workOrderLineSubTask.WorkOrderLineRecId == workOrderLine.RecId
+                        &&    workOrderLineSubTask.SubTaskId          == _subTaskDefault.SubTaskId
+                        &&    workOrderLineSubTask.Executed;
+        
+            workOrderId = workOrderLine.WorkOrderId;
+            lastDateTimeExecuted = workOrderLineResource.ActualToDateTime;
+        
+            select firstOnly PlannedToDateTime from workOrderLineResource
+            order by PlannedToDateTime desc
+                join WorkOrderId from workOrderLine
+                where workOrderLine.RecId  == workOrderLineResource.WorkOrderLineRecId
+                &&    workOrderLine.TaskId == _subTaskDefault.TaskId
+                    exists join workOrderTable
+                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    &&    workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        join TableId from workOrderLineSubTask
+                        where workOrderLineSubTask.WorkOrderLineRecId == workOrderLine.RecId
+                        &&    workOrderLineSubTask.SubTaskId          == _subTaskDefault.SubTaskId
+                        &&    workOrderLineSubTask.Executed;
+        
+            if (workOrderLineResource.PlannedToDateTime > lastDateTimeExecuted)
+            {
+                workOrderId = workOrderLine.WorkOrderId;
+                lastDateTimeExecuted = workOrderLineResource.PlannedToDateTime;
+            }
+        
+            // Also check the WPPWorkOrderLine for a date later than the ones on the WPPWorkOrderLineResource
+            select firstOnly RequestedEndDateTime, WorkOrderId from workOrderLine
+            order by workOrderLine.RequestedEndDateTime desc
+            where workOrderLine.TaskId == _subTaskDefault.TaskId
+                exists join workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                &&    workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                    join TableId from workOrderLineSubTask
+                    where workOrderLineSubTask.WorkOrderLineRecId == workOrderLine.RecId
+                    &&    workOrderLineSubTask.SubTaskId          == _subTaskDefault.SubTaskId
+                    &&    workOrderLineSubTask.Executed;
+        
+            if (workOrderLine.RequestedEndDateTime > lastDateTimeExecuted)
+            {
+                workOrderId = workOrderLine.WorkOrderId;
+            }
+        
+            return workOrderId;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+		</DataSources>
+		<DataControls xmlns="">
+			<Control>
+				<Name>displaySubTaskGroupId</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>jumpRef</Name>
+						<Source><![CDATA[
+        public void jumpRef()
+        {
+            Args args = new Args();
+            args.name(formStr(WPPSubTaskGroup));
+            args.lookupField(fieldNum(WPPSubTaskGroup, GroupId));
+            args.lookupValue(this.text());
+        
+            FormRun formRun = ClassFactory::formRunClassOnClient(args);
+            formRun.init();
+            formRun.run();
+            formRun.wait();
+            formRun.detach();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>displayLastWorkOrderId</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>jumpRef</Name>
+						<Source><![CDATA[
+        public void jumpRef()
+        {
+            Args args = new Args();
+            args.name(formStr(WPPWorkOrderTable));
+            args.lookupField(fieldNum(WPPWorkOrderTable, WorkOrderId));
+            args.lookupValue(this.text());
+        
+            FormRun formRun = ClassFactory::formRunClassOnClient(args);
+            formRun.init();
+            formRun.run();
+            formRun.wait();
+            formRun.detach();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources>
+		<AxFormDataSource xmlns="">
+			<Name>WPPSubTaskDefault</Name>
+			<Table>WPPSubTaskDefault</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>dataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>GroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsDeleted</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OverwriteRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecIdDb</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SubTaskId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaskId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<InsertAtEnd>No</InsertAtEnd>
+			<InsertIfEmpty>No</InsertIfEmpty>
+			<StartPosition>Last</StartPosition>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+	</DataSources>
+	<Design>
+		<Caption xmlns="">@DNR7274</Caption>
+		<Pattern xmlns="">SimpleList</Pattern>
+		<PatternVersion xmlns="">1.1</PatternVersion>
+		<SetCompany xmlns="">No</SetCompany>
+		<Style xmlns="">SimpleList</Style>
+		<TitleDataSource xmlns="">WPPSubTaskDefault</TitleDataSource>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormActionPaneControl">
+				<Name>ApplicationBar</Name>
+				<Type>ActionPane</Type>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls />
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormGroupControl">
+				<Name>CustomFilterGroup</Name>
+				<ElementPosition>1288490187</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Pattern>CustomAndQuickFilters</Pattern>
+				<PatternVersion>1.1</PatternVersion>
+				<Type>Group</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl>
+						<Name>QuickFilterControl</Name>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension>
+							<Name>QuickFilterControl</Name>
+							<ExtensionComponents />
+							<ExtensionProperties>
+								<AxFormControlExtensionProperty>
+									<Name>targetControlName</Name>
+									<Type>String</Type>
+									<TypeName>str</TypeName>
+									<Value>Grid</Value>
+								</AxFormControlExtensionProperty>
+								<AxFormControlExtensionProperty>
+									<Name>defaultColumnName</Name>
+									<Type>String</Type>
+									<TypeName>str</TypeName>
+								</AxFormControlExtensionProperty>
+								<AxFormControlExtensionProperty>
+									<Name>placeholderText</Name>
+									<Type>String</Type>
+								</AxFormControlExtensionProperty>
+							</ExtensionProperties>
+						</FormControlExtension>
+					</AxFormControl>
+				</Controls>
+				<AlignChild>No</AlignChild>
+				<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+				<FrameType>None</FrameType>
+				<Style>CustomFilter</Style>
+				<ViewEditMode>Edit</ViewEditMode>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormGridControl">
+				<Name>Grid</Name>
+				<ElementPosition>1431655764</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Type>Grid</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>WPPSubTaskDefault_TaskId</Name>
+						<ElementPosition>477218588</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataField>TaskId</DataField>
+						<DataSource>WPPSubTaskDefault</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>WPPSubTaskDefault_SubTaskId</Name>
+						<ElementPosition>715827882</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataField>SubTaskId</DataField>
+						<DataSource>WPPSubTaskDefault</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>displaySubTaskGroupId</Name>
+						<ElementPosition>954437176</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataField>GroupId</DataField>
+						<DataSource>WPPSubTaskDefault</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>displaySubTaskGroupDescription</Name>
+						<ElementPosition>1193046470</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataMethod>displaySubTaskGroupDescription</DataMethod>
+						<DataSource>WPPSubTaskDefault</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>displaySourceLevel</Name>
+						<ElementPosition>1431655764</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataMethod>displaySourceLevel</DataMethod>
+						<DataSource>WPPSubTaskDefault</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormDateTimeControl">
+						<Name>displayLastDateTimeExecuted</Name>
+						<ElementPosition>1670265058</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>DateTime</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataMethod>displayLastDateTimeExecuted</DataMethod>
+						<DataSource>WPPSubTaskDefault</DataSource>
+						<Label>@DNR7293</Label>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>displayLastWorkOrderId</Name>
+						<ElementPosition>1908874352</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataMethod>displayLastWorkOrderId</DataMethod>
+						<DataSource>WPPSubTaskDefault</DataSource>
+					</AxFormControl>
+				</Controls>
+				<AlternateRowShading>No</AlternateRowShading>
+				<DataSource>WPPSubTaskDefault</DataSource>
+				<MultiSelect>No</MultiSelect>
+				<ShowRowLabels>No</ShowRowLabels>
+				<Style>Tabular</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

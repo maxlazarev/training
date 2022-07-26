@@ -1,0 +1,736 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINSalesTotals</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINSalesTotals
+{
+    FINSalesTotalsProjInvoiceProposalCreateLines proposalCreateLines;
+    SalesParmTable parmTable;
+    psaTmpProjProposalTrans psaTmpProjProposalTrans;
+    Common callerBuffer;
+    SalesUpdate specQty = SalesUpdate::All;
+    TransDate transDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+    INVCalculationDateTime calculationDateTime = DateTimeUtil::getSystemDateTime();
+    FINInvoicingOptions invoicingOptionsForCredit;
+    boolean forceInvoicingOptionsForCredit;
+    ParmId parmId;
+    SalesTable salesTable;
+    SalesLine salesLine;
+    boolean wasInvoiced;
+    Set recIdSet = new Set(Types::Int64);
+    public boolean mustPrepareInvoicedData;
+    public ParmId estimationParmId;
+    CustInvoiceJourRefRecId creditJourRefRecId;
+    FINRentalCreditWizard rentalCreditWizard;
+    boolean forceInvoicingOptions;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setInvoicingOptionsForCredit</Name>
+				<Source><![CDATA[
+    public void setInvoicingOptionsForCredit(FINInvoicingOptions _invoicingOptionsForCredit)
+    {
+        invoicingOptionsForCredit = _invoicingOptionsForCredit;
+        forceInvoicingOptionsForCredit = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>recIdSet</Name>
+				<Source><![CDATA[
+    public Set recIdSet()
+    {        
+        return recIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>specQty</Name>
+				<Source><![CDATA[
+    SalesUpdate specQty(SalesUpdate _specQty = specQty)
+    {
+        specQty = _specQty;
+
+        return specQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transDate</Name>
+				<Source><![CDATA[
+    TransDate transDate(TransDate _transDate = transDate)
+    {
+        transDate = _transDate;
+
+        return transDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculationDateTime</Name>
+				<Source><![CDATA[
+    INVCalculationDateTime calculationDateTime(INVCalculationDateTime _calculationDateTime = calculationDateTime)
+    {
+        calculationDateTime = _calculationDateTime;
+
+        return calculationDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerBuffer</Name>
+				<Source><![CDATA[
+    public Common parmCallerBuffer(Common _callerBuffer = callerBuffer)
+    {
+        callerBuffer = _callerBuffer;
+        return callerBuffer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getParmTable</Name>
+				<Source><![CDATA[
+    public SalesParmTable getParmTable()
+    {
+        return parmTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPsaTmpProjProposalTrans</Name>
+				<Source><![CDATA[
+    public psaTmpProjProposalTrans getPsaTmpProjProposalTrans()
+    {
+        return psaTmpProjProposalTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isOrderLinkedToProject</Name>
+				<Source><![CDATA[
+    private boolean isOrderLinkedToProject()
+    {
+        boolean ret = false;
+
+        if (callerBuffer.TableId == tableNum(SalesTable))
+        {
+            salesTable = callerBuffer as SalesTable;
+        }
+        else if (callerBuffer.TableId == tableNum(SalesLine))
+        {
+            salesLine = callerBuffer as SalesLine;
+            if (salesLine)
+            {
+                salesTable = salesLine.salesTable();
+            }
+        }
+  
+        ret = (salesTable.ProjId != '');
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareProjectDataForTotals</Name>
+				<Source><![CDATA[
+    private void prepareProjectDataForTotals()
+    {        
+        if (callerBuffer.TableId == tableNum(salesTable) && mustPrepareInvoicedData)
+        {
+            // If called form header level then simply copy markupTrans.
+            // If called from line level then details will be calculated in FINRentalInvoiceDetailHelper.
+            this.prepareInvoicedData();
+        }
+
+        this.prepareProjectForecastData();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initProposalCreateLines</Name>
+				<Source><![CDATA[
+    private void initProposalCreateLines(container _params)
+    {
+        proposalCreateLines = FINSalesTotalsProjInvoiceProposalCreateLines::construct(_params);
+
+        // Limit rental totals calculation to the selected order/line instead of all rental orders in the project
+        if (salesLine && salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            proposalCreateLines.setSalesLineRecIdRange(salesLine.RecId);
+        }
+        else if (salesTable && salesTable.SalesType == SalesType::RORRental)
+        {
+            proposalCreateLines.setSalesIdRange(salesTable.SalesId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareProjInvoiceProposalParms</Name>
+				<Source><![CDATA[
+    private ProjInvoiceProposalCreateLinesParams prepareProjInvoiceProposalParms()
+    {
+        ProjInvoiceProposalCreateLinesParams proposalCreateLinesParams = ProjInvoiceProposalCreateLinesParams::construct();
+
+        TransDate transDateForProject = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+        // We want to see lines that will be delivered a month ahead.
+        transDateForProject = nextMth(transDateForProject);
+
+        proposalCreateLinesParams.parmEndDate(transDateForProject);
+        proposalCreateLinesParams.parmFundingSource("");
+        proposalCreateLinesParams.parmInvoiceDate(transDateForProject);
+        proposalCreateLinesParams.parmIsQueryCostTrans(NoYes::No);
+        proposalCreateLinesParams.parmIsQueryEmplTrans(NoYes::No);
+        proposalCreateLinesParams.parmIsQueryItemTrans(NoYes::No);
+        proposalCreateLinesParams.parmIsQueryOnAccTrans(NoYes::No);
+        proposalCreateLinesParams.parmIsQueryRevenueTrans(NoYes::No);
+        proposalCreateLinesParams.parmIsQuerySalesLine(NoYes::Yes);
+        proposalCreateLinesParams.parmIsQuerySubscriptionTrans(NoYes::No);
+        proposalCreateLinesParams.parmProjId(salesTable.ProjId);
+        proposalCreateLinesParams.parmProjInvoiceProjId(salesTable.projTable().ProjInvoiceProjId);
+        proposalCreateLinesParams.parmSalesUpdate(salesUpdate::All);
+                
+        if (salesLine)
+        {
+            calculationDateTime = max(calculationDateTime, salesLine.RORRentalDateTimes().getOffRentDateTime(true, true));
+        }
+        else
+        {
+            calculationDateTime = max(calculationDateTime, RORRentalDateTimes::findReference(salesTable.TableId, salesTable.RecId).getOffRentDateTime(true, true));
+        }
+
+        // Move calculation to begining of next month to be sure that monthly invoicing is correctly calculated.
+        calculationDateTime = DateTimeUtil::newDateTime(endMth(DateTimeUtil::date(calculationDateTime)) + 2, 0);
+
+        proposalCreateLinesParams.INVparmCalculationDateTime(calculationDateTime);
+        proposalCreateLinesParams.INVparmIncludeUninvoiced(true);
+        proposalCreateLinesParams.INVparmIncludeCredits(true);
+        proposalCreateLinesParams.FINParmEstimationParmId(parmId);
+
+        estimationParmId = parmId;
+
+        return proposalCreateLinesParams;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareProjectForecastData</Name>
+				<Source><![CDATA[
+    private void prepareProjectForecastData()
+    {
+        parmId = formletterParmData::getNewParmId();
+
+        ProjInvoiceProposalCreateLinesParams proposalCreateLinesParams = this.prepareProjInvoiceProposalParms();
+        this.initProposalCreateLines(proposalCreateLinesParams.pack());
+        proposalCreateLines.run();
+
+        psaTmpProjProposalTrans.setTmpData(proposalCreateLines.getProposalTransDisplay());
+
+        if (salesLine && salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            delete_from psaTmpProjProposalTrans
+            where psaTmpProjProposalTrans.TransactionOrigin != ProjOrigin::SalesOrder
+            ||    psaTmpProjProposalTrans.RefTableId != salesLine.TableId
+            ||    psaTmpProjProposalTrans.RefRecId != salesLine.RecId;
+
+            // There should be 1 record that we can use as a caller for Details form.
+            select firstonly psaTmpProjProposalTrans;            
+        }
+        else if (salesTable && salesTable.SalesType == SalesType::RORRental)
+        {
+            SalesLine salesLineForOrder;
+
+            delete_from psaTmpProjProposalTrans
+                notexists join salesLineForOrder
+                where salesLineForOrder.RecId == psaTmpProjProposalTrans.RefRecId
+                &&    salesLineForOrder.SalesId == salesTable.SalesId;            
+        } 
+               
+        Set recIdSetProj = FINMarkupTransGenerator::createMarkupTransForParmId(parmId);
+        recIdSet = Set::union(recIdSet, recIdSetProj);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCreditJourRefRecId</Name>
+				<Source><![CDATA[
+    public CustInvoiceJourRefRecId parmCreditJourRefRecId(CustInvoiceJourRefRecId _creditJourRefRecId = creditJourRefRecId)
+    {
+        creditJourRefRecId = _creditJourRefRecId;
+        return creditJourRefRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareDataForTotals</Name>
+				<Source><![CDATA[
+    public void prepareDataForTotals()
+    {
+        if (!RORParameters::find().RentalProjectInvoicing && this.isOrderLinkedToProject())
+        {
+            this.prepareProjectDataForTotals();
+        }
+        else
+        {
+            this.prepareForecastData();
+                         
+            if (callerBuffer.TableId == tableNum(salesTable) && mustPrepareInvoicedData)
+            {
+                // If called form header level then simply copy markupTrans.
+                // If called from line level then details will be calculated in FINRentalInvoiceDetailHelper.
+                this.prepareInvoicedData();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanupPrecalculatedData</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void cleanupPrecalculatedData()
+    {
+        ttsbegin;
+        if (parmTable)
+        {
+            parmTable.selectForUpdate(true);
+            parmTable.delete();
+        }
+
+        if (parmId)
+        {
+            FINMarkupWorkTrans  markupWorkTrans;
+
+            delete_from markupWorkTrans
+            where markupWorkTrans.ParmId == parmId;
+
+            FINInvoiceCalculatorParm    invoiceCalcParm;
+
+            delete_from invoiceCalcParm
+            where invoiceCalcParm.ParmId == parmId;
+
+            FINCustInvoiceRun   custInvoiceRun;
+            
+            delete_from custInvoiceRun
+            where custInvoiceRun.ParmId == parmId;
+        }
+
+        if (recIdSet && !recIdSet.empty())
+        {
+            SetEnumerator enumerator = recIdSet.getEnumerator();
+            
+            while (enumerator.moveNext())
+            {
+                RecId deletedRecId = enumerator.current();
+                MarkupTrans markupTrans;
+
+                delete_from markupTrans
+                where markupTrans.RecId == deletedRecId;
+            }            
+        }
+        ttscommit;
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareForecastData</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void prepareForecastData()
+    {          
+        SalesFormLetter salesFormLetter;
+        boolean isTechnicallyReplaced;
+
+        using (SalesFormLetterConstructContext context = SalesFormLetterConstructContext::construct())
+        {
+            // Do not load from SysLastValue as we may select on the wrong criteria.
+            context.parmLoadFromSysLastValue(UnknownNoYes::No);
+            salesFormLetter = SalesFormLetter::construct(DocumentStatus::Invoice);
+        }
+        
+        if (creditJourRefRecId)
+        {
+            salesFormLetter.FINParmInvoiceJourRecId(creditJourRefRecId);
+        }
+
+        SalesParmLine parmLine;
+          
+        if (callerBuffer.TableId == tableNum(SalesTable))
+        {
+            salesTable = callerBuffer as SalesTable;
+        }
+        else if (callerBuffer.TableId == tableNum(SalesLine))
+        {
+            salesLine = callerBuffer as SalesLine;
+            salesTable = salesLine.salesTable();
+            salesFormLetter.createFromLines(true);
+            List list = new List(Types::Record);
+            list.addEnd(salesLine);
+            salesFormLetter.parmLineList(list.pack());
+            isTechnicallyReplaced = salesLine.RORRecIdExchanged != 0;
+        }
+  
+        FINInvoicingOptions invoicingOptions;
+
+        if (forceInvoicingOptionsForCredit)
+        {
+            invoicingOptions = invoicingOptionsForCredit;
+        }
+        else
+        {
+            if (salesLine)
+            {
+                calculationDateTime = max(calculationDateTime, salesLine.RORRentalDateTimes().getOffRentDateTime(true, true));
+            }
+            else
+            {
+                calculationDateTime = max(calculationDateTime, RORRentalDateTimes::findReference(salesTable.TableId, salesTable.RecId).getOffRentDateTime(true, true));
+            }
+
+            // Move calculation to begining of next month to be sure that monthly invoicing is correctly calculated.
+            calculationDateTime = DateTimeUtil::newDateTime(endMth(DateTimeUtil::date(calculationDateTime)) + 2, 0);
+            
+            invoicingOptions = FINInvoicingOptions::construct();            
+            invoicingOptions.includeUninvoiced = NoYes::Yes;
+            invoicingOptions.includeCredited = NoYes::Yes;
+            invoicingOptions.calculationDateTime = calculationDateTime;
+        }
+
+        // If no menu item is specified, the invoicing options are overridden at /Classes/DNRSalesFormLetterParmDataClass1_Extension/Methods/FINSetInvoicingOptions
+        if (forceInvoicingOptions)
+        {
+            salesFormLetter.RORparmCallerMenuItem(menuitemactionstr(INVSalesFormLetter_InvoiceCreditWizard));
+        }
+
+        salesFormLetter.salesTable(salesTable);
+        salesFormLetter.getContract().parmCallerTable(salesTable);
+        salesFormLetter.transDate(transDate);
+        salesFormLetter.specQty(this.specQty());        
+        salesFormLetter.FINSetInvoicingOption(invoicingOptions);
+        salesFormLetter.RORparmRentalSubStatus(BOBRentalSubStatus::Invoiced);
+        if (!invoicingOptions.isCreditPreview && !isTechnicallyReplaced)
+        {
+            // For credit we want to see only delivered lines
+            salesFormLetter.FINParmCalcEstimation(true);
+            salesFormLetter.FINParmInvoiceJourRecId(0);
+        }
+        
+        salesFormLetter.FINParmPostInvoiceProposal(false);
+        salesFormLetter.FINParmProformaInvoiceJourRecId(0);
+
+        salesFormLetter.initLinesQuery();
+
+        FINMarkupTransGenerator::createMarkupWorkTrans(salesFormLetter.parmId());
+
+        if (salesLine && salesFormLetter.parmId())
+        {
+            delete_from parmLine
+            where parmLine.ParmId == salesFormLetter.parmId()
+            &&    parmLine.SalesLineRecId != salesLine.RecId;
+        }
+
+        select firstonly parmTable where parmTable.parmId == salesFormLetter.parmId();
+
+        parmId = parmTable.ParmId;
+
+        // create temporary markupTrans linked to salesLine
+        recIdSet = FINMarkupTransGenerator::createMarkupTransForParmId(parmId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prepareInvoicedData</Name>
+				<Source><![CDATA[
+    protected void prepareInvoicedData()
+    {
+        RecordInsertList insertList = new RecordInsertList(tableNum(FINMarkupWorkTrans));
+        MarkupTrans markupTrans;
+        CustInvoiceTrans custInvoiceTrans;
+        SalesLine orderLine;
+        ParmId localParmId = parmId;
+        
+        if (!localParmId)
+        {
+            localParmId = int642Str(salesTable.RecId);
+        }
+        
+        while select markupTrans
+            join TableId, RecId from custInvoiceTrans
+            where custInvoiceTrans.SalesId == salesTable.SalesId
+            &&    (!salesLine.RecId || custInvoiceTrans.InventTransId == salesLine.InventTransId)
+            &&    custInvoiceTrans.TableId == markupTrans.TransTableId
+            &&    custInvoiceTrans.RecId == markupTrans.TransRecId
+                join TableId, RecId from orderLine
+                where orderLine.InventTransId == custInvoiceTrans.InventTransId
+        {
+            FINMarkupWorkTrans  markupWorkTrans;
+            
+            markupWorkTrans.clear();
+            markupWorkTrans.RefTableId = orderLine.TableId;
+            markupWorkTrans.RefRecId = orderLine.RecId;
+            markupWorkTrans.ParmLineTableId = custInvoiceTrans.TableId;
+            markupWorkTrans.ParmLineRecId = custInvoiceTrans.RecId;
+            markupWorkTrans.MarkupCode = markupTrans.markupCode;
+            markupWorkTrans.Txt = markupTrans.Txt;
+            markupWorkTrans.TaxItemGroup = markupTrans.TaxItemGroup;
+            markupWorkTrans.AmountCur = markupTrans.CalculatedAmount;
+            markupWorkTrans.initFromRentalLine(orderLine);
+            markupWorkTrans.ParmId = localParmId;
+
+            insertList.add(markupWorkTrans);
+         
+            wasInvoiced = true;
+        }
+
+        insertList.insertDatabase();
+
+        // create temporary markupTrans linked to salesLine
+        Set recIdSetInvoiced = FINMarkupTransGenerator::createMarkupTransForParmId(localParmId);
+        recIdSet = Set::union(recIdSet, recIdSetInvoiced);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>wasInvoiced</Name>
+				<Source><![CDATA[
+    public boolean wasInvoiced()
+    {
+        return wasInvoiced;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void main(Args _args)
+    {
+        if (_args && _args.record()
+        && (_args.dataSet() == tableNum(SalesTable) || _args.dataSet() == tableNum(SalesLine)))
+        {
+            FINCreditManager creditManager;
+
+            if (_args.parmObject() && _args.parmObject() is FINCreditManager)
+            {
+                creditManager = _args.parmObject();
+            }
+
+            FINSalesTotals  finSalesTotals = new FINSalesTotals();
+                      
+            if (creditManager)
+            {
+                FINSalesTotals.specQty(SalesUpdate::DeliverNow);
+            }
+            finSalesTotals.parmCallerBuffer(_args.record());
+            finSalesTotals.prepareDataForTotals();
+                         
+            FormRun formRun;
+            Args args = new Args();
+            SalesLine salesLine;
+            Set recIdSet = finSalesTotals.recIdSet();
+
+            args.caller(finSalesTotals);
+            if (_args.dataSet() == tableNum(SalesTable))
+            {
+                args.record(_args.record());                    
+                args.name(formStr(FINSalesTotals));
+            }
+            else
+            {                
+                salesLine = _args.record();
+                
+                if (salesLine.RORTradeType == RORTradeType::SalesPurch)
+                {
+                    args.record(salesLine);                                             
+                    args.name(formStr(FINSalesTotals));
+                }
+                else
+                {
+                    SalesParmTable salesParmTable = finSalesTotals.getParmTable();
+                    psaTmpProjProposalTrans psaTmpProjProposalTrans = finSalesTotals.getPsaTmpProjProposalTrans();
+
+                    if (psaTmpProjProposalTrans)
+                    {
+                        args.record(psaTmpProjProposalTrans);
+                    }
+                    else
+                    {
+                        SalesParmLine salesParmLine;
+
+                        select firstonly salesParmLine
+                        where salesParmLine.SalesLineRecId == salesLine.RecId
+                        &&    salesParmLine.ParmId == salesParmTable.ParmId;
+                        
+                        if (salesParmLine)
+                        {
+                            args.record(salesParmLine);
+                        }
+                        else
+                        {
+                            args.record(salesLine);
+                        }
+                    }
+
+                    args.parm("@DNR435");
+                    args.name(formStr(FINRentalInvoiceDetail));
+                }
+            }
+
+            formRun = classfactory.formRunClass(args);
+            formRun.init();
+            formRun.run();
+              
+            FINMarkupTransGenerator::deleteMarkupTransForSet(recIdSet);
+                
+            if (creditManager)
+            {
+                creditManager.restoreOrig();                    
+            }      
+                 
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTotalAmount</Name>
+				<Source><![CDATA[
+    public static AmountCur calculateTotalAmount(Args _args)
+    {
+        AmountCur ret;
+
+        if (_args && _args.record()
+        && (_args.dataSet() == tableNum(SalesTable) || _args.dataSet() == tableNum(SalesLine)))
+        {
+            SalesLine salesLine;
+
+            if (_args.dataSet() == tableNum(SalesLine))
+            {
+                salesLine = _args.record();
+            }
+
+            FINSalesTotals  finSalesTotals = finSalesTotals::constructAndPrepareForTotals(_args);
+                                    
+            if (finSalesTotals.getParmTable())
+            {
+                SalesParmLine salesParmLine;
+                SalesParmTable salesParmTable = finSalesTotals.getParmTable();
+
+                while select salesParmLine
+                where salesParmLine.ParmId ==  salesParmTable.parmId
+                &&    (!salesLine || salesParmLine.SalesLineRecId == salesLine.RecId)
+                {
+                    FINRentalInvoiceDetailHelper helper = new FINRentalInvoiceDetailHelper();
+                    helper.initParameters(salesParmLine, false);
+                    helper.calculate();
+
+                    ret += helper.totalChargedAmount;
+                }
+
+                salesParmTable.selectForUpdate(true);
+                salesParmTable.delete();
+            }  
+         
+            FINMarkupTransGenerator::deleteMarkupTransForSet(finSalesTotals.recIdSet());
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>constructAndPrepareForTotals</Name>
+				<Source><![CDATA[
+    public static FINSalesTotals constructAndPrepareForTotals(Args _args)
+    {
+        FINSalesTotals finSalesTotals = new FINSalesTotals();
+        FINCreditManager creditManager;
+        FINRentalCreditWizard rentalCreditWizard;
+
+        if (_args.parmObject())
+        {
+            Object callerObject = _args.parmObject();
+
+            if (callerObject is FINCreditManager)
+            {
+                creditManager = callerObject;
+            }
+            else if(callerObject is FINRentalCreditWizard)
+            {
+                rentalCreditWizard = callerObject;
+            }
+        }
+
+        if (creditManager || rentalCreditWizard)
+        {
+            NoYes mustIncludeUninvoiced = NoYes::Yes;
+
+            if (creditManager)
+            {
+                finSalesTotals.calculationDateTime(creditManager.calculationDateTime());
+                finSalesTotals.parmCreditJourRefRecId(creditManager.callerCreditParmLine.JourRefRecId);
+                finSalesTotals.specQty(SalesUpdate::DeliverNow);
+            }
+            else
+            {
+                finSalesTotals.calculationDateTime(rentalCreditWizard.getCalculationDateTime());
+                finSalesTotals.specQty(SalesUpdate::All);
+                mustIncludeUninvoiced = !rentalCreditWizard.isFullCreditReinvoiceScenario();
+                finSalesTotals.setForceInvoicingOptions(true);
+            }
+              
+            FINInvoicingOptions invoicingOptions = FINInvoicingOptions::construct();
+            invoicingOptions.includeUninvoiced = mustIncludeUninvoiced;
+            invoicingOptions.includeCredited = NoYes::Yes;
+            invoicingOptions.calculationDateTime = finSalesTotals.calculationDateTime();
+            invoicingOptions.isCreditPreview = NoYes::Yes;
+            finSalesTotals.setInvoicingOptionsForCredit(invoicingOptions);
+            finSalesTotals.mustPrepareInvoicedData = false;
+        }
+
+        finSalesTotals.parmCallerBuffer(_args.record());
+        finSalesTotals.prepareDataForTotals();
+
+        return finSalesTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setForceInvoicingOptions</Name>
+				<Source><![CDATA[
+    private void setForceInvoicingOptions(boolean _forceInvoicingOptions)
+    {
+        forceInvoicingOptions = _forceInvoicingOptions;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

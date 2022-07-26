@@ -1,0 +1,2965 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxMap xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORRentalLine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class RORRentalLine extends Common
+{
+
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>BOBSynchRentalTransDateTimes</Name>
+				<Source><![CDATA[
+    public void BOBSynchRentalTransDateTimes()
+	{
+		InventTrans     inventTrans;
+		InventMovement  inventMovement;
+	
+		inventMovement = InventMovement::constructNoThrow(this);
+	
+		if(inventMovement)
+		{
+			ttsBegin;
+	
+			while select inventTrans
+			where inventTrans.InventTransOrigin == inventMovement.inventTransOriginId()
+			&&    inventTrans.BOBIsCompensatingTrans == NoYes::No
+			{
+				BOBRentalTransManager::newInventMovement(inventMovement, inventTrans).synchronize();
+			}
+	
+			ttsCommit;
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCascadeFieldsToLines</Name>
+				<Source><![CDATA[
+    public boolean canCascadeFieldsToLines(RORRentalLine _orig)
+	{
+		boolean         ret = false;
+		RORRentalLine   orig = _orig;
+	
+		if (this.RecId) // if the current record is being inserted, it won't have any children yet
+		{
+			if (this.KitComponentType == RORKitComponentType::Kit || this.KitComponentType == RORKitComponentType::Standalone)
+			{
+				//orig = this.orig();
+	
+				if (this.CalendarId         != orig.CalendarId
+				|| this.INVInvoiceProfileId != orig.INVInvoiceProfileId
+				|| this.PriceTimeUnit       != orig.PriceTimeUnit
+				|| this.INVRentalModeId     != orig.INVRentalModeId)
+				{
+					ret = true;
+				}
+			}
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canOpenRentalEditorForm</Name>
+				<Source><![CDATA[
+    public boolean canOpenRentalEditorForm()
+	{
+		return !this.ParentLineRecId && this.RecId;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canUpdateKitPricing</Name>
+				<Source><![CDATA[
+    public boolean canUpdateKitPricing()
+	{
+		boolean canUpdateKitPricing = false;
+		
+		if (this.TradeType == RORTradeType::SalesPurch && this.KitComponentType == RORKitComponentType::Standalone)
+		{
+			return canUpdateKitPricing;
+		}
+	
+		if (this.RentalGrossAmount  != this.orig().RentalGrossAmount
+		||  this.RentQty            != this.orig().RentQty
+		||  this.LinePercent        != this.orig().LinePercent
+		||  this.PriceTimeUnit      != this.orig().PriceTimeUnit
+		||  (!this.IsPriceFixed && this.IsPriceFixed != this.orig().IsPriceFixed)
+		|| (this.isPriceNet         != this.orig().isPriceNet && (this.KitComponentType == RORKitComponentType::Kit || this.KitComponentType == RORKitComponentType::KitComponent)))
+		{
+			canUpdateKitPricing = true;
+		}
+	
+		return canUpdateKitPricing;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeFieldsToLines</Name>
+				<Source><![CDATA[
+    public void cascadeFieldsToLines(RORRentalLine _this_orig = this.orig(), boolean _forceUpdateRentalLine = false, boolean _convertPrices = false)
+    {
+        // "Maps" map to real buffer so that select can work
+        RORRentalLine   rentalLineUpdate = this.RORLineBuffer();
+ 
+        RAGtmpContractLine  tmpContractLine;
+        RORParameters       rorParameters = RORParameters::find();
+        Factor              factor;
+ 
+        while select forupdate rentalLineUpdate
+        where rentalLineUpdate.HeaderId             == this.HeaderId
+        && rentalLineUpdate.ParentLineRecId         == this.RecId
+        && rentalLineUpdate.TradeType               == this.TradeType
+        && (_forceUpdateRentalLine                                              ||
+            rentalLineUpdate.CalendarId             != this.CalendarId          ||
+            rentalLineUpdate.INVInvoiceProfileId    != this.INVInvoiceProfileId ||
+            rentalLineUpdate.PriceTimeUnit          != this.PriceTimeUnit       ||
+            rentalLineUpdate.INVRentalModeId        != this.INVRentalModeId)
+        {
+            rentalLineUpdate.INVInvoiceProfileId = (rentalLineUpdate.INVInvoiceProfileId == _this_orig.INVInvoiceProfileId) ? this.INVInvoiceProfileId : rentalLineUpdate.INVInvoiceProfileId;
+            rentalLineUpdate.PriceTimeUnit = (rentalLineUpdate.PriceTimeUnit == _this_orig.PriceTimeUnit) ? this.PriceTimeUnit : rentalLineUpdate.PriceTimeUnit;
+    
+            if (rentalLineUpdate.LineType == RORLineType::Insurance
+            // InsureHireStops is applicable only for Rental Stops.
+            && rorParameters.isStopCalendar(this.CalendarId))
+            {
+                tmpContractLine = RAGContractData::getTmpContractLineFromRentalLine(rentalLineUpdate.RORGetParentLine());
+ 
+                if (!tmpContractLine.Insurance_InsureHireStops)
+                {
+                    rentalLineUpdate.CalendarId = (rentalLineUpdate.CalendarId == _this_orig.CalendarId) ? this.CalendarId: rentalLineUpdate.CalendarId;
+                }
+            }
+            else
+            {
+                // For all line - only update  calendarId and rentalMode if it matches the old - can be changed manually and then excluded from cascade
+                rentalLineUpdate.CalendarId = (rentalLineUpdate.CalendarId == _this_orig.CalendarId) ? this.CalendarId: rentalLineUpdate.CalendarId;
+            }
+ 
+            rentalLineUpdate.INVRentalModeId = (rentalLineUpdate.INVRentalModeId == _this_orig.INVRentalModeId) ? this.INVRentalModeId: rentalLineUpdate.INVRentalModeId;
+ 
+            // update also sub-kits.
+            if (rentalLineUpdate.KitComponentType == RORKitComponentType::KitComponent)
+            {
+                rentalLineUpdate.RORRentalLine::cascadeFieldsToLines(rentalLineUpdate.orig(), _forceUpdateRentalLine, _convertPrices);
+            }
+ 
+            if (_convertPrices)
+            {
+                factor = UnitOfMeasureConverter::convert(1, this.PriceTimeUnit, _this_orig.PriceTimeUnit, NoYes::No);
+ 
+                rentalLineUpdate.Price = this.Price * factor;
+                rentalLineUpdate.RentalGrossAmount = rentalLineUpdate.RentalGrossAmount * factor;
+                rentalLineUpdate.RORModifiedGrossAmount();
+            }
+ 
+            rentalLineUpdate.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkAllowEdit</Name>
+				<Source><![CDATA[
+    public client server container checkAllowEdit(boolean _mustUseAmendment = false)
+	{
+        boolean  allowEditQty           = this.RecId ? this.AllowQtyEdit : true;
+		boolean  allowEditRentalPricing = (this.LineType == RORLineType::Normal);
+		boolean  allowEditSalesPricing  = (this.LineType == RORLineType::Normal);
+	
+		switch (this.TradeType)
+		{
+			case RORTradeType::SubRental,
+				 RORTradeType::Rental:
+				allowEditSalesPricing = false;
+				if (this.isPriceFixed || _mustUseAmendment)
+				{
+					allowEditRentalPricing = false;
+				}
+				break;
+	
+			case RORTradeType::SalesPurch:
+				allowEditRentalPricing = false;
+				break;
+		}
+	
+		allowEditRentalPricing = allowEditRentalPricing
+			&& this.KitComponentType != RORKitComponentType::Kit
+			&& (this.KitComponentType != RORKitComponentType::KitComponent || this.RORRentalLine::pricingKitComponentType() != RORKitComponentType::KitComponent);
+	
+		allowEditSalesPricing = allowEditSalesPricing && (this.KitComponentType != RORKitComponentType::Kit || this.TradeType == RORTradeType::SalesPurch);
+	
+		return [allowEditRentalPricing, allowEditSalesPricing, allowEditQty];
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRentalDateTimes</Name>
+				<Source><![CDATA[
+    public RORRentalDateTimes createRentalDateTimes()
+	{
+		RORRentalDateTimes rentalDateTimes;
+
+		if (isConfigurationkeyEnabled(configurationKeyNum(RORRentalDateTimes))
+		&& this.TradeType != RORTradeType::SalesPurch)
+		{
+			rentalDateTimes = RORRentalDateTimes::findReference(this.TableId, this.RecId);
+	
+			if (!rentalDateTimes)
+			{
+				rentalDateTimes.initRentalDateTimes(this);
+	
+				if (rentalDateTimes.validateWriteFromCode(this.CalendarId))
+				{
+					rentalDateTimes.insert();
+				}
+			}
+		}
+	
+		return rentalDateTimes;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>customerVendorName</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+	display Name customerVendorName()
+	{
+		Name                name;
+		SalesTable          salesTable;
+		SalesQuotationTable salesQuotationTable;
+		PurchTable          purchTable;
+	
+		switch (this.TableId)
+		{
+			case tableNum(SalesLine) :
+				salesTable = this.RORGetHeader();
+				name = salesTable.customerName();
+				break;
+	
+			case tableNum(SalesQuotationLine) :
+				salesQuotationTable = this.RORGetHeader();
+				name = salesQuotationTable.customerName();
+				break;
+	
+			case tableNum(PurchLine) :
+				purchTable = this.RORGetHeader();
+				name = purchTable.vendorName();
+				break;
+		}
+	
+		return name;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>displayExpectedOffRentDateTime</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+	display RORExpectedOffRentDateTime displayExpectedOffRentDateTime()
+	{
+		RORExpectedOffRentDateTime   expectedOffRentDateTime;
+		RORRentalDateTimes  rentalDateTimes = this.RORRentalDateTimes();
+	
+		if (rentalDateTimes)
+		{
+			expectedOffRentDateTime = rentalDateTimes.ExpectedOffRentDateTime;
+		}
+	
+		return expectedOffRentDateTime;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>displayOffRentDateTime</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+	display ROROffRentDateTime displayOffRentDateTime()
+	{
+		ROROffRentDateTime  offRentDateTime;
+		RORRentalDateTimes  rentalDateTimes = this.RORRentalDateTimes();
+	
+		if (rentalDateTimes)
+		{
+			offRentDateTime = rentalDateTimes.OffRentDateTime;
+		}
+	
+		return offRentDateTime;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>displayOnRentDateTime</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+	display ROROnRentDateTime displayOnRentDateTime()
+	{
+		ROROnRentDateTime   onRentDateTime;
+		RORRentalDateTimes  rentalDateTimes = this.RORRentalDateTimes();
+	
+		if (rentalDateTimes)
+		{
+			onRentDateTime = rentalDateTimes.OnRentDateTime;
+		}
+	
+		return onRentDateTime;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>editDiscPercent</Name>
+				<Source><![CDATA[
+    public edit RORRentalDiscPercent editDiscPercent(boolean _set, RORRentalDiscPercent _discPercent)
+	{
+		RORRentalDiscPercent rentalDiscPercent;
+	
+		if (_set)
+		{
+			this.LinePercent = _discPercent;
+			this.isPriceNet  = NoYes::No;
+			this.RORRentalLine::rentalPricesModified();
+		}
+	
+		rentalDiscPercent = (this.isPriceNet == NoYes::Yes ? 0.0 : this.LinePercent);
+	
+		return rentalDiscPercent;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>editLineAmount</Name>
+				<Source><![CDATA[
+    edit LineAmount editLineAmount(boolean _set, LineAmount _newLineAmount)
+	{
+		real        delta;
+		LineAmount  lineAmount;
+	
+		if (this.KitComponentType == RORKitComponentType::Kit
+		|| this.KitComponentType == RORKitComponentType::KitComponent)
+		{
+			if (_set)
+			{
+				lineAmount = this.RORRentalLine::getKitGrossAmount(this);
+	
+				if (!this.isPriceFixed && this.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+				{
+					lineAmount += this.LineAmount;
+				}
+	
+				delta = lineAmount ? _newLineAmount / lineAmount : 0;
+	
+				this.RORRentalLine::editNetAmount(true, this.RentalGrossAmount * delta);
+	
+				// If KitComponent's children are only type Sales/Purch then prices will be recalcualted from method write() on form
+				if (this.RORRentalLine::pricingKitComponentType() != RORKitComponentType::Component)
+				{
+					this.RORRentalLine::rentalPricesModified();
+	
+					if (FormDataUtil::getFormDataSource(this))
+					{
+						FormDataUtil::getFormDataSource(this).write();
+					}
+					else
+					{
+						this.update();
+					}
+	
+					lineAmount = _newLineAmount;
+				}
+			}
+			else
+			{
+				lineAmount = this.RORRentalLine::getKitLineAmount(this);
+	
+				if (this.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+				{
+					lineAmount += this.LineAmount;
+				}
+			}
+		}
+		else
+		{
+			if (_set)
+			{
+				delta = this.LineAmount ? _newLineAmount / this.LineAmount : 0;
+	
+				this.RORRentalLine::editNetAmount(true, this.RORRentalLine::editNetAmount(false, 0) * delta);
+				this.LineAmount =  _newLineAmount;
+			}
+	
+			lineAmount = this.LineAmount;
+		}
+	
+		return lineAmount;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>editNetAmount</Name>
+				<Source><![CDATA[
+    public edit RORRentalNetAmount editNetAmount(boolean _set, RORRentalNetAmount _netAmount)
+	{
+		RORRentalNetAmount    netAmount;
+	
+		if (_set)
+		{
+			this.LinePercent    = this.RentalGrossAmount ? ((1 - _netAmount / this.RentalGrossAmount) * 100) : 0;
+			// Flag as net-price-based
+			this.IsPriceNet  = NoYes::Yes;
+			this.RORRentalLine::rentalPricesModified();
+	
+			// Show only warning, allow to set a price anyway.
+			this.RORRentalLine::validateNetAmount();
+		}
+	
+		// Do not round, this will cause double rouding. eg.: 76,75498 -> 76,7550 -> display 76,76.
+		netAmount = RAGUtil::calcNetPrice(this.RentalGrossAmount, this.LinePercent, this.CurrencyCode, true);
+	
+		return netAmount;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLineNum</Name>
+				<Source><![CDATA[
+    public LineNum getLineNum()
+    {
+        switch(this.TableId)
+        {
+            case tableNum(CustConfirmTrans):
+                CustConfirmTrans custConfirmTrans = this as CustConfirmTrans;
+                return custConfirmTrans.LineNum;
+
+            case tableNum(InventTransferLine):
+                InventTransferLine inventTransferLine = this as InventTransferLine;
+                return inventTransferLine.LineNum;
+
+            case tableNum(PurchLine):
+                PurchLine purchLine = this as PurchLine;
+                return purchLine.LineNumber;
+
+            case tableNum(PurchLineHistory):
+                PurchLineHistory purchLineHistory = this as PurchLineHistory;
+                return purchLineHistory.LineNumber;
+
+            case tableNum(RORRentalEditorLine):
+                RORRentalEditorLine rentalEditorLine = this as RORRentalEditorLine;
+                return rentalEditorLine.LineNum;
+
+            case tableNum(SalesLine):
+                SalesLine salesLine = this as SalesLine;
+                return salesLine.LineNum;
+
+            case tableNum(SalesQuotationLine):
+                SalesQuotationLine salesQuotationLine = this as SalesQuotationLine;
+                return salesQuotationLine.LineNum;
+
+            case tableNum(CustInvoiceTrans):
+            case tableNum(CustQuotationTrans):
+            case tableNum(CustQuotationConfirmTrans):
+            case tableNum(CustRORReturnNoteTrans):
+            case tableNum(CustRORSubStatusTrans):
+            case tableNum(PurchLineAllVersions):
+            case tableNum(VendInvoiceTrans):
+            case tableNum(VendRORReturnNoteTrans):
+            case tableNum(VendRORSubStatusTrans):
+                return 0;
+
+            default:
+                throw error(strFmt("@SYS31187", tableId2Name(this.TableId)));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getNextLineNum</Name>
+				<Source><![CDATA[
+    public LineNum getNextLineNum(LineNum _lineNumCurrent = this.RORRentalLine::getLineNum(), LineNum _agmtLineNumCurrent = 0.0)
+    {
+        LineNum ret, nextLineNum, parentLineNum, agmtLineNum;
+
+        switch(this.TableId)
+        {
+            case tableNum(RORRentalEditorLine):
+                [ nextLineNum, parentLineNum, agmtLineNum ] = this.RORgetLineNumContainer(_lineNumCurrent);
+                ret = (nextLineNum ? _lineNumCurrent + ((nextLineNum - _lineNumCurrent) / 2.0) : _lineNumCurrent + 1.0);
+                break;
+
+            case tableNum(InventTransferLine):
+            case tableNum(PurchLine):
+            case tableNum(SalesLine):
+            case tableNum(SalesQuotationLine):
+                LineNum lineNumIncrement = (this.TableId == tableNum(PurchLine) ? SystemParameters::find().SystemLineNumberIncrement : 1.0);
+                [ nextLineNum, parentLineNum, agmtLineNum ] = this.RORgetLineNumContainer(_lineNumCurrent);
+
+                if(nextLineNum)
+                {
+                    LineNum defaultSecondLineNum = 2.0 * lineNumIncrement;
+
+                    if (defaultSecondLineNum < _lineNumCurrent && parentLineNum)
+                    {
+                        defaultSecondLineNum = parentLineNum + lineNumIncrement;
+                    }
+
+                    if (this.LineType != RORLineType::Normal && defaultSecondLineNum < nextLineNum)
+                    {
+                        ret = _lineNumCurrent + ((defaultSecondLineNum - _lineNumCurrent) / 2.0);
+                    }
+                    else if (this.LineType == RORLineType::Normal && defaultSecondLineNum >= nextLineNum)
+                    {
+                        ret = (agmtLineNum ? 
+                               agmtLineNum + ((nextLineNum - agmtLineNum) / 2.0) : // try to fit normal line beetween contract item lines and first normal line after parent
+                               _lineNumCurrent + ((nextLineNum - _lineNumCurrent) / 2.0));
+                    }
+                    else
+                    {
+                        ret = _lineNumCurrent + ((nextLineNum - _lineNumCurrent) / 2.0);
+                    }
+                    
+                    if (ret == _lineNumCurrent)
+                    {
+                        ret = _lineNumCurrent + (lineNumIncrement / 2.0);
+                    }
+                }
+                else
+                {
+                    LineNum lineNumMax = max(_lineNumCurrent, _agmtLineNumCurrent);
+                    [ nextLineNum, parentLineNum ] = this.RORgetLineNumContainer(lineNumMax, false);
+                    ret = (nextLineNum ? nextLineNum : lineNumMax) + lineNumIncrement;
+                }
+                break;
+
+            case tableNum(CustConfirmTrans):
+            case tableNum(CustInvoiceTrans):
+            case tableNum(CustQuotationTrans):
+            case tableNum(CustQuotationConfirmTrans):
+            case tableNum(CustRORReturnNoteTrans):
+            case tableNum(CustRORSubStatusTrans):
+            case tableNum(PurchLineAllVersions):
+            case tableNum(VendInvoiceTrans):
+            case tableNum(VendRORReturnNoteTrans):
+            case tableNum(VendRORSubStatusTrans):
+                ret = 0.0;
+                break;
+
+            default:
+                throw error(strFmt("@SYS31187", tableId2Name(this.TableId)));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getAdditionalLineParent</Name>
+				<Source><![CDATA[
+    public RORRentalLine getAdditionalLineParent()
+	{
+		if (this.KitComponentType == RORKitComponentType::Component
+		|| this.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+		{
+			return this.RORGetParentLine();
+		}
+		else
+		{
+			return this;
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInsuranceLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine getInsuranceLine(boolean _forUpdate = false)
+	{
+		RORRentalLine insuranceLine = this.RORLineBuffer();
+	
+		insuranceLine.selectForUpdate(_forUpdate);
+	
+		select firstonly insuranceLine
+		where insuranceLine.ParentLineRecId == this.RecId
+		&& insuranceLine.LineType == RORLineType::Insurance
+		&& insuranceLine.ItemId   == RAGParameters::find().ItemIdInsurance;
+	
+		return insuranceLine;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getKitGrossAmount</Name>
+				<Source><![CDATA[
+    public RORRentalGrossAmount getKitGrossAmount(RORRentalLine _kitLine)
+	{
+		RORRentalGrossAmount    grossAmount;
+		RORRentalLine           rentalLine = _kitLine.RORLineBuffer();
+	
+		while select rentalLine
+		where rentalLine.ParentLineRecId == _kitLine.RecId
+		&& (rentalLine.KitComponentType != RORKitComponentType::Standalone ||
+			rentalLine.LineType == RORLineType::Normal)
+		{
+			if (!rentalLine.RORRentalLine::isIncluded())
+			{
+				continue;
+			}
+	
+			if ((rentalLine.KitComponentType == RORKitComponentType::Kit ||
+			rentalLine.KitComponentType == RORKitComponentType::KitComponent)
+			&& !rentalLine.IsPriceFixed)
+			{
+				if (rentalLine.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+				{
+					//This will be a case only in very rare situation when Rental line is actually Component
+					//but has as children Standalone sales/purch lines
+					grossAmount += rentalLine.RentalGrossAmount;
+				}
+	
+				grossAmount += this.RORRentalLine::getKitGrossAmount(rentalLine);
+			}
+			else
+			{
+				grossAmount += rentalLine.RentalGrossAmount;
+			}
+		}
+	
+		return grossAmount;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getKitLineAmount</Name>
+				<Source><![CDATA[
+    public LineAmount getKitLineAmount(RORRentalLine _kitLine)
+	{
+		LineAmount          lineAmount;
+		RORRentalLine       rentalLine = _kitLine.RORLineBuffer();
+	
+		if (_kitLine.IsPriceFixed)
+		{
+			lineAmount = PriceDisc::price2Amount(_kitLine.RentQty ? _kitLine.RentalGrossAmount/_kitLine.RentQty : 0,
+												 _kitLine.PriceUnit,
+												 _kitLine.discAmount(),
+												 _kitLine.RentQty,
+												 _kitLine.RentQty,
+												 0,
+												 _kitLine.discPercent(),
+												 _kitLine.CurrencyCode,
+												 _kitLine.LineAmount,
+												 true);
+		}
+		else if (_kitLine.RecId)
+		{
+			while select rentalLine
+			where rentalLine.ParentLineRecId == _kitLine.RecId
+			&& (rentalLine.KitComponentType != RORKitComponentType::Standalone ||
+				rentalLine.LineType == RORLineType::Normal)
+			{
+				if (!rentalLine.RORRentalLine::isIncluded())
+				{
+					continue;
+				}
+	
+				if (rentalLine.KitComponentType == RORKitComponentType::Kit
+				|| rentalLine.KitComponentType == RORKitComponentType::KitComponent)
+				{
+					if (rentalLine.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component)
+					{
+						//This will be a case only in very rare situation when Rental line is actually Component
+						//but has as children Standalone sales/purch lines
+						lineAmount += rentalLine.LineAmount;
+					}
+	
+					lineAmount += this.RORRentalLine::getKitLineAmount(rentalLine);
+				}
+				else
+				{
+					lineAmount += rentalLine.LineAmount;
+				}
+			}
+		}
+	
+		return lineAmount;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getKitSalesLinesGrossAmount</Name>
+				<Source><![CDATA[
+    public RORRentalGrossAmount getKitSalesLinesGrossAmount(RORRentalLine _kitLine)
+	{
+		RORRentalGrossAmount    grossAmount;
+		RORRentalLine           rentalLine = _kitLine.RORLineBuffer();
+	
+		while select rentalLine
+		where rentalLine.ParentLineRecId == _kitLine.RecId
+		&& (rentalLine.KitComponentType != RORKitComponentType::Standalone ||
+			rentalLine.LineType == RORLineType::Normal)
+		{
+			if (!rentalLine.RORRentalLine::isIncluded())
+			{
+				continue;
+			}
+	
+			if ((rentalLine.KitComponentType == RORKitComponentType::Kit ||
+			rentalLine.KitComponentType == RORKitComponentType::KitComponent)
+			&& !rentalLine.IsPriceFixed)
+			{
+				if (rentalLine.RORRentalLine::pricingKitComponentType() == RORKitComponentType::Component
+				&& rentalLine.KitComponentType == RORKitComponentType::Standalone)
+				{
+					//This will be a case only in very rare situation when Rental line is actually Component
+					//but has as children Standalone sales/purch lines
+					grossAmount += rentalLine.RentalGrossAmount;
+				}
+	
+				grossAmount += this.RORRentalLine::getKitSalesLinesGrossAmount(rentalLine);
+			}
+			else if (rentalLine.KitComponentType == RORKitComponentType::Standalone
+			|| (rentalLine.KitComponentType == RORKitComponentType::Component && rentalLine.TradeType == RORTradeType::SalesPurch))
+			{
+				grossAmount += rentalLine.RentalGrossAmount;
+			}
+		}
+	
+		return grossAmount;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getNewestReplacementLine</Name>
+				<Source><![CDATA[
+    public RecId getNewestReplacementLine()
+	{
+		RORRentalLine               rentalLineLocal = this.RORLineBuffer();
+		RORRentalLine               rentalLineReplacementChild = this.RORLineBuffer();
+		RecId                       recIdExchanged;
+		RecId                       recId = this.RecId;
+	
+		rentalLineLocal.data(this);
+	
+		select RecId from rentalLineReplacementChild
+		where rentalLineReplacementChild.RecIdExchanged == this.RecId
+        &&    rentalLineReplacementChild.HeaderId == this.HeaderId;
+	
+		if (this.RecIdExchanged || rentalLineReplacementChild.RecId)
+		{
+			//if item was exchanged then go up to newest replacement item and then calculate multiplier
+			//and total number of periods. Calculation is executed only once and then reused if item
+			//was exchanged several times.
+			recIdExchanged = this.RecIdExchanged;
+	
+			while (recIdExchanged)
+			{
+				select firstOnly rentalLineLocal
+				where rentalLineLocal.RecId == recIdExchanged;
+	
+				recIdExchanged = rentalLineLocal.RecIdExchanged;
+				recId = rentalLineLocal.RecId;
+			}
+		}
+	
+		return recId;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getNewestReplacementLineBuffer</Name>
+				<Source><![CDATA[
+    public RORRentalLine getNewestReplacementLineBuffer()
+	{
+		RORRentalLine               rentalLineLocal = this.RORLineBuffer();
+		RORRentalLine               rentalLineReplacementChild = this.RORLineBuffer();
+		RecId                       recIdExchanged;
+		RecId                       recId = this.RecId;
+	
+		rentalLineLocal.data(this);
+	
+		select RecId from rentalLineReplacementChild
+		where rentalLineReplacementChild.RecIdExchanged == this.RecId;
+	
+		if (this.RecIdExchanged || rentalLineReplacementChild.RecId)
+		{
+			//if item was exchanged then go up to newest replacement item and then calculate multiplier
+			//and total number of periods. Calculation is executed only once and then reused if item
+			//was exchanged several times.
+			recIdExchanged = this.RecIdExchanged;
+	
+			while (recIdExchanged)
+			{
+				select firstOnly rentalLineLocal
+				where rentalLineLocal.RecId == recIdExchanged;
+	
+				recIdExchanged = rentalLineLocal.RecIdExchanged;
+				recId = rentalLineLocal.RecId;
+			}
+		}
+	
+		return recId ? rentalLineLocal : null;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRentalLineKitToolTip</Name>
+				<Source><![CDATA[
+    public str getRentalLineKitToolTip()
+	{
+		str ret;
+	
+		switch(this.KitComponentType)
+		{
+			case RORKitComponentType::Kit:
+				ret = (this.ParentLineRecId && this.TradeType == RORTradeType::SalesPurch ?
+					   "@DNR6580" : // subkits whose trade type is Sales/Purch get KitComponentType 'kit'
+					   "@DNR223");
+				break;
+	
+			case RORKitComponentType::Component:
+				ret = "@DNR225";
+				break;
+	
+			case RORKitComponentType::KitComponent:
+				ret = "@DNR6580";
+				break;
+	
+			case RORKitComponentType::Standalone:
+				ret = (this.LineType == RORLineType::Normal ? "@DNR6411" : strFmt("%1", this.LineType));
+				break;
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getReturnTransportLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine getReturnTransportLine(boolean _forUpdate = false)
+	{
+		RORRentalLine returnTransportLine = this.RORLineBuffer();
+	
+		returnTransportLine.selectForUpdate(_forUpdate);
+	
+		select firstonly returnTransportLine
+		where returnTransportLine.ParentLineRecId == this.RecId
+		&&    returnTransportLine.LineType == RORLineType::Transport
+		&&    returnTransportLine.ItemId   == RAGParameters::find().ItemIdReturnTransport;
+	
+		return returnTransportLine;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTransportLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine getTransportLine(boolean _forUpdate = false)
+	{
+		RORRentalLine transportLine = this.RORLineBuffer();
+	
+		transportLine.selectForUpdate(_forUpdate);
+	
+		select firstonly transportLine
+		where transportLine.ParentLineRecId == this.RecId
+		&& transportLine.LineType == RORLineType::Transport
+		&& transportLine.ItemId   == RAGParameters::find().ItemIdTransport;
+	
+		return transportLine;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getWarrantyLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine getWarrantyLine(boolean _forUpdate = false)
+	{
+		RORRentalLine warrantyLine = this.RORLineBuffer();
+	
+		warrantyLine.selectForUpdate(_forUpdate);
+	
+		select firstonly warrantyLine
+		where warrantyLine.ParentLineRecId == this.RecId
+		&& warrantyLine.LineType == RORLineType::Warranty
+		&& warrantyLine.ItemId   == RAGParameters::find().ItemIdWarranty;
+	
+		return warrantyLine;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasBlockedPeriod</Name>
+				<Source><![CDATA[
+    public boolean hasBlockedPeriod()
+	{
+		boolean ret;
+		Common  common = this;
+	
+		if (INVInvoicePeriodHost::canHaveInvoicePeriods(this.TableId))
+		{
+			ret = common.INVInvoicePeriodHost::hasBlockedPeriod();
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasChildren</Name>
+				<Source><![CDATA[
+    public boolean hasChildren(boolean _componentsOnly, boolean _filterTradeType = true)
+	{
+		RORRentalLine   rentalLine = this.RORLineBuffer();
+		RAGParameters   parameters;
+	
+		if (_componentsOnly)
+		{
+			select firstonly RecId from rentalLine
+			where rentalLine.HeaderId           == this.HeaderId
+			&&    rentalLine.ParentLineRecId == this.RecId
+			&&    (!_filterTradeType || rentalLine.TradeType       == this.TradeType)
+				notExists join parameters
+				where parameters.ItemIdInsurance == rentalLine.ItemId
+				||    parameters.ItemIdTransport == rentalLine.ItemId
+				||    parameters.ItemIdReturnTransport == rentalLine.ItemId
+				||    parameters.ItemIdWarranty  == rentalLine.ItemId;
+		}
+		else
+		{
+			select firstonly RecId from rentalLine
+			where rentalLine.HeaderId            == this.HeaderId
+			&&    rentalLine.ParentLineRecId == this.RecId
+			&&    (!_filterTradeType || rentalLine.TradeType       == this.TradeType);
+		}
+	
+		return rentalLine.RecId;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lineHasIncludedChildren</Name>
+				<Source><![CDATA[
+    public boolean lineHasIncludedChildren(boolean _checkOnlyRentalLines = true)
+	{
+		boolean         ret;
+		RORRentalLine   rentalLine = this.RORLineBuffer();
+	
+		if (this.KitComponentType == RORKitComponentType::Kit
+		|| this.KitComponentType == RORKitComponentType::KitComponent)
+		{
+			select firstOnly RecId from rentalLine
+			where rentalLine.HeaderId == this.HeaderId
+            && rentalLine.ParentLineRecId == this.RecId
+            // In case of SalesPurchase Kit, selection should not be restricted to Rental Lines because SalesPurchase Kit cannot have Rental Item.
+            && (this.TradeType == RORTradeType::SalesPurch || (!_checkOnlyRentalLines || rentalLine.TradeType != RORTradeType::SalesPurch));
+	
+			if (rentalLine)
+			{
+				ret = true;
+			}
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initExtraLineFromParent</Name>
+				<Source><![CDATA[
+    public void initExtraLineFromParent(RORRentalLine _rentalLine)
+	{
+		this.HeaderId           = _rentalLine.HeaderId;
+		this.CurrencyCode       = _rentalLine.CurrencyCode;
+		this.CustVendAccount    = _rentalLine.CustVendAccount;
+		this.InventDimId        = _rentalLine.InventDimId;
+		this.ParentLineRecId    = _rentalLine.RecId;
+		this.RentQty            = _rentalLine.RentQty;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromHeaderBuffer</Name>
+				<Source><![CDATA[
+    public void initFromHeaderBuffer(RORRentalHeader _rentalHeaderFrom)
+	{
+		DNRCalendarId  newCalendarId;
+	
+		this.CalendarId          = _rentalHeaderFrom.CalendarId;
+		this.PriceTimeUnit       = _rentalHeaderFrom.PriceTimeUnit;
+		this.INVInvoiceProfileId = _rentalHeaderFrom.INVInvoiceProfileId;
+	             	
+		if (newCalendarId)
+		{
+			this.CalendarId = newCalendarId;
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromRentalType</Name>
+				<Source><![CDATA[
+    public void initFromRentalType(ItemId _itemId = this.ItemId)
+    {
+        
+        if (this.TradeType == RORTradeType::SalesPurch)
+        {
+            this.INVInvoiceProfileId = '';
+            this.CalendarId = '';
+            this.PriceTimeUnit = 0;
+        }
+        else
+        {
+            BOBRentalType rentalType = BOBRentalType::findFromItemId(_itemId);
+            
+            if (rentalType.INVInvoiceProfileId)
+            {
+                this.INVInvoiceProfileId = rentalType.INVInvoiceProfileId;
+            }
+ 
+            if (rentalType.RORPriceTimeUnit)
+            {
+                this.PriceTimeUnit = rentalType.RORPriceTimeUnit;
+            }
+             
+            if (rentalType.DNRRentalCalendarId)
+            {
+                this.CalendarId = rentalType.DNRRentalCalendarId;
+            }
+        }
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromInventTable</Name>
+				<Source><![CDATA[
+    public void initFromInventTable(InventTable _inventTable, boolean _headerIsRental, boolean _lineIsRental)
+	{
+		RORTradeType rentalTradeType = (this.TableId == tableNum(PurchLine) ? RORTradeType::SubRental : RORTradeType::Rental);
+	
+		if (_headerIsRental)
+		{
+			switch(_inventTable.RORItemTradeType)
+			{
+				case RORItemTradeType::SalesPurch:
+					this.TradeType = RORTradeType::SalesPurch;
+					// recalculate price, as previously we may not have had the correct trade type yet
+                    if (this.TableId == tableNum(PurchLine) || this.TableId == tableNum(SalesLine) || this.TableId == tableNum(SalesQuotationLine))
+                    {
+                        this.RORPriceModified();
+                    }
+					break;
+	
+				case RORItemTradeType::RentalSubRental:
+					this.TradeType = rentalTradeType;
+					break;
+	
+				case RORItemTradeType::FromOrder:
+					this.TradeType = (_lineIsRental ? rentalTradeType : RORTradeType::SalesPurch);
+					break;
+			}
+		}
+		else
+		{
+			// for 'normal' order order use always salesPurch trade type
+			this.TradeType = RORTradeType::SalesPurch;
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromLineBuffer</Name>
+				<Source><![CDATA[
+    public void initFromLineBuffer(RORRentalLine _rentalLineFrom, boolean _copyCalendar = true)
+	{
+		this.TradeType = _rentalLineFrom.TradeType;
+		this.RORRentalLine::modifiedRORTradeType();
+	
+		if (_copyCalendar)
+		{
+			this.CalendarId = _rentalLineFrom.CalendarId;
+		}
+	
+		this.PriceTimeUnit          = _rentalLineFrom.PriceTimeUnit;
+		this.INVInvoiceProfileId    = _rentalLineFrom.INVInvoiceProfileId;
+		this.INVRentalModeId        = _rentalLineFrom.INVRentalModeId;
+		this.INVRateMultiplierTier  = _rentalLineFrom.INVRateMultiplierTier;
+	
+		this.IsPriceFixed           = _rentalLineFrom.IsPriceFixed;
+		this.IsPriceNet             = _rentalLineFrom.IsPriceNet;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromParent</Name>
+				<Source><![CDATA[
+    public void initFromParent(RORRentalLine _rentalLineParent)
+	{
+		this.IsPriceFixed = _rentalLineParent.IsPriceFixed;
+	
+		// When adding components to a fixed price kit, then add them at zero nett (ie 100% discount) and remove
+		// any nett flag.  We can't use nett pricing on a new kit component because the system must be able to
+		// recalculate the price to maintain the correct fixed kit price, and nett pricing is marked as fixed
+		if (this.IsPriceFixed)
+		{
+			this.IsPriceNet     = NoYes::No;
+			this.LinePercent    = 100.00;
+			this.LineAmount     = this.calcLineAmountForced();
+		}
+	
+		if (_rentalLineParent.IsPriceNet)
+		{
+			this.IsPriceNet = _rentalLineParent.IsPriceNet;
+		}
+	
+		if (this.TradeType != RORTradeType::SalesPurch)
+		{
+			this.INVInvoiceProfileId    = _rentalLineParent.INVInvoiceProfileId ? _rentalLineParent.INVInvoiceProfileId : this.INVInvoiceProfileId;
+			this.CalendarId             = (this.CalendarId && this.LineType == RORLineType::Insurance) ? this.CalendarId : _rentalLineParent.CalendarId;
+			this.PriceTimeUnit          = _rentalLineParent.PriceTimeUnit ? _rentalLineParent.PriceTimeUnit : this.PriceTimeUnit;
+			this.INVRentalModeId        = _rentalLineParent.INVRentalModeId ? _rentalLineParent.INVRentalModeId : this.INVRentalModeId;
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initPricingFromRentalLine</Name>
+				<Source><![CDATA[
+    public void initPricingFromRentalLine(RORRentalLine _rentalLine)
+	{
+		this.Price                  = _rentalLine.Price;
+		this.LinePercent            = _rentalLine.LinePercent;
+		this.LineType               = _rentalLine.LineType;
+		this.RentalGrossAmount      = _rentalLine.RentalGrossAmount;
+		this.PriceTimeUnit          = _rentalLine.PriceTimeUnit;
+		this.IsPriceFixed           = _rentalLine.IsPriceFixed;
+		this.IsPriceNet             = _rentalLine.isPriceNet;
+		this.LineAmount             = _rentalLine.LineAmount;
+		this.LineDisc               = _rentalLine.LineDisc;
+		this.INVRentalModeId        = _rentalLine.INVRentalModeId;
+		this.INVRateMultiplierTier  = _rentalLine.INVRateMultiplierTier;
+		this.RentQty                = _rentalLine.RentQty;
+		this.SalesPurchUnit         = _rentalLine.SalesPurchUnit;
+		this.PriceUnit              = _rentalLine.PriceUnit;
+	
+		if (_rentalLine.TableId != tableNum(RORRentalEditorLine) && _rentalLine.InventDimId)
+		{
+			this.InventDimId    = _rentalLine.InventDimId;
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    public void initValue()
+	{
+		this.TradeType              = RORTradeType::SalesPurch;
+		this.INVRentalModeId        = RORParameters::find().RentalModeIdDefault;
+		this.INVRateMultiplierTier  = 1.00;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVCalculateTierMultiplierRate</Name>
+				<Source><![CDATA[
+    public container INVCalculateTierMultiplierRate(RORRentalDateTime       _transDateTime,
+                                                    INVRateMultiplierDateTime   _rateMultiplierDateTime,
+                                                    RORRentalLine           _rentalLine,
+                                                    SalesQty                _qtyRequested = naReal(),
+                                                    RAGAgreementType        _tier = RAGAgreementType::PriceTier,
+                                                    // if used for other purposes than invoicing then some checks can be skipped when calculating tiers
+    boolean                 _useForInvoicing = true,
+                                                    boolean                 _useForTotals = false)
+    {
+        INVRateMultiplierTier           rateMultiplierTier;
+        RAGPriceTierPeriod              priceTierPeriod;
+ 
+        return [rateMultiplierTier, priceTierPeriod];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINExistsJournalizedPeriod</Name>
+				<Source><![CDATA[
+    public boolean FINExistsJournalizedPeriod()
+    {
+        // implemented in Dynarent Invoicing model
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINExistUninvoicedCreditedForLine</Name>
+				<Source><![CDATA[
+    public boolean FINExistUninvoicedCreditedForLine()
+    {
+        // implemented in Dynarent Invoicing model
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINHasPriceAdjustments</Name>
+				<Source><![CDATA[
+    public boolean FINHasPriceAdjustments(TableId _tableId,
+        RecId                   _recId,
+        INVInvoicingOptions     _invoicingOptions,
+        INVCalculationDateTime  _calculationDateTime)
+    {
+        // implemented in Dynarent Invoicing model
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINHasOpenDays</Name>
+				<Source><![CDATA[
+    public boolean FINHasOpenDays(RefTableId  _refTableId,
+        RefRecId    _refRecId,
+        boolean     _isHourlyInvoicing = false)
+    {
+        // implemented in Dynarent Invoicing model
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVCanDeleteChildLine</Name>
+				<Source><![CDATA[
+    public boolean INVCanDeleteChildLine(
+		boolean                 _parentHasParmLine,
+		INVInvoicingOptions     _invoicingOptions,
+		INVCalculationDateTime  _calculationDateTime,
+		boolean                 _includeUninvoiced,
+		RefTableId              _childLineTableId,
+		RefRecId                _childLineRecId,
+		LineAmount              _parentParmLineAmount)
+	{
+        boolean ret = _includeUninvoiced;
+	
+		if (_parentHasParmLine)
+		{
+			if (!_includeUninvoiced
+			&& _parentParmLineAmount < 0
+			&& !this.RORRentalLine::FINExistUninvoicedCreditedForLine())
+			{
+				ret = true;
+			}
+		}
+		else
+		{
+            if ((!_includeUninvoiced || this.RORRentalLine::FINExistUninvoicedCreditedForLine())
+            && (!this.RORRentalLine::FINHasPriceAdjustments(_childLineTableId, _childLineRecId, _invoicingOptions, _calculationDateTime))
+			&& this.discPercent() < 100
+            && this.RORRentalLine::FINHasOpenDays(this.TableId, this.RecId, FINRentalInvoiceProfile::find(this.INVInvoiceProfileId).isHourlyInvoicing())
+            )
+			{
+				ret = true;
+			}
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVChargedPeriodsInDays</Name>
+				<Source><![CDATA[
+    public real INVChargedPeriodsInDays(INVChargedPeriods   _chargedPeriods,
+										INVInvoiceProfileId _invoiceProfileId = this.INVInvoiceProfileId)
+	{
+		#TimeConstants
+
+		real chargedPeriodsInDays = _chargedPeriods;
+		// The method was using obsolete fields
+	
+		return chargedPeriodsInDays;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventTable</Name>
+				<Source><![CDATA[
+    public InventTable inventTable(boolean _forUpdate = false)
+	{
+		return InventTable::find(this.ItemId, _forUpdate);
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVGetTierMultiplierRateOnCreation</Name>
+				<Source><![CDATA[
+    public INVRateMultiplierTier INVGetTierMultiplierRateOnCreation()
+    {
+        return 1.00;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVsetMultiplierRate</Name>
+				<Source><![CDATA[
+    public void INVsetMultiplierRate(
+        RAGAgreementType    _tier = RAGAgreementType::PriceTier,
+        RORRentalLine       _rentalLineParent = null,
+        TransDateTime       _fromDateTime = DateTimeUtil::minValue(),
+        TransDateTime       _toDateTime = DateTimeUtil::minValue(),
+        boolean             _updatePeriods = true)
+    {
+        RORRentalEditorLine     rentalEditorLineKit;
+        RORRentalEditorLine     rentalEditorLine;
+        Common                  common;
+ 
+        RORRentalDateTimes      rentalDateTimes;
+        FINRentalInvoiceProfile     invoiceProfile;
+ 
+        if (this.TradeType == RORTradeType::SalesPurch)
+        {
+            this.INVRateMultiplierTier = 1.00;
+ 
+            return;
+        }
+ 
+        if (this.TableId == tableNum(RORRentalEditorLine))
+        {
+            rentalEditorLine = this;
+ 
+            if (rentalEditorLine.ParentLineRecId)
+            {
+                select firstonly rentalEditorLineKit
+                order by LineNum asc
+                where rentalEditorLineKit.ParmId == rentalEditorLine.ParmId
+                && rentalEditorLineKit.HeaderId == rentalEditorLine.HeaderId
+                && rentalEditorLineKit.RecId == rentalEditorLine.ParentLineRecId;
+                //&& rentalEditorLineKit.ItemId == rentalEditorLine.ItemIdKit;
+            }
+            else
+            {
+                rentalEditorLineKit = rentalEditorLine;
+            }
+ 
+            invoiceProfile = FINRentalInvoiceProfile::find(rentalEditorLineKit.INVInvoiceProfileId);
+            common = rentalEditorLineKit.salesPurchLine();
+            rentalDateTimes = common.RORRentalDateTimesHost::rentalDateTimes();
+        }
+        else
+        {
+            invoiceProfile = FINRentalInvoiceProfile::find(this.INVInvoiceProfileId);
+        }
+ 
+        this.RORRentalLine::updateCalendarPeriodsMultiplierRate(
+            rentalDateTimes,
+            invoiceProfile,
+            _tier,
+            _rentalLineParent,
+            _updatePeriods,
+            _fromDateTime,
+            _toDateTime);
+ 
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVsetPeriodsMultiplierWhenExchanged</Name>
+				<Source><![CDATA[
+    public container INVsetPeriodsMultiplierWhenExchanged(
+        RORRentalLine       _rentalLine,
+        SalesQty            _qtyRequested,
+        // if used for other purposes then invoicing then some checks can be skip when calculation tiers.
+    boolean             _useForInvoicing,
+        RORRentalDateTime   _calculationDateTime,
+        INVRateMultiplierDateTime   _rateMultiplierDateTime)
+    {
+        RAGPriceTierPeriod          priceTierPeriod;
+        INVRateMultiplierTier       rateMultiplierTier;
+        int                         chargeablePeriods;
+        int                         calendarPeriods;
+  
+ 
+        return [chargeablePeriods, calendarPeriods, rateMultiplierTier, priceTierPeriod];
+ 
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isExchange</Name>
+				<Source><![CDATA[
+    public boolean isExchange()
+	{
+		boolean             ret;
+		RORRentalLine       rentalLine = this.RORLineBuffer();
+		RORRentalEditorLine rentalEditorLine;
+		;
+	
+		if (this.TableId == tableNum(SalesQuotationLine))
+		{
+			return false;
+		}
+	
+		if (this.TableId == tableNum(RORRentalEditorLine))
+		{
+			rentalEditorLine = this;
+			ret = rentalEditorLine.recIdExchanged();
+		}
+		else
+		{
+			ret = this.RecIdExchanged;
+		}
+	
+		if (!ret)
+		{
+			select firstonly  RecId from rentalLine
+			where rentalLine.RecIdExchanged == this.RecId
+            &&    rentalLine.HeaderId == this.HeaderId;
+	
+			if (rentalLine)
+			{
+				ret = true;
+			}
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isIncluded</Name>
+				<Source><![CDATA[
+    public boolean isIncluded()
+	{
+		boolean ret = (this.RecId != 0);
+	
+		Common              common = this;
+		RORRentalEditorLine editorLine = common as RORRentalEditorLine;
+	
+		if (ret && editorLine && !editorLine.Include)
+		{
+			ret = false;
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isLineConfirmed</Name>
+				<Source><![CDATA[
+    public boolean isLineConfirmed()
+	{
+		boolean             ret;
+		CustConfirmTrans    custConfirmTrans;
+	
+		switch (this.TableId)
+		{
+			case tableNum(SalesLine) :
+				select firstOnly RecId from custConfirmTrans
+				where custConfirmTrans.InventTransId == this.InventTransId;
+	
+				if (custConfirmTrans)
+				{
+					ret = true;
+				}
+				break;
+	
+			default : //do nothing
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedGrossAmount</Name>
+				<Source><![CDATA[
+    public void modifiedGrossAmount()
+	{
+		RORRentalNetAmount netAmount;
+	
+		// If nett pricing, then final calculated price should not change, so modify the discount to maintain
+		// current net value based on the new gross price
+		if (this.isPriceNet
+		// when changing price unit doesn't matter if price is marked as net.
+		&& this.PriceTimeUnit == this.orig().PriceTimeUnit)
+		{
+            Common common = this.orig();
+
+			// Find original net price before this change
+            if (common.TableId == tableNum(PurchLine))
+            {
+                netAmount = this.orig().ROREditLineNetAmount(false, 0);
+            }
+            else
+            {
+                netAmount = this.orig().ROREditNetAmount(false, 0);
+            }
+			// Modify discount
+			this.LinePercent    = ((this.RentalGrossAmount - netAmount) / (this.RentalGrossAmount ? this.RentalGrossAmount : 1) * 100);
+		}
+	
+		this.RORRentalLine::rentalPricesModified();
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedRORTradeType</Name>
+				<Source><![CDATA[
+    public void modifiedRORTradeType()
+	{
+		if (this.tableId == tableNum(SalesLine)
+		|| this.tableId == tableNum(PurchLine))
+		{
+			this.RORmodifiedRORTradeType();
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>openRentalLineEditor</Name>
+				<Source><![CDATA[
+    public void openRentalLineEditor(FormRun _caller, RORRentalLineEditMode  _mode = RORRentalLineEditMode::Create)
+	{
+		Args args;
+	
+		args = new Args();
+		args.record(this);
+		args.caller(_caller);
+		args.parmEnumType(enumNum(RORRentalLineEditMode));
+		args.parmEnum(_mode);
+	    
+        if (RORParameters::find().DNRAutoOpenRentalLineEditorV2)
+        {
+            new MenuFunction(menuItemActionStr(RORRentalLineEditorFormV2Class), MenuItemType::Action).run(args);
+        }
+        else
+        {
+            new MenuFunction(menuItemActionStr(RORRentalLineEditorFormClass), MenuItemType::Action).run(args);
+        }
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>orderMustBeReConfirmed</Name>
+				<Source><![CDATA[
+    public boolean orderMustBeReConfirmed(RORRentalLine _lineOrig = this.orig())
+	{
+		boolean ret;
+	
+		if (_lineOrig)
+		{
+			if(_lineOrig.RentQty                != this.RentQty
+			|| _lineOrig.RentalGrossAmount      != this.RentalGrossAmount
+			|| _lineOrig.Price                  != this.Price
+			|| _lineOrig.LineDisc               != this.LineDisc
+			|| _lineOrig.LinePercent            != this.LinePercent
+			|| _lineOrig.LineAmount             != this.LineAmount
+			|| _lineOrig.CalendarId             != this.CalendarId
+			|| _lineOrig.PriceTimeUnit          != this.PriceTimeUnit
+			|| _lineOrig.PriceUnit              != this.PriceUnit
+			|| _lineOrig.INVInvoiceProfileId    != this.INVInvoiceProfileId
+			|| _lineOrig.INVRateMultiplierTier  != this.INVRateMultiplierTier
+			|| _lineOrig.INVRentalModeId        != this.INVRentalModeId
+			|| _lineOrig.ItemId                 != this.ItemId
+			|| this.ROROrderMustBeReConfirmed(_lineOrig))
+			{
+				ret = true;
+			}
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>priceModified</Name>
+				<Source><![CDATA[
+    public void priceModified()
+	{
+		if (this.TradeType == RORTradeType::SalesPurch)
+		{
+			this.RentalGrossAmount = (this.Price * this.RentQty);
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pricingKitComponentType</Name>
+				<Source><![CDATA[
+    public RORKitComponentType pricingKitComponentType(boolean _checkOnlyRentalLines = true)
+	{
+		RORKitComponentType kitComponentType = this.KitComponentType;
+	
+		if (kitComponentType == RORKitComponentType::KitComponent
+        && !this.RORRentalLIne::lineHasIncludedChildren(_checkOnlyRentalLines))
+		{
+			kitComponentType = RORKitComponentType::Component;
+		}
+	
+		return kitComponentType;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RAGSetContractInfo</Name>
+				<Source><![CDATA[
+    public void RAGSetContractInfo(boolean _overwriteAgreementPrice = false, boolean _mustThrowWarningOnNoGrossPriceFound = true)
+    {
+        RAGContractDataParm         contractDataParm;
+        RAGTmpContractLine          tmpContractLine;
+        RORRentalNetAmount          netAmount;
+        RORNoneRentalSubRentalBoth  warningNoGrossPriceFound;
+        RORRentalGrossAmount        rentalGrossAmount;
+        PurchLineAmount             purchLineAmount;
+ 
+        if (!this.isPriceFixed)
+        {
+            tmpContractLine = RAGContractData::getTmpContractLineFromRentalLine(this);
+ 
+            // Don't to fetch prices if there is no contract. Warning amout missing default contract was thrown earlier in code.
+            if (!tmpContractLine.ContractId)
+            {
+                return;
+            }
+ 
+            if (tmpContractLine.GrossPrice_ContractIdSource)
+            {
+                rentalGrossAmount = _overwriteAgreementPrice ? tmpContractLine.GrossPrice_Price * this.INVRateMultiplierTier : tmpContractLine.GrossPrice_Price;
+                purchLineAmount   = _overwriteAgreementPrice ? tmpContractLine.NetPrice_Price * this.INVRateMultiplierTier : tmpContractLine.NetPrice_Price;
+                                
+                // for instance:                                                                                          'Workweek'          'Day'                                         = 5
+                this.RentalGrossAmount = this.RentQty * UnitOfMeasureConverter::convert(rentalGrossAmount, this.PriceTimeUnit, tmpContractLine.GrossPrice_TimeUnit, NoYes::No);
+ 
+                if (tmpContractLine.NetPrice_ContractIdSource && this.RentalGrossAmount)
+                {
+                    // calculate LinePercent based on net price/gross price ratio
+                    netAmount = this.RentQty * UnitOfMeasureConverter::convert(purchLineAmount, this.PriceTimeUnit, tmpContractLine.NetPrice_TimeUnit, NoYes::No);
+ 
+                    this.LinePercent    = (1 - netAmount/this.RentalGrossAmount) * 100;
+                    this.isPriceNet     = NoYes::Yes;
+                }
+                else
+                {
+                    // calculate LinePercent based on contract discount
+                    this.LinePercent = tmpContractLine.Discount_Percentage;
+                }
+            }
+            else
+            {
+                warningNoGrossPriceFound = RAGParameters::find().WarningNoGrossPriceFound;
+ 
+                if(_mustThrowWarningOnNoGrossPriceFound
+                && warningNoGrossPriceFound == RORNoneRentalSubRentalBoth::Both
+                        ||  (warningNoGrossPriceFound == RORNoneRentalSubRentalBoth::Rental    && this.TradeType == RORTradeType::Rental)
+                        ||  (warningNoGrossPriceFound == RORNoneRentalSubRentalBoth::SubRental && this.TradeType == RORTradeType::SubRental))
+                {
+                    contractDataParm.initFromRentalLine(this);
+                    // Due to a known issue, warnings are sometimes not shown so we use info here instead.
+                    info(strFmt("@DNR328", this.BOBRentalTypeId, contractDataParm.TransDate, this.CurrencyCode));
+                }
+            }
+
+            if (tmpContractLine.Transport_AddTransport)
+            {
+                this.RORRentalLine::addTransport(tmpContractLine);
+            }
+
+            if (tmpContractLine.ReturnTransport_AddTransport)
+            {
+                this.RORRentalLine::addReturnTransport(tmpContractLine);
+            }
+
+            if (tmpContractLine.Insurance_AddInsurance)
+            {
+                this.RORRentalLine::addInsurance(tmpContractLine);
+            }
+        }
+ 
+        this.RORRentalLine::rentalPricesModified();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addTransport</Name>
+				<Source><![CDATA[
+    public void addTransport(RAGTmpContractLine _tmpContractLine)
+    {
+        if (this.TableId == tableNum(SalesLine)
+        || this.TableId == tableNum(SalesQuotationLine)
+        || this.TableId == tableNum(PurchLine))
+        {
+            this.RORSetDeliveryContractInfo(_tmpContractLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addReturnTransport</Name>
+				<Source><![CDATA[
+    public void addReturnTransport(RAGTmpContractLine _tmpContractLine)
+    {
+        if (this.TableId == tableNum(SalesLine)
+        || this.TableId == tableNum(SalesQuotationLine)
+        || this.TableId == tableNum(PurchLine))
+        {
+            this.RORSetReturnContractInfo(_tmpContractLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addInsurance</Name>
+				<Source><![CDATA[
+    public void addInsurance(RAGTmpContractLine _tmpContractLine)
+    {
+        if (this.TableId == tableNum(SalesLine)
+        || this.TableId == tableNum(SalesQuotationLine)
+        || this.TableId == tableNum(PurchLine))
+        {
+            this.RORSetInsuranceContractInfo(_tmpContractLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RAGSetContractInfoFromParent</Name>
+				<Source><![CDATA[
+    public void RAGSetContractInfoFromParent()
+    {
+        RAGTmpContractLine      tmpContractLine;
+        RORRentalLine           parentLine;
+ 
+        RORRentalGrossAmount    insuranceGrossAmount;
+        RORRentalNetAmount      insuranceNetAmount;
+        RORInsurancePercentage  insurancePct;
+ 
+        if (this.LineType != RORLineType::Insurance)
+        {
+            return;
+        }
+ 
+        if (!this.isPriceFixed)
+        {
+            parentLine = this.RORGetParentLine();
+ 
+            if (parentLine.TradeType != RORTradeType::SalesPurch && RAGUtil::mustApplyRentalAgreements(parentLine.BOBRentalTypeId))
+            {
+                tmpContractLine = RAGContractData::getTmpContractLineFromRentalLine(parentLine);
+ 
+                if (tmpContractLine.Insurance_AddInsurance && tmpContractLine.InsurancePct_Percentage)
+                {
+                    insurancePct            = tmpContractLine.InsurancePct_Percentage / 100;
+                    insuranceGrossAmount    = parentLine.RentalGrossAmount * insurancePct;
+ 
+                    switch (tmpContractLine.Insurance_CalcBasis)
+                    {
+                        case RORInsuranceCalcBasis::Gross:
+                            insuranceNetAmount = parentLine.RentalGrossAmount * insurancePct;
+                            break;
+ 
+                        case RORInsuranceCalcBasis::Net:
+                            insuranceNetAmount = parentLine.RORRentalLine::editNetAmount(false, 0) * insurancePct;
+                            break;
+                    }
+                }
+ 
+                this.RentalGrossAmount = insuranceGrossAmount;
+                this.LinePercent = RAGUtil::calcRentalDiscount(insuranceGrossAmount, insuranceNetAmount);
+            }
+        }
+ 
+        this.RORRentalLine::rentalPricesModified();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalPricesModified</Name>
+				<Source><![CDATA[
+    public void rentalPricesModified(boolean _checkOnlyRentalLines = true)
+	{
+		if (this.KitComponentType == RORKitComponentType::Component
+		||  this.KitComponentType == RORKitComponentType::Standalone
+		||  this.RORRentalLine::pricingKitComponentType(_checkOnlyRentalLines) == RORKitComponentType::Component)
+		{
+			this.Price = this.RentalGrossAmount / (this.RentQty ? this.RentQty : 1.0);
+			this.LineAmount = this.calcLineAmount();
+		}
+		else if (this.IsPriceFixed)
+		{
+			this.Price      = 0;
+			this.LineDisc   = 0;
+			this.LineAmount = this.calcLineAmount();
+		}
+		else
+		{
+			this.Price      = 0;
+			this.LineDisc   = 0;
+			this.LineAmount = 0;
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORGetHeader</Name>
+				<Source><![CDATA[
+    public RORRentalHeader RORGetHeader(boolean _forUpdate = false)
+	{
+		return this.RORGetHeader(_forUpdate);
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORGetParentLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine RORGetParentLine(boolean _forUpdate = false)
+	{
+		return this.RORGetParentLine(_forUpdate);
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORInitFromOrderLine</Name>
+				<Source><![CDATA[
+    public void RORInitFromOrderLine(RORRentalLine _rentalLine)
+	{
+		this.RORInitFromOrderLine(_rentalLine);
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORModifiedCalendarId</Name>
+				<Source><![CDATA[
+    public void RORModifiedCalendarId()
+	{
+		if (this.CalendarId != this.orig().CalendarId
+		&& this.TableId == tableNum(RORRentalEditorLine))
+		{
+			// Invoice periods didn't get new calendar yet so multiplier cannot be recalculated here
+			this.INVSetTierMultiplierRateOnCreation();
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORModifiedInvoiceProfileId</Name>
+				<Source><![CDATA[
+    public void RORModifiedInvoiceProfileId()
+	{
+		if (this.INVInvoiceProfileId != this.orig().INVInvoiceProfileId)
+		{
+            this.INVSetTierMultiplierRateOnCreation();			
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>timeZoneSite</Name>
+				<Source><![CDATA[
+    public Timezone timeZoneSite()
+    {
+        return this.RORTimeZoneSite();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINTimeZoneOrder</Name>
+				<Source><![CDATA[
+    public Timezone FINTimeZoneOrder()
+    {
+        // Implemented in the 'DynaRentInvoicing' model.
+
+        // Return the company time zone by default.
+        return DateTimeUtil::getCompanyTimeZone();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateCalendarPeriodsMultiplierRate</Name>
+				<Source><![CDATA[
+    public void updateCalendarPeriodsMultiplierRate(RORRentalDateTimes      _rentalDateTimes,
+                                                    FINRentalInvoiceProfile _invoiceProfile,
+	                                                RAGAgreementType        _tier               = RAGAgreementType::PriceTier,
+	                                                // pass parent if available to reduce database roundtrips.
+	                                                RORRentalLine           _rentalLineParent   = null,
+	                                                // force to update periods if not updated in standard process.
+	                                                boolean                 _updatePeriods      = false,
+	                                                TransDateTime           _fromDateTime       = DateTimeUtil::minValue(),
+	                                                TransDateTime           _toDateTime         = DateTimeUtil::minValue())
+	{
+		#TimeConstants
+
+        RORRentalLine           rentalLineLocal;
+		RAGContractTable        contractTable;
+		RORRentalDateTimes      rentalDateTimes;
+		Common                  common;
+	
+        FieldId startDateFieldId        = RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingStart());
+        FieldId endDateFieldId          = RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingEnd());
+        FieldId expectedEndDateFieldId  = RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingExpectedEnd());
+	
+		RORNumOfPeriods         totalPeriodsNum;
+		RAGPriceTierPeriod      tierPeriod;
+		RAGContractId           contractId;
+		ItemId                  itemId;
+	
+		// Maybe better to use parameter to check which fields are start/end rental dates?
+		TransDate                   startDate;
+		TransDate                   endDate;
+		TransDateTime               startDateTime;
+		TransDateTime               endDateTime;
+		Timezone                    timeZone = this.RORRentalLine::FINTimeZoneOrder();
+
+		if (_invoiceProfile.PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating)
+		{
+			itemId = this.ItemId;
+
+			if (this.TradeType == RORTradeType::SalesPurch
+			&& (this.LineType != RORLineType::Transport || !this.ParentLineRecId))
+			{
+				// Make sure that this record is saved outside of this method otherwise multiplier value will be lost.
+				this.INVRateMultiplierTier = 1.00;
+			}
+			else
+			{
+				// Insurance and Transport have no contract so we need to use sometimes parent line.
+				if (this.LineType   == RORLineType::Insurance
+				||  this.LineType   == RORLineType::Transport)
+				{
+					rentalLineLocal = _rentalLineParent ? _rentalLineParent : this.RORGetParentLine();
+				}
+				else
+				{
+					rentalLineLocal = this;
+				}
+
+				common          = rentalLineLocal;
+				rentalDateTimes = _rentalDateTimes ? _rentalDateTimes : common.RORRentalDateTimesHost::rentalDateTimes();
+
+				startDateTime   = rentalDateTimes.(startDateFieldId);
+				startDate       = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(startDateTime, timeZone));
+
+				endDateTime     = rentalDateTimes.(endDateFieldId) ? rentalDateTimes.(endDateFieldId) : rentalDateTimes.(expectedEndDateFieldId);
+				endDate         = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(endDateTime, timeZone));
+
+				select firstonly ContractId from contractTable
+				where contractTable.RelationType    == RAGContractType::Default
+				&&    contractTable.CurrencyCode    == rentalLineLocal.CurrencyCode
+				&&    contractTable.FromDate        <= startDate
+				&&    contractTable.ToDate          >= startDate;
+
+				contractId = contractTable.ContractId;
+
+				[totalPeriodsNum, tierPeriod] = RAGContractLine::getCalendarPeriods(
+					_invoiceProfile,
+					startDate,
+					DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(startDateTime, timeZone)),
+					endDate,
+					DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(endDateTime, timeZone)));
+
+				// Make sure that this record is saved outside of this method otherwise multiplier value will be lost.
+                this.INVRateMultiplierTier = this.RORRentalLine::getMultiplierRate(rentalLineLocal, _tier, totalPeriodsNum, tierPeriod);
+
+				if (_updatePeriods)
+				{
+                    this.updateInvoicePeriodMultiplier(_fromDateTime, _toDateTime);
+				}
+			}
+		}
+		else if (!this.RecId && (this.LineType == RORLineType::Insurance || this.LineType == RORLineType::Transport))
+		{
+			this.INVRateMultiplierTier = 1.00;
+		}
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMultiplierRate</Name>
+				<Source><![CDATA[
+    private INVRateMultiplierTier getMultiplierRate(RORRentalLine _rentalLine, RAGAgreementType _tier, RORNumOfPeriods _totalPeriodsNum, RAGPriceTierPeriod _tierPeriod)
+    {
+        RAGContractDataParm contractDataParm;
+
+        contractDataParm.initFromRentalLine(_rentalLine);
+
+        RAGContractData contractData = new RAGContractData();
+        
+        contractData.parmDataParm(contractDataParm);
+        contractData.populateData();
+
+        INVRateMultiplierTier ret = contractData.getTierMultiplier(_rentalLine.BOBRentalTypeId, _tier, _totalPeriodsNum, _tierPeriod);
+        
+        return (ret ? ret : 1.0); // make sure that there is always multiplier, even if there is no contract
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustKeepCallerOrigPrices</Name>
+				<Source><![CDATA[
+    public boolean mustKeepCallerOrigPrices()
+    {
+        boolean mustKeepCallerOrigPrices = true;
+
+        return mustKeepCallerOrigPrices;
+        // Can be implemented in other model.
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInvoicePeriodMultiplier</Name>
+				<Source><![CDATA[
+    public void updateInvoicePeriodMultiplier(TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        // Can be implemented in other model.
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateContractWithChanges</Name>
+				<Source><![CDATA[
+    public void updateContractWithChanges()
+    {
+        RAGTmpContractLine      tmpContractLine;
+        RAGContractTable        contractTable;
+        RORRentalLine           rentalLineParent;
+        RAGParameters           parameters;
+ 
+        if (this.LineType != RORLineType::Normal)
+        {
+            rentalLineParent = this.RORGetParentLine();
+ 
+            if (!rentalLineParent)
+            {
+                return;
+            }
+ 
+            parameters = RAGParameters::find();
+            tmpContractLine = RAGContractData::getTmpContractLineFromRentalLine(rentalLineParent);
+            tmpContractLine.insert(); // insert so we can later on use the orig() method to see what was changed
+ 
+            switch(this.LineType)
+            {
+                case RORLineType::Transport:
+                    if(this.ItemId == parameters.ItemIdTransport)
+                    {
+                        tmpContractLine.Transport_AddTransport = false;
+                        tmpContractLine.Transport_Price = 0;
+                    }
+                    else if(this.ItemId == parameters.ItemIdReturnTransport)
+                    {
+                        tmpContractLine.ReturnTransport_AddTransport = false;
+                        tmpContractLine.ReturnTransport_Price = 0;
+                    }
+                    break;
+ 
+                case RORLineType::Warranty:
+                    // Do not update contract for credit line
+                    if (this.LineAmount >= 0)
+                    {
+                        tmpContractLine.Warranty_AddWarranty = false;
+                        tmpContractLine.Warranty_Price = 0;
+                    }
+                    break;
+ 
+                case RORLineType::Insurance:
+                    tmpContractLine.Insurance_AddInsurance = false;
+                    tmpContractLine.Insurance_InsureHireStops = false;
+                    tmpContractLine.InsurancePct_Percentage = 0;
+                    tmpContractLine.Insurance_CalcBasis = RORInsuranceCalcBasis::Gross;
+                    break;
+ 
+                default:
+                    // do nothing
+                    break;
+            }
+ 
+            // check contract elements for any changes
+            if (!tmpContractLine.getModifications().empty())
+            {
+                contractTable = RAGContractTable::findOrCreateFromRentalLine(rentalLineParent, tmpContractLine);
+                tmpContractLine.modifyTmpContractLine();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateExtraLines</Name>
+				<Source><![CDATA[
+    public void updateExtraLines(
+        PriceCur _priceInsuranceGross,
+        PriceCur _priceInsuranceNet,
+        PriceCur _priceTransport,
+        PriceCur _priceReturnTransport,
+        PriceCur _priceWarranty,
+        LineNum _highestLineNum,
+        boolean _allowCreateExtraLines = true,
+        boolean _allowDeleteExtraLines = true)
+    {
+        RORRentalLine       rentalLineInsurance;
+        RORRentalLine       rentalLineTransport;
+        RORRentalLine       rentalLineReturnTransport;
+        RORRentalLine       rentalLineWarranty;
+        RAGParameters       parameters;
+        RORRentalLine       topKitLine = this.RORLineBuffer();
+        RORVenueTable       venueTable;
+        SalesTable          salesTable;
+        SalesQuotationTable salesQuotationTable;
+        RORRentalEditorLine rentalEditorLine;
+        Common              common;
+        RecId               parentRecId;
+        LineNum             highestLineNum = this.RORRentalLine::getLineNum();
+ 
+        ttsbegin;
+
+        topKitLine.data(this.data());
+ 
+        while (topKitLine.ParentLineRecId)
+        {
+            parentRecId = topKitLine.ParentLineRecId;
+            highestLineNum = topKitLine.RORRentalLine::getLineNum();
+ 
+            select firstonly topKitLine
+            where topKitLine.RecId == parentRecId;
+        }
+ 
+        parameters = RAGParameters::find();
+ 
+        // TODO: create Transport/Insurance lines only in RLE form otherwise store numeric values on a parent line itself.
+        if (this.TableId == tableNum(RORRentalEditorLine))
+        {
+            // Insurance
+            rentalLineInsurance = topKitLine.RORRentalLine::getInsuranceLine(true);
+ 
+            if (_priceInsuranceGross)
+            {
+                // If doesn't exist already, then create
+                if (!rentalLineInsurance && _allowCreateExtraLines)
+                {
+                    rentalLineInsurance = topKitLine.RORCreateExtraLine(this.TradeType, RORKitComponentType::Standalone, parameters.ItemIdInsurance, highestLineNum);
+                }
+ 
+                if (rentalLineInsurance && !rentalLineInsurance.IsPriceFixed)
+                {
+                    rentalLineInsurance.RentalGrossAmount = _priceInsuranceGross;
+                    rentalLineInsurance.LinePercent = RAGUtil::calcRentalDiscount(_priceInsuranceGross, _priceInsuranceNet);
+                    rentalLineInsurance.RORRentalLine::rentalPricesModified();
+                    //Insurance should always have the same price type as its parent
+                    rentalLineInsurance.IsPriceNet = this.IsPriceNet;
+                    rentalLineInsurance.update();
+ 
+                    if (rentalLineInsurance.RORRentalLine::getLineNum() > highestLineNum)
+                    {
+                        highestLineNum = rentalLineInsurance.RORRentalLine::getLineNum();
+                    }
+                }
+            }
+            else if (rentalLineInsurance && _allowDeleteExtraLines)
+            {
+                rentalLineInsurance.delete();
+            }
+ 
+            // Transport
+            rentalLineTransport = topKitLine.RORRentalLine::getTransportLine(true);
+ 
+            if (_priceTransport)
+            {
+                // If doesn't exist already, then create
+                if (!rentalLineTransport && _allowCreateExtraLines)
+                {
+                    rentalLineTransport = topKitLine.RORCreateExtraLine(RORTradeType::SalesPurch, RORKitComponentType::Standalone, parameters.ItemIdTransport, highestLineNum);
+                }
+ 
+                if (rentalLineTransport)
+                {
+                    if (InventTable::find(rentalLineTransport.ItemId).RORBasePriceOnDistance)
+                    {
+                        common = rentalLineTransport;
+                        rentalEditorLine = common as RORRentalEditorLine;
+ 
+                        if (rentalLineTransport.TableId == tableNum(SalesLine)
+                        ||  (rentalEditorLine && rentalEditorLine.RefTableId == tableNum(SalesLine)))
+                        {
+                            select firstOnly RecId, TransportDistanceQty from venueTable
+                            where venueTable.TransportDistanceQty
+                            &&    venueTable.TransportDistanceUnit
+                                exists join salesTable
+                                where salesTable.RORVenueCode == venueTable.VenueCode
+                                &&    salesTable.SalesId      == rentalLineTransport.HeaderId;
+                        }
+ 
+                        if (rentalLineTransport.TableId == tableNum(SalesQuotationLine)
+                        ||  (rentalEditorLine && rentalEditorLine.RefTableId == tableNum(SalesQuotationLine)))
+                        {
+                            select firstOnly RecId, TransportDistanceQty from venueTable
+                            where venueTable.TransportDistanceQty
+                            &&    venueTable.TransportDistanceUnit
+                                exists join salesQuotationTable
+                                where salesQuotationTable.RORVenueCode  == venueTable.VenueCode
+                                &&    salesQuotationTable.QuotationId   == rentalLineTransport.HeaderId;
+                        }
+                    }
+ 
+                    rentalLineTransport.Price = venueTable ? _priceTransport / venueTable.TransportDistanceQty : _priceTransport;
+
+                    if (topKitLine.RentQty)
+                    {
+                        rentalLineTransport.Price = rentalLineTransport.Price * topKitLine.RentQty;
+                    }
+                    rentalLineTransport.RORRentalLine::priceModified();
+                    rentalLineTransport.LineAmount = rentalLineTransport.calcLineAmountForced();
+                    rentalLineTransport.update();
+ 
+                    if (rentalLineTransport.RORRentalLine::getLineNum() > highestLineNum)
+                    {
+                        highestLineNum = rentalLineTransport.RORRentalLine::getLineNum();
+                    }
+                }
+            }
+            else if (rentalLineTransport && _allowDeleteExtraLines)
+            {
+                rentalLineTransport.delete();
+            }
+ 
+            // Return transport
+            rentalLineReturnTransport = topKitLine.RORRentalLine::getReturnTransportLine(true);
+ 
+            if(_priceReturnTransport)
+            {
+                // create a new line, in case it doesn't exist already
+                if(!rentalLineReturnTransport)
+                {
+                    rentalLineReturnTransport = topKitLine.RORCreateExtraLine(RORTradeType::SalesPurch, RORKitComponentType::Standalone, parameters.ItemIdReturnTransport, highestLineNum);
+                }
+ 
+                if(rentalLineReturnTransport)
+                {
+                    rentalLineReturnTransport.Price = _priceReturnTransport;
+                    if (topKitLine.RentQty)
+                    {
+                        rentalLineTransport.Price = rentalLineTransport.Price * topKitLine.RentQty;
+                    }
+                    rentalLineReturnTransport.RORRentalLine::priceModified();
+                    rentalLineReturnTransport.LineAmount = rentalLineReturnTransport.calcLineAmountForced();
+                    rentalLineReturnTransport.update();
+ 
+                    if(rentalLineReturnTransport.RORRentalLine::getLineNum() > highestLineNum)
+                    {
+                        highestLineNum = rentalLineReturnTransport.RORRentalLine::getLineNum();
+                    }
+                }
+            }
+            else if(rentalLineReturnTransport && _allowDeleteExtraLines)
+            {
+                rentalLineReturnTransport.delete();
+            }
+        }
+ 
+        // Warranty
+        rentalLineWarranty = topKitLine.RORRentalLine::getWarrantyLine(true);
+ 
+        if (_priceWarranty)
+        {
+			// If doesn't exist already, then create
+			if (!rentalLineWarranty && _allowCreateExtraLines)
+            {
+                if (topKitLine.TableId == tableNum(SalesLine))
+                {
+                    rentalLineWarranty = topKitLine.RORCreateExtraLine(RORTradeType::SalesPurch, RORKitComponentType::Standalone, parameters.ItemIdWarranty, highestLineNum);
+                }
+                else if (topKitLine.TableId == tableNum(PurchLine))
+                {
+                    rentalLineWarranty = topKitLine.RORCreateExtraLine( RORLineType::Warranty, RORTradeType::SalesPurch, RORKitComponentType::Standalone, parameters.ItemIdWarranty, highestLineNum);
+                }
+            }
+ 
+            if (rentalLineWarranty)
+            {
+                rentalLineWarranty.Price  = _priceWarranty;
+                rentalLineWarranty.RORRentalLine::priceModified();
+                rentalLineWarranty.LineAmount = rentalLineWarranty.calcLineAmountForced();
+                rentalLineWarranty.update();
+ 
+                if (rentalLineWarranty.RORRentalLine::getLineNum() > highestLineNum)
+                {
+                    highestLineNum = rentalLineWarranty.RORRentalLine::getLineNum();
+                }
+            }
+        }
+        else if (rentalLineWarranty && _allowDeleteExtraLines)
+        {
+            rentalLineWarranty.delete();
+        }
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateFromRentalEditorLine</Name>
+				<Source><![CDATA[
+    public void updateFromRentalEditorLine(RORRentalEditorLine _rentalEditorLine, boolean _ignoreInvoicePeriodValues = false)
+	{
+		InventDim   inventDim;
+	
+		if (!_ignoreInvoicePeriodValues)
+		{
+			this.Price                  = _rentalEditorLine.RentalPrice;
+			this.LinePercent            = _rentalEditorLine.LinePercent;
+			this.LineType               = _rentalEditorLine.LineType;
+			this.PriceTimeUnit          = _rentalEditorLine.PriceTimeUnit;
+			this.LineAmount             = _rentalEditorLine.LineAmount;
+			this.LineDisc               = _rentalEditorLine.LineDisc;
+			this.INVRentalModeId        = _rentalEditorLine.INVRentalModeId;
+			this.INVRateMultiplierTier  = _rentalEditorLine.INVRateMultiplierTier;
+			this.RentQty                = _rentalEditorLine.RentalQty;
+			this.SalesPurchUnit         = _rentalEditorLine.RentalUnit;
+			this.RentalGrossAmount      = _rentalEditorLine.RentalGrossAmount;
+			this.INVInvoiceProfileId    = _rentalEditorLine.INVInvoiceProfileId;
+	
+            if (this.CalendarId != _rentalEditorLine.DNRCalendarId) 
+			{
+                this.CalendarId = _rentalEditorLine.DNRCalendarId;
+	
+				this.INVSetTierMultiplierRateOnCreation();
+			}
+		}
+	
+		//this.RentalGrossAmount      = _rentalEditorLine.RentalGrossAmount;
+		this.isPriceFixed           = _rentalEditorLine.isPriceFixed;
+		this.isPriceNet             = _rentalEditorLine.isPriceNet;
+		this.TradeType              = _rentalEditorLine.TradeType;
+	
+		inventDim = inventDim::find(this.InventDimId);
+		inventDim.InventLocationId  = _rentalEditorLine.InventLocationId;
+		inventDim.InventSiteId      = _rentalEditorLine.InventSiteId;
+		inventDim = inventDim::findOrCreate(inventDim);
+	
+		this.InventDimId = inventDim.InventDimId;
+	
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateKitComponentPricing</Name>
+				<Source><![CDATA[
+    public server void updateKitComponentPricing(RORKitPricingActionType    _kitPricingActionType,
+												 boolean                    _checkOnlyRentalLines = true,
+												 boolean                    _forceUpdateFromComponent = false,
+												 boolean                    _parentUpdatedFromChild = false)
+	{
+		RORKitPriceUpdateType   kitPriceUpdateType;
+	
+		if (!_forceUpdateFromCOmponent
+		&& (this.KitComponentType == RORKitComponentType::Kit ||
+            (this.KitComponentType == RORKitComponentType::KitComponent && this.RORRentalLine::lineHasIncludedChildren(_checkOnlyRentalLines))))
+		{
+			kitPriceUpdateType = RORKitPriceUpdateType::FromKit;
+		}
+		else if (this.KitComponentType == RORKitComponentType::Standalone)
+		{
+			kitPriceUpdateType = RORKitPriceUpdateType::Standalone;
+		}
+		else
+		{
+			kitPriceUpdateType = RORKitPriceUpdateType::FromComponent;
+		}
+	
+		RORKitPriceManager::construct(this, kitPriceUpdateType, _kitPricingActionType, _checkOnlyRentalLines, _parentUpdatedFromChild).run();
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateNetAmount</Name>
+				<Source><![CDATA[
+    private boolean  validateNetAmount()
+	{
+		boolean  ok = true;
+	
+		if (this.RentalGrossAmount < RAGUtil::calcNetPrice(this.RentalGrossAmount, this.LinePercent, this.CurrencyCode))
+		{
+			warning("@DNR2281");
+		}
+	
+		return ok;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    public boolean validateWrite()
+	{
+		boolean ret = true;
+	
+		if (this.TradeType != RORTradeType::SalesPurch)
+		{
+			if (!this.INVInvoiceProfileId)
+			{
+				ret = checkFailed(strFmt("@SYS84378", fieldId2pname(tableNum(SalesLine), fieldNum(SalesLine, INVInvoiceProfileId))));
+			}
+	
+			if (!this.CalendarId)
+			{
+				ret = checkFailed(strFmt("@SYS84378", fieldId2pname(tableNum(SalesLine), fieldNum(SalesLine, DNRCalendarId))));
+			}
+	
+			if (!this.PriceTimeUnit)
+			{
+				ret = checkFailed(strFmt("@SYS84378", fieldId2pname(tableNum(SalesLine), fieldNum(SalesLine, RORPriceTimeUnit))));
+			}
+	
+			if (!this.INVRentalModeId)
+			{
+				ret = checkFailed(strFmt("@SYS84378", fieldId2pname(tableNum(SalesLine), fieldNum(SalesLine, INVRentalModeId))));
+			}
+		}
+	
+		return ret;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>itemHasComponents</Name>
+				<Source><![CDATA[
+    public client server static boolean itemHasComponents(RORRentalLine _callerRentalLine, ItemId _itemIdKit, SalesPurchTable _callerHeader)
+	{
+		SuppItem            suppItem;
+		TmpSuppItem         tmpSuppItem;
+		Common              common = _callerRentalLine;
+		SalesPurchLine      salesPurchLineDummy;
+	
+		salesPurchLineDummy = common; // copy from main kit and then modify the required fields
+		salesPurchLineDummy.salesPurchLineInterface().DNRassignItemId(_itemIdKit);
+	
+		suppItem = SuppItem::newSuppItem(_callerHeader, HeadingLine::Line);
+		suppItem.DNRCalcSuppItem(salesPurchLineDummy);
+		tmpSuppItem = suppItem.tmpSuppItem();
+	
+		select firstonly RecId from tmpSuppItem
+		where tmpSuppItem.RORTradeType != RORTradeType::SalesPurch;
+	
+		return tmpSuppItem.RecId != 0;
+	}
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>displayLineTypeImage</Name>
+				<Source><![CDATA[
+    public display container displayLineTypeImage()
+    {
+        ImageReference imageReference;
+        container imageContainer;
+        RAGParameters   parameters;
+                 
+        if (this.RecId)
+        {
+            switch(this.KitComponentType)
+            {
+                case RORKitComponentType::Kit:
+                    imageReference = (this.ParentLineRecId && this.TradeType == RORTradeType::SalesPurch ?
+                        ImageReference::constructForSymbol('OrderLineMultipleDeliveries') :
+                        // subkits whose trade type is Sales/Purch get KitComponentType 'kit'
+                    ImageReference::constructForSymbol('Organization'));
+                    break;
+
+                case RORKitComponentType::Component:
+                    imageReference = ImageReference::constructForSymbol('Quantity');
+                    break;
+
+                case RORKitComponentType::KitComponent:
+                    imageReference = ImageReference::constructForSymbol('OrderLineMultipleDeliveries');
+                    break;
+
+                case RORKitComponentType::Standalone:
+                    parameters = RAGParameters::find();
+
+                    if (this.ItemId == parameters.ItemIdWarranty
+                    || this.ItemId == parameters.ItemIdInsurance
+                    || this.ItemId == parameters.ItemIdReturnTransport
+                    || this.ItemId == parameters.ItemIdTransport)
+                    {
+                        imageReference = ImageReference::constructForSymbol('OpenEnrollment');
+                    }
+                    else if (this.TradeType == RORTradeType::SalesPurch)
+                    {
+                        if (this.ItemId == RORParameters::find().ItemIdFuel)
+                        {
+                            imageReference = ImageReference::constructForSymbol('CarRental');
+                        }
+                        else
+                        {
+                            imageReference = ImageReference::constructForSymbol('RadioEmpty');
+                        }
+                    }
+                    else
+                    {
+                        imageReference = ImageReference::constructForSymbol('Products');
+                    }
+                    break;
+            }
+        }
+        else
+        {
+            imageReference = ImageReference::constructForSymbol('');
+        }
+
+        if (imageReference)
+        {
+            imageContainer = imageReference.pack();
+        }
+
+        return imageContainer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isTechnicalExchange</Name>
+				<Source><![CDATA[
+    public boolean isTechnicalExchange()
+    {
+        boolean             ret;
+        RORRentalLine       rentalLine = this.RORLineBuffer();
+        RORRentalEditorLine rentalEditorLine;
+        ;
+ 
+        if (this.TableId == tableNum(SalesQuotationLine))
+        {
+            return false;
+        }
+ 
+        if (this.TableId == tableNum(RORRentalEditorLine))
+        {
+            rentalEditorLine = this;
+            ret = rentalEditorLine.recIdExchanged() && rentalEditorLine.exchangeType() == RORAmendmentExchangeType::Technical;
+        }
+        else
+        {
+            ret = this.RecIdExchanged && this.AmendmentExchangeType == RORAmendmentExchangeType::Technical;
+        }
+ 
+        if (!ret)
+        {
+            select firstonly  RecId from rentalLine
+            where rentalLine.HeaderId == this.HeaderId
+            &&    rentalLine.RecIdExchanged == this.RecId
+            &&    rentalLine.AmendmentExchangeType == RORAmendmentExchangeType::Technical;
+ 
+            if (rentalLine)
+            {
+                ret = true;
+            }
+        }
+ 
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOrigReplacementLineBuffer</Name>
+				<Source><![CDATA[
+    public RORRentalLine getOrigReplacementLineBuffer()
+    {
+        RORRentalLine               rentalLineLocal = this.RORLineBuffer();
+        RORRentalLine               rentalLineReplacementChild = this.RORLineBuffer();
+        RecId                       recIdExchanged;
+        RecId                       recId = this.RecId;
+        RORRentalLine               ret;
+ 
+        rentalLineLocal.data(this);
+ 
+        select rentalLineReplacementChild
+        where rentalLineReplacementChild.RecIdExchanged == this.RecId
+        &&    rentalLineReplacementChild.HeaderId == this.HeaderId;
+ 
+        if (this.TableId != tableNum(SalesQuotationLine)
+        && this.TableId != tableNum(RORRentalEditorLine)
+        && (this.RecIdExchanged || rentalLineReplacementChild.RecId))
+        {
+            if (rentalLineReplacementChild.RecId)
+            {
+                recIdExchanged = rentalLineReplacementChild.RecId;
+                if (recIdExchanged)
+                {
+                    recId = recIdExchanged;
+                    ret = rentalLineReplacementChild;
+                }
+            }
+            else
+            {
+                recIdExchanged = this.RecId;
+                ret = this;
+            }
+
+            while (recIdExchanged)
+            {
+                select firstOnly rentalLineLocal
+                where rentalLineLocal.RecIdExchanged == recIdExchanged
+                &&    rentalLineLocal.HeaderId == this.HeaderId;
+ 
+                recIdExchanged = rentalLineLocal.RecId;
+
+                if (rentalLineLocal)
+                {
+                    recId = rentalLineLocal.RecId;
+                    ret.data(rentalLineLocal);
+                }
+            }
+        }
+ 
+        return recId ? ret : null;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>promptChangeInventLocationResetPrice</Name>
+				<Source><![CDATA[
+    public boolean promptChangeInventLocationResetPrice()
+    {
+        return Box::yesNo("@DNR:WarehouseChangedRecalcPrice", DialogButton::No) == DialogButton::Yes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInsurancePercentage</Name>
+				<Source><![CDATA[
+    public RORInsurancePercentage getInsurancePercentage()
+    {
+        return this.InsuranceCalcBasis == RORInsuranceCalcBasis::Gross ? this.InsuranceGrossPercentage : this.InsuranceNetPercentage;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCurrentNetPrice</Name>
+				<Source><![CDATA[
+    public RORCurrentNetAmount RORCurrentNetPrice()
+    {
+        // implemented in Dynarent Invoicing model
+        return this.RentalGrossAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isLineUpdated</Name>
+				<Source><![CDATA[
+    public boolean isLineUpdated(RORRentalEditorLine _rentalEditorLine)
+    {
+        boolean		ret;
+        InventDim	inventDim = inventDim::find(this.InventDimId);
+
+        if (this.Price					!= _rentalEditorLine.RentalPrice
+        ||	this.LinePercent			!= _rentalEditorLine.LinePercent
+        ||	this.LineType				!= _rentalEditorLine.LineType
+        ||	this.PriceTimeUnit			!= _rentalEditorLine.PriceTimeUnit
+        ||	this.LineAmount				!= _rentalEditorLine.LineAmount
+        ||	this.LineDisc               != _rentalEditorLine.LineDisc
+        ||	this.INVRentalModeId        != _rentalEditorLine.INVRentalModeId
+        ||	this.INVRateMultiplierTier  != _rentalEditorLine.INVRateMultiplierTier
+        ||	this.RentQty                != _rentalEditorLine.RentalQty
+        ||	this.SalesPurchUnit         != _rentalEditorLine.RentalUnit
+        ||	this.RentalGrossAmount      != _rentalEditorLine.RentalGrossAmount
+        ||	this.INVInvoiceProfileId    != _rentalEditorLine.INVInvoiceProfileId
+        ||	this.CalendarId				!= _rentalEditorLine.DNRCalendarId
+        ||	this.isPriceFixed           != _rentalEditorLine.isPriceFixed
+        ||	this.isPriceNet             != _rentalEditorLine.isPriceNet
+        ||	this.TradeType              != _rentalEditorLine.TradeType
+        ||	inventDim.InventLocationId  != _rentalEditorLine.InventLocationId
+        ||	inventDim.InventSiteId      != _rentalEditorLine.InventSiteId)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR7514</DeveloperDocumentation>
+	<Label>@DNR1668</Label>
+	<FieldGroups />
+	<Fields>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldEnum">
+			<Name>AllowQtyEdit</Name>
+			<ExtendedDataType>RORAllowQtyEdit</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldEnum">
+			<Name>AmendmentExchangeType</Name>
+			<EnumType>RORAmendmentExchangeType</EnumType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>BOBRentalTypeId</Name>
+			<ExtendedDataType>BOBRentalTypeId</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>CalendarId</Name>
+			<ExtendedDataType>DNRCalendarId</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>CurrencyCode</Name>
+			<ExtendedDataType>CurrencyCode</ExtendedDataType>
+			<StringSize>3</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>CustVendAccount</Name>
+			<ExtendedDataType>CustVendAC</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>HeaderId</Name>
+			<ExtendedDataType>RORHeaderId</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>InventDimId</Name>
+			<ExtendedDataType>InventDimId</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>InventTransId</Name>
+			<ExtendedDataType>InventTransId</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>INVInvoiceProfileId</Name>
+			<ExtendedDataType>INVInvoiceProfileId</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>INVRateMultiplierTier</Name>
+			<ExtendedDataType>INVRateMultiplierTier</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>INVRentalModeId</Name>
+			<ExtendedDataType>INVRentalModeId</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldEnum">
+			<Name>IsPriceFixed</Name>
+			<ExtendedDataType>RORIsPriceFixed</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldEnum">
+			<Name>IsPriceNet</Name>
+			<ExtendedDataType>RORIsPriceNet</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>ItemId</Name>
+			<ExtendedDataType>ItemId</ExtendedDataType>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldEnum">
+			<Name>KitComponentType</Name>
+			<EnumType>RORKitComponentType</EnumType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>LineAmount</Name>
+			<ExtendedDataType>LineAmount</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>LineDisc</Name>
+			<ExtendedDataType>SalesLineDisc</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>LinePercent</Name>
+			<ExtendedDataType>SalesLinePercent</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldEnum">
+			<Name>LineType</Name>
+			<EnumType>RORLineType</EnumType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldInt64">
+			<Name>ParentLineRecId</Name>
+			<ExtendedDataType>RORLineParent</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>Price</Name>
+			<ExtendedDataType>SalesPrice</ExtendedDataType>
+			<HelpText>@SYS1174</HelpText>
+			<Label>@SYS11770</Label>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldInt64">
+			<Name>PriceTimeUnit</Name>
+			<ExtendedDataType>RORPriceTimeUnit</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>PriceUnit</Name>
+			<ExtendedDataType>PriceUnit</ExtendedDataType>
+			<HelpText>@SYS3472</HelpText>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldInt64">
+			<Name>RecIdExchanged</Name>
+			<ExtendedDataType>RORRecIdExchanged</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>RentalGrossAmount</Name>
+			<ExtendedDataType>RORRentalGrossAmount</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>RentQty</Name>
+			<ExtendedDataType>SalesQty</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>SalesPurchUnit</Name>
+			<ExtendedDataType>SalesUnit</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldInt64">
+			<Name>SuppItemTableRecid</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SuppItemTableRefRecId</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldEnum">
+			<Name>TradeType</Name>
+			<EnumType>RORTradeType</EnumType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldString">
+			<Name>WPPWorkOrderTemplateId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>WPPWorkOrderTemplateId</ExtendedDataType>
+			<HelpText>@DNR1488</HelpText>
+			<Label>@DNR1487</Label>
+			<StringSize>20</StringSize>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldEnum">
+			<Name>InsuranceCalcBasis</Name>
+			<EnumType>RORInsuranceCalcBasis</EnumType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>InsuranceGrossPercentage</Name>
+			<ExtendedDataType>RORInsurancePercentage</ExtendedDataType>
+		</AxMapBaseField>
+		<AxMapBaseField xmlns=""
+			i:type="AxMapFieldReal">
+			<Name>InsuranceNetPercentage</Name>
+			<ExtendedDataType>RORInsurancePercentage</ExtendedDataType>
+		</AxMapBaseField>
+	</Fields>
+	<Mappings />
+</AxMap>

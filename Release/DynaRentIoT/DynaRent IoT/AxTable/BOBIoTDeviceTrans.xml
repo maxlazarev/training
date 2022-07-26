@@ -1,0 +1,646 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBIoTDeviceTrans</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class BOBIoTDeviceTrans extends common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>findRecId</Name>
+				<Source><![CDATA[
+    public static BOBIoTDeviceTrans findRecId(BOBIoTDeviceTransRecId _recId, boolean _forUpdate = false)
+    {
+        BOBIoTDeviceTrans ret;
+    
+        if(_recId)
+        {
+            if(_forUpdate)
+            {
+                ret.selectForUpdate(true);
+            }
+    
+            select firstOnly ret
+            where ret.RecId == _recId;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setTransStatus</Name>
+				<Source><![CDATA[
+    public void setTransStatus()
+    {
+        if (!this.IsUnauthorizedUsage && !this.IsObjectLocationChanged && !this.MeterValue)
+        {
+            this.TransStatus = BOBIoTDeviceTransStatus::NotRequired;
+        }
+        else if ((!this.IsUnauthorizedUsage || this.IsUnauthorizedUsageProcessed)
+              && (!this.IsObjectLocationChanged || this.IsObjectLocationChangedProcessed)
+              && (!this.MeterValue || this.IsMeterValueProcessed))
+        {
+            this.TransStatus = BOBIoTDeviceTransStatus::FullyProcessed;
+        }
+        else if ((this.IsUnauthorizedUsage && this.IsUnauthorizedUsageProcessed)
+              || (this.IsObjectLocationChanged && this.IsObjectLocationChangedProcessed)
+              || (this.MeterValue && this.IsMeterValueProcessed))
+        {
+            this.TransStatus = BOBIoTDeviceTransStatus::PartlyProcessed;
+        }
+        else
+        {
+            this.TransStatus = BOBIoTDeviceTransStatus::NotProcessed;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setToProcess</Name>
+				<Source><![CDATA[
+    public void setToProcess()
+    {
+        this.ToProcess = '';
+        str separator = '';
+
+        if (this.IsUnauthorizedUsage && !this.IsUnauthorizedUsageProcessed)
+        {
+            this.ToProcess += "@DNR:IsUnauthorizedUsage";
+            separator = ', ';
+        }
+
+        if (this.IsObjectLocationChanged && !this.IsObjectLocationChangedProcessed)
+        {
+            this.ToProcess += separator + "@DNR:IsObjectLocationChanged";
+            separator = ', ';
+        }
+
+        if (this.MeterValue && !this.IsMeterValueProcessed)
+        {
+            this.ToProcess += separator + "@DNR6964";
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insert</Name>
+				<Source><![CDATA[
+    public void insert()
+    {
+        this.IsObjectLocationChanged = this.deviceIsMoved();
+        this.IsObjectLocationChangedProcessed = !this.IsObjectLocationChanged;
+
+        this.IsUnauthorizedUsage = this.IsObjectLocationChanged && this.deviceIsUsedUnauthorized();
+        this.IsUnauthorizedUsageProcessed = !this.IsUnauthorizedUsage;
+
+        this.IsMeterValueProcessed = !this.MeterValue;
+        
+        this.setTransStatus();
+        this.setToProcess();
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update()
+    {
+        this.setTransStatus();
+        this.setToProcess();
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deviceIsUsedUnauthorized</Name>
+				<Source><![CDATA[
+    private NoYes deviceIsUsedUnauthorized()
+    {
+        BOBIoTDeviceTable   deviceTable;
+        BOBRentalTrans      rentalTrans;
+        SalesLine           salesLine;
+        InventTransOrigin   inventTransOrigin;
+        InventTrans         inventTrans;
+
+        select firstonly salesLine
+            exists join inventTransOrigin
+            where inventTransOrigin.InventTransId == salesLine.InventTransId
+                join TableId from inventTrans
+                where inventTrans.InventTransOrigin == inventTransOrigin.RecId
+                    join TableId from rentalTrans
+                    where rentalTrans.FromDateTime <= this.MessageDateTime
+                    &&    rentalTrans.ToDateTime >= this.MessageDateTime
+                    &&    rentalTrans.TransType == BOBRentalTransType::Rental
+                    &&    rentalTrans.SubStatus >= BOBRentalSubStatus::Delivered
+                    &&    rentalTrans.SubStatus < BOBRentalSubStatus::Returned
+                    &&    rentalTrans.InventTransOrigin == inventTrans.InventTransOrigin
+                        join TableId from deviceTable
+                        where deviceTable.RecId == this.DeviceTableRecId
+                        &&    deviceTable.ObjectId == rentalTrans.ObjectId;
+
+        if(salesLine)
+        {
+            return this.detectUnauthorizedUsage(salesLine);
+        }
+
+        return NoYes::No;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>detectUnauthorizedUsage</Name>
+				<Source><![CDATA[
+    private NoYes detectUnauthorizedUsage(SalesLine _salesLine)
+    {
+        Map invoiceProfileMap = new Map(Types::String, Types::Enum);
+        FINRentalInvoiceProfile invoiceProfile;
+        
+        while select invoiceProfile
+        {
+            invoiceProfileMap.insert(invoiceProfile.InvoiceProfileId, invoiceProfile.isHourlyInvoicing());
+        }
+
+        FINInvoicePeriodAmendment invoicePeriodAmendment;
+        Map calendarMap = new Map(Types::String, Types::Enum);
+
+        boolean mustPopulateTimes = invoiceProfileMap.lookup(_salesLine.INVInvoiceProfileId);
+ 
+        if(calendarMap.exists(_salesLine.DNRCalendarId))
+        {
+            mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(_salesLine.DNRCalendarId));
+        }
+ 
+        calendarMap.insert(_salesLine.DNRCalendarId, mustPopulateTimes);
+
+        while select StrValue from invoicePeriodAmendment
+        where invoicePeriodAmendment.RefTableId == _salesLine.TableId
+        &&    invoicePeriodAmendment.RefRecId == _salesLine.RecId
+        &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+        &&    (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed)
+        {
+            if (calendarMap.exists(invoicePeriodAmendment.StrValue))
+            {
+                mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(invoicePeriodAmendment.StrValue));
+            }
+ 
+            calendarMap.insert(invoicePeriodAmendment.StrValue, mustPopulateTimes);
+        }
+ 
+        // build a work calendar cache with all the necessary working dates/times for this invoice run
+        FromDate invoiceFromDate;
+        ToDate invoiceToDate;
+        [ invoiceFromDate, invoiceToDate ] = this.calculateInvoiceDateRange(_salesLine);
+ 
+        RORCalendarId calendarId = this.getPriceComponent(this.MessageDateTime, FINInvoicePeriodPriceComponent::CalendarId, _salesLine);
+
+        FINWorkCalendar workCalendar = new FINWorkCalendar();
+        workCalendar.populate(calendarMap, invoiceFromDate, invoiceToDate);
+
+        // Maybe refactor the workCalendar.isDateOpen method to avoid the errors from being thrown?
+        try
+        {
+            TransDate messageDate = DateTimeUtil::date(this.MessageDateTime);
+
+            if(messageDate > invoiceFromDate
+            && messageDate < invoiceToDate
+            && workCalendar.isDateOpen(calendarId, messageDate))
+            {
+                return NoYes::No;
+            }
+        }
+        catch (Exception::Error)
+        {
+            // If the rental calendar is not open for the specified date, an error is thrown.
+            // However, this also means that the machinery is used while not authorized.
+            // For now, this is solved by this try-catch block.
+            return NoYes::Yes;
+        }
+
+        return NoYes::Yes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateInvoiceDateRange</Name>
+				<Source><![CDATA[
+    private container calculateInvoiceDateRange(SalesLine _salesLine)
+    {
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+         
+        select firstonly minof(DeliveryDateTime) from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId == _salesLine.TableId
+        &&    invoicePeriodQtyPhysical.RefRecId == _salesLine.RecId
+            exists join invoicePeriodQtyFinancial
+            where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+            &&    !invoicePeriodQtyFinancial.InvoiceId;
+ 
+        FromDate invoiceMinDate = DateTimeUtil::date(invoicePeriodQtyPhysical.DeliveryDateTime);
+        
+        RORRentalDateTimes rentalDateTimes;
+        TransDateTime minDateTime = DateTimeUtil::minValue();
+        TransDateTime maxDateTime = DateTimeUtil::maxValue();
+
+        select maxof(ExpectedOffRentDateTime) from rentalDateTimes
+        where (rentalDateTimes.OffRentDateTime == maxDateTime || rentalDateTimes.OffRentDateTime == minDateTime)
+        &&     rentalDateTimes.RefTableId == _salesLine.TableId
+        &&     rentalDateTimes.RefRecId == _salesLine.RecId;
+
+        TransDateTime endDateTime = rentalDateTimes.ExpectedOffRentDateTime;
+
+        select maxof(OffRentDateTime) from rentalDateTimes
+        where rentalDateTimes.OffRentDateTime != maxDateTime
+        &&    rentalDateTimes.RefTableId == _salesLine.TableId
+        &&    rentalDateTimes.RefRecId == _salesLine.RecId;
+
+        endDateTime = max(endDateTime, rentalDateTimes.OffRentDateTime);
+        endDateTime = DateTimeUtil::newDateTime(endMth(DateTimeUtil::date(endDateTime)), 0);
+
+        // For monthly invoice profile we may need to know all open days for a specific month even if it is beyond calculation point.
+        ToDate invoiceMaxDate = DateTimeUtil::date(endDateTime) + 1;
+        invoiceMinDate = str2DateDMY(strFmt("1-%1-%2", mthOfYr(invoiceMinDate), year(invoiceMinDate)));
+
+        return [ invoiceMinDate, invoiceMaxDate ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPriceComponent</Name>
+				<Source><![CDATA[
+    private anytype getPriceComponent(TransDateTime _messageDateTimeInTimeZone, FINInvoicePeriodPriceComponent _priceComponent, SalesLine _salesLine)
+    {
+        RORRentalLine callerRentalLine = _salesLine;
+        FINInvoicePeriodAmendment priceTable;
+        TransDateTime messageDateTime = DateTimeUtil::removeTimeZoneOffset(_messageDateTimeInTimeZone, callerRentalLine.RORTimeZoneSite());
+        TransDateTime minDateTime = DateTimeUtil::minValue();
+
+        FINCreditPendingChangesReference pendingChangesReference;
+
+        select firstonly RecId, StrValue, RealValue from priceTable
+        order by CreatedDateTime desc
+        where priceTable.RefTableId == callerRentalLine.TableId
+        &&    priceTable.RefRecId == callerRentalLine.RecId
+        &&    priceTable.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+        &&    priceTable.FromDateTime <= messageDateTime
+        &&    (priceTable.ToDateTime == minDateTime || priceTable.ToDateTime > messageDateTime)
+        &&    (priceTable.DocumentState == FINAmendmentDocumentState::None || priceTable.DocumentState == FINAmendmentDocumentState::Confirmed)
+            notexists join pendingChangesReference
+            where pendingChangesReference.RefTableId == priceTable.TableId
+            &&    pendingChangesReference.RefRecId == priceTable.RecId
+            &&    (pendingChangesReference.DocumentState == VersioningDocumentState::Draft ||
+                    pendingChangesReference.DocumentState == VersioningDocumentState::InReview ||
+                    pendingChangesReference.DocumentState == VersioningDocumentState::InExternalReview ||
+                    pendingChangesReference.DocumentState == VersioningDocumentState::Rejected);
+
+        return (priceTable.RecId ? priceTable.StrValue : callerRentalLine.CalendarId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deviceIsMoved</Name>
+				<Source><![CDATA[
+    private NoYes deviceIsMoved()
+    {
+        if (!this.Longitude && !this.Latitude)
+        {
+            return NoYes::No;
+        }
+
+        LogisticsAddressLongitude oldLongitude;
+        LogisticsAddressLatitude oldLatitude;
+
+        BOBIoTDeviceTrans formerMessage;
+
+        select firstonly Longitude, Latitude from formerMessage
+        where formerMessage.MessageDateTime < this.MessageDateTime
+        &&    formerMessage.IsObjectLocationChangedProcessed != NoYes::Yes
+        &&    formerMessage.DeviceTableRecId == this.DeviceTableRecId;
+
+        if(formerMessage)
+        {
+            oldLongitude = formerMessage.Longitude;
+            oldLatitude = formerMessage.Latitude;
+        }
+        else
+        {
+            LogisticsPostalAddress address;
+            BOBObjectLocationLog locationLog;
+            BOBIoTDeviceTable deviceTable;
+
+            select firstonly TableId from locationLog order by FromDateTime desc
+            where locationLog.FromDateTime <= this.MessageDateTime
+                join Longitude, Latitude from address
+                where locationLog.PostalAddress == address.RecId
+                    join TableId from deviceTable
+                    where deviceTable.RecId == this.DeviceTableRecId
+                    &&    deviceTable.ObjectId == locationLog.ObjectId;
+            
+            oldLongitude = address.Longitude;
+            oldLatitude = address.Latitude;
+        }
+
+        BOBIoTDistance updateRadius = BOBIoTParameters::find().UpdateRadius;
+
+        return (this.getDistanceInMeters(oldLatitude, oldLongitude, this.Latitude, this.Longitude) > updateRadius ?
+                NoYes::Yes :
+                NoYes::No);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDistanceInMeters</Name>
+				<Source><![CDATA[
+    private DistanceValue getDistanceInMeters(LogisticsAddressLatitude lat1, LogisticsAddressLongitude lng1, LogisticsAddressLatitude lat2, LogisticsAddressLongitude lng2)
+    {
+        const str SolverAssembly = 'Microsoft.Dynamics365.Commerce.DistributedOrderManagement.SolverHeuristicMethod';
+        const str DistanceProviderType = 'Microsoft.Dynamics365.Commerce.DistributedOrderManagement.SolverHeuristicMethod.DistanceProvider';
+        const str DistanceProviderMethod = 'GetDistance';
+
+        System.Reflection.Assembly assembly = System.Reflection.Assembly::Load(SolverAssembly);
+
+        if (!assembly)
+        {
+            throw error(strFmt("@GLS130192", SolverAssembly));
+        }
+
+        System.Type type = assembly.GetType(DistanceProviderType);
+
+        if (!type)
+        {
+            throw error(strFmt("@SYS101163", DistanceProviderType, SolverAssembly));
+        }
+
+        System.Reflection.MethodInfo method = type.GetMethod(DistanceProviderMethod);
+
+        if (!method)
+        {
+            throw error(strFmt("@SYS101163", DistanceProviderMethod, SolverAssembly));
+        }
+
+        System.Object[] methodArgs = new System.Object[4]();
+        methodArgs.SetValue(System.Convert::ToDouble(lat1), 0);
+        methodArgs.SetValue(System.Convert::ToDouble(lng1), 1);
+        methodArgs.SetValue(System.Convert::ToDouble(lat2), 2);
+        methodArgs.SetValue(System.Convert::ToDouble(lng2), 3);
+
+        System.Object result = method.Invoke(null, methodArgs);
+
+        DistanceValue distance = System.Convert::ToDouble(result);
+            
+        return distance;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR7578</DeveloperDocumentation>
+	<Label>@DNR:BOBIoTDeviceTransactions</Label>
+	<TableGroup>TransactionLine</TableGroup>
+	<TitleField1>DeviceTableRecId</TitleField1>
+	<TitleField2>MessageDateTime</TitleField2>
+	<CacheLookup>NotInTTS</CacheLookup>
+	<PrimaryIndex>DeviceDateTimeIdx</PrimaryIndex>
+	<ReplacementKey>DeviceDateTimeIdx</ReplacementKey>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>Message</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TransStatus</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>DeviceTableRecId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>MessageDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Overview</Name>
+			<Label>@SYS50012</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>Message</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>DeviceTableRecId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Longitude</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Latitude</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>IsUnauthorizedUsage</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>IsUnauthorizedUsageProcessed</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>IsObjectLocationChanged</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>IsObjectLocationChangedProcessed</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>MessageDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TransStatus</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>DeviceTableRecId</Name>
+			<ExtendedDataType>BOBIoTDeviceTableRecId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>Longitude</Name>
+			<ExtendedDataType>AddressLongitude</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>Latitude</Name>
+			<ExtendedDataType>AddressLatitude</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>IsUnauthorizedUsage</Name>
+			<AllowEdit>No</AllowEdit>
+			<ExtendedDataType>NoYesId</ExtendedDataType>
+			<Label>@DNR:IsUnauthorizedUsage</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>IsUnauthorizedUsageProcessed</Name>
+			<AllowEdit>No</AllowEdit>
+			<ExtendedDataType>NoYesId</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>IsObjectLocationChanged</Name>
+			<AllowEdit>No</AllowEdit>
+			<ExtendedDataType>NoYesId</ExtendedDataType>
+			<Label>@DNR:IsObjectLocationChanged</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>IsObjectLocationChangedProcessed</Name>
+			<AllowEdit>No</AllowEdit>
+			<ExtendedDataType>NoYesId</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>MessageDateTime</Name>
+			<ExtendedDataType>BOBTransDateTime</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>Message</Name>
+			<ExtendedDataType>FreeText</ExtendedDataType>
+			<Visible>No</Visible>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>TransStatus</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<Label>@DNR7993</Label>
+			<EnumType>BOBIoTDeviceTransStatus</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ToProcess</Name>
+			<ExtendedDataType>BOBIoTTransTypesToProcess</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>MeterValue</Name>
+			<ExtendedDataType>BOBMeterValue</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>IsMeterValueProcessed</Name>
+			<AllowEdit>No</AllowEdit>
+			<ExtendedDataType>NoYesId</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>DeviceDateTimeIdx</Name>
+			<AlternateKey>Yes</AlternateKey>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>DeviceTableRecId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>MessageDateTime</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>MeterValueProcessedIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>IsMeterValueProcessed</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>ObjectLocationChangedProcessedIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>IsObjectLocationChangedProcessed</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>UnauthorizedUsageProcessedIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>IsUnauthorizedUsageProcessed</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>BOBIoTDeviceTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>BOBIoTDeviceTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>DeviceTableRecId</Name>
+					<Field>DeviceTableRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>RecId</Index>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

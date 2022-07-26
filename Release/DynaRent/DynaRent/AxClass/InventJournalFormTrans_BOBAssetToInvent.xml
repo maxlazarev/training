@@ -1,0 +1,350 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>InventJournalFormTrans_BOBAssetToInvent</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class InventJournalFormTrans_BOBAssetToInvent extends InventJournalFormTrans_BOBConversion
+{
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>busObjCategoryRange</Name>
+				<Source><![CDATA[
+    protected Range busObjCategoryRange()
+    {
+        return strFmt('%1, %2', BOBObjectCategory::Internal, BOBObjectCategory::Rental);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkEnableAssetButton</Name>
+				<Source><![CDATA[
+    protected void checkEnableAssetButton()
+    {
+        // do nothing, the 'create fixed asset' button is not visible for this sub class
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>datasourceInitValuePost</Name>
+				<Source><![CDATA[
+    public void datasourceInitValuePost()
+    {
+        super();
+    
+        inventJournalTrans.AssetTransType = AssetTransTypeJournal::DisposalSale;
+        inventJournalTrans.Qty = -1;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fieldModifiedAssetIdPost</Name>
+				<Source><![CDATA[
+    public void fieldModifiedAssetIdPost()
+    {
+        super();
+    
+        if(inventJournalTrans.AssetId != prevAssetId)
+        {
+            // also fill the item and serial number based on the entered fixed asset number
+            BOBObjectTable objectTable = BOBObjectTable::findByAssetId(inventJournalTrans.AssetId, inventJournalTrans.TransDate);
+    
+            if (objectTable)
+            {
+                if (!inventJournalTrans.RecId) // item number may only be changed on new records
+                {
+                    inventJournalTrans.ItemId = objectTable.getAcquiredInventTable().ItemId;
+                    this.fieldModifiedItemIdPost();
+                }
+    
+                if (objectTable.InventSerialId != prevSerialNum)
+                {
+                    InventDim inventDimNew = inventJournalTrans.inventDim();
+                    inventDimNew.inventSerialId = objectTable.InventSerialId;
+                    inventDimNew = InventDim::findOrCreate(inventDimNew);
+    
+                    inventJournalTrans.InventDimId = inventDimNew.inventDimId;
+                    inventDim.data(inventDimNew);
+                    inventDim_ds.setCurrent();
+                    this.fieldModifiedInventDimFieldsPost(inventDim, fieldNum(InventDim, InventSerialId));
+                }
+            }
+    
+            this.setCostPrice();
+        }
+    
+        prevAssetId = inventJournalTrans.AssetId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fieldModifiedInventDimFieldsPost</Name>
+				<Source><![CDATA[
+    public void fieldModifiedInventDimFieldsPost(InventDim _inventDim, FieldId _dimFieldId)
+    {
+        
+        FieldId safeFieldId = fieldExt2Id(_dimFieldId); // this is needed as the form engine might use different field IDs.
+        super(_inventDim, _dimFieldId);
+    
+        // also fill the item and fixed asset number based on the entered serial number
+        if (safeFieldId == fieldNum(inventDim, InventSerialId)
+        &&  prevSerialNum != _inventDim.inventSerialId)
+        {
+            BOBObjectTable objectTable = BOBObjectTable::findInventSerialId(_inventDim.inventSerialId);
+
+            if (objectTable)
+            {
+                AssetId objectAssetId = objectTable.assetId(inventJournalTrans.TransDate);
+
+                if(objectAssetId != inventJournalTrans.AssetId)
+                {
+                    inventJournalTrans.AssetId = objectAssetId;
+                    this.fieldModifiedAssetIdPost();
+                }
+
+                ItemId objectItemId = objectTable.getAcquiredInventTable().ItemId;
+    
+                if (!inventJournalTrans.RecId && objectItemId != inventJournalTrans.ItemId) // item number may only be changed on new records
+                {
+                    inventJournalTrans.ItemId = objectItemId;
+                    this.fieldModifiedItemIdPost();
+                }
+            }
+        }
+        else if (safeFieldId == fieldNum(InventDim, InventSiteId))
+        {
+            // inventJournalTrans.initFromInventTable (called by super) resets the qty
+            inventJournalTrans.Qty = -1;
+        }
+    
+        this.setCostPrice();
+        prevSerialNum = _inventDim.inventSerialId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fieldModifiedItemIdPost</Name>
+				<Source><![CDATA[
+    public void fieldModifiedItemIdPost()
+    {
+        super(); // inventJournalTrans.initFromInventTable (called by super) resets the qty
+        inventJournalTrans.Qty = -1;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fieldModifiedQtyPost</Name>
+				<Source><![CDATA[
+    public void fieldModifiedQtyPost()
+    {
+        super();
+        this.setCostPrice();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fieldModifiedTransDatePost</Name>
+				<Source><![CDATA[
+    public void fieldModifiedTransDatePost()
+    {
+        super();
+        this.setCostPrice();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fieldValidateInventSerialId</Name>
+				<Source><![CDATA[
+    public boolean fieldValidateInventSerialId()
+    {
+        BOBObjectTable objectTable;
+        boolean ret = super();
+        ;
+    
+        if(ret && inventDim.inventSerialId)
+        {
+            objectTable = BOBObjectTable::findInventSerialId(inventDim.inventSerialId);
+    
+            if(!objectTable)
+            {
+                ret = checkFailed(strFmt("@DNR6375", inventDim.inventSerialId));
+            }
+            else if(objectTable.Category != BOBObjectCategory::Rental &&
+                    objectTable.Category != BOBObjectCategory::Internal)
+            {
+                ret = checkFailed(strFmt("@DNR6534",
+                                         objectTable.ObjectId,
+                                         objectTable.InventSerialId,
+                                         BOBObjectCategory::Rental,
+                                         BOBObjectCategory::Internal));
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>formInitPost</Name>
+				<Source><![CDATA[
+    public void formInitPost()
+    {
+        FormDropDialogButtonControl ctrlBulkProposalButtonLocal;
+        SalesLine                   salesLine;
+    
+        super();
+
+        ctrlBulkProposalButtonLocal = this.BOBParmCtrlBulkProposalButton();
+
+        ctrlBulkProposalButtonLocal.visible(true);
+    
+        if(!journalTableData.journalTable().Posted)
+        {
+            select firstOnly RecId from salesLine
+            where salesLine.BOBConversionJourId == journalTableData.journalTable().JournalId;
+    
+            ctrlBulkProposalButtonLocal.enabled(salesLine.RecId == 0);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initDatasourceAllow</Name>
+				<Source><![CDATA[
+    protected void initDatasourceAllow()
+    {
+        FormDataSource dataSource;
+        boolean isLinkedToSalesLine;
+        ;
+    
+        super();
+    
+        isLinkedToSalesLine = (select firstOnly RecId from SalesLine
+                               where SalesLine.BOBConversionJourId == journalFormTable.journalTable().JournalId).RecId != 0;
+    
+        if(isLinkedToSalesLine)
+        {
+            dataSource = this.journalTrans_DS();
+            dataSource.allowDelete(false);
+            dataSource.allowCreate(false);
+            dataSource.object(fieldNum(InventJournalTrans, AssetId)).allowEdit(false);
+            dataSource.object(fieldNum(InventJournalTrans, Qty)).allowEdit(false);
+
+            inventDim_ds.allowEdit(false);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lookupAssetId</Name>
+				<Source><![CDATA[
+    public void lookupAssetId(FormStringControl _ctrl)
+    {
+        SysTableLookup          lookup;
+        Query                   query;
+        QueryBuildDataSource    qbdsAssetTable, qbdsBulkAssetParent, qbdsBulkAssetChild, qbdsObjectTable;
+        ;
+    
+        query = new Query();
+    
+        qbdsAssetTable = query.addDataSource(tableNum(AssetTable));
+        qbdsAssetTable.addSelectionField(fieldNum(AssetTable, AssetId));
+        qbdsAssetTable.addSelectionField(fieldNum(AssetTable, Name));
+        qbdsAssetTable.addSelectionField(fieldNum(AssetTable, AssetGroup));
+    
+        // only include fixed assets that are linked to internal or rental business objects
+        qbdsObjectTable = qbdsAssetTable.addDataSource(tableNum(BOBObjectTable));
+        qbdsObjectTable.relations(true);
+        qbdsObjectTable.addSelectionField(fieldNum(BOBObjectTable, TableId));
+        qbdsObjectTable.addRange(fieldNum(BOBObjectTable, Category)).value(this.busObjCategoryRange());
+    
+        // do not include bulk child assets
+        qbdsBulkAssetChild = qbdsObjectTable.addDataSource(tableNum(AssetTable));
+        qbdsBulkAssetChild.joinMode(JoinMode::NoExistsJoin);
+        qbdsBulkAssetChild.relations(false);
+        qbdsBulkAssetChild.addRange(fieldNum(AssetTable, DataAreaId)).value(strFmt('(%1 == %2.%1)', fieldStr(AssetTable, AssetId), qbdsAssetTable.name()));
+    
+        qbdsBulkAssetParent = qbdsBulkAssetChild.addDataSource(tableNum(AssetTable));
+        qbdsBulkAssetParent.relations(false);
+        qbdsBulkAssetParent.addSelectionField(fieldNum(AssetTable, TableId));
+        qbdsBulkAssetParent.addRange(fieldNum(AssetTable, BOBIsBulkParent)).value(SysQuery::value(NoYes::Yes));
+        qbdsBulkAssetParent.addRange(fieldNum(AssetTable, DataAreaId)).value(strFmt('(%1 == %2.%3)',
+                                                                                    fieldStr(AssetTable, AssetId),
+                                                                                    qbdsBulkAssetChild.name(),
+                                                                                    fieldStr(AssetTable, MainAssetId)));
+        lookup = SysTableLookup::newParameters(tableNum(AssetTable), _ctrl);
+        lookup.parmQuery(query);
+        lookup.addLookupfield(fieldNum(AssetTable, AssetId), true);
+        lookup.addLookupfield(fieldNum(AssetTable, Name));
+        lookup.addLookupfield(fieldNum(AssetTable, AssetGroup));
+        lookup.performFormLookup();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCostPrice</Name>
+				<Source><![CDATA[
+    private void setCostPrice()
+    {
+        inventJournalTrans.DNRSetAssetCostPrice();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>enableButtonsActive</Name>
+				<Source><![CDATA[
+    protected void enableButtonsActive()
+    {
+        super();
+
+        this.DNRgetCtrlInventJournalTrans_AssetTransType().visible(true);
+        this.DNRgetCtrlInventTransactionType().visible(false);
+        this.DNRgetCtrlAssetTransType().visible(true);
+        this.DNRgetCtrlInventAssetTransType().visible(false);        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runbaseMainStart</Name>
+				<Source><![CDATA[
+    public void runbaseMainStart()
+    {
+        super();
+
+        this.enableButtonsActive();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCostAmountEnabled</Name>
+				<Source><![CDATA[
+    protected void setCostAmountEnabled()
+    {
+        super();
+        
+        this.fieldCostPrice().allowEdit(false);
+        this.fieldCostAmount().allowEdit(false);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

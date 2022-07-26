@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRCPRentalOrderHeaderEntity_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(dataentityviewstr(DNRCPRentalOrderHeaderEntity))]
+public final class DNRCPRentalOrderHeaderEntity_Extension
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>postLoad</Name>
+				<Source><![CDATA[
+    public void postLoad()
+    {
+        next postLoad();
+
+        if (appl.ttsLevel() > 0 && RORParameters::find().DNRCPAsyncUpdate)  // DW is always within transaction scope
+        {
+            this.DNRCPEntityAsync();
+        }
+
+        DNRCPRentalOrderHeaderEntity::replaceAddressToken(this,
+            fieldStr(DNRCPRentalOrderHeaderEntity, FormattedDelveryAddress),
+                fieldStr(DNRCPRentalOrderHeaderEntity, CountryRegionId));
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRCPEntityAsync</Name>
+				<Source><![CDATA[
+    public void DNRCPEntityAsync()
+    {
+        boolean delete = (select firstonly SalesId from salesTableDelete
+            where salesTableDelete.SalesId == this.SalesOrderNumber).SalesId != '';
+
+        if (delete)
+        {
+            return;  // delete is always sync
+        }
+
+        if (Global::clientKind() != ClientType::Server)
+        {
+            DNRCPEntityAsyncCaller::scheduleUpdate('DNRCPRentalOrderHeaderEntity' , this);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>replaceAddressToken</Name>
+				<Source><![CDATA[
+    public static void replaceAddressToken(Common currTable, str _address, str _regionFieldName)
+    {
+        #ISOCountryRegionCodes
+
+        str addressStr;
+        str addressFieldName = _address;
+
+        str countryRegionStr;
+        str countryRegionFieldName = _regionFieldName;
+
+        if (currTable.isFieldDataRetrieved(addressFieldName))
+        {
+            addressStr = currTable.(fieldName2id(currTable.TableId, addressFieldName));
+
+            if (addressStr && strContains(addressStr, '%1'))
+            {
+                if (!currTable.isFieldDataRetrieved(countryRegionFieldName))
+                {
+                    // The country region data may not be retrieved based on the data access settings of the caller.
+                    // Reread the caller record to get the country region data.
+                    Common currTableRetrieved = DictTable::createRecord(tableId2Name(currTable.TableId));
+
+                    // Skip post load to avoid recursion and redundant processing
+                    // as the primary caller of this method is the table's postLoad method.
+                    currTableRetrieved.skipPostLoad(true);
+
+                    select * from currTableRetrieved
+                        where currTableRetrieved.RecId == currTable.RecId;
+
+                    countryRegionStr = currTableRetrieved.(fieldName2id(currTableRetrieved.TableId, countryRegionFieldName));
+                }
+                else
+                {
+                    countryRegionStr = currTable.(fieldName2id(currTable.TableId, countryRegionFieldName));
+                }
+
+                if (countryRegionStr)
+                {
+                    UserInfo userInfo;
+     
+                    select Language from userInfo where userInfo.Id == curUserId();
+
+                    // Get the short name for the country/region in the system language set for Current User
+                    LogisticsAddressCountryRegionTranslation logisticsAddressCountryRegionTranslation = LogisticsAddressCountryRegionTranslation::find(countryRegionStr, userInfo.Language);
+
+                    if (LogisticsAddressCountryRegion::find(countryRegionStr).ISOcode == #isoRU)
+                    {
+                        currTable.(fieldName2id(currTable.TableId, addressFieldName)) = strFmt(addressStr,
+                            logisticsAddressCountryRegionTranslation.LongName ?
+                            logisticsAddressCountryRegionTranslation.LongName :
+                            (logisticsAddressCountryRegionTranslation.ShortName ?
+                                logisticsAddressCountryRegionTranslation.ShortName :
+                                countryRegionStr));
+                    }
+                    else
+                    {
+                        // Replace token with short name of country/region translated in system language
+                        currTable.(fieldName2id(currTable.TableId, addressFieldName)) = strFmt(addressStr, logisticsAddressCountryRegionTranslation.ShortName);
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

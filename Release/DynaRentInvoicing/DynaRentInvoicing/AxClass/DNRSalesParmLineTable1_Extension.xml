@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesParmLineTable1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(SalesParmLine))]
+public final class DNRSalesParmLineTable1_Extension
+{
+    // event handler methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>RORParentParmLine_Post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(DNRSalesParmLineTable_Extension), staticMethodStr(DNRSalesParmLineTable_Extension, RORParentParmLine))]
+    public static void RORParentParmLine_Post(XppPrePostArgs _args)
+    {
+        SalesParmLine salesParmLineParent;
+        ParmId parmId = _args.getArg('_parmId');
+        salesLine salesLineParent = _args.getArg('_salesLineParent');
+    
+        if (parmId && salesLineParent)
+        {
+            select firstonly salesParmLineParent
+             where salesParmLineParent.ParmId           == parmId
+                && salesParmLineParent.OrigSalesId      == salesLineParent.SalesId
+                && salesParmLineParent.itemId           == salesLineParent.ItemId
+                && salesParmLineParent.LineNum          == salesLineParent.LineNum
+                && salesParmLineParent.InventTransId    == salesLineParent.InventTransId
+                && salesParmLineParent.SalesLineRecId   == salesLineParent.RecId
+                && (salesLineParent.RORKitComponentType == RORKitComponentType::Kit || salesParmLineParent.LineAmount != 0 || salesParmLineParent.FINLineAmount != 0);
+        }
+    
+        _args.setReturnValue(salesParmLineParent);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINDeleteChildLine</Name>
+				<Source><![CDATA[
+    // extension methods
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void FINDeleteChildLine(SalesParmUpdate _salesParmUpdate, InventTransId _parentSalesParmLineInventTransId, LineAmount _parentParmLineLineAmount)
+    {
+        SalesLine salesLineParent;
+        FINRentalInvoiceProfile invoiceProfile;
+                
+        select firstonly InvoiceChildLinesAfterParent from invoiceProfile
+            join salesLineParent
+            where salesLineParent.INVInvoiceProfileId == invoiceProfile.InvoiceProfileId
+            &&    salesLineParent.InventTransId == _parentSalesParmLineInventTransId;
+
+        if (salesLineParent && invoiceProfile.InvoiceChildLinesAfterParent)
+        {
+            SalesParmLine salesParmLine;
+            SalesLine salesLine;
+                    
+            while select RecId, FINLineAmount from salesParmLine
+            where salesParmLine.ParmId == _salesParmUpdate.ParmId
+            // Don't discard any lines when this is a credit
+            &&    salesParmLine.DeliverNow > 0
+            &&    salesParmLine.FINLineAmount >= 0
+                join RecId, TableId from  salesLine
+                where salesLine.RORParentLineRecId == salesLineParent.RecId
+                &&    salesLine.InventTransId == salesParmLine.InventTransId
+            {
+                // Here we use delete_from inside the body of this WHILE SELECT. Even though that results in a database rountrip
+                // per record in the resultset, it's a better approach then selecting forupdate, thereby locking most of the table.
+                // There aren't too many results that meet that INVCanDeleteChildLine criterion anyway.
+
+                if (salesLineParent.RORRentalLine::INVCanDeleteChildLine(true,
+                                                                         INVInvoicingOptions::newSalesParmUpdate(_salesParmUpdate),
+                                                                         _salesParmUpdate.INVCalculationDateTime,
+                                                                         _salesParmUpdate.INVIncludeUninvoiced,
+                                                                         salesLine.TableId,
+                                                                         salesLine.RecId,
+                                                                         _parentParmLineLineAmount))
+                {
+                    SalesParmLine salesParmLineDelete;
+
+                    delete_from salesParmLineDelete
+                    where salesParmLineDelete.RecId == salesParmLine.RecId;
+                }
+            }            
+        }
+
+        
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

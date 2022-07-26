@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>InventJournalCheckPost_BOBAssetToInvent</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class InventJournalCheckPost_BOBAssetToInvent extends InventJournalCheckPost_Movement
+{
+    AssetParameters parameters;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkTrans</Name>
+				<Source><![CDATA[
+    protected boolean checkTrans(JournalTransData _journalTransData)
+    {
+        boolean             ret;
+        AssetTable          assetTableParent, assetTableChild;
+        InventTrans         inventTrans;
+        InventTransOrigin   origin;
+        InventDim           inventDim;
+        InventJournalTrans  journalTrans;
+        BOBRentalType       rentalType;
+        BOBObjectView       objectView;
+        BOBRentalTrans      rentalTrans;
+        BOBObjectAssetLog   objectAssetLog;
+        ;
+    
+        ret = super(_journalTransData);
+    
+        if(ret)
+        {
+            journalTrans    = _journalTransData.journalTrans();
+            rentalType      = BOBRentalType::findFromItemId(journalTrans.ItemId);
+    
+            if(rentalType && rentalType.Classification != BOBRentalTypeClassification::Virtual)
+            {
+                switch(rentalType.Classification)
+                {
+                    case BOBRentalTypeClassification::Serialized:
+                        select firstOnly ObjectId, InventSerialId, Category, LastOnRentDate, PhysicalOwner from objectView
+                        where objectView.RentalTypeId == rentalType.RentalTypeId // RentalType is already found based on the item on journalTrans
+                            join TableId from objectAssetLog
+                            where objectAssetLog.ObjectId == objectView.ObjectId
+                            &&    objectAssetLog.ValidFrom <= journalTrans.TransDate
+                            &&  (!objectAssetLog.ValidTo || objectAssetLog.ValidTo >= journalTrans.TransDate)
+                            &&    objectAssetLog.AssetId == journalTrans.AssetId
+                                join TableId from inventDim
+                                where inventDim.inventDimId == journalTrans.InventDimId
+                                &&    inventDim.inventSerialId == objectView.InventSerialId
+                                &&    inventDim.inventSerialId
+                                    outer join RecId from rentalTrans
+                                    where rentalTrans.ObjectId == objectView.ObjectId
+                                    &&    rentalTrans.TransType == BOBRentalTransType::Rental
+                                    &&    rentalTrans.SubStatus < BOBRentalSubStatus::Returned
+                                    &&    rentalTrans.AssetId == objectAssetLog.AssetId;
+    
+                        if(!objectView)
+                        {
+                            ret = checkFailed(strFmt("@DNR6186", journalTrans.AssetId));
+                        }
+    
+                        if(journalTrans.Qty != -1)
+                        {
+                            ret = checkFailed(strFmt("@DNR529", -1));
+                        }
+
+                        boolean isInternal = (objectView.Category == BOBObjectCategory::Internal);
+    
+                        if(objectView.Category != BOBObjectCategory::Rental && !isInternal)
+                        {
+                            // only perform this validation in case the journal transaction has NOT yet been registered
+                            select firstOnly sum(Qty) from inventTrans
+                            where inventTrans.StatusReceipt == StatusReceipt::Registered
+                                exists join origin
+                                where origin.RecId == inventTrans.InventTransOrigin
+                                &&    origin.InventTransId == journalTrans.InventTransId;
+    
+                            if(-journalTrans.Qty != inventTrans.Qty)
+                            {
+                                ret = checkFailed(strFmt("@DNR6534", objectView.ObjectId, objectView.InventSerialId, BOBObjectCategory::Rental, BOBObjectCategory::Internal));
+                            }
+                        }
+
+                        SalesLine   salesLine;
+
+                        select firstonly InterCompanyInventTransId from salesLine where salesLine.BOBConversionJourId == this.JournalId;
+
+                        boolean interCompanyOrder = salesLine.InterCompanyInventTransId ? true : false ;
+    
+                        if(objectView.PhysicalOwner != curext() && !interCompanyOrder)
+                        {
+                            ret = checkFailed(strFmt("@DNR6001", objectView.ObjectId, objectView.InventSerialId, strLwr("@SYS76015"), curext()));
+                        }
+    
+                        if(!objectView.LastOnRentDate && !parameters.BOBAutoFillPostingDates && !isInternal)
+                        {
+                            ret = checkFailed(strFmt("@DNR7282", objectView.ObjectId, objectView.InventSerialId));
+                        }
+    
+                        if(rentalTrans)
+                        {
+                            ret = checkFailed(strFmt("@DNR5993", objectView.InventSerialId, journalTrans.AssetId, objectView.ObjectId));
+                        }
+                        break;
+    
+                    case BOBRentalTypeClassification::Bulk:
+                        select firstOnly Quantity from assetTableChild
+                        where assetTableChild.AssetId == journalTrans.AssetId
+                        &&   !assetTableChild.BOBIsBulkParent
+                            join UnitOfMeasure from assetTableParent
+                            where assetTableParent.AssetId == assetTableChild.MainAssetId
+                            &&    assetTableParent.BOBIsBulkParent
+                                join TableId from objectAssetLog
+                                where objectAssetLog.AssetId == assetTableParent.AssetId;
+    
+                        if(!assetTableChild)
+                        {
+                            ret = checkFailed(strFmt("@DNR8137", journalTrans.AssetId));
+                        }
+    
+                        if(!journalTrans.Qty)
+                        {
+                            ret = checkFailed(strFmt("@DNR7115", fieldPName(InventJournalTrans, Qty)));
+                        }
+    
+                        if(journalTrans.Qty > 0)
+                        {
+                            ret = checkFailed(strFmt("@SYS71085", fieldPName(InventJournalTrans, Qty), 0));
+                        }
+    
+                        if(-journalTrans.Qty > assetTableChild.Quantity)
+                        {
+                            ret = checkFailed(strFmt("@DNR8138", -journalTrans.Qty, assetTableParent.UnitOfMeasure, journalTrans.AssetId, assetTableChild.Quantity));
+                        }
+                        break;
+    
+                    // no default case necessary
+                }
+            }
+            else
+            {
+                ret = checkFailed(strFmt("@DNR5945", journalTrans.ItemId));
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+        parameters = AssetParameters::find();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournal</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. This method is obsolete')]
+    protected void postJournal(JournalTransList _journalTransList)
+    {
+        super(_journalTransList);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postTrans</Name>
+				<Source><![CDATA[
+    protected void postTrans(JournalTransData _journalTransData)
+    {
+        AssetTable          assetTableDispose, assetTableOrig;
+        AssetCopy           assetCopy;
+        InventJournalTrans  journalTrans;
+        ;
+    
+        journalTrans = _journalTransData.journalTrans();
+
+        assetTableOrig = AssetTable::find(journalTrans.AssetId, true);
+    
+        // in case we want to convert part of a bulk child fixed asset to inventory,
+        // we need to transfer that part of its value and quantity to a new sibling
+        // fixed asset, and then convert that one to inventory instead of the original one
+        if(assetTableOrig.BOBIsBulkChild() && assetTableOrig.Quantity > -journalTrans.Qty)
+        {
+            // create a new bulk child fixed asset that has the same parent and value models as the original one
+            if(!assetTableOrig.assetGroup().AutoNumber && !parameters.AutoNumber)
+            {
+                throw error(strFmt("@DNR8140", assetTableOrig.AssetId, assetTableOrig.AssetGroup));
+            }
+    
+            assetCopy = new AssetCopy(assetTableOrig);
+            assetCopy.runOperation();
+    
+            // the assetCopy class copied the quantity as well -- we need to reset it to
+            // 0 first so it can be correctly set during AssetSplit::BOBSplitAndPost()
+            assetTableDispose.data(assetCopy.assetTableNew());
+            assetTableDispose.selectForUpdate(true);
+            assetTableDispose.Quantity = 0;
+            assetTableDispose.doUpdate(); // skip all other stuff
+    
+            // use the split function to transfer the conversion quantity and value to the new asset
+            using (DNRPrimitiveDisposableContext context = new DNRPrimitiveDisposableContext())
+            {
+                context.DNRparmString(journalTrans.inventDim().InventLocationId);
+                AssetSplit::BOBSplitAndPost(assetTableOrig.AssetId,
+                                            assetTableDispose.AssetId,
+                                            -journalTrans.Qty,
+                                            journalTrans.TransDate);
+            }
+    
+            journalTrans.AssetId = assetTableDispose.AssetId;
+            journalTrans.update();
+        }
+    
+        super(_journalTransData);
+    
+        BOBRentalTransManager::newAssetUpdate().conversionJournalPostTrans(journalTrans);
+        BOBObjectManager::postConvJourTransA2I(journalTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateJournalTablePosted</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. This method is obsolete')]
+    protected void updateJournalTablePosted(JournalTableMap _journalTable)
+    {
+        super(_journalTable);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

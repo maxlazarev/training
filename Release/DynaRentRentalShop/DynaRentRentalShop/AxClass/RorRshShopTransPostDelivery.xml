@@ -1,0 +1,1049 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RorRshShopTransPostDelivery</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Class to process delivery
+/// </summary>
+class RorRshShopTransPostDelivery
+{
+    Map projIdSalesTable = new Map(Types::String, Types::Record);
+    Map projIdJournalTable = new Map(Types::String, Types::Record);
+    ProjParameters projParameters;
+    RORParameters rorParameters;
+    boolean mustPostJournal = true;
+    RecId currentRentalShopTransRecId;
+    StartDateTime processingStartDateTime;
+    Map previousPackingSlipMap = new Map(Types::Int64, Types::String);
+    Map deliverySetPerOrder = new Map(Types::String, Types::Class);
+    Set processedRentalLine = new Set(Types::Record);
+    boolean processSalesItemInRentalOrder;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static RorRshShopTransPostDelivery construct()
+    {
+        return new RorRshShopTransPostDelivery();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setProcessingStartDateTime</Name>
+				<Source><![CDATA[
+    public void setProcessingStartDateTime(StartDateTime _processingStartDateTime)
+    {
+        processingStartDateTime = _processingStartDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Runs delivery process
+    /// </summary>
+    public void run()
+    {
+        rorParameters = RORParameters::find();
+        projParameters = ProjParameters::find();
+
+        if (rorParameters.RshShopTransactionCreationType == RorRshShopTransactionCreationType::TransactionDetail)
+        {
+            processSalesItemInRentalOrder = rorParameters.RshCounterRentalActive;
+
+            // Creates rental order lines
+            this.processRentalDelivery();
+
+            // Creates project item requirement lines or sales lines on rental order
+            this.processSalesDelivery();
+
+            if (mustPostJournal)
+            {
+                this.postJournalTable();
+            }
+        }
+        // Condition (rorParameters.RentalShopTransactionCreationType == RORRentalShopTransactionCreationType::TransactionSummary)
+        // is going to be implemented on later stage of the project
+
+        // Rentalshop-customer processing
+        this.processRentalShopCartRentalDelivery();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processRentalShopCartRentalDelivery</Name>
+				<Source><![CDATA[
+    private void processRentalShopCartRentalDelivery()
+    {
+        RorRshShopCardTable          rentalShopCart;
+        RorRshShopTrans              rentalShopTrans;
+        RorRshShopTransInProcessing  rentalShopTransInProcessing;
+        SalesTable                   salesTable; 
+        Map                          rentalShopMap = new  Map(Types::String, Types::Record);
+        
+        while select forupdate rentalShopCart
+        order by ShopCardId
+        where rentalShopCart.RentalShopType == DNRRSHRentalShopType::Customer
+        &&    rentalShopCart.IsConfirmed    == NoYes::Yes
+            join rentalShopTrans
+            where rentalShopTrans.ShopCardId == rentalShopCart.ShopCardId
+            &&    rentalShopTrans.TransType  == RorRshShopTransType::Delivery
+            &&    rentalShopTrans.IsProcessed == NoYes::No
+                notexists join rentalShopTransInProcessing
+                where rentalShopTransInProcessing.ShopTransRecId    == rentalShopTrans.RecId
+                &&    rentalShopTransInProcessing.ProcessingDateTime != processingStartDateTime
+        {
+            SalesLine     salesLine;
+
+            try
+            {
+                ttsbegin;
+                currentRentalShopTransRecId = rentalShopTrans.RecId;
+                
+                if (rentalShopMap.exists(rentalShopCart.ShopCardId))
+                {
+                    salesTable = rentalShopMap.lookup(rentalShopCart.ShopCardId);
+                }
+                else
+                {
+                    salesTable = null;
+                }
+
+                if (!salesTable)
+                {
+                    salesTable = this.createRentalOrderFromRentalShopCart(rentalShopCart);
+
+                    if (rentalShopCart.SalesId != salesTable.SalesId)
+                    {
+                        rentalShopCart.SalesId = salesTable.SalesId;
+                        rentalShopCart.update();
+                    }
+                }
+
+                salesLine = this.createSalesLineForRentalShopTrans(salesTable, rentalShopTrans);
+                this.addToPackingSlipPosting(salesLine);
+                rentalShopTrans.selectForUpdate(true);
+                rentalShopTrans.IsProcessed = NoYes::Yes;
+                rentalShopTrans.update();
+
+                processedRentalLine.add(salesLine);
+                ttscommit;
+                rentalShopMap.insert(rentalShopCart.ShopCardId, salesTable);
+            }
+            catch(Exception::Error)
+            {
+                this.revertOnErrorForRentalShopCart(salesLine);
+            }
+        }
+        this.postPackingSlipPerSalesOrder();
+        currentRentalShopTransRecId = 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRentalOrderFromRentalShopCart</Name>
+				<Source><![CDATA[
+    private SalesTable createRentalOrderFromRentalShopCart(RorRshShopCardTable    _cartTable)
+    {
+        SalesTable salesTable;
+       
+        salesTable.clear();
+        salesTable.initValue(SalesType::RORRental);
+    
+        salesTable.CustAccount = _cartTable.CustAccount;
+        salesTable.initFromCustTable();
+        salesTable.SalesId = NumberSeq::newGetNum(SalesParameters::numRefSalesId()).num();
+    
+            
+        if (!salesTable.validateWrite())
+        {
+            throw Exception::Error;
+        }
+    
+        salesTable.insert();
+
+        // Create dummy dateTimes on header. Actuall on/off rent will be set on line level.
+        RORRentalDateTimes rentalDateTimes;
+
+        rentalDateTimes.initFromHost(salesTable);
+        rentalDateTimes.SynchronizeFromParent = NoYes::No;
+        rentalDateTimes.OnRentDateTime = _cartTable.FromDateTime;
+        rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+        rentalDateTimes.ExpectedOffRentDateTime = _cartTable.ToDateTime;
+        rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+        rentalDateTimes.insert();
+        
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processRentalDelivery</Name>
+				<Source><![CDATA[
+    private void processRentalDelivery()
+    {
+        RorRshShopTrans rentalShopTrans;
+        RorRshShopCardTable shopCardTable;
+        ProjTable projTable;
+        RorRshShopTransInProcessing shopTransInProcessing;
+
+        while select forupdate rentalShopTrans
+        where rentalShopTrans.IsProcessed == NoYes::No
+        &&    rentalShopTrans.TransType == RorRshShopTransType::Delivery
+        &&    rentalShopTrans.TradeType == RORTradeType::Rental
+            join forupdate shopCardTable
+            where shopCardTable.ShopCardId == rentalShopTrans.ShopCardId
+            && shopCardTable.RentalShopType == DNRRSHRentalShopType::Project
+                join projTable
+                where projTable.ProjId == shopCardTable.ProjId
+                    notexists join shopTransInProcessing
+                    where shopTransInProcessing.ShopTransRecId == rentalShopTrans.RecId
+                    &&    shopTransInProcessing.ProcessingDateTime != processingStartDateTime
+        {
+            SalesLine salesLine;
+
+            try
+            {
+                ttsbegin;
+
+                currentRentalShopTransRecId = rentalShopTrans.RecId;
+                SalesTable salesTable = this.findOrCreateRentalOrder(projTable);
+
+                if (shopCardTable.SalesId != salesTable.SalesId)
+                {
+                    shopCardTable.SalesId = salesTable.SalesId;
+                    shopCardTable.update();
+                }
+
+                salesLine = this.createSalesLine(salesTable, rentalShopTrans);
+            
+                this.addToPackingSlipPosting(salesLine);
+
+                rentalShopTrans.IsProcessed = NoYes::Yes;
+                rentalShopTrans.update();
+
+                processedRentalLine.add(salesLine);
+ 
+                ttscommit;
+            }
+            catch
+            {
+                this.revertOnError(salesLine, projTable);
+            }
+        }
+ 
+        // Post packing slip when all lines in rental orders are created.
+        if (!processSalesItemInRentalOrder)
+        {
+            this.postPackingSlipPerSalesOrder();
+        }
+          
+        currentRentalShopTransRecId = 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>revertOnErrorForRentalShopCart</Name>
+				<Source><![CDATA[
+    private void revertOnErrorForRentalShopCart(SalesLine _salesLine)
+    {
+        previousPackingSlipMap.remove(_salesLine.RecId);
+
+        if (deliverySetPerOrder.exists(_salesLine.SalesId))
+        {
+            Set deliverySet = deliverySetPerOrder.lookup(_salesLine.SalesId);
+            deliverySet.remove(_salesLine);
+            deliverySetPerOrder.insert(_salesLine.SalesId, deliverySet);
+        }
+
+        processedRentalLine.remove(_salesLine);
+
+        this.logError();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>revertOnError</Name>
+				<Source><![CDATA[
+    private void revertOnError(SalesLine _salesLine, ProjTable _projTable)
+    {
+        projIdSalesTable.remove(_projTable.ProjId);
+        previousPackingSlipMap.remove(_salesLine.RecId);
+
+        if (deliverySetPerOrder.exists(_salesLine.SalesId))
+        {
+            Set deliverySet = deliverySetPerOrder.lookup(_salesLine.SalesId);
+            deliverySet.remove(_salesLine);
+            deliverySetPerOrder.insert(_salesLine.SalesId, deliverySet);
+        }
+
+        processedRentalLine.remove(_salesLine);
+
+        this.logError();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>logError</Name>
+				<Source><![CDATA[
+    private void logError()
+    {
+        // In case of error log an error so during next run of the job failed record would be ignored
+        if (currentRentalShopTransRecId)
+        {
+            ErrorMsg errorMsg = infolog.text(infologLine() - 1);
+
+            ttsbegin;
+            RorRshShopTransLog::createLog(tableNum(RorRshShopTrans), currentRentalShopTransRecId, RorRshShopLogType::PostingError, errorMsg);
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addToPackingSlipPosting</Name>
+				<Source><![CDATA[
+    private void addToPackingSlipPosting(SalesLine _salesLine)
+    {
+        this.collectPreviousPackingSlip(_salesLine);
+
+        Set deliverySet;
+
+        if (deliverySetPerOrder.exists(_salesLine.SalesId))
+        {
+            deliverySet = deliverySetPerOrder.lookup(_salesLine.SalesId);
+        }
+        else
+        {
+            deliverySet = new Set(Types::Record);
+        }
+
+        deliverySet.add(_salesLine);
+        deliverySetPerOrder.insert(_salesLine.SalesId, deliverySet);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postPackingSlipPerSalesOrder</Name>
+				<Source><![CDATA[
+    private void postPackingSlipPerSalesOrder()
+    {
+        try
+        {
+            MapEnumerator mapEnumerator = deliverySetPerOrder.getEnumerator();
+
+            while (mapEnumerator.moveNext())
+            {
+                this.runSingleDeliveryPosting(mapEnumerator.currentKey(), mapEnumerator.currentValue());
+            }
+        }
+        finally
+        {
+            this.createPostDeliveryLog();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runSingleDeliveryPosting</Name>
+				<Source><![CDATA[
+    private void runSingleDeliveryPosting(SalesId _salesId, Set _deliverySet)
+    {
+        if (_salesId && _deliverySet && !_deliverySet.empty())
+        {
+            ttsbegin;
+
+            SalesFormLetter salesFormLetter = SalesFormLetter::construct(DocumentStatus::PackingSlip);
+
+            salesFormLetter.allowEmptyTable(true);
+            salesFormLetter.createFromLines(true);
+
+            SetEnumerator deliverySetEnumerator = _deliverySet.getEnumerator();
+            List deliveryList = new List(Types::Record);
+
+            while (deliverySetEnumerator.moveNext())
+            {
+                deliveryList.addEnd(deliverySetEnumerator.current());
+            }
+
+            salesFormLetter.parmLineList(deliveryList.pack());
+            salesFormLetter.specQty(SalesUpdate::All);
+            salesFormLetter.lockSalesUpdateField(false);
+            salesFormLetter.enableUpdateNowField(true);
+            salesFormLetter.printFormLetter(false);
+            salesFormLetter.RORparmRentalSubStatus(BOBRentalSubStatus::Delivered);
+            salesFormLetter.RORparmCanGoBatch(false);
+            salesFormLetter.WPPparmChangeObjectAvailability(true);
+            salesFormLetter.parmVersioningUpdateType(VersioningUpdateType::Initial);
+            salesFormLetter.salesTable(SalesTable::find(_salesId));
+            salesFormLetter.prePromptInit();
+            salesFormLetter.createParmUpdateFromParmUpdateRecord(SalesFormletterParmData::initSalesParmUpdateFormletter(DocumentStatus::PackingSlip, salesFormLetter.pack()));
+
+            RorRshShopTransPostService::setPostingDateTime(salesFormLetter, processingStartDateTime);
+
+            salesFormLetter.run();
+            
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPostDeliveryLog</Name>
+				<Source><![CDATA[
+    private void createPostDeliveryLog()
+    {
+        SetEnumerator setEnumerator = processedRentalLine.getEnumerator();
+
+        while (setEnumerator.moveNext())
+        {
+            SalesLine salesLine = setEnumerator.current();
+
+            if (!this.checkPackingSlipPosted(salesLine))
+            {
+                RorRshShopTrans rentalShopDelivery;
+                RorRshShopTransReference rentalShopTransReference;
+
+                select firstonly TableId, RecId from rentalShopDelivery
+                    exists join rentalShopTransReference
+                    where rentalShopTransReference.RefTableId == salesLine.TableId
+                    &&    rentalShopTransReference.RefRecId == salesLine.RecId
+                    &&    rentalShopTransReference.DeliveryTransId == rentalShopDelivery.TransId;
+                
+                if (rentalShopDelivery)
+                {
+                    ttsbegin;
+                    RorRshShopTransLog::createLog(rentalShopDelivery.TableId, rentalShopDelivery.RecId, RorRshShopLogType::PostingError, strFmt("@DNR:RentalShopPostingFailed", "@SYS11549", salesLine.SalesId, salesLine.LineNum));
+                    ttscommit;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>collectPreviousPackingSlip</Name>
+				<Source><![CDATA[
+    private void collectPreviousPackingSlip(SalesLine _salesLine)
+    {
+        if (!previousPackingSlipMap.exists(_salesLine.RecId))
+        {
+            CustPackingSlipJour packingSlipJour;
+            CustPackingSlipTrans packingSlipTrans;
+
+            select firstonly PackingSlipId from packingSlipJour
+            order by CreatedDateTime desc
+            where packingSlipJour.SalesId == _salesLine.SalesId
+                exists join packingSlipTrans
+                where packingSlipTrans.SalesId == packingSlipJour.SalesId
+                &&    packingSlipTrans.PackingSlipId == packingSlipJour.PackingSlipId
+                &&    packingSlipTrans.DeliveryDate == packingSlipJour.DeliveryDate
+                &&    packingSlipTrans.InventTransId == _salesLine.InventTransId;
+                                           
+            previousPackingSlipMap.insert(_salesLine.RecId, packingSlipJour.PackingSlipId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkPackingSlipPosted</Name>
+				<Source><![CDATA[
+    private boolean checkPackingSlipPosted(SalesLine _salesLine)
+    {
+        boolean ret = true;
+        CustPackingSlipJour packingSlipJour;
+        CustPackingSlipTrans packingSlipTrans;
+
+        select firstonly PackingSlipId from packingSlipJour
+            order by CreatedDateTime desc
+            where packingSlipJour.SalesId == _salesLine.SalesId
+                exists join packingSlipTrans
+                where packingSlipTrans.SalesId == packingSlipJour.SalesId
+                &&    packingSlipTrans.PackingSlipId == packingSlipJour.PackingSlipId
+                &&    packingSlipTrans.DeliveryDate == packingSlipJour.DeliveryDate
+                &&    packingSlipTrans.InventTransId == _salesLine.InventTransId;
+
+        if (packingSlipJour.PackingSlipId)
+        {
+            if (previousPackingSlipMap.exists(_salesLine.RecId))
+            {
+                PackingSlipId packingSlipId = previousPackingSlipMap.lookup(_salesLine.RecId);
+                                           
+                if (packingSlipId == packingSlipJour.PackingSlipId)
+                {
+                    // No new postings
+                    ret = false;
+                }
+            }
+        }
+        else
+        {
+            // Nothing ever posted.
+            ret = false;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSalesDelivery</Name>
+				<Source><![CDATA[
+    private void processSalesDelivery()
+    {
+        if (processSalesItemInRentalOrder)
+        {
+            this.processSalesDeliveryInRentalOrder();
+        }
+        else
+        {
+            this.processSalesDeliveryInItemJournal();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSalesDeliveryInRentalOrder</Name>
+				<Source><![CDATA[
+    private void processSalesDeliveryInRentalOrder()
+    {
+        RorRshShopTrans rentalShopTrans;
+        RorRshShopCardTable shopCardTable;
+        ProjTable projTable;
+        RorRshShopTransInProcessing shopTransInProcessing;
+
+        while select forupdate rentalShopTrans
+        where rentalShopTrans.IsProcessed == NoYes::No
+        &&    rentalShopTrans.TransType == RorRshShopTransType::Delivery
+        &&    rentalShopTrans.TradeType == RORTradeType::SalesPurch
+            join forupdate shopCardTable
+            where shopCardTable.ShopCardId == rentalShopTrans.ShopCardId
+            &&    shopCardTable.RentalShopType == DNRRSHRentalShopType::Project
+                join projTable
+                where projTable.ProjId == shopCardTable.ProjId
+                    notexists join shopTransInProcessing
+                    where shopTransInProcessing.ShopTransRecId == rentalShopTrans.RecId
+                    &&    shopTransInProcessing.ProcessingDateTime != processingStartDateTime
+        {
+            SalesLine salesLine;
+
+            try
+            {
+                ttsbegin;
+
+                currentRentalShopTransRecId = rentalShopTrans.RecId;
+                SalesTable salesTable = this.findOrCreateRentalOrder(projTable);
+
+                if (shopCardTable.SalesId != salesTable.SalesId)
+                {
+                    shopCardTable.SalesId = salesTable.SalesId;
+                    shopCardTable.update();
+                }
+
+                salesLine = this.createSalesLine(salesTable, rentalShopTrans);
+            
+                this.addToPackingSlipPosting(salesLine);
+
+                rentalShopTrans.IsProcessed = NoYes::Yes;
+                rentalShopTrans.update();
+
+                processedRentalLine.add(salesLine);
+
+                ttscommit;
+            }
+            catch
+            {
+                this.revertOnError(salesLine, projTable);
+            }
+        }
+ 
+        this.postPackingSlipPerSalesOrder();
+              
+        currentRentalShopTransRecId = 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSalesDeliveryInItemJournal</Name>
+				<Source><![CDATA[
+    private void processSalesDeliveryInItemJournal()
+    {
+        RorRshShopTrans rentalShopTrans;
+        RorRshShopCardTable shopCardTable;
+        ProjTable projTable;
+        RorRshShopTransInProcessing shopTransInProcessing;
+
+        while select forupdate rentalShopTrans
+        where rentalShopTrans.IsProcessed == NoYes::No
+        &&    rentalShopTrans.TransType == RorRshShopTransType::Delivery
+        &&    rentalShopTrans.TradeType == RORTradeType::SalesPurch
+            join RecId from shopCardTable
+            where shopCardTable.ShopCardId == rentalShopTrans.ShopCardId
+            &&    shopCardTable.RentalShopType == DNRRSHRentalShopType::Project
+                join projTable
+                where projTable.ProjId == shopCardTable.ProjId
+                    notexists join shopTransInProcessing
+                    where shopTransInProcessing.ProcessingDateTime != processingStartDateTime
+                    &&    shopTransInProcessing.ShopTransRecId == rentalShopTrans.RecId
+        {
+            try
+            {
+                ttsbegin;
+
+                currentRentalShopTransRecId = rentalShopTrans.RecId;
+                InventJournalTable inventJournalTable = this.findOrCreateJournalTable(projTable);
+
+                this.createItemJournalTrans(inventJournalTable, rentalShopTrans, projTable);
+
+                rentalShopTrans.IsProcessed = NoYes::Yes;
+                rentalShopTrans.update();
+
+                ttscommit;
+            }
+            catch
+            {
+                projIdJournalTable.remove(projTable.ProjId);
+                this.logError();
+            }
+        }
+       
+        currentRentalShopTransRecId = 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findOrCreateJournalTable</Name>
+				<Source><![CDATA[
+    private InventJournalTable findOrCreateJournalTable(ProjTable _projTable)
+    {
+        InventJournalTable inventJournalTable;
+
+        if (projIdJournalTable.exists(_projTable.ProjId))
+        {
+            inventJournalTable = projIdJournalTable.lookup(_projTable.ProjId);
+        }
+        else
+        {
+            select firstonly inventJournalTable
+            order by RecId desc
+            where inventJournalTable.WPPProjId == _projTable.ProjId
+            &&    inventJournalTable.JournalType   == InventJournalType::project
+            &&    inventJournalTable.JournalNameId == projParameters.InventJournalNameId
+            &&    inventJournalTable.Posted == NoYes::No;
+
+            if (!inventJournalTable)
+            {
+                inventJournalTable = this.createJournalTable(_projTable);
+            }
+
+            projIdJournalTable.insert(_projTable.ProjId, inventJournalTable);
+        }
+
+        return inventJournalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalTable</Name>
+				<Source><![CDATA[
+    private InventJournalTable createJournalTable(ProjTable _projTable)
+    {
+        InventJournalTable inventJournalTable;
+        InventJournalName inventJournalName = InventJournalName::find(projParameters.InventJournalNameId);
+    
+        if (!inventJournalName)
+        {
+            throw error("@DNR6671");
+        }
+    
+        inventJournalTable.clear();
+        inventJournalTable.initValue();
+        inventJournalTable.initFromInventJournalName(inventJournalName);
+        inventJournalTable.WPPinitFromProjTable(_projTable);
+        inventJournalTable.JournalId = JournalTableData::newTable(inventJournalTable).nextJournalId();
+        inventJournalTable.insert();
+
+        return inventJournalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createItemJournalTrans</Name>
+				<Source><![CDATA[
+    private void createItemJournalTrans(InventJournalTable _journalTable, RorRshShopTrans _rentalShopTrans, ProjTable _projTable)
+    {
+        InventJournalTableData  journalTableData;
+        InventJournalTransData  journalTransData;
+        InventJournalTable      journalTableUpd;
+        InventJournalTrans      journalTrans, journalTransSelect;
+        NumberSeq               numberSeq;
+        Counter                 journalTransCounter;
+
+        journalTableData        = JournalTableData::newTable(_journalTable);
+        journalTransData        = journalTableData.journalStatic().newJournalTransData(journalTrans, journalTableData);
+                
+        // Init JournalTrans
+        journalTableData.initFromJournalName(journalTableData.journalStatic().findJournalName(_journalTable.JournalNameId));
+
+        journalTrans.clear();
+        journalTrans.initValue();
+
+        select maxof(LineNum), count(RecId) from journalTransSelect
+        order by LineNum desc
+        where journalTransSelect.JournalId == _journalTable.JournalId;
+            
+        journalTransCounter = any2Int(journalTransSelect.RecId);
+
+        journalTrans.LineNum            = journalTransSelect.LineNum + 1;
+        numberSeq                       = NumberSeq::newGetVoucherFromId(_journalTable.VoucherNumberSequenceTable, false);
+        journalTrans.Voucher            = numberSeq.voucher();
+                
+        journalTransData.initFromJournalTable();
+        
+        journalTrans.ProjLinePropertyId     = rorParameters.RshShopLinePropertyId;
+        journalTrans.ProjCategoryId         = projParameters.ItemCategory;
+        journalTrans.ProjId                 = _projTable.ProjId;
+        journalTrans.initFromProjTable(_projTable);
+        journalTrans.TransDate              = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+        journalTrans.InventDimId            = _rentalShopTrans.inventDimId;
+        journalTrans.Qty                    = _rentalShopTrans.Qty;
+        
+        journalTrans.ItemId                 = _rentalShopTrans.ItemId;
+
+        if (!journalTrans.ProjSalesCurrencyId)
+        {
+            journalTrans.ProjSalesCurrencyId = Ledger::accountingCurrency(CompanyInfo::current());
+        }
+
+        InventMov_Journal movement = journalTrans.inventMovement();
+        movement.parmQtyModified(true);
+        movement.journalSetItemId(InventDim::find(journalTrans.InventDimId));
+
+        journalTrans.InventTransId = NumberSeq::newGetNum(InventParameters::numRefInventTransId()).num();
+
+        journalTrans.Worker                 = HcmWorker::userId2Worker(curUserId());
+
+        InventTableModule inventTableModule = InventTableModule::find(journalTrans.ItemId, ModuleInventPurchSales::Purch);
+        InventPriceMap inventPriceMap  = journalTrans.inventTable().inventCostPriceMap('', null, inventTableModule, journalTrans.TransDate);
+
+        journalTrans.CostPrice  = inventPriceMap.price();
+        journalTrans.PriceUnit  = inventPriceMap.priceUnit();
+        journalTrans.CostMarkup = inventPriceMap.markup();
+        journalTrans.ProjUnitId = inventTableModule.UnitId;
+        journalTrans.CostAmount = journalTrans.Qty * journalTrans.CostPrice;
+
+        journalTrans.insert();
+        
+        update_recordset journalTableUpd
+        setting NumOfLines = journalTransCounter + 1
+        where journalTableUpd.JournalId == _journalTable.JournalId;
+                 
+        RorRshShopTransReference::createDeliveryReference(journalTrans.TableId, journalTrans.RecId, _rentalShopTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournalTable</Name>
+				<Source><![CDATA[
+    private void postJournalTable()
+    {
+        MapEnumerator enumerator = projIdJournalTable.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            InventJournalTable inventJournalTable = enumerator.currentValue();
+            
+            try
+            {
+                ttsbegin;
+
+                //Posting the journal
+                JournalCheckPost jourPost = InventJournalCheckPost::newJournalCheckPost(JournalCheckPostType::Post, inventJournalTable);
+                jourPost.parmAutoBlock(true);
+                jourPost.runOperation();
+                
+                ttscommit;
+            }
+            finally
+            {
+                if (!InventJournalTable::find(inventJournalTable.JournalId).Posted)
+                {
+                    ttsbegin;
+
+                    // Create a log for not posted transactions and continue posting another journal.
+                    RorRshShopTransReference shopTransReference;
+                    RorRshShopTrans shopTrans;
+                    InventJournalTrans inventJournalTrans;
+
+                    while select RecId, TableId from shopTrans
+                        exists join shopTransReference
+                        where shopTransReference.DeliveryTransId == shopTrans.TransId
+                            join TableId from inventJournalTrans
+                            where inventJournalTrans.JournalId == inventJournalTable.JournalId
+                            &&    inventJournalTrans.TableId == shopTransReference.RefTableId
+                            &&    inventJournalTrans.RecId == shopTransReference.RefRecId
+                    {
+                        RorRshShopTransLog::createLog(shopTrans.TableId, shopTrans.RecId, RorRshShopLogType::PostingError, "@SYS21533");
+                    }
+
+                    ttscommit;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findOrCreateRentalOrder</Name>
+				<Source><![CDATA[
+    private SalesTable findOrCreateRentalOrder(ProjTable _projTable)
+    {
+        SalesTable salesTable;
+
+        if (projIdSalesTable.exists(_projTable.ProjId))
+        {
+            salesTable = projIdSalesTable.lookup(_projTable.ProjId);
+        }
+        else
+        {
+            select firstonly salesTable
+            order by RecId desc
+            where salesTable.ProjId == _projTable.ProjId
+            &&    salesTable.SalesType == SalesType::RORRental
+            &&    salesTable.SalesStatus != SalesStatus::Invoiced
+            &&    salesTable.SalesStatus != SalesStatus::Canceled;
+
+            if (!salesTable)
+            {
+                salesTable = this.createSalesTable(_projTable);
+            }
+
+            projIdSalesTable.insert(_projTable.ProjId, salesTable);
+        }
+
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSalesTable</Name>
+				<Source><![CDATA[
+    private SalesTable createSalesTable(ProjTable _projTable)
+    {
+        SalesTable salesTable;
+       
+        salesTable.clear();
+        salesTable.ProjId = _projTable.ProjId;
+        salesTable.initValue(SalesType::RORRental);
+    
+        salesTable.initFromProjTable(_projTable);
+        salesTable.CustAccount = _projTable.CustAccount;
+        salesTable.initFromCustTable();
+        salesTable.SalesId = NumberSeq::newGetNum(SalesParameters::numRefSalesId()).num();
+    
+        salesTable.FixedExchRate = ProjInvoiceCurrency::find(_projTable.projInvoice().ProjInvoiceProjId, salesTable.CurrencyCode).ExchRate;
+    
+        if (!salesTable.validateWrite())
+        {
+            throw Exception::Error;
+        }
+    
+        salesTable.insert();
+
+        // Create dummy dateTimes on header. Actuall on/off rent will be set on line level.
+        RORRentalDateTimes rentalDateTimes;
+
+        rentalDateTimes.initFromHost(salesTable);
+        rentalDateTimes.SynchronizeFromParent = NoYes::No;
+        rentalDateTimes.OnRentDateTime = processingStartDateTime;
+        rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+        rentalDateTimes.ExpectedOffRentDateTime = DateTimeUtil::addDays(rentalDateTimes.OnRentDateTime, 1);
+        rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+        rentalDateTimes.insert();
+        
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSalesLine</Name>
+				<Source><![CDATA[
+    private SalesLine createSalesLine(SalesTable _salesTable, RorRshShopTrans _rentalShopTrans)
+    {
+        SalesLine       salesLine;
+                   
+        salesLine.initValue();
+        salesLine.initFromSalesTable(_salesTable);
+        salesLine.RORTradeType = _rentalShopTrans.TradeType;
+    
+        if (_rentalShopTrans.ItemId)
+        {
+            InventTable inventTable = InventTable::find(_rentalShopTrans.ItemId);
+            
+            salesLine.ItemId = inventTable.ItemId;
+            salesLine.itemIdChanged();
+            salesLine.initFromInventTable(inventTable);
+        
+            salesLine.SalesQty     = _rentalShopTrans.Qty;
+            salesLine.salesQtyModified();
+            salesLine.SalesUnit    = _rentalShopTrans.SalesUnit;
+            salesLine.SalesPrice   = inventTable.salesPcsPrice();
+        }
+        
+        InventDim inventDim = _rentalShopTrans.inventDim();
+
+        salesLine.InventDimId = inventDim.inventDimId;
+        salesLine.RORReturnInventLocationId = inventDim.InventLocationId;
+
+        salesLine.setPriceDisc(inventDim);
+        salesLine.createLine();
+
+        if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            RORRentalLineEditorForm::createSupplementaryItemsLines(salesLine);
+        }
+
+        
+        InventSerialId serialNum = inventDim.inventSerialId;
+
+        if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            this.updateRentalDateTimes(salesLine, _rentalShopTrans);
+        }
+        
+        // The salesLine buffer could get updated during creation of supplementary items.
+        // Sometimes it was causing update conflict when assigning BO.
+        salesLine = SalesLine::findRecId(salesLine.RecId, true);
+
+        //Assign serial number
+        if (salesLine && serialNum)
+        {
+            ttsBegin;
+            BOBObjectAssignmentEngine objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, serialNum);
+            objectAssignmentEngine.runOperation();
+            ttsCommit;
+        }
+
+        RorRshShopTransReference::createDeliveryReference(salesLine.TableId, salesLine.RecId, _rentalShopTrans);
+
+        return salesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSalesLineForRentalShopTrans</Name>
+				<Source><![CDATA[
+    private SalesLine createSalesLineForRentalShopTrans(SalesTable _salesTable, RorRshShopTrans _rentalShopTrans)
+    {
+        SalesLine       salesLine;
+        InventDim       inventDim = _rentalShopTrans.inventDim();
+        InventSerialId  serialNum = inventDim.inventSerialId;
+
+        salesLine.initValue();
+        salesLine.initFromSalesTable(_salesTable);
+        salesLine.RORTradeType = _rentalShopTrans.TradeType;
+    
+        if (_rentalShopTrans.ItemId)
+        {
+            InventTable inventTable = InventTable::find(_rentalShopTrans.ItemId);
+            
+            salesLine.ItemId = inventTable.ItemId;
+            salesLine.itemIdChanged();
+            salesLine.initFromInventTable(inventTable);
+            salesLine.SalesQty     = _rentalShopTrans.Qty;
+            salesLine.QtyOrdered   = _rentalShopTrans.Qty;
+            salesLine.salesQtyModified();
+            salesLine.SalesUnit    = _rentalShopTrans.SalesUnit;
+        }
+        salesLine.BOBRentalTypeIdRequested  = _rentalShopTrans.RentalTypeId;
+        salesLine.RORPriceTimeUnit  =  _rentalShopTrans.PriceTimeUnit;
+        salesLine.DNRCalendarId     =  _rentalShopTrans.CalendarId;
+        salesLine.INVInvoiceProfileId   = _rentalShopTrans.InvoiceProfileId;
+        
+        salesLine.InventDimId = _rentalShopTrans.inventDimId;
+        salesLine.RORReturnInventLocationId = inventDim.InventLocationId;
+
+        salesLine.setPriceDisc(inventDim);
+        salesLine.SalesPrice = _rentalShopTrans.SalesPrice;
+        salesLine.LinePercent = _rentalShopTrans.LinePercent;
+        salesLine.RORRentalGrossAmount = _rentalShopTrans.RentalGrossAmount;
+        salesLine.LineAmount    = _rentalShopTrans.LineAmount;
+        salesLine.createLine();
+
+        if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            this.updateRentalDateTimes(salesLine, _rentalShopTrans);
+        }
+        
+        // The salesLine buffer could get updated during creation of supplementary items.
+        // Sometimes it was causing update conflict when assigning BO.
+        salesLine = SalesLine::findRecId(salesLine.RecId, true);
+
+        //Assign serial number
+        if (salesLine && serialNum)
+        {
+            ttsBegin;
+            BOBObjectAssignmentEngine objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, serialNum);
+            objectAssignmentEngine.runOperation();
+            ttsCommit;
+        }
+
+        RorRshShopTransReference::createDeliveryReference(salesLine.TableId, salesLine.RecId, _rentalShopTrans);
+
+        return salesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalDateTimes</Name>
+				<Source><![CDATA[
+    private void updateRentalDateTimes(SalesLine _salesLine, RorRshShopTrans _rentalShopTrans)
+    {
+        RORRentalDateTimes rentalDateTimes = _salesLine.RORRentalDateTimes(true);
+
+        if (rentalDateTimes)
+        {
+            rentalDateTimes.OnRentDateTime = _rentalShopTrans.OnRentDateTime;
+            rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+            rentalDateTimes.ExpectedOffRentDateTime = _rentalShopTrans.ExpectedOffRentDateTime;
+            rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+            rentalDateTimes.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,423 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxDataEntityView xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRAttachmentEntity</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Base entity used for the import/export of <c>DocuRef</c> records.
+/// </summary>
+public class DNRAttachmentEntity extends common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Populates default values for new records.
+    /// </summary>
+    public void initValue()
+    {
+        super();
+        this.DocumentId = newGuid();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertEntityDataSource</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Saves a new entity record to the database.
+    /// </summary>
+    /// <param name="_entityCtx">Data entity context</param>
+    /// <param name="_dataSourceCtx">Data source context</param>
+    /// <returns><c>true</c> if the insert succeeded; otherwise, <c>false</c>.</returns>
+    public boolean insertEntityDataSource(DataEntityRuntimeContext _entityCtx, DataEntityDataSourceRuntimeContext _dataSourceCtx)
+    {
+        boolean ret;
+    
+        ret = super(_entityCtx, _dataSourceCtx);
+
+        // After a DocuRef record is inserted, save the file contents if necessary
+        if (ret && _dataSourceCtx.name() == dataEntityDataSourceStr(DocuRefEntity, DocuRef))
+        {
+            DocuRef docuRefBuffer = _dataSourceCtx.getBuffer();
+
+            /*if (this.FileContents && this.fieldExternallySet(fieldNum(DocuRefEntity, FileContents)))
+            {
+                str completeFileName = this.FileName + "." + this.FileType;
+                Binary bin = Binary::constructFromContainer(this.FileContents);
+                using (System.IO.MemoryStream fileStream = bin.getMemoryStream())
+                {
+                    DocuAction action = docuRefBuffer.docuAction();
+                    ret = ret && action.attachFile(docuRefBuffer, completeFileName, '', fileStream);
+                }
+            }*/
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postLoad</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Populates virtual fields.
+    /// </summary>
+    public void postLoad()
+    {
+        super();
+
+        // A DocuValue record can exist for URL types in addition to File types -- only populate FileContents for files.
+        if (this.ValueRecId != 0 && this.DocuValueType == DocuValueType::Others)
+        {
+            // this.dataSource() isn't populated at this point so a select statement is necessary to get a DocuRef cursor.
+            DocuRef record;
+            select firstonly record where record.RecId == this.RecId;
+            /*this.FileContents = DocumentManagement::getAttachmentAsContainer(record);
+            this.fieldExternallySet(fieldNum(DocuRefEntity, FileContents), false);*/
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Updates the current record with the contents of the buffer.
+    /// </summary>
+    /// <remarks>Updating records through this data entity is not supported.</remarks>
+    public void update()
+    {
+        throw error("@ApplicationFoundation:DocuRefEntity_UpdateNotSupported");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Determines whether data is valid and ready to be written.
+    /// </summary>
+    /// <returns><c>true</c> if the data is valid; otherwise, <c>false</c></returns>
+    public boolean validateWrite()
+    {
+        boolean ret;
+    
+        ret = super();
+
+        // Ensure that the DocuType record exists
+        DocuType docType = DocuType::find(this.TypeId);
+
+        if (!docType || !docType.ActionClassId)
+        {
+            ret = ret && checkFailed(error::missingParameter(null));
+        }
+
+        boolean isDocuFileType = SysDictClass::isEqualOrSuperclass(docType.ActionClassId, classNum(DocuActionFile));
+
+        // If one of {FileName, FileType, FileContents} is set or if the DocuType is a file, all three fields need to be set and the DocuType needs to be for a file.
+        if (isDocuFileType || this.FileName || this.FileType) //|| this.FileContents)
+        {
+            if (!isDocuFileType)
+            {
+                ret = ret && checkFailed(strFmt("@ApplicationFoundation:Docu_IncorrectDocuType", "@SYS4047"));
+            }
+            
+            if (!this.FileName)
+            {
+                ret = ret && checkFailed(strFmt("@ApplicationFoundation:DocuRefEntity_FileFieldBlank", fieldStr(DocuRefEntity, FileName)));
+            }
+
+            if (!this.FileType)
+            {
+                ret = ret && checkFailed(strFmt("@ApplicationFoundation:DocuRefEntity_FileFieldBlank", fieldStr(DocuRefEntity, FileType)));
+            }
+
+            /*if (!this.FileContents)
+            {
+                ret = ret && checkFailed(strFmt("@ApplicationFoundation:DocuRefEntity_FileFieldBlank", fieldStr(DocuRefEntity, FileContents)));
+            }*/
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>defineFileName</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Exposes FileName as a mutable column.
+    /// </summary>
+    /// <returns>A SQL string to be used as the definition of the FileName column.</returns>
+    private static str defineFileName()
+    {
+        // The FileName column is marked as AllowEdit=No,AllowEditOnCreate=No on the DocuValue table
+        // Since the entity can't override that, the column has to be exposed as a virtual column
+        str field = SysComputedColumn::returnField(tableStr(DocuRefEntity), dataEntityDataSourceStr(DocuRefEntity, DocuValue), fieldStr(DocuValue, FileName));
+
+        return field;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>defineFileType</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Exposes FileType as a mutable column.
+    /// </summary>
+    /// <returns>A SQL string to be used as the definition of the FileType column.</returns>
+    private static str defineFileType()
+    {
+        // The FileType column is marked as AllowEdit=No,AllowEditOnCreate=No on the DocuValue table
+        // Since the entity can't override that, the column has to be exposed as a virtual column
+        str field = SysComputedColumn::returnField(tableStr(DocuRefEntity), dataEntityDataSourceStr(DocuRefEntity, DocuValue), fieldStr(DocuValue, FileType));
+
+        return field;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>defineFileContents</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Defines the FileContents column to be a blank SQL column.
+    /// </summary>
+    /// <returns>A SQL string to be used as the definition of the FileContents column.</returns>
+    private static str defineFileContents()
+    {
+        // This is a workaround to get import/export working since it does not recognize a virtual container field.
+        return SysComputedColumn::nullExpression();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<ConfigurationKey>DNRDeletedObjects_DynaRentDataManagement</ConfigurationKey>
+	<FormRef>DocuView</FormRef>
+	<Label>DNR attachments</Label>
+	<DataManagementEnabled>Yes</DataManagementEnabled>
+	<DataManagementStagingTable>DNRAttachmentEntityStaging</DataManagementStagingTable>
+	<EnableSetBasedSqlOperations>No</EnableSetBasedSqlOperations>
+	<EntityCategory>Document</EntityCategory>
+	<IsPublic>Yes</IsPublic>
+	<Modules>SystemAdministration</Modules>
+	<PrimaryCompanyContext>ActualCompanyId</PrimaryCompanyContext>
+	<PrimaryKey>EntityKey</PrimaryKey>
+	<PublicCollectionName>DNRAttachments</PublicCollectionName>
+	<PublicEntityName>DNRAttachment</PublicEntityName>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DocumentId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>DocumentId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>ActualCompanyId</Name>
+			<AccessModifier>Private</AccessModifier>
+			<DataField>ActualCompanyId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>TypeId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>Yes</AllowEditOnCreate>
+			<DataField>TypeId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>RefCompanyId</Name>
+			<DataField>RefCompanyId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>RefRecId</Name>
+			<DataField>RefRecId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>RefTableId</Name>
+			<DataField>RefTableId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>Name</Name>
+			<DataField>Name</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>Restriction</Name>
+			<DataField>Restriction</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>Notes</Name>
+			<DataField>Notes</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>ValueRecId</Name>
+			<AccessModifier>Private</AccessModifier>
+			<DataField>ValueRecId</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DocuValueType</Name>
+			<AccessModifier>Private</AccessModifier>
+			<DataField>Type</DataField>
+			<DataSource>DocuValue</DataSource>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldString">
+			<Name>FileName</Name>
+			<ComputedFieldMethod>defineFileName</ComputedFieldMethod>
+			<ExtendedDataType>Filename</ExtendedDataType>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewUnmappedFieldString">
+			<Name>FileType</Name>
+			<ComputedFieldMethod>defineFileType</ComputedFieldMethod>
+			<ExtendedDataType>FilenameType</ExtendedDataType>
+		</AxDataEntityViewField>
+		<AxDataEntityViewField xmlns=""
+			i:type="AxDataEntityViewMappedField">
+			<Name>DefaultAttachment</Name>
+			<DataField>DefaultAttachment</DataField>
+			<DataSource>DocuRef</DataSource>
+		</AxDataEntityViewField>
+	</Fields>
+	<Keys>
+		<AxDataEntityViewKey>
+			<Name>EntityKey</Name>
+			<Fields>
+				<AxDataEntityViewKeyField>
+					<DataField>DocumentId</DataField>
+				</AxDataEntityViewKeyField>
+			</Fields>
+		</AxDataEntityViewKey>
+	</Keys>
+	<Mappings />
+	<Ranges />
+	<Relations>
+		<AxDataEntityViewRelation xmlns=""
+			i:type="AxDataEntityViewRelationForeignKey">
+			<Name>DocuTypeRelation</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedDataEntity>DocuTypeEntity</RelatedDataEntity>
+			<RelatedDataEntityCardinality>ExactlyOne</RelatedDataEntityCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxDataEntityViewRelationConstraint xmlns=""
+					i:type="AxDataEntityViewRelationConstraintField">
+					<Name>RelationConstraintField1</Name>
+					<Field>ActualCompanyId</Field>
+					<RelatedField>DataAreaId</RelatedField>
+				</AxDataEntityViewRelationConstraint>
+				<AxDataEntityViewRelationConstraint xmlns=""
+					i:type="AxDataEntityViewRelationConstraintField">
+					<Name>RelationConstraintField2</Name>
+					<Field>TypeId</Field>
+					<RelatedField>ID</RelatedField>
+				</AxDataEntityViewRelationConstraint>
+			</Constraints>
+		</AxDataEntityViewRelation>
+	</Relations>
+	<StateMachines />
+	<ViewMetadata>
+		<Name>Metadata</Name>
+		<SourceCode>
+			<Methods>
+				<Method>
+					<Name>classDeclaration</Name>
+					<Source><![CDATA[
+[Query]
+public class Metadata extends QueryRun
+{
+}
+]]></Source>
+				</Method>
+			</Methods>
+		</SourceCode>
+		<DataSources>
+			<AxQuerySimpleRootDataSource>
+				<Name>DocuRef</Name>
+				<DynamicFields>Yes</DynamicFields>
+				<Table>DocuRef</Table>
+				<DataSources>
+					<AxQuerySimpleEmbeddedDataSource>
+						<Name>DocuValue</Name>
+						<DynamicFields>Yes</DynamicFields>
+						<IsReadOnly>Yes</IsReadOnly>
+						<Table>DocuValue</Table>
+						<DataSources />
+						<DerivedDataSources />
+						<Fields />
+						<Ranges />
+						<JoinMode>OuterJoin</JoinMode>
+						<Relations>
+							<AxQuerySimpleDataSourceRelation>
+								<Name>QueryDataSourceRelation1</Name>
+								<JoinDataSource>DocuRef</JoinDataSource>
+								<JoinRelationName>DocuValue</JoinRelationName>
+							</AxQuerySimpleDataSourceRelation>
+						</Relations>
+					</AxQuerySimpleEmbeddedDataSource>
+				</DataSources>
+				<DerivedDataSources />
+				<Fields />
+				<Ranges />
+				<GroupBy />
+				<Having />
+				<OrderBy />
+			</AxQuerySimpleRootDataSource>
+		</DataSources>
+	</ViewMetadata>
+</AxDataEntityView>

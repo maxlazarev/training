@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINROROrderAmendmentDialogType_ExchangeCls_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(ROROrderAmendmentDialogType_Exchange))]
+public final class FINROROrderAmendmentDialogType_ExchangeCls_Extension
+{
+    private TransDateTime toRentalStopDateTime;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getInvoicedEndDateTime</Name>
+				<Source><![CDATA[
+    protected RORRentalDateTime getInvoicedEndDateTime(SalesLine _salesLine, RORRentalDateTime _exchangedDateTime)
+    {
+        RORRentalDateTime exchangeDateTime = next getInvoicedEndDateTime(_salesLine, _exchangedDateTime);
+
+        if (!FINRentalInvoiceProfile::find(_salesLine.INVInvoiceProfileId).AllowChangeDateForInvoicedPeriods)
+        {
+            FINInvoicePeriodQtyPhysical     invoicePeriodQtyPhysical;
+            FINInvoicePeriodQtyFinancial    invoicePeriodQtyFinancial;
+
+            select maxof(PeriodEndDateTime) from invoicePeriodQtyFinancial
+            where invoicePeriodQtyFinancial.InvoiceId
+            &&    invoicePeriodQtyFinancial.PeriodEndDateTime > _exchangedDateTime
+                exists join invoicePeriodQtyPhysical
+                where invoicePeriodQtyPhysical.RecId == invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+                &&    invoicePeriodQtyPhysical.RefTableId == _salesLine.TableId
+                &&    invoicePeriodQtyPhysical.RefRecId == _salesLine.RecId;
+
+            if (invoicePeriodQtyFinancial.PeriodEndDateTime != DateTimeUtil::minValue())
+            {
+                exchangeDateTime = invoicePeriodQtyFinancial.PeriodEndDateTime;
+            }
+        }
+
+        return exchangeDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLine</Name>
+				<Source><![CDATA[
+    // Chain-of-command wrapper methods
+    protected void updateSourceLine(Common _salesLineNew)
+    {
+        next updateSourceLine(_salesLineNew);
+
+        if (this.FINCanCopyInvoicePeriodAmendments(common, _salesLineNew))
+        {
+            this.FINCopyInvoicePeriodAmendments(common, _salesLineNew);
+        }
+
+        if (this.FINmustCreateRentalStopForInvoicedPeriod(common, _salesLineNew))
+        {
+            this.FINcreateRentalStopForInvoicedPeriod(_salesLineNew);
+        }
+
+        FINRAGContractLineTier::syncContractLineTiers(common);
+        FINRAGContractLineTier::syncContractLineTiers(_salesLineNew);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCopyInvoicePeriodAmendments</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void FINCopyInvoicePeriodAmendments(SalesLine _fromSalesLine, SalesLine _toSalesLine)
+    {
+        FINInvoicePeriodAmendment invoicePeriodAmendmentFrom, invoicePeriodAmendmentTo;
+        FINCreditPendingChangesReference creditPendingChangesReference;
+        RefRecId toRefRecId = _toSalesLine.RecId;
+        RefTableId toRefTableId = _toSalesLine.TableId;
+
+        ttsbegin;
+
+        // Delete price amendments created by "Range tier multiplier on creation" feature. For technical exchange we treat 2 order lines as 1 rental so no new tier calculation is needed.
+        // There shouldn't be any other amendments at this point as this is newly created replacement order line.
+        delete_from invoicePeriodAmendmentTo
+        where invoicePeriodAmendmentTo.RefTableId == toRefTableId
+        &&    invoicePeriodAmendmentTo.RefRecId == toRefRecId
+        &&    invoicePeriodAmendmentTo.PriceComponent == FINInvoicePeriodPriceComponent::RentalPrice;
+
+        // Copy all amendments affecting period after the exchange
+        insert_recordset invoicePeriodAmendmentTo (FromDateTime, ToDateTime, StrValue, RealValue, PriceComponent, RefRecId, RefTableId)
+        select FromDateTime, ToDateTime, StrValue, RealValue, PriceComponent, toRefRecId, toRefTableId from invoicePeriodAmendmentFrom
+        where invoicePeriodAmendmentFrom.RefTableId == _fromSalesLine.TableId
+        &&    invoicePeriodAmendmentFrom.RefRecId == _fromSalesLine.RecId
+        &&    invoicePeriodAmendmentFrom.ToDateTime >= tmpOrderAmendmentDialogTable.OffRentDateTime
+            notexists join creditPendingChangesReference
+            where creditPendingChangesReference.RefTableId == invoicePeriodAmendmentFrom.TableId
+            &&    creditPendingChangesReference.RefRecId == invoicePeriodAmendmentFrom.RecId;
+
+        // Cut amendments before an on-rent date time of the new order line
+        update_recordset invoicePeriodAmendmentTo
+        setting FromDateTime = tmpOrderAmendmentDialogTable.OffRentDateTime
+        where invoicePeriodAmendmentTo.RefTableId == toRefTableId
+        &&    invoicePeriodAmendmentTo.RefRecId == toRefRecId
+        &&    invoicePeriodAmendmentTo.FromDateTime < tmpOrderAmendmentDialogTable.OffRentDateTime;
+        
+        ttscommit;        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCanCopyInvoicePeriodAmendments</Name>
+				<Source><![CDATA[
+    private boolean FINCanCopyInvoicePeriodAmendments(SalesLine _fromSalesLine, SalesLine _toSalesLine)
+    {
+        boolean ret = false;
+
+        if (_toSalesLine 
+        && _fromSalesLine 
+        && tmpOrderAmendmentDialogTable.ExchangeType == RORAmendmentExchangeType::Technical
+        // Copy amendments only between exchanged and replacement order lines. 
+        // This method is executed also for a caller record (exchanged line) and then copying makes no sense.
+        && _fromSalesLine.RecId != _toSalesLine.RecId)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINmustCreateRentalStopForInvoicedPeriod</Name>
+				<Source><![CDATA[
+    private boolean FINmustCreateRentalStopForInvoicedPeriod(SalesLine _fromSalesLine, SalesLine _toSalesLine)
+    {
+        boolean ret;
+
+        toRentalStopDateTime = DateTimeUtil::minValue();
+
+        if (tmpOrderAmendmentDialogTable.ExchangeType == RORAmendmentExchangeType::Technical
+        &&  !FINRentalInvoiceProfile::find(_toSalesLine.INVInvoiceProfileId).AllowChangeDateForInvoicedPeriods
+        &&  _fromSalesLine
+        &&  _toSalesLine
+        &&  _fromSalesLine.RecId != _toSalesLine.RecId)
+        {
+            ROROffRentDateTime exchangeDateTime = tmpOrderAmendmentDialogTable.OffRentDateTime;
+
+            FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+            FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+
+            select firstonly PeriodEndDateTime from invPeriodQtyFinancial
+            order by PeriodEndDateTime desc
+            where invPeriodQtyFinancial.InvoiceId
+            &&    invPeriodQtyFinancial.PeriodEndDateTime >= exchangeDateTime
+                exists join invPeriodQtyPhysical
+                where invPeriodQtyPhysical.RefTableId == _fromSalesLine.TableId
+                &&    invPeriodQtyPhysical.RefRecId == _fromSalesLine.RecId
+                &&    invPeriodQtyPhysical.RecId == invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+                &&    invPeriodQtyPhysical.QtyRented;
+
+            if (invPeriodQtyFinancial)
+            {
+                toRentalStopDateTime = invPeriodQtyFinancial.PeriodEndDateTime;
+                ret = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINcreateRentalStopForInvoicedPeriod</Name>
+				<Source><![CDATA[
+    private void FINcreateRentalStopForInvoicedPeriod(SalesLine _toSalesLine)
+    {
+        // create rental stop from exchange moment until toRentalStopDateTime
+        Args args = new Args();
+        args.parmEnum(DNRReasonType::RentalStop);
+
+        RORTmpOrderAmendmentDialogTable tmpOrderAmendmentForRentalStop;
+        ROROrderAmendmentDialogType_RentalStop orderAmendmentDialogType_RentalStop = ROROrderAmendmentDialogType::construct(args);
+
+        tmpOrderAmendmentForRentalStop.CalendarType = RORRentalCalendarType::RentalStop;
+        tmpOrderAmendmentForRentalStop.EffectiveDateTimeFrom = tmpOrderAmendmentDialogTable.OffRentDateTime;
+        tmpOrderAmendmentForRentalStop.EffectiveDateTimeTo = toRentalStopDateTime;
+
+        orderAmendmentDialogType_RentalStop.parmRentalStopOneDayActive(false);
+        orderAmendmentDialogType_RentalStop.parmCommon(_toSalesLine);
+        orderAmendmentDialogType_RentalStop.parmTmpOrderAmendmentDialogTable(tmpOrderAmendmentForRentalStop);
+        orderAmendmentDialogType_RentalStop.run();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

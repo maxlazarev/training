@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRRORRentalDateTimesHostMap_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(mapStr(RORRentalDateTimesHost))]
+public final class DNRRORRentalDateTimesHostMap_Extension
+{
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>modifiedRORRentalDateTimes</Name>
+				<Source><![CDATA[
+    public void modifiedRORRentalDateTimes(RORRentalDateTimes _origRentalDateTimes, RORRentalDateTimes _newRentalDateTimes, boolean _forceStopTierRangeRecalculation)
+    {
+        next modifiedRORRentalDateTimes(_origRentalDateTimes, _newRentalDateTimes, _forceStopTierRangeRecalculation);
+
+        #DNRConstants
+        INVPeriodStartDateTime periodStartDateTimeOrig, periodStartDateTimeNew;
+        INVPeriodEndDateTime periodEndDateTimeOrig, periodEndDateTimeNew;
+        INVPeriodExpectedEndDateTime periodExpectedEndDateTimeOrig, periodExpectedEndDateTimeNew;
+
+        //LOCAL METHODS >>>
+        boolean periodStartDateTimeModified()
+        {
+            if (periodStartDateTimeOrig != periodStartDateTimeNew
+            && (DateTimeUtil::year(periodStartDateTimeOrig) > #DNRNullYear || DateTimeUtil::year(periodStartDateTimeNew) > #DNRNullYear))
+            {
+                return true;
+            }
+
+            return false;
+        }
+    
+        boolean periodExpectedEndDateTimeModified()
+        {
+            if (periodExpectedEndDateTimeOrig != periodExpectedEndDateTimeNew
+            && (DateTimeUtil::year(periodExpectedEndDateTimeOrig) > #DNRNullYear || DateTimeUtil::year(periodExpectedEndDateTimeNew) > #DNRNullYear))
+            {
+                return true;
+            }
+
+            return false;
+        }
+    
+        boolean periodEndDateTimeModified()
+        {
+            if (periodEndDateTimeOrig != periodEndDateTimeNew
+            && (DateTimeUtil::year(periodEndDateTimeOrig) > #DNRNullYear || DateTimeUtil::year(periodEndDateTimeNew) > #DNRNullYear))
+            {
+                return true;
+            }
+
+            return false;
+        }
+        //LOCAL METHODS <<<
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(RORRentalDateTimes))
+        && this.HeaderId
+        && (this.RORRentalDateTimesHost::isWorksheetTable()
+        && _newRentalDateTimes.hostHeadingLineLevel(this.TableId) == HeadingLine::Line))
+        {
+            Map changesMap = new Map(Types::Enum, Types::Container);
+            
+            if (_origRentalDateTimes.OnRentDateTime != _newRentalDateTimes.OnRentDateTime)
+            {
+                changesMap.insert(FINInvoicePeriodPhysicalChange::StartDateTime, [_newRentalDateTimes.OnRentDateTime]);
+            }
+            
+            if (_origRentalDateTimes.OffRentDateTime != _newRentalDateTimes.OffRentDateTime)
+            {
+                changesMap.insert(FINInvoicePeriodPhysicalChange::EndDateTime, [_newRentalDateTimes.OffRentDateTime]);
+
+                //If the offrent date is changed (from previously set value), first run the invoice period manager to clear the offrent date
+                if (_origRentalDateTimes.OffRentDateTime)
+                {
+                    Map clearOffRentDateMap = new Map(Types::Enum, Types::Container);
+                    clearOffRentDateMap.insert(FINInvoicePeriodPhysicalChange::EndDateTime, [DateTimeUtil::minValue()]);
+                    RORRentalDateTimesHost::runInvoicePeriodManager(this, clearOffRentDateMap);
+                }
+            }
+
+            if (!changesMap.empty())
+            {
+                RORRentalDateTimesHost::runInvoicePeriodManager(this, changesMap);
+            }
+
+            // If period start- or end-dates/times have changed, then trigger updates to rental periods table
+            [periodStartDateTimeOrig, periodEndDateTimeOrig, periodExpectedEndDateTimeOrig] = _origRentalDateTimes.getRentalPeriodDateTimes();
+            [periodStartDateTimeNew, periodEndDateTimeNew, periodExpectedEndDateTimeNew] = _newRentalDateTimes.getRentalPeriodDateTimes();
+    
+            if (!_forceStopTierRangeRecalculation 
+            &&  (periodStartDateTimeModified() || periodEndDateTimeModified() || periodExpectedEndDateTimeModified())
+            &&  (this.TableId == tableNum(SalesLine) ||
+                 this.TableId == tableNum(SalesQuotationLine) ||
+                 this.TableId == tableNum(PurchLine)))
+            {
+                Common common = this;
+                RORRentalLine rentalLine = common;
+                RORRentalLine rentalLineTransport = rentalLine.RORLineBuffer();
+    
+                // Allow recalculation of the tier multiplier
+                rentalLine.selectForUpdate(true);
+                FINInvoicePeriodQtyPhysical::updateInvoicePeriodMultiplier(rentalLine.TableId, rentalLine.RecId, false);
+                rentalLine.INVSetTierMultiplierOnCreation();
+                rentalLine.update();
+                
+                while select forupdate rentalLineTransport
+                where rentalLineTransport.ParentLineRecId == rentalLine.RecId
+                {
+                    // Allow recalculation of the tier multiplier
+                    FINInvoicePeriodQtyPhysical::updateInvoicePeriodMultiplier(rentalLineTransport.TableId, rentalLineTransport.RecId, false);
+                    rentalLineTransport.INVSetTierMultiplierOnCreation();
+                    rentalLineTransport.update();
+                }
+
+                rentalLine.RORRentalLine::updateKitComponentPricing(RORKitPricingActionType::ModifyLine, true, true);
+
+                if (_newRentalDateTimes.OnRentDateTime != _origRentalDateTimes.OnRentDateTime
+                 || _newRentalDateTimes.ExpectedOffRentDateTime != _origRentalDateTimes.ExpectedOffRentDateTime
+                 || _newRentalDateTimes.OffRentDateTime != _origRentalDateTimes.OffRentDateTime)
+                {
+                    FINRAGContractLineTier::syncContractLineTiers(rentalLine);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runInvoicePeriodManager</Name>
+				<Source><![CDATA[
+    private static void runInvoicePeriodManager(RORRentalDateTimesHost _rentalDateTimesHost, Map _changesMap)
+    {
+        Common common = _rentalDateTimesHost;
+        INVInvoicePeriodHost invoicePeriodHost = common;
+        FINInvoicePeriodManager_PhysicalChange invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::PhysicalChange, invoicePeriodHost);
+        invoicePeriodManager.setChanges(_changesMap);
+        invoicePeriodManager.run();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalDateTimes</Name>
+				<Source><![CDATA[
+    public RORRentalDateTimes rentalDateTimes(boolean _forUpdate)
+    {
+        RORRentalDateTimes ret = next rentalDateTimes(_forUpdate);
+
+        FINSyncContractLineTierAsyncDisposableContext asyncContext = FINSyncContractLineTierAsyncDisposableContext::current();
+
+        if (asyncContext)
+        {
+            ret = asyncContext.parmRentalDateTimes();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

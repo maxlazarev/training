@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRDNRRORPurchTableForm_PurchLineDS_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(formDataSourceStr(DNRRORPurchTable, PurchLine))]
+public final class DNRDNRRORPurchTableForm_PurchLineDS_Extension
+{
+    private RecId lastSelectedPurchLineRecId;
+
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>resetPurchLineFieldsWhenItemIdModified</Name>
+				<Source><![CDATA[
+    public void resetPurchLineFieldsWhenItemIdModified()
+    {
+        PurchLine purchLine = this.cursor() as PurchLine;
+        RORTradeType tradeType = purchLine.RORTradeType;
+
+        next resetPurchLineFieldsWhenItemIdModified();
+
+        if (!purchLine
+        &&  purchLine.RORTradeType == RORTradeType::Rental
+        &&  tradeType == RORTradeType::SalesPurch)
+        {
+            purchLine.RORTradeType = RORTradeType::SalesPurch;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        next init();
+
+        this.object(fieldNum(PurchLine, ItemId)).registerOverrideMethod(methodStr(FormDataObject, lookup), methodStr(DNRDNRRORPurchTableForm_Extension, RORItemId_onLookup), this.formRun());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>active</Name>
+				<Source><![CDATA[
+    int active()
+    {
+        int ret = next active();
+
+        FormDataSource InventDim_ds = this.formRun().datasource(formDataSourceStr(DNRRORPurchTable, InventDim));
+        PurchTable purchTable = element.purchTable();
+
+        if (purchTable.PurchaseType == PurchaseType::RORSubRental
+        &&  purchTable.InterCompanyDirectDelivery
+        &&  purchTable.InterCompanyOrder)
+        {
+            InventDim_ds.object(fieldNum(InventDim, InventSerialId)).enabled(false);
+        }
+        else
+        {
+            InventDim_ds.object(fieldNum(InventDim, InventSerialId)).enabled(true);
+        }
+
+        this.RORUpdateLineButtonsDesign();
+        this.RORUpdateLineFieldsMandatory();
+
+        PurchLine purchLine = this.cursor() as PurchLine;
+        boolean allowQtyEdit = conPeek(purchLine.RORRentalLine::CheckAllowEdit(), 3);
+        this.object(fieldnum(PurchLine, PurchQty)).allowEdit(allowQtyEdit    && this.object(fieldNum(PurchLine, PurchQty)).allowEdit());
+        this.object(fieldnum(PurchLine, PurchUnit)).allowEdit(allowQtyEdit   && this.object(fieldNum(PurchLine, PurchUnit)).allowEdit());
+        this.object(fieldnum(PurchLine, QtyOrdered)).allowEdit(allowQtyEdit  && this.object(fieldNum(PurchLine, QtyOrdered)).allowEdit());
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>delete</Name>
+				<Source><![CDATA[
+    void delete()
+    {
+        PurchLine purchLine = this.cursor() as PurchLine;
+
+        element.RORParmPurchLineRecIdParent(purchLine.RORParentLineRecId);
+        element.RORParmPurchLinePreDelete(purchLine.data());
+
+        boolean mustResearch = (purchLine.RecId == this.RORGetLastSelectedPurchLineRecId());
+
+        next delete();
+
+        if (mustResearch)
+        {
+            this.research();
+            lastSelectedPurchLineRecId = 0;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>write</Name>
+				<Source><![CDATA[
+    void write()
+    {
+        PurchLine purchLine = this.cursor() as PurchLine;
+
+        element.RORParmPurchLine_Orig(purchLine.orig().data());
+        element.RORParmPurchLineInserted(purchLine.RecId == 0);
+
+        next write();
+
+        boolean showRentalLineEditor = element.RORParmShowRentalLineEditor();
+
+        if (showRentalLineEditor)
+        {
+            purchLine.RORRentalLine::openRentalLineEditor(element);
+        }
+        else if (element.RORParmReReadLines())
+        {
+            PurchLine localPurchLine;
+            localPurchLine.data(purchLine);
+
+            if (element.RORParmUpdateKitPricing())
+            {
+                boolean lineInserted = element.RORParmPurchLineInserted();
+
+                if (lineInserted)
+                {
+                    RORRentalLineEditorForm::createSupplementaryItemsLines(localPurchLine);
+                }
+                else
+                {
+                    purchLine.RORRentalLine::updateKitComponentPricing(lineInserted ? RORKitPricingActionType::CreateLines : RORKitPricingActionType::ModifyLine, !element.RORParmLineAmountModified());
+                }
+            }
+
+            this.research();
+            this.refresh();
+            this.positionToRecord(localPurchLine);
+            element.RORParmLineAmountModified(false);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reread</Name>
+				<Source><![CDATA[
+    public void reread()
+    {
+        next reread();
+        this.RORRefreshInventDim();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>itemIdModified</Name>
+				<Source><![CDATA[
+    void itemIdModified()
+    {
+        this.RORUpdateLineFieldsMandatory();
+        next itemIdModified();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateLineButtonsDesign</Name>
+				<Source><![CDATA[
+    // Extension methods
+    private void RORUpdateLineButtonsDesign()
+    {
+        PurchLine purchLine = this.cursor() as PurchLine;
+
+        this.formRun().design().controlName(formControlStr(DNRRORPurchTable, RORSubrentalReference)).enabled(purchLine.RORTradeType != RORTradeType::SalesPurch && RORSubrentalReference::existPurch(purchLine.InventTransId));
+        this.formRun().design().controlName(formControlStr(DNRRORPurchTable, RORRentalLineEditorFormButton)).enabled(purchLine.RORRentalLine::canOpenRentalEditorForm());
+
+        // This call is required in order to enable the relevant amendment log buttons when opening a sub rental order via the related rental order.
+
+        element.RORUpdateAmendmentLogLineActions();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateLineFieldsMandatory</Name>
+				<Source><![CDATA[
+    private void RORUpdateLineFieldsMandatory()
+    {
+        PurchLine purchLine = this.cursor() as PurchLine;
+        boolean isSalesPurch = purchLine.RORTradeType == RORTradeType::SalesPurch;
+
+        this.object(fieldNum(PurchLine, INVInvoiceProfileId)).mandatory(!isSalesPurch);
+        this.object(fieldNum(PurchLine, DNRCalendarId)).mandatory(!isSalesPurch);
+        this.object(fieldNum(PurchLine, RORPriceTimeUnit)).mandatory(!isSalesPurch);
+        this.object(fieldNum(PurchLine, INVRentalModeId)).mandatory(!isSalesPurch);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORRefreshInventDim</Name>
+				<Source><![CDATA[
+    public void RORRefreshInventDim()
+    {
+        PurchLine purchLine = this.cursor() as PurchLine;
+        FormDataSource InventDim_ds = this.formRun().datasource(formDataSourceStr(DNRRORPurchTable, InventDim));
+        InventDim inventDim = InventDim_ds.cursor() as InventDim;
+
+        if (purchLine.InventDimId != inventDim.InventDimId)
+        {
+            inventDim.data(InventDim::find(purchLine.InventDimId));
+            InventDim_ds.setCurrent();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORGetLastSelectedPurchLineRecId</Name>
+				<Source><![CDATA[
+    private RecId RORGetLastSelectedPurchLineRecId()
+    {
+        PurchLine purchLineLocal;
+
+        if(!lastSelectedPurchLineRecId)
+        {
+            for(purchLineLocal = this.getFirst(true) ? this.getFirst(true) : this.cursor();
+                purchLineLocal;
+                purchLineLocal = this.getnext())
+            {
+                lastSelectedPurchLineRecId = purchLineLocal.RecId;
+            }
+        }
+
+        return lastSelectedPurchLineRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_PurchLineDS_OnActivated</Name>
+				<Source><![CDATA[
+    // Event-handler methods
+
+    [FormDataSourceEventHandler(formDataSourceStr(DNRRORPurchTable, PurchLine), FormDataSourceEventType::Activated)]
+    public static void DNREvent_PurchLineDS_OnActivated(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        Object formRunObj = _sender.formRun() as Object;
+        PurchLine purchLine = _sender.cursor() as PurchLine;
+
+        boolean allowEditRentalPricing, allowEditSalesPricing, allowEditQty;
+
+        [allowEditRentalPricing, allowEditSalesPricing, allowEditQty] = purchLine.RORRentalLine::CheckAllowEdit();
+
+        formRunObj.RORUpdateDesign_PurchLineDS(allowEditRentalPricing, allowEditSalesPricing, allowEditQty);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_PurchLineDS_OnDeleting</Name>
+				<Source><![CDATA[
+    [FormDataSourceEventHandler(formDataSourceStr(DNRRORPurchTable, PurchLine), FormDataSourceEventType::Deleting)]
+    public static void DNREvent_PurchLineDS_OnDeleting(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        PurchLine purchLine = _sender.cursor() as PurchLine;
+
+        if (purchLine.RecId && purchLine.RORHasChildren(false, false) && _sender.validateDelete())
+        {
+            purchLine.type().RORDeleteChildren();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_PurchLineDS_OnDeleted</Name>
+				<Source><![CDATA[
+    [FormDataSourceEventHandler(formDataSourceStr(DNRRORPurchTable, PurchLine), FormDataSourceEventType::Deleted)]
+    public static void DNREvent_PurchLineDS_OnDeleted(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        Object formRunObj = _sender.formRun() as Object;
+        PurchTable purchTable = formRunObj.purchTable();
+        PurchLine purchLinePreDelete = formRunObj.RORParmPurchLinePreDelete();
+        RecId recIdParent = formRunObj.RORParmPurchLineRecIdParent();
+        PurchLine purchLine = _sender.cursor() as PurchLine;
+
+        if (purchTable.PurchaseType == PurchaseType::RORSubRental)
+        {
+            purchLinePreDelete.RORRentalLine::updateContractWithChanges();
+        }
+
+        // Update kit pricing if the deleted line was part of a kit
+        if (purchLine.RecId && recIdParent)
+        {
+            RORKitPriceManager::construct(PurchLine::findRecId(recIdParent, true), RORKitPriceUpdateType::FromKit, RORKitPricingActionType::DeleteLine).run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_PurchLineDS_OnWriting</Name>
+				<Source><![CDATA[
+    [FormDataSourceEventHandler(formDataSourceStr(DNRRORPurchTable, PurchLine), FormDataSourceEventType::Writing)]
+    public static void DNREvent_PurchLineDS_OnWriting(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        Object formRunObj = _sender.formRun() as Object;
+        PurchLine purchLine = _sender.cursor() as PurchLine;
+
+        if (formRunObj.RORParmPurchLineInserted())
+        {
+            purchLine.LineNumber = 0;
+        }
+
+        boolean showRentalLineEditor = RORRentalLineEditorForm::mustAutoShowRentalLineEditor(purchLine);
+        boolean updateKitPricing = (!showRentalLineEditor && purchLine.RORRentalLine::canUpdateKitPricing());
+        boolean rereadLines;
+
+        if (purchLine.RORRentalLine::canCascadeFieldsToLines(formRunObj.RORParmPurchLine_Orig()))
+        {
+            purchLine.RORRentalLine::CascadeFieldsToLines();
+            rereadLines = true;
+        }
+
+        formRunObj.RORParmReReadLines(rereadLines);
+        formRunObj.RORParmShowRentalLineEditor(showRentalLineEditor);
+        formRunObj.RORParmUpdateKitPricing(updateKitPricing);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

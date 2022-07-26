@@ -1,0 +1,565 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoiceServiceController_RentalProjInvoice</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINInvoiceServiceController_RentalProjInvoice extends FINInvoiceServiceController
+{
+    INVCalculationDateTime calculationDateTime;
+    PSAtmpProjProposalTrans tmpProjProposalTrans;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINInvoiceServiceController_RentalProjInvoice construct(ParmId _parmId,
+        PSAtmpProjProposalTrans _tmpProjProposalTrans,
+        ProjInvoiceProposalCreateLinesParams _projInvoiceProposalCreateLinesParams)
+    {
+        FINInvoiceServiceController_RentalProjInvoice controller = new FINInvoiceServiceController_RentalProjInvoice();
+        SalesParmUpdate parmUpdate;
+
+        parmUpdate.ParmId = _parmId;
+        parmUpdate.FINInitFromProjInvoiceProposalParams(_projInvoiceProposalCreateLinesParams);
+        
+        controller.setParmUpdate(parmUpdate);
+        controller.setTmpProjProposalTrans(_tmpProjProposalTrans);
+        return controller;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setParmUpdate</Name>
+				<Source><![CDATA[
+    protected void setParmUpdate(FormletterParmUpdate _parmUpdate)
+    {
+        super(_parmUpdate);
+
+        SalesParmUpdate salesParmUpdate = _parmUpdate;
+        parmId = salesParmUpdate.ParmId;
+        calculationDateTime = salesParmUpdate.INVCalculationDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setTmpProjProposalTrans</Name>
+				<Source><![CDATA[
+    protected void setTmpProjProposalTrans(PSAtmpProjProposalTrans _tmpProjProposalTrans)
+    {
+        tmpProjProposalTrans = _tmpProjProposalTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalizeInvoiceRunData</Name>
+				<Source><![CDATA[
+    protected void journalizeInvoiceRunData()
+    {
+        if (parmId)
+        {
+            FINProjInvoiceRun   projInvoiceRun;
+
+            select forupdate firstonly projInvoiceRun
+                where projInvoiceRun.ParmId == parmId;
+
+            projInvoiceRun.ParmId = parmId;
+            projInvoiceRun.WorkCalendarPacked = FINInvoiceServiceController::getWorkCalendar().pack();
+            projInvoiceRun.write();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildWorkCalendar</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInvalidInitFormMethodWarning", "Validation of caller must be performed before invoking super()"),
+     SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    protected void buildWorkCalendar()
+    {
+        // build a map of all invoice profiles so we don't have to select them from the database during the next step
+        FINRentalInvoiceProfile invoiceProfile;
+        Map invoiceProfileMap = new Map(Types::String, Types::Enum);
+        
+        while select invoiceProfile
+        {
+            invoiceProfileMap.insert(invoiceProfile.InvoiceProfileId, invoiceProfile.isHourlyInvoicing());
+        }
+ 
+        // build a map of all relevant calendars and whether or not they need hourly invoicing
+        SalesLine salesLine;
+        FINInvoicePeriodAmendment invoicePeriodAmendment;
+        Map calendarMap = new Map(Types::String, Types::Enum);
+
+        PSAtmpProjProposalTrans tmpProjProposalTransLocal;
+        tmpProjProposalTransLocal.setTmpData(tmpProjProposalTrans);
+
+        while select tmpProjProposalTransLocal
+        where tmpProjProposalTransLocal.TransactionOrigin == ProjOrigin::SalesOrder
+        {
+            while select INVInvoiceProfileId, DNRCalendarId from salesLine
+            where salesLine.RORTradeType != RORTradeType::SalesPurch
+            &&    salesLine.RecId == tmpProjProposalTransLocal.RefRecId
+                outer join StrValue from invoicePeriodAmendment
+                where invoicePeriodAmendment.RefTableId == salesLine.TableId
+                &&    invoicePeriodAmendment.RefRecId == salesLine.RecId
+                &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+            {
+                boolean mustPopulateTimes = invoiceProfileMap.lookup(salesLine.INVInvoiceProfileId);
+ 
+                if (calendarMap.exists(salesLine.DNRCalendarId))
+                {
+                    mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(salesLine.DNRCalendarId));
+                }
+ 
+                calendarMap.insert(salesLine.DNRCalendarId, mustPopulateTimes);
+
+                if (invoicePeriodAmendment.StrValue)
+                {
+                    if (calendarMap.exists(invoicePeriodAmendment.StrValue))
+                    {
+                        mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(invoicePeriodAmendment.StrValue));
+                    }
+ 
+                    calendarMap.insert(invoicePeriodAmendment.StrValue, mustPopulateTimes);
+                }
+            }
+        }
+ 
+        // build a work calendar cache with all the necessary working dates/times for this invoice run
+        FromDate invoiceFromDate;
+        ToDate invoiceToDate;
+        [ invoiceFromDate, invoiceToDate ] = this.calculateInvoiceDateRange();
+ 
+        // In order to make the full period invoicing work
+        // we load extra calendar days before and after on/off rent dates
+        invoiceFromDate = invoiceFromDate - 90;
+        invoiceToDate   = invoiceToDate + 90;
+
+        workCalendar = new FINWorkCalendar();
+        workCalendar.populate(calendarMap, invoiceFromDate, invoiceToDate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateInvoiceDateRange</Name>
+				<Source><![CDATA[
+    protected container calculateInvoiceDateRange()
+    {
+        SalesLine salesLine;
+        PSAtmpProjProposalTrans tmpProjProposalTransLocal;
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+
+        tmpProjProposalTransLocal.setTmpData(tmpProjProposalTrans);
+
+        TransDateTime   minPeriodStartDateTime = DateTimeUtil::minValue();
+
+        while select tmpProjProposalTransLocal
+        where tmpProjProposalTransLocal.TransactionOrigin == ProjOrigin::SalesOrder
+        {
+            select firstonly DeliveryDateTime from invoicePeriodQtyPhysical
+            where invoicePeriodQtyPhysical.RefTableId == tableNum(SalesLine)
+            &&    invoicePeriodQtyPhysical.RefRecId == tmpProjProposalTransLocal.RefRecId
+                    join TableId from salesLine
+                    where salesLine.RecId == invoicePeriodQtyPhysical.RefRecId
+                    &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                        exists join invoicePeriodQtyFinancial
+                        where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+                        &&    !invoicePeriodQtyFinancial.InvoiceId;
+
+            if (invoicePeriodQtyPhysical.DeliveryDateTime != DateTimeUtil::minValue())
+            {
+                minPeriodStartDateTime = (minPeriodStartDateTime ==  DateTimeUtil::minValue() ? invoicePeriodQtyPhysical.DeliveryDateTime :
+                    min(invoicePeriodQtyPhysical.DeliveryDateTime, minPeriodStartDateTime));
+            }
+        }
+
+        // Populate calendar cache for 1 day before invoicePeriodQtyPhysical.DeliveryDateTime in GMT so we don't need to worry about time zones.
+        FromDate invoiceMinDate = DateTimeUtil::date(minPeriodStartDateTime) - 1;
+
+        TransDateTime maxDateTime = DateTimeUtil::maxValue();
+        select firstonly maxof(ReturnDateTime) from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId == tableNum(SalesLine)
+            &&    invoicePeriodQtyPhysical.ReturnDateTime != maxDateTime
+            &&    invoicePeriodQtyPhysical.RefRecId == tmpProjProposalTransLocal.RefRecId
+                    join TableId from salesLine
+                    where salesLine.RecId == invoicePeriodQtyPhysical.RefRecId
+                    &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                        exists join invoicePeriodQtyFinancial
+                        where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+                        &&    !invoicePeriodQtyFinancial.InvoiceId;
+
+        TransDateTime endDateTime = max(calculationDateTime, invoicePeriodQtyPhysical.ReturnDateTime);
+                
+        if (calcEstimation)
+        {
+            RORRentalDateTimes rentalDateTimes;
+            
+            select maxof(ExpectedOffRentDateTime) from rentalDateTimes
+            where rentalDateTimes.OffRentDateTime == maxDateTime
+                exists join salesLine
+                where salesLine.TableId == rentalDateTimes.RefTableId
+                &&    salesLine.RecId == rentalDateTimes.RefRecId
+                &&    salesLine.RecId == invoicePeriodQtyPhysical.RefRecId
+                &&    salesLine.RORTradeType != RORTradeType::SalesPurch;
+
+            endDateTime = rentalDateTimes.ExpectedOffRentDateTime;
+
+            select maxof(OffRentDateTime) from rentalDateTimes
+            where rentalDateTimes.OffRentDateTime != maxDateTime
+                exists join salesLine
+                where salesLine.TableId == rentalDateTimes.RefTableId
+                &&    salesLine.RecId == rentalDateTimes.RefRecId
+                &&    salesLine.RecId == invoicePeriodQtyPhysical.RefRecId
+                &&    salesLine.RORTradeType != RORTradeType::SalesPurch;
+
+            endDateTime = max(endDateTime, rentalDateTimes.OffRentDateTime);
+            endDateTime = DateTimeUtil::newDateTime(endMth(DateTimeUtil::date(endDateTime)), 0);
+        }
+        // For monthly invoice profile we may need to know all open days for a specific month even if it is beyond calculation point.
+        ToDate invoiceMaxDate = max(DateTimeUtil::date(endDateTime) + 1, endMth(DateTimeUtil::date(calculationDateTime)));
+        invoiceMinDate = str2DateDMY(strFmt("1-%1-%2", mthOfYr(invoiceMinDate), year(invoiceMinDate)));
+         
+        return [ invoiceMinDate, invoiceMaxDate ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performPreCalculationForExchange</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "update happend in the method executeFullReturn()"),
+     SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    protected void performPreCalculationForExchange()
+    {
+        FINInvoiceServiceController::setPreviouslyInvoicedNumOfPeriodsForExchange(new Map(Types::Int64, Types::Container));
+
+        SalesParmUpdate salesParmUpdate = parmUpdate as SalesParmUpdate;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+        FINInvoicingOptions invoicingOptions = FINInvoicingOptions::createFromSalesParmUpdate(salesParmUpdate);
+        PSAtmpProjProposalTrans tmpProjProposalTransLocal;
+        SalesLine salesLine;
+
+        tmpProjProposalTransLocal.setTmpData(tmpProjProposalTrans);
+
+        while select tmpProjProposalTransLocal
+        where tmpProjProposalTransLocal.TransactionOrigin == ProjOrigin::SalesOrder
+        {
+            while select salesLine
+            where salesLine.RecId == tmpProjProposalTransLocal.RefRecId
+            &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                outer join invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmId           == parmId
+                &&    invoiceCalculatorParm.OrderLineTableId == salesLine.TableId
+                &&    invoiceCalculatorParm.OrderLineRecId   == salesLine.RecId
+            {
+                if (salesLine.RORRentalLine::isTechnicalExchange())
+                {
+                    invoiceCalculatorParm.ParmUpdatePacked = buf2Con(parmUpdate);
+                    FINInvoiceCalculator invoiceCalculator = FINInvoiceCalculator::construct(salesLine, tmpProjProposalTransLocal, invoiceCalculatorParm);
+                    invoiceCalculatorParm = invoiceCalculator.getInvoiceCalculatorParm();
+                    FINPeriodSpecificationManager periodSpecificationManager = FINPeriodSpecificationManager::construct();
+                
+                    periodSpecificationManager.setCalcEstimation(calcEstimation);
+                    periodSpecificationManager.setCreditJourRefRecId(creditJourRefRecId);
+                    periodSpecificationManager.populateNumOfPeriods(invoiceCalculatorParm, salesLine, invoicingOptions);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performInvoiceCalculation</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInvalidInitFormMethodWarning", "Validation of caller must be performed before invoking super()"),
+     SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    protected void performInvoiceCalculation()
+    {
+        SalesLine salesLine;
+        SalesTable salesTable;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+        RecordInsertList calcParmInsertList = new RecordInsertList(tableNum(FINInvoiceCalculatorParm));
+        
+        PSAtmpProjProposalTrans tmpProjProposalTransLocal;
+        tmpProjProposalTransLocal.setTmpData(tmpProjProposalTrans);
+
+        // When using the periodic function, there's a possibility that multiple projects are assigned to the same contract specified in the parameters.
+        // In order to avoid unique key violations, remove the records from the previous run .
+        while select tmpProjProposalTransLocal
+        where tmpProjProposalTransLocal.TransactionOrigin == ProjOrigin::SalesOrder
+        {
+            FINInvoiceCalculatorParm calcParmDel;
+                    
+            delete_from calcParmDel
+            where calcParmDel.ParmId == parmId
+            &&    calcParmDel.ParmLineRecId == tmpProjProposalTransLocal.RecId
+            &&    calcParmDel.ParmLineTableId == tmpProjProposalTransLocal.TableId;
+        }
+
+        if (!postInvoiceProposal)
+        {
+            this.performPreCalculationForExchange();
+        }
+                    
+        while select tmpProjProposalTransLocal
+        where tmpProjProposalTransLocal.TransactionOrigin == ProjOrigin::SalesOrder
+        {
+            while select salesLine
+            where salesLine.RecId == tmpProjProposalTransLocal.RefRecId
+            &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                join FINForceUntilCalculationDateTime, FINForceFromCalculationDateTime from salesTable
+                where salesTable.SalesId == salesLine.SalesId
+                    outer join invoiceCalculatorParm
+                    where invoiceCalculatorParm.ParmId           == parmId
+                    &&    invoiceCalculatorParm.OrderLineTableId == salesLine.TableId
+                    &&    invoiceCalculatorParm.OrderLineRecId   == salesLine.RecId
+            {
+                invoiceCalculatorParm.ParmUpdatePacked = buf2Con(parmUpdate);
+                // Before creation of invoiceProposal there is no id that we could use as an identification.
+                // Dummy parmId is created from number sequence.
+                invoiceCalculatorParm.ParmId = parmId;
+                invoiceCalculatorParm.IsEstimation = calcEstimation;
+                invoiceCalculatorParm.HeaderForceUntilCalculationDateTime = salesTable.FINForceUntilCalculationDateTime;
+                invoiceCalculatorParm.HeaderForceFromCalculationDateTime = salesTable.FINForceFromCalculationDateTime;
+
+                FINInvoiceCalculator invoiceCalculator = FINInvoiceCalculator::construct(salesLine, tmpProjProposalTransLocal, invoiceCalculatorParm);
+                invoiceCalculator.run();
+            
+                FINInvoiceCalculatorParm finInvoiceCalculatorParm = invoiceCalculator.getInvoiceCalculatorParm();
+            
+                if (invoiceCalculatorParm.RecId)
+                {
+                    FINInvoiceCalculatorParm calcParmDel;
+                    
+                    // delete the record to avoid Unique key violations
+                    delete_from calcParmDel where calcParmDel.RecId == invoiceCalculatorParm.RecId;
+                }
+
+                calcParmInsertList.add(finInvoiceCalculatorParm.data());
+            }
+        }
+            
+        calcParmInsertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifyParmLine</Name>
+				<Source><![CDATA[
+    protected void modifyParmLine()
+    {
+        SalesLine salesLine;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+        Map parentProposal = new Map(Types::Int64, Types::Enum);
+        
+        // Update on actual table not its copy
+        while select forupdate tmpProjProposalTrans
+        where tmpProjProposalTrans.TransactionOrigin == ProjOrigin::SalesOrder
+        {
+            select firstonly  invoiceCalculatorParm
+            where invoiceCalculatorParm.ParmLineTableId  == tmpProjProposalTrans.TableId
+            &&    invoiceCalculatorParm.ParmLineRecId    == tmpProjProposalTrans.RecId
+            &&    invoiceCalculatorParm.ParmId == parmId;
+
+            if (invoiceCalculatorParm)
+            {
+                if (invoiceCalculatorParm.MustBeInvoiced == NoYes::Yes)
+                {
+                    parentProposal.insert(invoiceCalculatorParm.OrderLineRecId, NoYes::Yes);
+                }
+                else
+                {
+                    tmpProjProposalTrans.delete();
+                    continue;
+                }
+
+                // Because of partial deliveries we need to check qty when SpecQty = All
+                FINRentalJournalizer journalizedData = new FINRentalJournalizer();
+                journalizedData.unpack(invoiceCalculatorParm.RentalCalcPacked);
+                Qty qty = journalizedData.getInvoicedQty();
+                int chargedPeriods = journalizedData.getChargedPeriods();
+
+                if (!qty)
+                {
+                    // If only "Credited" checkbox is marked in an invoicing form then use this qty
+                    FINCreditJournalizer journalizedCreditData = new FINCreditJournalizer();
+                    if (invoiceCalculatorParm.CreditCalcPacked)
+                    {
+                        journalizedCreditData.unpack(invoiceCalculatorParm.CreditCalcPacked);
+                    }
+                    qty = journalizedCreditData.getInvoicedQty();
+                }
+
+                if (!qty)
+                {
+                    // If fully invoiced and return not posted yet then use qty 1 to be able to invoice return amount.
+                    FINTransportPriceJournalizer journalizedTransportData = new FINTransportPriceJournalizer();
+                    if (invoiceCalculatorParm.TransportCalcPacked)
+                    {
+                        journalizedTransportData.unpack(invoiceCalculatorParm.TransportCalcPacked);
+                    }
+                    
+                    if (journalizedTransportData.getReturnAmount())
+                    {
+                        qty = 1;
+                    }
+                }
+
+                tmpProjProposalTrans.Qty = qty ? qty : tmpProjProposalTrans.Qty;
+                tmpProjProposalTrans.INVInvoicePeriods = chargedPeriods;
+                tmpProjProposalTrans.FINLineAmount = invoiceCalculatorParm.InvoiceAmount;
+                tmpProjProposalTrans.FINParmId = invoiceCalculatorParm.ParmId;
+                tmpProjProposalTrans.LineAmount = 0;
+                tmpProjProposalTrans.update();
+            }
+            else
+            {
+                tmpProjProposalTrans.FINLineAmount = tmpProjProposalTrans.LineAmount;
+                tmpProjProposalTrans.FINParmId = parmId;
+                tmpProjProposalTrans.update();
+            }
+        }
+
+        update_recordset tmpProjProposalTrans
+        setting FINLineAmount = tmpProjProposalTrans.LineAmount,
+                FinParmId = parmId
+        where tmpProjProposalTrans.TransactionOrigin != ProjOrigin::SalesOrder;
+
+        this.discardChildLine(parentProposal);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanUpOrphanCalcParmAsync</Name>
+				<Source><![CDATA[
+    internal static void cleanUpOrphanCalcParmAsync(container _parameter)
+    {
+        Counter retryCount;
+        ParmId parmId;
+        container packedRecord;
+        FINInvoiceCalculatorParm parmDelete;
+        FINInvoiceCalculatorParm invoiceCalcParm;
+        PSATmpProjProposalTrans tmpProjProposalTrans;
+        PSATmpProjProposalTrans tmpProjProposalTransLoc;
+        [parmId, packedRecord] = _parameter;
+
+        tmpProjProposalTrans = con2Buf(packedRecord);
+        
+        try
+        {
+            tmpProjProposalTransLoc.setTmpData(tmpProjProposalTrans);
+
+            while select RecId, ParmLineRecId from invoiceCalcParm
+            where invoiceCalcParm.ParmId == parmId
+            &&    invoiceCalcParm.ParmLineTableId == tableNum(PSATmpProjProposalTrans)
+            {
+                select firstonly RecId from tmpProjProposalTransLoc
+                where tmpProjProposalTransLoc.RecId == invoiceCalcParm.ParmLineRecId;
+                
+                if (!tmpProjProposalTransLoc.RecId)
+                {
+                    // delete one record at a time to reduce blocking issues.
+                    delete_from parmDelete where parmDelete.RecId == invoiceCalcParm.RecId;
+                }
+            }
+        }
+        catch (Exception::Deadlock)
+        {
+            if (!retryCount)
+            {
+                retryCount += 1;
+                retry;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>discardChildLine</Name>
+				<Source><![CDATA[
+    protected void discardChildLine(Map _parentProposal)
+    {
+        SalesLine salesLine, salesLineParent;
+        FINRentalInvoiceProfile invoiceProfile;
+        Map invoicedParent = new Map(Types::Int64, Types::Enum);
+        Map childParentDelete = new Map(Types::Int64, Types::Enum);
+                                      
+        while select forupdate tmpProjProposalTrans
+        where tmpProjProposalTrans.TransactionOrigin == ProjOrigin::SalesOrder
+        {
+            select firstonly RORParentLineRecId, RORTradeType from salesLine
+            where salesLine.RORParentLineRecId
+            &&    SalesLine.RecId == tmpProjProposalTrans.RefRecId
+                join salesLineParent
+                where salesLineParent.RecId == salesLine.RORParentLineRecId
+                    join InvoiceChildLinesAfterParent from invoiceProfile
+                    where invoiceProfile.InvoiceProfileId == salesLineParent.INVInvoiceProfileId;
+            
+            if (!invoiceProfile.InvoiceChildLinesAfterParent
+            ||  (salesLine.RORTradeType == RORTradeType::SalesPurch && salesLine.SalesQty < 0))
+            {
+                continue;
+            }
+
+            if (salesLine.RORParentLineRecId)
+            {
+                // Check parent only once
+                if (childParentDelete.exists(salesLine.RORParentLineRecId))
+                {
+                    if (childParentDelete.lookup(salesLine.RORParentLineRecId))
+                    {
+                        tmpProjProposalTrans.delete();
+                    }
+                }
+                else
+                {
+                    if (!invoicedParent.exists(salesLine.RORParentLineRecId))
+                    {
+                        boolean parentIsFullyInvoiced = !salesLineParent.RORRentalLine::FINExistUninvoicedCreditedForLine();
+                        invoicedParent.insert(salesLine.RORParentLineRecId, parentIsFullyInvoiced);
+                    }
+
+                    // Do not check if parent was invoiced before.
+                    if (invoicedParent.lookup(salesLine.RORParentLineRecId))
+                    {
+                        childParentDelete.insert(salesLine.RORParentLineRecId, NoYes::Yes);
+                    }
+                    else
+                    {
+                        NoYes mustDeleteChild = NoYes::Yes;
+
+                        if (_parentProposal.exists(salesLine.RORParentLineRecId) && _parentProposal.lookup(salesLine.RORParentLineRecId) == NoYes::Yes)
+                        {
+                            mustDeleteChild = NoYes::No;
+                        }
+
+                        childParentDelete.insert(salesLine.RORParentLineRecId, mustDeleteChild);
+
+                        if (childParentDelete.lookup(salesLine.RORParentLineRecId))
+                        {
+                            tmpProjProposalTrans.delete();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

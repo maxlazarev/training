@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBIoTUpdateObjectLocation</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBIoTUpdateObjectLocation
+{
+    BOBObjectTable objectTable;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static BOBIoTUpdateObjectLocation construct(BOBObjectTable _objectTable)
+    {
+        BOBIoTUpdateObjectLocation updateObjectLocationProcessor = new BOBIoTUpdateObjectLocation();
+        updateObjectLocationProcessor.parmObjectTable(_objectTable);
+
+        return updateObjectLocationProcessor;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        if (_args.dataset() != tableNum(BOBObjectTable))
+        {
+            throw error(Error::missingRecord(tableId2pname(tableNum(BOBObjectTable))));
+        }
+
+        BOBIoTUpdateObjectLocation updateObjectLocationProcessor = BOBIoTUpdateObjectLocation::construct(_args.record());
+        updateObjectLocationProcessor.updateObjectLocation();
+        updateObjectLocationProcessor.researchCallerDatasource();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateObjectLocation</Name>
+				<Source><![CDATA[
+    public void updateObjectLocation()
+    {
+        #BOBIoTConstants
+
+        BOBObjectLocationLog locationLog;
+        LogisticsPostalAddress postalAddress;
+
+        select firstonly postalAddress
+            join TableId from locationLog order by CreatedDateTime desc
+            where locationLog.PostalAddress == postalAddress.RecId
+            &&    locationLog.ObjectId == objectTable.ObjectId;
+
+        RetailCommonWebAPI webApi = RetailCommonWebAPI::construct();
+        str requestUrl = strFmt("https://maps.googleapis.com/maps/api/geocode/json?latlng=%1,%2&key=%3", num2Str(postalAddress.Latitude, 0, 6, 1, 0), num2Str(postalAddress.Longitude, 0, 6, 1, 0), #APIKey);
+        RetailWebRequest request = RetailWebRequest::newUrl(requestUrl);
+        RetailWebResponse response = webApi.getResponse(request);
+        str rawResponse = response.parmData();
+        Map data = RetailCommonWebAPI::getMapFromJsonString(rawResponse);
+        Map resultsMap = Map::create(conPeek(data.lookup(#results), 4));
+        container addressComponentsContainer = resultsMap.lookup(#address_components);
+        Map builderMap = new Map(Types::String, Types::String);
+
+        for(int i = 4; i <= conLen(addressComponentsContainer); i++)
+        {
+            Map fieldMap = Map::create(conPeek(addressComponentsContainer, i));
+            
+            str longName = fieldMap.lookup(#long_name);
+            str shortName = fieldMap.lookup(#short_name);
+
+            container typeContainer = fieldMap.lookup(#types);
+            str type = conPeek(typeContainer, 4);
+
+            // Only for the country and state attributes, we want to use the short name property.
+            builderMap.insert(type, (type == #country || type == #administrative_area_level_1) ? shortName : longName);
+        }
+
+        builderMap.insert(#formatted_address, conPeek(resultsMap.lookup(#formatted_address), 1));
+        
+        ttsbegin;
+
+        LogisticsPostalAddress newAddress;
+        newAddress.Street = builderMap.exists(#route) ? builderMap.lookup(#route) : '';
+        newAddress.StreetNumber = builderMap.exists(#street_number) ? builderMap.lookup(#street_number) : '';
+        newAddress.ZipCode = builderMap.exists(#postal_code) ? builderMap.lookup(#postal_code) : '';
+        newAddress.City = builderMap.exists(#locality) ? builderMap.lookup(#locality) : '';
+        newAddress.County = builderMap.exists(#administrative_area_level_2) ? builderMap.lookup(#administrative_area_level_2) : '';
+        newAddress.State = builderMap.exists(#administrative_area_level_1) ? builderMap.lookup(#administrative_area_level_1) : '';
+        newAddress.CountryRegionId = builderMap.exists(#country) ? builderMap.lookup(#country) : '';
+        newAddress.Address = builderMap.exists(#formatted_address) ? builderMap.lookup(#formatted_address) : '';
+        newAddress.Longitude = postalAddress.Longitude;
+        newAddress.Latitude = postalAddress.Latitude;
+        newAddress.insert();
+
+        BOBObjectLocationLog::changeLocation(objectTable.ObjectId, newAddress.RecId, DateTimeUtil::getSystemDateTime());
+
+        objectTable.selectForUpdate(true);
+        objectTable.MustUpdateObjectLocation = NoYes::No;
+        objectTable.update();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>researchCallerDatasource</Name>
+				<Source><![CDATA[
+    private void researchCallerDatasource()
+    {
+        FormDataSource objectTable_ds = FormDataUtil::getFormDataSource(objectTable);
+
+        if (objectTable_ds)
+        {
+            objectTable_ds.rereadJoinHierarchy();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmObjectTable</Name>
+				<Source><![CDATA[
+    public BOBObjectTable parmObjectTable(BOBObjectTable _objectTable = objectTable)
+    {
+        objectTable = _objectTable;
+        return objectTable;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

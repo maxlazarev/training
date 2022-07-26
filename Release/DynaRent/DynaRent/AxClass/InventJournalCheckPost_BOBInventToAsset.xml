@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>InventJournalCheckPost_BOBInventToAsset</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class InventJournalCheckPost_BOBInventToAsset extends InventJournalCheckPost_Movement
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkTrans</Name>
+				<Source><![CDATA[
+    protected boolean checkTrans(JournalTransData _journalTransData)
+    {
+        boolean             ret;
+        InventJournalTrans  trans;
+        InventDim           inventDim;
+        InventTable         inventTable;
+        EcoResProduct       ecoResProduct;
+        BOBRentalType       rentalType;
+        BOBObjectView       objectView;
+        BOBObjectTable      objectTable;
+        BOBObjectAssetLog   objectAssetLog;
+        ;
+    
+        ret = super(_journalTransData);
+    
+        if(ret)
+        {
+            trans = _journalTransData.journalTrans();
+    
+            select firstOnly RecId from inventTable
+            where inventTable.ItemId == trans.ItemId
+                join TableId from ecoResProduct
+                where ecoResProduct.RecId == inventTable.Product
+                    join Classification from rentalType
+                    where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                    &&    rentalType.Classification != BOBRentalTypeClassification::Virtual
+                        join TableId from inventDim
+                        where inventDim.inventDimId == trans.InventDimId
+                            outer join ObjectId, InventSerialId, Category, FirstOnRentDate, LastOnRentDate from objectView
+                            where objectView.InventSerialId == inventDim.InventSerialId
+                                outer join AssetId from objectAssetLog 
+                                where objectAssetLog.ObjectId == objectView.ObjectId
+                                &&    objectAssetLog.ValidFrom <= trans.TransDate
+                                &&  (!objectAssetLog.ValidTo || objectAssetLog.ValidTo >= trans.TransDate);
+    
+            if(!inventTable)
+            {
+                ret = checkFailed(strFmt("@DNR5945", trans.ItemId));
+            }
+    
+            switch(rentalType.Classification)
+            {
+                case BOBRentalTypeClassification::Serialized:
+                    if(objectView)
+                    {
+                        if(trans.Qty != 1)
+                        {
+                            ret = checkFailed(strFmt("@DNR529", 1));
+                        }
+                        if(objectAssetLog.AssetId != trans.AssetId && objectView.Category != BOBObjectCategory::Inventory)
+                        {
+                            ret = checkFailed(strFmt("@DNR6535", objectView.ObjectId, objectView.InventSerialId, BOBObjectCategory::Inventory));
+                        }
+    
+                        if(ret)
+                        {
+                            objectTable = BOBObjectTable::findByAssetId(trans.AssetId, trans.TransDate);
+    
+                            if(objectTable)
+                            {
+                                ret = checkFailed(strFmt("@DNR7288", trans.AssetId, objectTable.ObjectId, objectTable.InventSerialId));
+                            }
+                        }
+                    }
+                    else
+                    {
+                        ret = checkFailed("@DNR7644");
+                    }
+                    break;
+    
+                case BOBRentalTypeClassification::Bulk:
+                    if(trans.Qty <= 0)
+                    {
+                        ret = checkFailed(strFmt("@SYS78465", fieldPName(InventJournalTrans, Qty)));
+                    }
+                    break;
+    
+                // default case has already been covered by the IF block just above this SWITCH
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournal</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. This method is obsolete')]
+    protected void postJournal(JournalTransList _journalTransList)
+    {
+        super(_journalTransList);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postTrans</Name>
+				<Source><![CDATA[
+    protected void postTrans(JournalTransData _journalTransData)
+    {
+        InventJournalTrans                  inventJournalTrans;
+        InventDim                           inventDim;
+        InventLocation                      inventLocation;
+        LogisticsEntityPostalAddressView    addressView;
+        ;
+    
+        // moved to below, we need the BOBObjectManager to replace the inventJournalTrans.AssetId value
+        // super(_journalTransData);
+    
+        inventJournalTrans = _journalTransData.journalTrans();
+    
+        select firstOnly InventSerialId from inventDim
+        where inventDim.inventDimId == inventJournalTrans.InventDimId
+            join TableId from inventLocation
+            where inventLocation.InventLocationId == inventDim.InventLocationId
+                outer join PostalAddress from addressView
+                where addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                &&    addressView.Entity == inventLocation.RecId
+                &&    addressView.IsPrimary == NoYes::Yes;
+    
+        BOBObjectManager::postConvJourTransI2A(inventJournalTrans);
+        BOBRentalTransManager::newAssetUpdate().conversionJournalPostTrans(inventJournalTrans);
+    
+        super(_journalTransData);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateJournalTablePosted</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. This method is obsolete')]
+    protected void updateJournalTablePosted(JournalTableMap _journalTable)
+    {
+        super(_journalTable);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

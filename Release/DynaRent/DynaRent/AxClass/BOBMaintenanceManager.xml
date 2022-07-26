@@ -1,0 +1,1724 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBMaintenanceManager</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBMaintenanceManager extends RunBaseBatch
+{
+    ToDate          toDate;
+    NoYesId         useSysDateInBatch;
+    DialogField     dfToDate, dfUseSysDateInBatch, dfBusObjCount, dfBusObjUnavail, dfReasonCode;
+    SysQueryRun     queryRun;
+    boolean         markBOUnavail;
+    DNRReasonCode   reasonCode;
+    Set             objectIdSet;
+
+    #define.CurrentVersion(3)
+    #localmacro.CurrentList
+        toDate,
+        useSysDateInBatch
+    #endMacro
+
+    #localmacro.CurrentListV2
+        toDate
+    #endmacro
+    
+    #TimeConstants
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>adjustRecurrenceStartDate</Name>
+				<Source><![CDATA[
+    private SysRecurrenceData adjustRecurrenceStartDate(SysRecurrenceData _data, StartDate _newStartDate)
+    {
+        int                 version;
+        TimeOfDay           startTime;
+        StartDate           startDate;
+        int                 endDateType; // 1 = no end date, 2 = end after X times, 3 = fixed end date
+        int                 endAfterTimes;
+        EndDate             fixedEndDate;
+        SysRecurrenceUnit   recurrenceUnit;
+        container           pattern;
+        TimeZone            timeZone;
+        ;
+    
+        [ version, startTime, startDate, endDateType, endAfterTimes, fixedEndDate, recurrenceUnit, pattern, timezone] = _data;
+    
+        if(endDateType == 2 && _newStartDate > startDate)
+        {
+            endAfterTimes --;
+        }
+    
+        return [ version, startTime, _newStartDate, endDateType, endAfterTimes, fixedEndDate, recurrenceUnit, pattern, timeZone ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildQuery</Name>
+				<Source><![CDATA[
+    private Query buildQuery()
+    {
+        // take the query the user defined using the SysQueryForm
+        Query query = new Query(queryRun.query().pack());
+    
+        // then add some more ranges and data sources
+        QueryBuildDataSource qbdsDefaultMaint = query.dataSourceTable(tableNum(BOBDefaultMaintenancePlan));
+    
+        QueryBuildDataSource qbdsBusObjMaint = query.dataSourceTable(tableNum(BOBObjectMaintenancePlan));
+    
+        SysQuery::findOrCreateRange(qbdsBusObjMaint, fieldNum(BOBObjectMaintenancePlan, WPPTemplateId)).value(SysQuery::valueNotEmptyString());
+    
+        QueryBuildDataSource qbdsObjectView = query.dataSourceTable(tableNum(BOBObjectView));
+        
+        QueryBuildDataSource qbdsObjectTable = qbdsObjectView.addDataSource(tableNum(BOBObjectTable));
+        qbdsObjectTable.addLink(fieldNum(BOBObjectView, ObjectId), fieldNum(BOBObjectTable, ObjectId));
+    
+        QueryBuildDataSource qbdsTemplateTable = qbdsObjectTable.addDataSource(tableNum(WPPWorkOrderTemplateTable));
+        qbdsTemplateTable.addSelectionField(fieldNum(WPPWorkOrderTemplateTable, TableId));
+        qbdsTemplateTable.relations(false);
+        qbdsTemplateTable.addRange(fieldNum(WPPWorkOrderTemplateTable, DataAreaId)).value(strFmt('(%1.%2 == %3.%4)',
+                                                                                                 qbdsBusObjMaint.name(),
+                                                                                                 fieldStr(BOBObjectMaintenancePlan, WPPTemplateId),
+                                                                                                 qbdsTemplateTable.name(),
+                                                                                                 fieldStr(WPPWorkOrderTemplateTable, TemplateId)));
+        QueryBuildDataSource qbdsProjGroup = qbdsTemplateTable.addDataSource(tableNum(ProjGroup));
+        qbdsProjGroup.addSelectionField(fieldNum(ProjGroup, ProjGroupId));
+        qbdsProjGroup.addSelectionField(fieldNum(ProjGroup, ProjType));
+        qbdsProjGroup.relations(true);
+    
+        QueryBuildDataSource qbdsMaintLog = qbdsProjGroup.addDataSource(tableNum(BOBMaintenanceLog));
+        qbdsMaintLog.joinMode(JoinMode::NoExistsJoin);
+        qbdsMaintLog.relations(false);
+        qbdsMaintLog.addRange(fieldNum(BOBMaintenanceLog, DataAreaId)).value(strFmt('((%1 == %2.%3) && (%4 == %5.%6) && ((%7 == %2.%8) || ((%9 == %5.%10) && (%11 >= %2.%12))))',
+                                                                                    fieldStr(BOBMaintenanceLog, ObjectId),
+                                                                                    qbdsBusObjMaint.name(),
+                                                                                    fieldStr(BOBObjectMaintenancePlan, ObjectId),
+                                                                                    fieldStr(BOBMaintenanceLog, PlanCode),
+                                                                                    qbdsDefaultMaint.name(),
+                                                                                    fieldStr(BOBDefaultMaintenancePlan, PlanCode),
+                                                                                    fieldStr(BOBMaintenanceLog, PlannedExecution),
+                                                                                    fieldStr(BOBObjectMaintenancePlan, NextDate),
+                                                                                    enum2int(BOBMaintenancePlanType::TimeAndConsumptionBased),
+                                                                                    fieldStr(BOBDefaultMaintenancePlan, PlanType),
+                                                                                    fieldStr(BOBMaintenanceLog, MeterValue),
+                                                                                    fieldStr(BOBObjectMaintenancePlan, NextConsumption)));
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>confirmRecallCritical</Name>
+				<Source><![CDATA[
+    private void confirmRecallCritical(BOBDefaultMaintenancePlan _recallPlan, ProjGroupId _projGroupId, ProjType _projType)
+    {
+        SysQueryRun queryRunLocal = new SysQueryRun(_recallPlan.RecallQuery);
+    
+        while(queryRunLocal.next())
+        {
+            BOBObjectTable objectTable = queryRunLocal.get(tableNum(BOBObjectTable));
+    
+            WPPWorkOrderId workOrderId = this.createWorkOrder(objectTable, _recallPlan.StartDate, _projGroupId, _projType, _recallPlan.WPPTemplateId, _recallPlan.InventLocationId);
+    
+            this.createMaintenanceLog(objectTable.ObjectId, _recallPlan.PlanCode, workOrderId, _recallPlan.StartDate, 0, 0);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>confirmRecallNonCritical</Name>
+				<Source><![CDATA[
+    private void confirmRecallNonCritical(BOBDefaultMaintenancePlan _recallPlan, ProjGroupId _projGroupId, ProjType _projType)
+    {
+        SysQueryRun             queryRunLocal;
+        WPPWorkOrderId          workOrderId;
+        WPPWorkOrderTable       workOrderTable;
+        WPPWorkOrderLine        workOrderLine;
+        BOBMaintenanceLog       maintenanceLog;
+        BOBMaintenanceManager   maintenanceMgr;
+        BOBObjectTable          objectTable;
+        BOBObjectId             objectId;
+        Set                     templateIdSet;
+        SetEnumerator           enumerator;
+        ;
+    
+        queryRunLocal = new SysQueryRun(_recallPlan.RecallQuery);
+        objectIdSet = new Set(Types::String); // BOBObjectId
+        templateIdSet = new Set(Types::String); // WPPWorkOrderTemplateId
+        templateIdSet.add(_recallPlan.WPPTemplateId);
+    
+        while(queryRunLocal.next())
+        {
+            objectTable = queryRunLocal.get(tableNum(BOBObjectTable));
+    
+            // check if there are any existing maintenance work orders that we can use
+            select firstOnly workOrderTable
+            where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+            &&    workOrderTable.StartDate <= _recallPlan.StartDate
+                exists join workOrderLine
+                where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                &&    workOrderLine.Status <= WPPWorkOrderLineStatus::InProgress
+                    exists join maintenanceLog
+                    where maintenanceLog.WPPWorkOrderId == workOrderTable.WorkOrderId;
+    
+            if(workOrderTable) // merge the recall's tasks into the existing work order
+            {
+                WPPWorkOrderSynchronizer::newWorkOrderTable(workOrderTable, templateIdSet).run();
+                this.createMaintenanceLog(objectTable.ObjectId, _recallPlan.PlanCode, workOrderTable.WorkOrderId, _recallPlan.StartDate, 0, 0);
+    
+                info(strFmt("@DNR7664", objectTable.ObjectId, workOrderTable.WorkOrderId));
+            }
+            else
+            {
+                objectIdSet.add(objectTable.ObjectId);
+            }
+        }
+    
+        if(!objectIdSet.empty())
+        {
+            // recursive call -- use this class' RunBase feature using the recall plan's start date
+            // to create time-based maintenance work orders (if any) for the relevant business objects
+            maintenanceMgr = new BOBMaintenanceManager();
+            maintenanceMgr.initParmDefault();
+            maintenanceMgr.parmToDate(_recallPlan.StartDate);
+            maintenanceMgr.parmObjectIdSet(objectIdSet);
+            maintenanceMgr.runOperation();
+    
+            enumerator = objectIdSet.getEnumerator();
+    
+            while(enumerator.moveNext())
+            {
+                objectId    = enumerator.current();
+                objectTable = BOBObjectTable::findObjectId(objectId); 
+    
+                // check again if there any maintenance work orders that we can use now
+                select firstonly workOrderTable
+                where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                &&    workOrderTable.StartDate <= _recallPlan.StartDate
+                    exists join workOrderLine
+                    where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                    &&    workOrderLine.Status <= WPPWorkOrderLineStatus::InProgress
+                        exists join maintenanceLog
+                        where maintenanceLog.WPPWorkOrderId == workOrderTable.WorkOrderId;
+    
+                if(workOrderTable) // merge the recall's tasks into the newly created work order
+                {
+                    WPPWorkOrderSynchronizer::newWorkOrderTable(workOrderTable, templateIdSet).run();
+                }
+                else
+                {
+                    workOrderId = this.createWorkOrder(objectTable, _recallPlan.StartDate, _projGroupId, _projType, _recallPlan.WPPTemplateId, _recallPlan.InventLocationId);
+                }
+    
+                this.createMaintenanceLog(objectTable.ObjectId, _recallPlan.PlanCode, workOrderId, _recallPlan.StartDate, 0, 0);
+    
+                info(strFmt("@DNR7664", objectTable.ObjectId, workOrderTable.WorkOrderId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyInternalNote</Name>
+				<Source><![CDATA[
+    protected void copyInternalNote(WPPWorkOrderId    _workOrderId,
+                                    DNRAdditionalNote _internalNote)
+    {
+        DNRAdditionalNoteTable::editNote(WPPWorkOrderTable::find(_workOrderId), fieldNum(DNRAdditionalNoteTable, InternalNote), true, _internalNote);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMaintenanceLog</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    protected void createMaintenanceLog(BOBObjectId               _objectId,
+                                      BOBMaintenancePlanCode    _planCode,
+                                      WPPWorkOrderId            _workOrderId,
+                                      TransDate                 _execDate,
+                                      BOBMeterTableRecId        _meterTableRecId,
+                                      BOBMeterValue             _meterValue)
+    {
+        BOBMaintenanceLog log;
+        ;
+    
+        ttsBegin;
+        log = BOBMaintenanceLog::find(_objectId, _planCode, _workOrderId, true);
+    
+        if (log)
+        {
+            log.CompletedDateTime   = DateTimeUtil::getSystemDateTime();
+            log.CompletedBy         = curUserId();
+            log.PlannedExecution    = _execDate;
+            log.MeterValue          = _meterValue;
+            log.update();
+        }
+        else
+        {
+            log.ObjectId            = _objectId;
+            log.PlanCode            = _planCode;
+            log.WPPWorkOrderId      = _workOrderId;
+            log.PlannedExecution    = _execDate;
+            log.MeterTableRecId     = _meterTableRecId;
+            log.MeterValue          = _meterValue;
+            log.insert();
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createWorkOrder</Name>
+				<Source><![CDATA[
+    protected WPPWorkOrderId createWorkOrder(BOBObjectTable           _objectTable,
+                                             StartDate                _startDate,
+                                             ProjGroupId              _projGroupId,
+                                             ProjType                 _projType,
+                                             WPPWorkOrderTemplateId   _templateId,
+                                             InventLocationId         _inventLocationId = "")
+    
+    {
+        WPPWorkOrderTable   workOrder;
+        Set                 templateIdSet;
+        CustTable           custTable;
+        smmBusRelTable      busRelTable;
+
+        workOrder.initValue();
+
+        if (_objectTable.OrganizationParty && _objectTable.Category != BOBObjectCategory::Rental)
+        {
+            custTable = CustTable::findByPartyRecId(_objectTable.OrganizationParty);
+
+            if (custTable)
+            {
+                workOrder.initFromCustTable(custTable, true);
+            }
+        }
+
+        if (workOrder.OrganizationParty || (_projType != ProjType::FixedPrice && _projType != ProjType::TimeMaterial))
+        {
+            workOrder.AssetId               = _objectTable.assetId(_startDate);
+            workOrder.BOBObjectTableRecId   = _objectTable.RecId;
+
+            workOrder.modifiedField(fieldNum(WPPWorkOrderTable, BOBObjectTableRecId));
+
+            if (WPPParameters::find().DefaultLocationPreventiveMaintenanceOption == DefaultLocationPreventiveMaintenanceOption::CurrentLocation)
+            {
+                workOrder.setLogisticsLocationFromBusinessObject(true);
+            }
+
+            workOrder.ProjGroupId           = _projGroupId;
+            workOrder.StartDate             = _startDate;
+            workOrder.EndDate               = _startDate;
+            workOrder.Name                  = WPPWorkOrderTemplateTable::find(_templateId).Description;
+
+            if (_inventLocationId)
+            {
+                workOrder.InventLocationId      = _inventLocationId;
+            }
+
+            workOrder.insert();
+
+            templateIdSet = new Set(Types::String);
+            templateIdSet.add(_templateId);
+            WPPWorkOrderSynchronizer::newWorkOrderTable(workOrder, templateIdSet).run();
+        }
+        else
+        {
+            warning(strFmt("@DNR7032", _objectTable.ObjectId, _templateId));
+        }
+
+        return workOrder.WorkOrderId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        DialogRunbase dialog;
+        ;
+
+        dialog = super();
+        dialog.caption("@DNR7020");
+        dialog.allowUpdateOnSelectCtrl(true);
+
+        dfToDate = dialog.addFieldValue(extendedTypeStr(ToDate), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()) + #daysPerWeek);
+
+        dfUseSysDateInBatch = dialog.addField(extendedTypeStr(NoYesId), "@DNR:UseSystemDateInBatch", "@DNR:UseSystemDateInBatchHelp");
+
+        dfBusObjUnavail = dialog.addField(extendedTypeStr(NoYesId), "@DNR7022", "@DNR7023");
+    
+        dfReasonCode = dialog.addField(extendedTypeStr(DNRReasonCode));
+        dfReasonCode.allowEdit(false);
+    
+        dfBusObjCount = dialog.addFieldValue(extendedTypeStr(NumberOf), this.getObjectCount(), "@DNR5871");
+        dfBusObjCount.allowEdit(false);
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialogSelectCtrl</Name>
+				<Source><![CDATA[
+    public void dialogSelectCtrl()
+    {
+        super();
+
+        if (dfToDate.value() == dateNull())
+        {
+            dfUseSysDateInBatch.value(NoYes::Yes);
+        }
+
+        if (dfBusObjUnavail.value() == NoYes::Yes)
+        {
+            dfReasonCode.allowEdit(true);
+            dfReasonCode.mandatory_RU(true);
+        }
+        else
+        {
+            dfReasonCode.allowEdit(false);
+            dfReasonCode.value('');
+            dfReasonCode.mandatory_RU(false);
+        }
+    
+        dfBusObjCount.value(this.getObjectCount());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        toDate              = dfToDate.value();
+        useSysDateInBatch   = dfUseSysDateInBatch.value();
+        markBOUnavail       = dfBusObjUnavail.value();
+        reasonCode          = dfReasonCode.value();
+    
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getObjectCount</Name>
+				<Source><![CDATA[
+    private Counter getObjectCount()
+    {
+        Query                       query;
+        QueryRun                    localQueryRun;
+        BOBObjectTable              objectTable;
+        BOBObjectMaintenancePlan    objectMaintenancePlan;
+        Set                         objectIds;
+        ;
+    
+        query = this.buildQuery();
+        localQueryRun = new QueryRun(query);
+        objectIds = new Set(Types::String); // BOBObjectId
+    
+        while(localQueryRun.next())
+        {
+            objectTable = localQueryRun.get(tableNum(BOBObjectTable));
+            objectMaintenancePlan = localQueryRun.get(tableNum(BOBObjectMaintenancePlan));
+    
+            // Check the date here instead of in the buildQuery method
+            // because the subtraction cannot be done in a query range
+            if (objectMaintenancePlan.NextDate - objectMaintenancePlan.AdvanceMargin <= (dfToDate ? dfToDate.value() : toDate))
+            {
+                objectIds.add(objectTable.ObjectId); // remove duplicates
+            }
+        }
+    
+        return objectIds.elements();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParmDefault</Name>
+				<Source><![CDATA[
+    public void initParmDefault()
+    {
+        Query query = new Query();
+    
+        QueryBuildDataSource qbdsDefaultMaint = query.addDataSource(tableNum(BOBDefaultMaintenancePlan));
+        qbdsDefaultMaint.addSelectionField(fieldNum(BOBDefaultMaintenancePlan, PlanCode));
+    
+        QueryBuildRange qbr = qbdsDefaultMaint.addRange(fieldNum(BOBDefaultMaintenancePlan, PlanType));
+        qbr.value(queryRangeConcat(SysQuery::value(BOBMaintenancePlanType::TimeBased), BOBMaintenancePlanType::TimeAndConsumptionBased));
+        qbr.status(RangeStatus::Locked);
+    
+        QueryBuildDataSource qbdsBusObjMaint = qbdsDefaultMaint.addDataSource(tableNum(BOBObjectMaintenancePlan));
+        qbdsBusObjMaint.relations(true);
+    
+        qbr = qbdsBusObjMaint.addRange(fieldNum(BOBObjectMaintenancePlan, NextDate));
+        qbr.value(SysQuery::valueNot(dateNull()));
+        qbr.status(RangeStatus::Hidden);
+    
+        QueryBuildDataSource qbdsObjectView = qbdsBusObjMaint.addDataSource(tableNum(BOBObjectView));
+        qbdsObjectView.addLink(fieldNum(BOBObjectMaintenancePlan, ObjectId), fieldNum(BOBObjectView, ObjectId));
+    
+        queryRun = new SysQueryRun(query);
+        queryRun.promptAllowAddDataSource(false);
+        queryRun.promptLoadLastUsedQuery(false);
+    
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [ #CurrentVersion, #CurrentList, queryRun.pack() ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmObjectIdSet</Name>
+				<Source><![CDATA[
+    public Set parmObjectIdSet(Set _set = objectIdSet)
+    {
+        if(!prmisDefault(_set))
+        {
+            objectIdSet = _set;
+        }
+    
+        return objectIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmToDate</Name>
+				<Source><![CDATA[
+    public ToDate parmToDate(ToDate _toDate = toDate)
+    {
+        toDate = _toDate;
+        return toDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryRun</Name>
+				<Source><![CDATA[
+    public QueryRun queryRun(QueryRun _queryRun = queryRun)
+    {
+        queryRun = _queryRun;
+        queryRun.promptAllowAddDataSource(false);
+    
+        if(dfBusObjCount)
+        {
+            dfBusObjCount.value(this.getObjectCount());
+        }
+    
+        return queryRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        #OCCRetryCount
+
+        if (this.isInBatch() && useSysDateInBatch == NoYes::Yes)
+        {
+            toDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+        }
+
+        if (this.validate())
+        {
+            try
+            {
+                this.runCreateTimeBasedWorkOrders();
+            }
+            catch (Exception::Deadlock)
+            {
+                retry;
+            }
+            catch (Exception::UpdateConflict)
+            {
+                if (appl.ttsLevel() == 0)
+                {
+                    if (xSession::currentRetryCount() >= #RetryNum)
+                    {
+                        throw Exception::UpdateConflictNotRecovered;
+                    }
+                    else
+                    {
+                        retry;
+                    }
+                }
+                else
+                {
+                    throw Exception::UpdateConflict;
+                }
+            }
+        }
+        else
+        {
+            throw error("@SYS93289");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustSetNextMaintenance</Name>
+				<Source><![CDATA[
+    private boolean mustSetNextMaintenance(BOBDefaultMaintenancePlan _defaultMaint, BOBObjectMaintenancePlan _busObjMaint)
+    {
+        return ((_defaultMaint.PlanType == BOBMaintenancePlanType::TimeBased
+                    || _defaultMaint.PlanType == BOBMaintenancePlanType::TimeAndConsumptionBased)
+                    && _busObjMaint.RecurrenceData)
+                || ((_defaultMaint.PlanType == BOBMaintenancePlanType::ConsumptionBased
+                    || _defaultMaint.PlanType == BOBMaintenancePlanType::TimeAndConsumptionBased)
+                    && _busObjMaint.Reset != BOBResetMaintenance::WhenDue && _busObjMaint.RecurrenceValue && _busObjMaint.MeterTableRecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runCompleteWorkOrderLine</Name>
+				<Source><![CDATA[
+    protected void runCompleteWorkOrderLine(WPPWorkOrderLine _workOrderLineCompleted)
+    {
+        WPPWorkOrderTable           workOrderTable;
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderLineResource    resourcePlanning;
+        WPPWorkOrderTaskId          potentialMainTaskId;
+        BOBObjectTable              objectTable;
+        BOBMaintenanceLog           log;
+        BOBDefaultMaintenancePlan   defaultMaint;
+        BOBObjectMaintenancePlan    busObjMaint;
+        BOBMeterTrans               meterTrans;
+        TransDateTime               adjustmentDateTime;
+        WrkCtrId                    resource1, resource2, resource3;
+        boolean                     allTasksCompleted = false;
+        ;
+    
+        // only do something if the supplied work order line has just been completed
+        if(_workOrderLineCompleted.Status >= WPPWorkOrderLineStatus::Completed)
+        {
+            adjustmentDateTime = DateTimeUtil::getSystemDateTime();
+    
+            select minOf(Status) from workOrderLine
+            where workOrderLine.WorkOrderId == _workOrderLineCompleted.WorkOrderId;
+    
+            if(workOrderLine.Status >= WPPWorkOrderLineStatus::Completed)
+            {
+                // the entire work order is now completed
+    
+                potentialMainTaskId = _workOrderLineCompleted.TaskId;
+    
+                select maxOf(PlannedToDateTime) from resourcePlanning
+                    exists join workOrderLine
+                    where workOrderLine.RecId == resourcePlanning.WorkOrderLineRecId
+                    &&    workOrderLine.WorkOrderId == _workOrderLineCompleted.WorkOrderId;
+    
+                if (resourcePlanning.PlannedToDateTime)
+                {
+                    adjustmentDateTime = resourcePlanning.PlannedToDateTime;
+                }
+                else
+                {
+                    select maxOf(RequestedEndDateTime) from workOrderLine
+                    where workOrderLine.WorkOrderId == _workOrderLineCompleted.WorkOrderId;
+    
+                    if (workOrderLine.RequestedEndDateTime)
+                    {
+                        adjustmentDateTime = workOrderLine.RequestedEndDateTime;
+                    }
+                }
+    
+                allTasksCompleted = true;
+            }
+            else
+            {
+                select minOf(Status) from workOrderLine
+                where workOrderLine.WorkOrderId == _workOrderLineCompleted.WorkOrderId
+                &&    workOrderLine.TaskId      == _workOrderLineCompleted.TaskId;
+    
+                if (workOrderLine.Status >= WPPWorkOrderLineStatus::Completed)
+                {
+                    // the work order contains lines that have not yet been completed,
+                    // however the passed in work order line may contain the 'main' task
+    
+                    potentialMainTaskId = _workOrderLineCompleted.TaskId;
+    
+                    select maxOf(PlannedToDateTime) from resourcePlanning
+                    where resourcePlanning.WorkOrderLineRecId == _workOrderLineCompleted.RecId;
+    
+                    if (resourcePlanning.PlannedToDateTime)
+                    {
+                        adjustmentDateTime = resourcePlanning.PlannedToDateTime;
+                    }
+                    else if (_workOrderLineCompleted.RequestedEndDateTime)
+                    {
+                        adjustmentDateTime = _workOrderLineCompleted.RequestedEndDateTime;
+                    }
+                }
+            }
+    
+            adjustmentDateTime = DateTimeUtil::applyTimeZoneOffset(adjustmentDateTime, DateTimeUtil::getUserPreferredTimeZone());
+        }
+    
+        if(adjustmentDateTime)
+        {
+            // check if there is a business object maintenance plan that we need
+            // to reset now that its maintenance work order has been completed
+            QueryRun queryRunLoc = new QueryRun(this.queryMainTaskMaintenancePlan(_workOrderLineCompleted.WorkOrderId, potentialMainTaskId));
+            
+            if(queryRunLoc.next())
+            {
+                defaultMaint = queryRunLoc.get(tableNum(BOBDefaultMaintenancePlan));
+                busObjMaint  = queryRunLoc.get(tableNum(BOBObjectMaintenancePlan));
+            }
+    
+            if(busObjMaint && this.mustSetNextMaintenance(defaultMaint, busObjMaint))
+            {
+                this.setNextMaintenance(busObjMaint, defaultMaint, defaultMaint.PlanType, adjustmentDateTime);
+            }
+            else
+            {
+                // the completed work order line was not generated from a maintenance plan,
+                // but its task may be used the external task on one -- if so, update that
+    
+                select firstOnly TableId from workOrderTable
+                where workOrderTable.WorkOrderId == _workOrderLineCompleted.WorkOrderId
+                    join ObjectId from objectTable
+                    where objectTable.RecId == workOrderTable.BOBObjectTableRecId
+                        join  busObjMaint
+                        where busObjMaint.WPPExternalTaskId == _workOrderLineCompleted.TaskId
+                        &&    busObjMaint.ObjectId == objectTable.ObjectId
+                            join defaultMaint
+                            where defaultMaint.RecId == busObjMaint.DefaultPlanRecId
+                                outer join log
+                                where log.ObjectId       == objectTable.ObjectId
+                                &&    log.PlanCode       == defaultMaint.PlanCode
+                                &&    log.WPPWorkOrderId != _workOrderLineCompleted.WorkOrderId
+                                &&   !log.CompletedDateTime
+                                &&   !log.CompletedBy;
+    
+                if(busObjMaint)
+                {
+                    if(busObjMaint.MeterTableRecId)
+                    {
+                        select firstonly MeterValue from meterTrans
+                        order by TransDateTime desc
+                        where meterTrans.MeterTableRecId == busObjMaint.MeterTableRecId
+                        &&    meterTrans.WPPWorkOrderId == _workOrderLineCompleted.WorkOrderId;
+                    }
+    
+                    this.createMaintenanceLog(busObjMaint.ObjectId,
+                                              defaultMaint.PlanCode,
+                                              _workOrderLineCompleted.WorkOrderId,
+                                              DateTimeUtil::date(adjustmentDateTime),
+                                              busObjMaint.MeterTableRecId,
+                                              meterTrans.MeterValue);
+                    if(log)
+                    {
+                        warning(strFmt("@DNR7027", defaultMaint.PlanCode, objectTable.ObjectId, log.WPPWorkOrderId));
+                    }
+                    else
+                    {
+                        this.setNextMaintenance(busObjMaint, defaultMaint, defaultMaint.PlanType, adjustmentDateTime);
+                    }
+                }
+                else
+                if (allTasksCompleted)
+                {
+                    // when all tasks are completed check for any maintenance plan to be updated
+    
+                    select firstOnly defaultMaint
+                        join  busObjMaint
+                        where busObjMaint.DefaultPlanRecId == defaultMaint.RecId
+                        &&    busObjMaint.Reset == BOBResetMaintenance::OnCompletion
+                            exists join log
+                            where log.ObjectId == busObjMaint.ObjectId
+                            &&    log.PlanCode == defaultMaint.PlanCode
+                            &&    log.WPPWorkOrderId == _workOrderLineCompleted.WorkOrderId;
+    
+                    if(busObjMaint && this.mustSetNextMaintenance(defaultMaint, busObjMaint))
+                    {
+                        this.setNextMaintenance(busObjMaint, defaultMaint, defaultMaint.PlanType, adjustmentDateTime);
+                    }
+                }
+            }
+    
+            // update maintenance log -- find the top 3 resources that performed tasks on the work order
+            while select firstonly10 ResourceId from resourcePlanning
+            group by ResourceId
+                exists join workOrderLine
+                where workOrderLine.RecId == resourcePlanning.WorkOrderLineRecId
+                &&    workOrderLine.WorkOrderId == _workOrderLineCompleted.WorkOrderId
+            {
+                if(!resource1)
+                {
+                    resource1 = resourcePlanning.ResourceId;
+                }
+                else if(!resource2)
+                {
+                    resource2 = resourcePlanning.ResourceId;
+                }
+                else if(!resource3)
+                {
+                    resource3 = resourcePlanning.ResourceId;
+                    break;
+                }
+            }
+    
+            // update time-based and consumption-based logs
+            update_recordSet log
+            setting CompletedDateTime = DateTimeUtil::getSystemDateTime(),
+                    CompletedBy = curUserId(),
+                    ExecutedByResource1 = resource1,
+                    ExecutedByResource2 = resource2,
+                    ExecutedByResource3 = resource3
+            where log.WPPWorkOrderId == _workOrderLineCompleted.WorkOrderId
+            &&   !log.CompletedBy
+            &&   !log.CompletedDateTime
+                exists join busObjMaint
+                where busObjMaint.ObjectId == log.ObjectId
+                &&    (busObjMaint.WPPMainTaskId == potentialMainTaskId || allTasksCompleted)
+                    exists join defaultMaint
+                    where defaultMaint.RecId == busObjMaint.DefaultPlanRecId
+                    &&    defaultMaint.PlanCode == log.PlanCode;
+    
+            // update recall log
+            update_recordSet log
+            setting CompletedDateTime = DateTimeUtil::getSystemDateTime(),
+                    CompletedBy = curUserId(),
+                    ExecutedByResource1 = resource1,
+                    ExecutedByResource2 = resource2,
+                    ExecutedByResource3 = resource3
+            where log.WPPWorkOrderId == _workOrderLineCompleted.WorkOrderId
+            &&   !log.CompletedBy
+            &&   !log.CompletedDateTime
+                exists join busObjMaint
+                where busObjMaint.ObjectId == log.ObjectId
+                    exists join defaultMaint
+                    where defaultMaint.RecId == busObjMaint.DefaultPlanRecId
+                    &&    defaultMaint.PlanType == BOBMaintenancePlanType::Recall
+                    &&    defaultMaint.PlanCode == log.PlanCode;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryMainTaskMaintenancePlan</Name>
+				<Source><![CDATA[
+    [SysObsolete('This method will soon be removed to use SysDA', false)]
+    protected Query queryMainTaskMaintenancePlan(WPPWorkOrderId  _workOrderId, WPPWorkOrderTaskId    _mainTaskId)
+    {
+        Query                   query;
+        QueryBuildDataSource    qbdsDefaultMaint;
+        QueryBuildDataSource    qbdsMaintenanceLog;
+        QueryBuildDataSource    qbdsObjectMaintenancePlan;
+
+
+        query = new Query();
+
+        qbdsDefaultMaint = query.addDataSource(tableNum(BOBDefaultMaintenancePlan));
+        qbdsDefaultMaint.firstOnly(true);
+
+        qbdsObjectMaintenancePlan = qbdsDefaultMaint.addDataSource(tableNum(BOBObjectMaintenancePlan));
+        qbdsObjectMaintenancePlan.addLink(fieldNum(BOBDefaultMaintenancePlan, RecId), fieldNum(BOBObjectMaintenancePlan, DefaultPlanRecId));
+        qbdsObjectMaintenancePlan.joinMode(JoinMode::InnerJoin);
+        qbdsObjectMaintenancePlan.addRange(fieldNum(BOBObjectMaintenancePlan, Reset)).value(SysQuery::value(BOBResetMaintenance::OnCompletion));
+        qbdsObjectMaintenancePlan.addRange(fieldNum(BOBObjectMaintenancePlan, WPPMainTaskId)).value(_mainTaskId);
+
+        qbdsMaintenanceLog = qbdsObjectMaintenancePlan.addDataSource(tableNum(BOBMaintenanceLog));
+        qbdsMaintenanceLog.addLink(fieldNum(BOBObjectMaintenancePlan, ObjectId), fieldNum(BOBMaintenanceLog, ObjectId));
+        qbdsMaintenanceLog.joinMode(JoinMode::ExistsJoin);
+        qbdsMaintenanceLog.addRange(fieldNum(BOBMaintenanceLog, WPPWorkOrderId)).value(_workOrderId);
+        qbdsMaintenanceLog.addRange(fieldNum(BOBMaintenanceLog, DataAreaId)).value(strFmt('(%1.%2 == %3.%4)', 
+                                                                                          qbdsMaintenanceLog.name(),
+                                                                                          fieldStr(BOBMaintenanceLog, PlanCode),
+                                                                                          qbdsDefaultMaint.name(),
+                                                                                          fieldStr(BOBDefaultMaintenancePlan, PlanCode)));
+
+
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMainTaskMaintenancePlanQuery</Name>
+				<Source><![CDATA[
+    // This method will replace queryMainTaskMaintenancePlan in coming releases
+    private SysDaQueryObject getMainTaskMaintenancePlanQuery(BOBDefaultMaintenancePlan    _defaultMaintenancePlan,
+                                                             BOBMaintenanceLog            _maintenanceLog,
+                                                             BOBObjectMaintenancePlan     _objectMaintenancePlan,
+                                                             WPPWorkOrderId               _workOrderId,
+                                                             WPPWorkOrderTaskId           _mainTaskId)
+    {
+
+        SysDaQueryObject            oDefaultMaintenancePlan;
+        SysDaQueryObject            oMaintenanceLog;
+        SysDaQueryObject            oObjectMaintenancePlan;
+
+        oDefaultMaintenancePlan = new SysDaQueryObject(_defaultMaintenancePlan);
+        oDefaultMaintenancePlan.firstOnlyHint = true;
+
+        oObjectMaintenancePlan = new SysDaQueryObject(_objectMaintenancePlan);
+        oDefaultMaintenancePlan.joinClause(SysDaJoinKind::InnerJoin, oObjectMaintenancePlan);
+
+        oObjectMaintenancePlan.whereClause(
+            new SysDaAndExpression(
+                new SysDaEqualsExpression(
+                    new SysDaFieldExpression(_objectMaintenancePlan, fieldStr(BOBObjectMaintenancePlan, DefaultPlanRecId)),
+                    new SysDaFieldExpression(_defaultMaintenancePlan, fieldStr(BOBDefaultMaintenancePlan, RecId))),
+                new SysDaAndExpression(
+                    new SysDaEqualsExpression(
+                        new SysDaFieldExpression(_objectMaintenancePlan, fieldStr(BOBObjectMaintenancePlan, Reset)),
+                        new SysDaValueExpression(BOBResetMaintenance::OnCompletion)),
+                    new SysDaEqualsExpression(
+                        new SysDaFieldExpression(_objectMaintenancePlan, fieldStr(BOBObjectMaintenancePlan, WPPMainTaskId)),
+                        new SysDaValueExpression(_mainTaskId)))));
+
+        oMaintenanceLog = new SysDaQueryObject(_maintenanceLog);
+        oObjectMaintenancePlan.joinClause(SysDaJoinKind::ExistsJoin, oMaintenanceLog);
+
+        oMaintenanceLog.whereClause(
+            new SysDaAndExpression(
+                new SysDaEqualsExpression(
+                    new SysDaFieldExpression(_maintenanceLog, fieldStr(BOBMaintenanceLog, ObjectId)),
+                    new SysDaFieldExpression(_objectMaintenancePlan, fieldStr(BOBObjectMaintenancePlan, ObjectId))),
+                new SysDaAndExpression(
+                    new SysDaEqualsExpression(
+                        new SysDaFieldExpression(_maintenanceLog, fieldStr(BOBMaintenanceLog, PlanCode)),
+                        new SysDaFieldExpression(_defaultMaintenancePlan, fieldStr(BOBDefaultMaintenancePlan, PlanCode))),
+                    new SysDaEqualsExpression(
+                        new SysDaFieldExpression(_maintenanceLog, fieldStr(BOBMaintenanceLog, WPPWorkOrderId)),
+                        new SysDaValueExpression(_workOrderId)))));
+    
+        return oDefaultMaintenancePlan;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runConfirmRecall</Name>
+				<Source><![CDATA[
+    private void runConfirmRecall(BOBDefaultMaintenancePlan _recallPlan)
+    {
+        WPPWorkOrderTemplateTable   templateTable;
+        ProjGroup                   projGroup;
+        ;
+    
+        if(_recallPlan.validateRecall())
+        {
+            select firstOnly ProjGroupId, ProjType from projGroup
+                exists join templateTable
+                where templateTable.TemplateId == _recallPlan.WPPTemplateId
+                &&    templateTable.ProjGroupId == projGroup.ProjGroupId;
+    
+            if(_recallPlan.IsCritical)
+            {
+                this.confirmRecallCritical(_recallPlan, projGroup.ProjGroupId, projGroup.projType);
+            }
+            else
+            {
+                this.confirmRecallNonCritical(_recallPlan, projGroup.ProjGroupId, projGroup.projType);
+            }
+    
+            _recallPlan.selectForUpdate(true);
+            _recallPlan.ConfirmedBy = curUserId();
+            _recallPlan.ConfirmedDateTime = DateTimeUtil::getSystemDateTime();
+            _recallPlan.update();
+    
+            info(strFmt("@DNR7028", _recallPlan.PlanCode));
+        }
+        else
+        {
+            throw error("@SYS93289");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runCreateTimeBasedWorkOrders</Name>
+				<Source><![CDATA[
+    protected void runCreateTimeBasedWorkOrders()
+    {
+        BOBObjectTable              objectTable;
+        BOBDefaultMaintenancePlan   defaultMaint;
+        BOBObjectMaintenancePlan    busObjMaint;
+        ProjGroup                   projGroup;
+        WPPWorkOrderId              workOrderId;
+        DNRAdditionalNote           internalNote;
+        Query                       query;
+        ;
+    
+        query = this.buildQuery();
+        queryRun = new SysQueryRun(query);
+    
+        while(queryRun.next())
+        {
+            objectTable     = queryRun.get(tableNum(BOBObjectTable));
+            busObjMaint     = queryRun.get(tableNum(BOBObjectMaintenancePlan));
+            defaultMaint    = busObjMaint.defaultMaintenancePlan(); // Query uses not exists join and does not contain full buffer.
+            projGroup       = queryRun.get(tableNum(ProjGroup));
+    
+            // Check the date here instead of in the buildQuery method
+            // because the subtraction cannot be done in a query range
+            if (busObjMaint.NextDate - busObjMaint.AdvanceMargin <= toDate)
+            {
+                if(!objectIdSet || objectIdSet.in(objectTable.ObjectId))
+                {
+                    try
+                    {
+                        ttsbegin;
+
+                        workOrderId = this.createWorkOrder(objectTable,
+                                                            busObjMaint.NextDate,
+                                                            projGroup.ProjGroupId,
+                                                            projGroup.projType,
+                                                            busObjMaint.WPPTemplateId,
+                                                            defaultMaint.InventLocationId);
+                        
+                        if(workOrderId)
+                        {
+                            this.createMaintenanceLog(objectTable.ObjectId, defaultMaint.PlanCode, workOrderId, busObjMaint.NextDate, 0, 0);
+    
+                            if(busObjMaint.Reset == BOBResetMaintenance::WhenDue)
+                            {
+                                this.setNextMaintenance(busObjMaint, defaultMaint, BOBMaintenancePlanType::TimeBased);
+                            }
+    
+                            if(markBOUnavail)
+                            {
+                                BOBObjectAvailabilityLog::changeAvailability(objectTable.ObjectId, NoYes::No, '', workOrderId);
+                            }
+    
+                            internalNote = DNRAdditionalNoteTable::find(busObjMaint.TableId, busObjMaint.RecId).InternalNote;
+                            if (internalNote)
+                            {
+                                this.copyInternalNote(workOrderId, internalNote);
+                            }
+    
+                            info(strFmt("@DNR7021", workOrderId));
+                        }
+
+                        ttscommit;
+                    }
+                    catch
+                    {
+                        exceptionTextFallThrough();
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runCreateWorkOrderFromMaintenancePlan</Name>
+				<Source><![CDATA[
+    private void runCreateWorkOrderFromMaintenancePlan(BOBObjectMaintenancePlan _busObjMaint, WPPWorkOrderId _workOrderId)
+    {
+        BOBDefaultMaintenancePlan defaultMaint = _busObjMaint.defaultMaintenancePlan();
+    
+        this.createMaintenanceLog(_busObjMaint.ObjectId,
+                                  defaultMaint.PlanCode,
+                                  _workOrderId,
+                                  dateNull(),
+                                  _busObjMaint.MeterTableRecId,
+                                  BOBMeterTable::findByRecId(_busObjMaint.MeterTableRecId).Total);
+    
+        if (_busObjMaint.Reset == BOBResetMaintenance::WhenDue)
+        {
+            this.setNextMaintenance(_busObjMaint, defaultMaint, BOBMaintenancePlanType::ConsumptionBased);
+        }
+    
+        DNRAdditionalNote internalNote = DNRAdditionalNoteTable::find(defaultMaint.TableId, defaultMaint.RecId).InternalNote;
+
+        if (internalNote)
+        {
+            this.copyInternalNote(_workOrderId, internalNote);
+        }
+    
+        info(strFmt("@DNR7021", _workOrderId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runModifyObjectMaintenancePlan</Name>
+				<Source><![CDATA[
+    private void runModifyObjectMaintenancePlan(BOBObjectMaintenancePlan _busObjMaint)
+    {
+        BOBObjectMaintenancePlan    orig;
+        BOBMaintenanceLog           log;
+        BOBDefaultMaintenancePlan   defaultMaint;
+        SysRecurrence               sysRecurrence;
+        ;
+    
+        orig = _busObjMaint.orig();
+        defaultMaint = orig.defaultMaintenancePlan();
+    
+        if ((defaultMaint.PlanType == BOBMaintenancePlanType::ConsumptionBased || defaultMaint.PlanType == BOBMaintenancePlanType::TimeAndConsumptionBased)
+        &&  _busObjMaint.MeterTableRecId
+        && (_busObjMaint.RecurrenceValue != orig.RecurrenceValue ||
+            _busObjMaint.RecurrenceUnit != orig.RecurrenceUnit ||
+            _busObjMaint.MeterTableRecId != orig.MeterTableRecId))
+        {
+            if(_busObjMaint.RecurrenceValue)
+            {
+                log = BOBMaintenanceManager::findLastMaintenanceLogOfType(_busObjMaint, BOBMaintenancePlanType::ConsumptionBased);
+    
+                _busObjMaint.NextConsumption = _busObjMaint.RecurrenceValue;
+    
+                while(_busObjMaint.NextConsumption <= log.MeterValue)
+                {
+                    _busObjMaint.NextConsumption += _busObjMaint.RecurrenceValue;
+                }
+            }
+            else
+            {
+                _busObjMaint.NextConsumption = 0;
+            }
+        }
+        
+        if((defaultMaint.PlanType == BOBMaintenancePlanType::TimeBased || defaultMaint.PlanType == BOBMaintenancePlanType::TimeAndConsumptionBased)
+            && _busObjMaint.RecurrenceData != orig.RecurrenceData)
+        {
+            if(_busObjMaint.RecurrenceData)
+            {
+                log = BOBMaintenanceManager::findLastMaintenanceLogOfType(_busObjMaint, BOBMaintenancePlanType::TimeBased);
+    
+                sysRecurrence = new SysRecurrence(_busObjMaint.RecurrenceData);
+                sysRecurrence.reset();
+    
+                _busObjMaint.NextDate = dateNull();
+    
+                while(_busObjMaint.NextDate <= (log ? log.PlannedExecution : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone())) && sysRecurrence.moveNext())
+                {
+                    _busObjMaint.NextDate = sysRecurrence.currentDay();
+                }
+    
+                if(_busObjMaint.NextDate <= (log ? log.PlannedExecution : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone())))
+                {
+                    _busObjMaint.NextDate = dateNull();
+                }
+            }
+            else
+            {
+                _busObjMaint.NextDate = dateNull();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findLastMaintenanceLog</Name>
+				<Source><![CDATA[
+    [Hookable(true), SysObsolete('Use findLastMaintenanceLogOfType instead', false)]
+    private static BOBMaintenanceLog findLastMaintenanceLog(BOBObjectMaintenancePlan _objectMaintenancePlan)
+    {
+        return BOBMaintenanceManager::findLastMaintenanceLogOfType(_objectMaintenancePlan, _objectMaintenancePlan.defaultMaintenancePlan().PlanType);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findLastMaintenanceLogOfType</Name>
+				<Source><![CDATA[
+    private static BOBMaintenanceLog findLastMaintenanceLogOfType(BOBObjectMaintenancePlan _objectMaintenancePlan, BOBMaintenancePlanType _planType)
+    {
+        BOBMaintenanceLog           maintenanceLog;
+        BOBDefaultMaintenancePlan   defaultMaintenancePlan = _objectMaintenancePlan.defaultMaintenancePlan();
+
+        if(_planType == BOBMaintenancePlanType::ConsumptionBased)
+        {
+            select firstOnly maintenanceLog
+            order by CreatedDateTime desc
+            where maintenanceLog.ObjectId == _objectMaintenancePlan.ObjectId
+            &&    maintenanceLog.PlanCode == defaultMaintenancePlan.PlanCode
+            &&    maintenanceLog.MeterValue;
+        }
+        else if(_planType == BOBMaintenancePlanType::TimeBased)
+        {
+            select firstOnly maintenanceLog
+            order by PlannedExecution desc
+            where maintenanceLog.ObjectId == _objectMaintenancePlan.ObjectId
+            &&    maintenanceLog.PlanCode == defaultMaintenancePlan.PlanCode
+            &&    maintenanceLog.PlannedExecution;
+        }
+        
+        return maintenanceLog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runRegisterMeterTrans</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    protected void runRegisterMeterTrans(BOBMeterTrans _meterTrans)
+    {
+        BOBMeterTable               meterTable;
+        BOBDefaultMaintenancePlan   defaultMaint;
+        BOBObjectMaintenancePlan    busObjMaint;
+        BOBObjectTable              objectTable;
+        WPPWorkOrderTemplateTable   templateTable;
+        ProjGroup                   projGroup;
+        WPPWorkOrderId              workOrderId;
+        DNRAdditionalNote           internalNote;
+        Set                         busObjMaintSet;
+        ;
+    
+        busObjMaintSet = new Set(Types::Int64);
+    
+        QueryRun queryRunLoc = new QueryRun(this.queryMaintenancePlan(_meterTrans.MeterTableRecId));
+        
+        while(queryRunLoc.next())
+        {
+            defaultMaint = queryRunLoc.get(tableNum(BOBDefaultMaintenancePlan));
+            busObjMaint  = queryRunLoc.get(tableNum(BOBObjectMaintenancePlan));
+            meterTable   = queryRunLoc.get(tableNum(BOBMeterTable));
+            projGroup    = queryRunLoc.get(tableNum(ProjGroup));
+            objectTable  = queryRunLoc.get(tableNum(BOBObjectTable));
+
+            // A work order might be manually created,
+            // when that is the case don't create another one
+            workOrderId = busObjMaint.displayOpenWorkOrder();
+    
+            if (this.mustCreateWorkOrder(workOrderId, meterTable, defaultMaint, busObjMaint, objectTable))
+            {
+                workOrderId = this.createWorkOrder(objectTable, DateTimeUtil::date(_meterTrans.TransDateTime), projGroup.ProjGroupId, projGroup.projType, busObjMaint.WPPTemplateId, defaultMaint.InventLocationId) ;
+    
+                if(workOrderId)
+                {
+                    this.createMaintenanceLog(objectTable.ObjectId, defaultMaint.PlanCode, workOrderId, dateNull(), meterTable.RecId, meterTable.Total);
+    
+                    if (busObjMaint.Reset == BOBResetMaintenance::WhenDue)
+                    {
+                        this.setNextMaintenance(busObjMaint, defaultMaint, BOBMaintenancePlanType::ConsumptionBased);
+                    }
+    
+                    internalNote = DNRAdditionalNoteTable::find(busObjMaint.TableId, busObjMaint.RecId).InternalNote;
+
+                    if (internalNote)
+                    {
+                        this.copyInternalNote(workOrderId, internalNote);
+                    }
+    
+                    info(strFmt("@DNR7021", workOrderId));
+    
+                    busObjMaintSet.add(busObjMaint.RecId);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queryMaintenancePlan</Name>
+				<Source><![CDATA[
+    [SysObsolete('This method will soon be removed to use SysDA', false)]
+    protected Query queryMaintenancePlan(RefRecId _meterTableRecId)
+    {
+        QueryBuildDataSource    qbdsDefaultMaint;
+        QueryBuildDataSource    qbdsObjectMaint;
+        QueryBuildDataSource    qbdsMeterTable;
+        QueryBuildDataSource    qbdsObjectTable;
+        QueryBuildDataSource    qbdsTemplateTable;
+        QueryBuildDataSource    qbdsProjGroup;
+        QueryBuildDataSource    qbdsMaintenanceLog;
+        QueryBuildFieldList     fieldList;
+        Query                   query = new Query();
+        
+        qbdsDefaultMaint = query.addDataSource(tableNum(BOBDefaultMaintenancePlan));
+        qbdsDefaultMaint.addRange(fieldNum(BOBDefaultMaintenancePlan, PlanType)).value(queryRangeConcat(SysQuery::value(BOBMaintenancePlanType::ConsumptionBased), BOBMaintenancePlanType::TimeAndConsumptionBased));
+
+        qbdsObjectMaint = qbdsDefaultMaint.addDataSource(tableNum(BOBObjectMaintenancePlan));
+        qbdsObjectMaint.relations(true);
+        qbdsObjectMaint.joinMode(JoinMode::InnerJoin);
+        qbdsObjectMaint.addRange(fieldNum(BOBObjectMaintenancePlan, NextConsumption)).value('> 0');
+        qbdsObjectMaint.addRange(fieldNum(BOBObjectMaintenancePlan, WPPTemplateId)).value(SysQuery::valueNotEmptyString());
+        
+        qbdsMeterTable = qbdsObjectMaint.addDataSource(tableNum(BOBMeterTable));
+        qbdsMeterTable.relations(false);
+        qbdsMeterTable.addLink(fieldNum(BOBObjectMaintenancePlan, MeterTableRecId), fieldNum(BOBMeterTable, RecId));
+        qbdsMeterTable.joinMode(JoinMode::InnerJoin);
+        qbdsMeterTable.addRange(fieldNum(BOBMeterTable, RecId)).value(SysQuery::value(_meterTableRecId));
+        qbdsMeterTable.addRange(fieldNum(BOBMeterTable, DataAreaId)).value(strFmt('(%1.%2 >= (%3.%4 - %3.%5))',
+                                                                                 qbdsMeterTable.name(),
+                                                                                 fieldStr(BOBMeterTable, Total),
+                                                                                 qbdsObjectMaint.name(),
+                                                                                 fieldStr(BOBObjectMaintenancePlan, NextConsumption),
+                                                                                 fieldStr(BOBObjectMaintenancePlan,AdvanceMargin)));
+        fieldList = qbdsMeterTable.fields();
+        fieldList.clearFieldList();
+        fieldList.addField(fieldNum(BOBMeterTable, Total));
+
+        qbdsObjectTable = qbdsMeterTable.addDataSource(tableNum(BOBObjectTable));
+        qbdsObjectTable.relations(true);
+        qbdsObjectTable.joinMode(JoinMode::InnerJoin);
+
+        qbdsTemplateTable = qbdsObjectTable.addDataSource(tableNum(WPPWorkOrderTemplateTable));
+        qbdsTemplateTable.relations(false);
+        qbdsTemplateTable.joinMode(JoinMode::InnerJoin);
+        qbdsTemplateTable.addRange(fieldNum(WPPWorkOrderTemplateTable, DataAreaId)).value(strFmt('(%1.%2 == %3.%4)', 
+                                                                                                qbdsTemplateTable.name(),
+                                                                                                fieldStr(WPPWorkOrderTemplateTable, TemplateId),
+                                                                                                qbdsObjectMaint.name(),
+                                                                                                fieldStr(BOBObjectMaintenancePlan, WPPTemplateId)));
+        fieldList = qbdsTemplateTable.fields();
+        fieldList.addField(fieldNum(WPPWorkOrderTemplateTable, TableId));
+
+
+        qbdsProjGroup = qbdsTemplateTable.addDataSource(tableNum(ProjGroup));
+        qbdsProjGroup.relations(true);
+        qbdsProjGroup.joinMode(JoinMode::InnerJoin);
+        fieldList = qbdsProjGroup.fields();
+        fieldList.addField(fieldNum(ProjGroup, ProjGroupId));
+        fieldList.addField(fieldNum(ProjGroup, ProjType));
+
+        qbdsMaintenanceLog = qbdsProjGroup.addDataSource(tableNum(BOBMaintenanceLog));
+        qbdsMaintenanceLog.relations(false);
+        qbdsMaintenanceLog.joinMode(JoinMode::NoExistsJoin);
+        qbdsMaintenanceLog.addRange(fieldNum(BOBMaintenanceLog, DataAreaId)).value(strFmt('((%1.%2 == %3.%4) && (%1.%5 == %6.%7) && ((%1.%8 >= %9.%10) || ((%11 == %6.%12) && (%1.%13 == %9.%14))))',
+                                                                                            qbdsMaintenanceLog.name(),  
+                                                                                            fieldStr(BOBMaintenanceLog, ObjectId),
+                                                                                            qbdsObjectTable.name(),
+                                                                                            fieldStr(BOBObjectTable, ObjectId),
+                                                                                            fieldStr(BOBMaintenanceLog, PlanCode),
+                                                                                            qbdsDefaultMaint.name(),
+                                                                                            fieldStr(BOBDefaultMaintenancePlan, PlanCode),
+                                                                                            fieldStr(BOBMaintenanceLog, MeterValue),
+                                                                                            qbdsObjectMaint.name(),
+                                                                                            fieldStr(BOBObjectMaintenancePlan, NextConsumption),
+                                                                                            enum2int(BOBMaintenancePlanType::TimeAndConsumptionBased),
+                                                                                            fieldStr(BOBDefaultMaintenancePlan, PlanType),
+                                                                                            fieldStr(BOBMaintenanceLog, PlannedExecution),
+                                                                                            fieldStr(BOBObjectMaintenancePlan, NextDate)));
+
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMaintenancePlanQuery</Name>
+				<Source><![CDATA[
+    // This method will be used instead of queryMaintenacePlan in coming Releases
+    private SysDaQueryObject  getMaintenancePlanQuery(BOBMeterTrans   _meterTrans,
+                                                      BOBMeterTable   _meterTable,
+                                                      BOBDefaultMaintenancePlan   _defaultMaint,
+                                                      BOBObjectMaintenancePlan    _busObjMaint,
+                                                      BOBObjectTable  _objectTable,
+                                                      BOBMaintenanceLog   _maintenanceLog,
+                                                      WPPWorkOrderTemplateTable   _templateTable,
+                                                      ProjGroup   _projGroup)
+    {
+        SysDaQueryObject    qDefaultMaintenancePlan;
+        SysDaQueryObject    qItemMaintenancePlan;
+        SysDaQueryObject    qObjectMaintenancePlan;
+        SysDaQueryObject    qMeterTable;
+        SysDaQueryObject    qObjectTable;
+        SysDaQueryObject    qTemplateTable;
+        SysDaQueryObject    qMaintenanceLog;
+        SysDaQueryObject    qProjGroup;
+
+
+        qDefaultMaintenancePlan = new SysDaQueryObject(_defaultMaint);
+        qDefaultMaintenancePlan.whereClause(
+            new SysDaOrExpression(
+                new SysDaEqualsExpression(
+                    new SysDaFieldExpression(_defaultMaint, fieldStr(BOBDefaultMaintenancePlan, PlanType)),
+                    new SysDaValueExpression(BOBMaintenancePlanType::ConsumptionBased)),
+                new SysDaEqualsExpression(
+                    new SysDaFieldExpression(_defaultMaint, fieldStr(BOBDefaultMaintenancePlan, PlanType)),
+                    new SysDaValueExpression(BOBMaintenancePlanType::TimeAndConsumptionBased))));
+
+        qObjectMaintenancePlan = new SysDaQueryObject(_busObjMaint);
+
+        qDefaultMaintenancePlan.joinClause(SysDaJoinKind::InnerJoin, qObjectMaintenancePlan);
+
+        qObjectMaintenancePlan.whereClause(
+            new SysDaAndExpression(
+                new SysDaEqualsExpression(
+                    new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, DefaultPlanRecId)),
+                    new SysDaFieldExpression(_defaultMaint, fieldStr(BOBDefaultMaintenancePlan, RecId))),
+                new SysDaAndExpression(
+                    new SysDaGreaterThanExpression(
+                        new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, NextConsumption)),
+                        new SysDaValueExpression(0)),
+                    new SysDaNotEqualsExpression(
+                        new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, WPPTemplateId)),
+                        new SysDaValueExpression('')))));
+
+        qMeterTable = new SysDaQueryObject(_meterTable);
+
+        qObjectMaintenancePlan.joinClause(SysDaJoinKind::InnerJoin, qMeterTable);
+
+        qMeterTable.projection().add(fieldStr(BOBMeterTable, Total));
+
+        qMeterTable.whereClause(
+            new SysDaAndExpression(
+                new SysDaEqualsExpression(
+                    new SysDaFieldExpression(_meterTable, fieldStr(BOBMeterTable, RecId)),
+                    new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, MeterTableRecId))),
+                new SysDaAndExpression(
+                    new SysDaEqualsExpression(
+                        new SysDaFieldExpression(_meterTable, fieldStr(BOBMeterTable, RecId)),
+                        new SysDaValueExpression(_meterTrans.RecId)),
+                    new SysDaGreaterThanOrEqualsExpression(
+                        new SysDaFieldExpression(_meterTable, fieldStr(BOBMeterTable, Total)),
+                        new SysDaMinusExpression(
+                            new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, NextConsumption)),
+                            new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, AdvanceMargin)))))));
+
+        qObjectTable = new SysDaQueryObject(_objectTable);
+        qMeterTable.joinClause(SysDaJoinKind::InnerJoin, qObjectTable);
+
+        qObjectTable.whereClause(
+            new SysDaEqualsExpression(
+                new SysDaFieldExpression(_objectTable, fieldStr(BOBObjectTable, ObjectId)),
+                new SysDaFieldExpression(_meterTable, fieldStr(BOBMeterTable, ObjectId))));
+
+        qTemplateTable = new SysDaQueryObject(_templateTable);
+        qTemplateTable.projection().add(fieldStr(WPPWorkOrderTemplateTable, TableId));
+
+        qObjectTable.joinClause(SysDaJoinKind::InnerJoin, qTemplateTable);
+
+        qTemplateTable.whereClause(
+            new SysDaEqualsExpression(
+                new SysDaFieldExpression(_templateTable, fieldStr(WPPWorkOrderTemplateTable, TemplateId)),
+                new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, WPPTemplateId))));
+
+        qProjGroup = new SysDaQueryObject(_projGroup);
+        qProjGroup.projection().
+            add(fieldStr(ProjGroup, ProjGroupId)).
+            add(fieldStr(ProjGroup, ProjType));
+
+        qTemplateTable.joinClause(SysDaJoinKind::InnerJoin, qProjGroup);
+
+        qProjGroup.whereClause(
+            new SysDaEqualsExpression(
+                new SysDaFieldExpression(_projGroup, fieldStr(ProjGroup, ProjGroupId)),
+                new SysDaFieldExpression(_templateTable, fieldStr(WPPWorkOrderTemplateTable, ProjGroupId))));
+
+        qMaintenanceLog = new SysDaQueryObject(_maintenanceLog);
+        qProjGroup.joinClause(SysDaJoinKind::NotExistsJoin, qMaintenanceLog);
+
+        qMaintenanceLog.whereClause(
+            new SysDaAndExpression(
+                new SysDaEqualsExpression(
+                    new SysDaFieldExpression(_maintenanceLog, fieldStr(BOBMaintenanceLog, ObjectId)),
+                    new SysDaFieldExpression(_objectTable, fieldStr(BOBObjectTable, ObjectId))),
+                new SysDaAndExpression(
+                    new SysDaEqualsExpression(
+                        new SysDaFieldExpression(_maintenanceLog, fieldStr(BOBMaintenanceLog, PlanCode)),
+                        new SysDaFieldExpression(_defaultMaint, fieldStr(BOBDefaultMaintenancePlan, PlanCode))),
+                    new SysDaOrExpression(
+                        new SysDaGreaterThanOrEqualsExpression(
+                            new SysDaFieldExpression(_maintenanceLog, fieldStr(BOBMaintenanceLog, MeterValue)),
+                            new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, NextConsumption))),
+                        new SysDaAndExpression(
+                            new SysDaEqualsExpression(
+                                new SysDaValueExpression(BOBMaintenancePlanType::TimeAndConsumptionBased),
+                                new SysDaFieldExpression(_defaultMaint, fieldStr(BOBDefaultMaintenancePlan, PlanType))),
+                            new SysDaEqualsExpression(
+                                new SysDaFieldExpression(_maintenanceLog, fieldStr(BOBMaintenanceLog, PlannedExecution)),
+                                new SysDaFieldExpression(_busObjMaint, fieldStr(BOBObjectMaintenancePlan, NextDate))))))));
+
+        return qDefaultMaintenancePlan;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCreateWorkOrder</Name>
+				<Source><![CDATA[
+    [Hookable(true)]
+    private boolean mustCreateWorkOrder(WPPWorkOrderId              _workOrderId,
+                                        BOBMeterTable               _meterTable,
+                                        BOBDefaultMaintenancePlan   _defaultMaint,
+                                        BOBObjectMaintenancePlan    _busObjMaint,
+                                        BOBObjectTable              _objectTable)
+    {
+        return (!_workOrderId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setNextMaintenance</Name>
+				<Source><![CDATA[
+    protected void setNextMaintenance(BOBObjectMaintenancePlan    _busObjMaint,
+                                      BOBDefaultMaintenancePlan   _defaultMaint,
+                                      BOBMaintenancePlanType      _planType,
+                                      TransDateTime               _adjustmentDateTime = utcDateTimeNull(),
+                                      boolean                     _isCorrection = false)
+    {
+        #TimeConstants
+    
+        SysRecurrence       sysRecurrence;
+        BOBNextMaintenance  nextMaintenance;
+        BOBMeterTrans       meterTrans;
+        ;
+    
+        if(_planType != BOBMaintenancePlanType::Recall)
+        {
+            _busObjMaint.selectForUpdate(true);
+        }
+    
+        if(_busObjMaint.Reset == BOBResetMaintenance::WhenDue) // In this case _planType cannot be TimeAndConsumptionBased
+        {
+            if(_planType == BOBMaintenancePlanType::TimeBased)
+            {
+                sysRecurrence = new SysRecurrence(_busObjMaint.RecurrenceData);
+                sysRecurrence.reset();
+    
+                while(nextMaintenance <= _busObjMaint.NextDate && sysRecurrence.moveNext())
+                {
+                    nextMaintenance = sysRecurrence.currentDay();
+                }
+    
+                _busObjMaint.NextDate = (nextMaintenance > _busObjMaint.NextDate ? nextMaintenance : dateNull());
+                _busObjMaint.update();
+            }
+            else if(_planType == BOBMaintenancePlanType::ConsumptionBased)
+            {
+                if (_isCorrection)
+                {
+                    do
+                    {
+                        _busObjMaint.NextConsumption -= _busObjMaint.RecurrenceValue;
+                    }
+                    while (_busObjMaint.NextConsumption - _busObjMaint.RecurrenceValue > _busObjMaint.displayMeterValue());
+                }
+                else
+                {
+                    _busObjMaint.NextConsumption += _busObjMaint.RecurrenceValue;
+    
+                    if (_defaultMaint.ExceptEvery
+                    &&  real2int(_busObjMaint.NextConsumption) mod _defaultMaint.ExceptEvery == 0)
+                    {
+                        _busObjMaint.NextConsumption += _busObjMaint.RecurrenceValue;
+                    }
+                }
+    
+                _busObjMaint.update();
+            }
+        }
+        else
+        {
+            if(_planType == BOBMaintenancePlanType::TimeBased || _planType == BOBMaintenancePlanType::TimeAndConsumptionBased)
+            {
+                _busObjMaint.RecurrenceData = this.adjustRecurrenceStartDate(_busObjMaint.RecurrenceData, DateTimeUtil::date(_adjustmentDateTime));
+                _busObjMaint.NextDate = SysRecurrence::nextDate(_busObjMaint.RecurrenceData, DateTimeUtil::date(_adjustmentDateTime));
+                _busObjMaint.update();
+            }
+            
+            if(_planType == BOBMaintenancePlanType::ConsumptionBased || _planType == BOBMaintenancePlanType::TimeAndConsumptionBased)
+            {
+                select firstOnly MeterValue from meterTrans
+                order by TransDateTime desc
+                where meterTrans.MeterTableRecId == _busObjMaint.MeterTableRecId;
+    
+                if (_busObjMaint.RecurrenceValue)
+                {
+                    _busObjMaint.NextConsumption = meterTrans.MeterValue + _busObjMaint.RecurrenceValue;
+                }
+    
+                _busObjMaint.update();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showQueryValues</Name>
+				<Source><![CDATA[
+    public boolean showQueryValues()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version     version = RunBase::getVersion(_packedClass);
+        container   packedQuery;
+        boolean     ret;
+
+        switch(version)
+        {
+            case 1:
+                [ version, packedQuery ] = _packedClass;
+
+                if(packedQuery)
+                {
+                    queryRun = new SysQueryRun(packedQuery);
+                }
+
+                ret = true;
+                break;
+
+            case 2:
+                [ version, #CurrentListV2, packedQuery ] = _packedClass;
+    
+                if (packedQuery)
+                {
+                    queryRun = new SysQueryRun(packedQuery);
+                }
+
+                ret = true;
+                break;
+
+            case #CurrentVersion:
+                [ version, #CurrentList, packedQuery ] = _packedClass;
+
+                if (packedQuery)
+                {
+                    queryRun = new SysQueryRun(packedQuery);
+                }
+
+                ret = true;
+                break;
+
+            default:
+                ret = false;
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean ret = super(_calledFrom);
+
+        if (_calledFrom is FormRun && _calledFrom.name() == formStr(SysQueryForm))
+        {
+            // for some reason closing the query form also calls the validation
+            // that is too soon, so don't call our custom validations in that case
+            return true;
+        }
+
+        if (ret && toDate < DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))
+        {
+            ret = checkFailed("@SYS17556");
+        }
+
+        if (markBOUnavail && !reasonCode)
+        {
+            ret = checkFailed(strFmt("@DNR1166", "@DNR7022", "@SYS63086"));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        BOBMaintenanceManager mgr = new BOBMaintenanceManager();
+    
+        if(mgr.prompt())
+        {
+            mgr.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runFromCommon</Name>
+				<Source><![CDATA[
+    public static void runFromCommon(Common _caller, WPPWorkOrderId _workOrderId = '')
+    {
+        BOBMaintenanceManager mgr = new BOBMaintenanceManager();
+    
+        ttsBegin;
+    
+        switch(_caller.TableId)
+        {
+            case tableNum(WPPWorkOrderLine):
+                mgr.runCompleteWorkOrderLine(_caller);
+                break;
+    
+            case tableNum(BOBMeterTrans):
+                mgr.runRegisterMeterTrans(_caller);
+                break;
+    
+            case tableNum(BOBDefaultMaintenancePlan):
+                mgr.runConfirmRecall(_caller);
+                break;
+    
+            case tableNum(BOBObjectMaintenancePlan):
+                if (_workOrderId)
+                {
+                    mgr.runCreateWorkOrderFromMaintenancePlan(_caller, _workOrderId);
+                }
+                else
+                {
+                    mgr.runModifyObjectMaintenancePlan(_caller);
+                }
+                break;
+    
+            default:
+                throw error(strFmt("@SYS31187", tableId2Name(_caller.TableId)));
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

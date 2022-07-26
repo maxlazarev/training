@@ -1,0 +1,905 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINPeriodDistributionEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINPeriodDistributionEngine implements FINIVoucherProcessorGenericEngine
+{
+    List                            resultList;
+    GeneralJournalEntry             generalJournalEntry;
+    LedgerVoucherTransList          transactionCollection;
+    RefRecId                        subledgerTransferId;
+    SourceDocument                  sourceDocument;
+    Map                             orderLinesToProcess;
+    Map                             amountsToDistribute;
+    RORParameters                   parameters;
+    LedgerDimensionDefaultAccount   periodicLedgerDimDistributionAccount;
+    #define.engineId('PeriodDistr')
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINPeriodDistributionEngine construct()
+    {
+        return new FINPeriodDistributionEngine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInput</Name>
+				<Source><![CDATA[
+    public void setInput(GeneralJournalEntry _generalJournalEntry, LedgerVoucherTransList _transactionCollection, RefRecId  _subledgerTransferId, SourceDocument _sourceDocument)
+    {
+        this.initialize();
+
+        generalJournalEntry     = _generalJournalEntry;
+        transactionCollection   = _transactionCollection;
+        subledgerTransferId     = _subledgerTransferId;
+        sourceDocument          = _sourceDocument;
+
+        if (!generalJournalEntry && subledgerTransferId)
+        {
+            select firstonly generalJournalEntry
+            where generalJournalEntry.TransferId == subledgerTransferId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initialize</Name>
+				<Source><![CDATA[
+    public void initialize()
+    {
+        parameters = RORParameters::find();
+
+        resultList              = new List(Types::Record);
+        // key: tableId_recId, value: salesLine or purchLine
+        orderLinesToProcess     = new Map(Types::String, Types::Container);
+        // key: salesLine or purchLine, value: map of amounts per type (i.e. revenue, discount)
+        amountsToDistribute     = new Map(Types::Record, Types::Class);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    public void process()
+    {
+        if (this.mustRunEngine())
+        {
+            this.collectAmountsToDistribute();
+            this.executeMarkupDistribution();
+            this.executeProjInvoiceEmplDistribution();
+            this.executeProjJournalTransCostDistribution();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustRunEngine</Name>
+				<Source><![CDATA[
+    protected boolean mustRunEngine()
+    {
+        boolean ret = false;
+
+        if (parameters.FINDistributionMethod == FINDistributionMethod::TransPeriod 
+        ||  parameters.FINDistributionMethod == FINDistributionMethod::AnalyticalDate)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>collectAmountsToDistribute</Name>
+				<Source><![CDATA[
+    protected void collectAmountsToDistribute()
+    {
+        if (transactionCollection && transactionCollection.elements() > 0)
+        {
+            transactionCollection.first();
+        
+            do
+            {
+                LedgerVoucherTransObject ledgerVoucherTransObject = transactionCollection.item();
+                Common                   common = ledgerVoucherTransObject.DNRDocumentSourceLine();
+
+                if (!ledgerVoucherTransObject.FINparmSkipDistribution() && this.mustDistribute(common, ledgerVoucherTransObject.DNRInvoiceId()))
+                {
+                    LedgerPostingType   ledgerPostingType = ledgerVoucherTransObject.parmLedgerPostingType();
+                    AmountCur           amountCur = ledgerVoucherTransObject.parmAmountCur();
+
+                    FINTmpVoucherProcessorEngineParm    parm;
+
+                    parm.initFromLedgerVoucherTransObject(ledgerVoucherTransObject);
+
+                    this.processSingleTrans(common, ledgerPostingType, amountCur, parm);
+                }
+            }
+            while (transactionCollection.next());
+        }
+        else if (subledgerTransferId)
+        {
+            Common common;
+            InvoiceId invoiceId;
+            SourceDocumentHeader sourceDocumentHeader = sourceDocument.parmSourceDocumentHeader();
+            VendInvoiceInfoTable vendInvoiceInfoTable = VendInvoiceInfoTable::findSourceDocumentHeader(sourceDocumentHeader.RecId);
+
+            [common, invoiceId] = this.getCommonInvoiceId(vendInvoiceInfoTable);
+
+            if (this.mustDistribute(common, invoiceId))
+            {
+                AccountingDistribution                  accountingDistribution;
+                SourceDocumentLine                      sourceDocumentLine;
+                GeneralJournalAccountEntry               generalJournalAccountEntry;
+                SubLedgerJournalAccountEntryView         subLedgerJournalAccountEntryView;
+                SubledgerJournalAccountEntryDistribution subledgerJournalAccountEntryDistribution;
+                
+                Map markupTransMap = this.getMarkupTransMap(vendInvoiceInfoTable);
+
+                
+                while select generalJournalAccountEntry
+                        join TableId from subLedgerJournalAccountEntryView
+                        where subLedgerJournalAccountEntryView.TransferId == subledgerTransferId
+                        &&    subLedgerJournalAccountEntryView.SourceDocumentHeader == sourceDocumentHeader.RecId
+                        &&    subLedgerJournalAccountEntryView.GeneralJournalAccountEntry == generalJournalAccountEntry.RecId
+                            join TableId from subledgerJournalAccountEntryDistribution
+                            where subledgerJournalAccountEntryDistribution.SubledgerJournalAccountEntry == subLedgerJournalAccountEntryView.SubLedgerJournalAccountEntry
+                                    join TableId from accountingDistribution
+                                    where accountingDistribution.RecId == subledgerJournalAccountEntryDistribution.AccountingDistribution
+                                    &&    accountingDistribution.AccountingEvent == subLedgerJournalAccountEntryView.AccountingEvent
+                                        join RecId from sourceDocumentLine
+                                        where sourceDocumentLine.RecId == accountingDistribution.SourceDocumentLine
+                                        &&    sourceDocumentLine.SourceDocumentHeader == sourceDocumentHeader.RecId
+                                        &&    sourceDocumentLine.SourceRelationType == tableNum(MarkupTrans)
+                {
+                    LedgerPostingType   ledgerPostingType = generalJournalAccountEntry.PostingType;
+                    AmountCur           amountCur = generalJournalAccountEntry.TransactionCurrencyAmount;
+
+                    FINTmpVoucherProcessorEngineParm    parm;
+
+                    parm.initFromGeneralJournalAccountEntry(generalJournalAccountEntry);
+
+                    if (markupTransMap.exists([ledgerPostingType, sourceDocumentLine.RecId]))
+                    {
+                        MarkupTrans markupTrans = markupTransMap.lookup([ledgerPostingType, sourceDocumentLine.RecId]);
+                        this.processSingleTrans(markupTrans, ledgerPostingType, generalJournalAccountEntry.AccountingCurrencyAmount, parm);
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCommonInvoiceId</Name>
+				<Source><![CDATA[
+    protected container getCommonInvoiceId(VendInvoiceInfoTable _vendInvoiceInfoTable)
+    {
+        Common                  common;
+        InvoiceId               invoiceId;
+        VendInvoiceInfoLine     vendInvoiceInfoLine;
+                
+        select firstonly vendInvoiceInfoLine
+            order by RecId
+            where vendInvoiceInfoLine.ParmId == _vendInvoiceInfoTable.ParmId;
+
+        common = vendInvoiceInfoLine.purchLine();
+        invoiceId = _vendInvoiceInfoTable.Num;
+
+        return [common, invoiceId];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMarkupTransMap</Name>
+				<Source><![CDATA[
+    protected Map getMarkupTransMap(VendInvoiceInfoTable _vendInvoiceInfoTable)
+    {
+        Map                     markupTransMap = new Map(Types::Container, Types::Record);
+        VendInvoiceTrans        vendInvoiceTrans;
+        VendInvoiceInfoLine     vendInvoiceInfoLine;
+        MarkupTrans             markupTrans;
+        MarkupTable             markupTable;
+
+        while select markupTrans
+            join TableId from vendInvoiceTrans
+            where vendInvoiceTrans.TableId == markupTrans.TransTableId
+            &&    vendInvoiceTrans.RecId == markupTrans.TransRecId
+            &&    vendInvoiceTrans.InvoiceId == _vendInvoiceInfoTable.Num
+                exists join vendInvoiceInfoLine
+                where vendInvoiceInfoLine.ParmId == _vendInvoiceInfoTable.ParmId
+                &&    vendInvoiceInfoLine.InventTransId == vendInvoiceTrans.InventTransId
+        {
+            markupTable = markupTrans.markupTable();
+            markupTransMap.insert([markupTable.CustPosting ? markupTable.CustPosting : markupTable.VendPosting, markupTrans.SourceDocumentLine], markupTrans);
+        }
+
+        return markupTransMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>orderLinesToProcessKey</Name>
+				<Source><![CDATA[
+    protected str orderLinesToProcessKey(TableId _tableId, RecId _recId)
+    {
+        return strFmt('%1_%2', _tableId, _recId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustDistribute</Name>
+				<Source><![CDATA[
+    protected boolean mustDistribute(Common _common, InvoiceId _invoiceId)
+    {
+        boolean ret;
+        Common  common = _common;
+        
+        if (common.TableId == tableNum(MarkupTrans))
+        {
+            MarkupTrans markupTrans = common;
+            common = this.getOrderLineFromMarkupTrans(markupTrans);
+        }
+        else if (common.TableId == tableNum(ProjInvoiceEmpl))
+        {
+            ProjInvoiceEmpl projInvoiceEmpl = common;
+            common = projInvoiceEmpl.FINGetSalesLine();
+
+            if (!common.RecId || !this.mustDestributeProjInvoiceEmpl(projInvoiceEmpl))
+            {
+                return false;
+            }
+        }
+        else if (common.TableId == tableNum(ProjJournalTrans))
+        {
+            ProjJournalTrans projJournalTrans = common;
+            
+            if (projJournalTrans.INVRefTableId == tableNum(SalesLine))
+            {
+                common = SalesLine::findRecId(ProjJournalTrans.INVRefRecId);
+            }
+        }
+
+        if (common.TableId == tableNum(PurchLine)
+        || common.TableId == tableNum(SalesLine))
+        {
+            if (orderLinesToProcess.exists(this.orderLinesToProcessKey(common.TableId, common.RecId)))
+            {
+                ret = true;
+            }
+            else
+            //In the map store RORTradeType instead of boolean because of costPrice distribution
+            if (common.TableId == tableNum(PurchLine))
+            {
+                PurchLine purchLine = common;
+                ret = purchLine.RORTradeType != RORTradeType::SalesPurch;
+
+                if (ret)
+                {
+                    orderLinesToProcess.insert(this.orderLinesToProcessKey(common.TableId, common.RecId), [purchLine, purchLine.RORTradeType, _invoiceId]);
+                }
+                
+            }
+            else
+            {
+                SalesLine salesLine = common;
+                ret = salesLine.RORTradeType != RORTradeType::SalesPurch;
+
+                if (ret)
+                {
+                    orderLinesToProcess.insert(this.orderLinesToProcessKey(common.TableId, common.RecId), [salesLine, salesLine.RORTradeType, _invoiceId]);
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustDestributeProjInvoiceEmpl</Name>
+				<Source><![CDATA[
+    protected boolean mustDestributeProjInvoiceEmpl(ProjInvoiceEmpl _projInvoiceEmpl)
+    {
+        ProjJournalTrans projJournalTrans;
+        RAGParameters ragParameters = RAGParameters::find();
+
+        select firstonly FINExtraItemId from projJournalTrans
+        where projJournalTrans.TransId == _projInvoiceEmpl.TransId;
+
+        return !projJournalTrans.FINExtraItemId || projJournalTrans.FINExtraItemId == ragParameters.ItemIdInsurance;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ledgerDimensionLineAmount</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects07_2020. This method is obsolete')]
+    protected LedgerDimensionDefaultAccount ledgerDimensionLineAmount(Common _common)
+    {
+        if (_common.TableId == tableNum(PurchLine))
+        {
+            PurchLine purchLine = _common;
+            return purchLine.ledgerDimensionOffsetAccountPckSlp();
+        }
+        else
+        {
+            SalesLine salesLine = _common;
+            return salesLine.ledgerDimensionSales(salesLine.inventTable());
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lineDiscountLedgerDimension</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects07_2020. This method is obsolete')]
+    public LedgerDimensionDefaultAccount lineDiscountLedgerDimension(Common _common)
+    {
+        if (_common.TableId == tableNum(PurchLine))
+        {
+            PurchLine purchLine = _common;
+            return purchLine.ledgerDimensionDiscount();
+        }
+        else
+        {
+            SalesLine salesLine = _common;
+            return salesLine.accountDiscLedgerDimension(salesLine.inventTable());
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>LedgerPostingTypeLineAmount</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects07_2020. This method is obsolete')]
+    protected LedgerPostingType LedgerPostingTypeLineAmount(Common _common)
+    {
+        if (_common.TableId == tableNum(PurchLine))
+        {
+            return LedgerPostingType::PurchConsump;
+        }
+        else
+        {
+            SalesLine salesLine = _common;
+            return salesLine.postingSales();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ledgerPostingTypeLineDiscount</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects07_2020. This method is obsolete')]
+    public LedgerPostingType ledgerPostingTypeLineDiscount(Common _common)
+    {
+        if (_common.TableId == tableNum(PurchLine))
+        {
+            return LedgerPostingType::PurchDisc;
+        }
+        else
+        {
+            return LedgerPostingType::SalesDisc;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSingleTrans</Name>
+				<Source><![CDATA[
+    protected void processSingleTrans(Common _common, LedgerPostingType _ledgerPostingType, AmountCur _amountCur, FINTmpVoucherProcessorEngineParm _parm)
+    {
+        // Sum up amounts for distribution. Group original transactions for reversing.
+        // Store it per order line in separate maps for markup/financial/costPrice distribution
+        Map         amountsMap;
+        AmountCur   distributionAmount;
+        Set         transSet;
+        Common      common = _common;
+
+        if (amountsToDistribute.exists(common))
+        {
+            amountsMap = amountsToDistribute.lookup(common);
+        }
+        else
+        {
+            amountsMap = new Map(Types::Enum, Types::container);
+        }
+
+        if (amountsMap.exists(_ledgerPostingType))
+        {
+            container transSetPacked;
+            [distributionAmount, transSetPacked] = amountsMap.lookup(_ledgerPostingType);
+
+            transSet = Set::create(transSetPacked);
+        }
+        else
+        {
+            distributionAmount = 0;
+            transSet = new Set(Types::Record);
+        }
+
+        transSet.add(_parm);
+        amountsMap.insert(_ledgerPostingType, [-(distributionAmount + _amountCur), transSet.pack()]);
+
+        amountsToDistribute.insert(common, amountsMap);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInvoiceId</Name>
+				<Source><![CDATA[
+    protected InvoiceId getInvoiceId(Common _common)
+    {
+        InvoiceId       invoiceId;
+        Common          common;
+        RORTradeType    tradeType;
+        ;
+
+        if (orderLinesToProcess.exists(this.orderLinesToProcessKey(_common.TableId, _common.RecId)))
+        {
+            [common, tradeType, invoiceId] = orderLinesToProcess.lookup(this.orderLinesToProcessKey(_common.TableId, _common.RecId));
+        }
+
+        return invoiceId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reverseSingleTrans</Name>
+				<Source><![CDATA[
+    public void reverseSingleTrans(FINTmpVoucherProcessorEngineParm _tmpGeneralJournalAccountEntry)
+    {
+        DimensionDefault                 defaultDimension = LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(_tmpGeneralJournalAccountEntry.LedgerDimension);
+        FINTmpLedgerJournalGeneratorParm tmpLedgerJournalTrans;
+
+        tmpLedgerJournalTrans.initLedgerJournalGeneratorParm(
+            _tmpGeneralJournalAccountEntry.DataAreaId,
+            _tmpGeneralJournalAccountEntry.LedgerDimension,
+            _tmpGeneralJournalAccountEntry.Quantity,
+            - _tmpGeneralJournalAccountEntry.TransactionCurrencyAmount,
+            _tmpGeneralJournalAccountEntry.TransactionCurrencyCode,
+            defaultDimension,
+            generalJournalEntry.PostingLayer,
+            generalJournalEntry.AccountingDate,
+            LedgerTransType::FINMDAReversal);
+        resultList.addEnd(tmpLedgerJournalTrans);
+
+        if (parameters.FINDistributionMethod == FINDistributionMethod::TransPeriod)
+        {
+        
+            tmpLedgerJournalTrans.clear();
+            tmpLedgerJournalTrans.initLedgerJournalGeneratorParm(
+                _tmpGeneralJournalAccountEntry.DataAreaId,
+                LedgerDimensionFacade::serviceCreateLedgerDimension(periodicLedgerDimDistributionAccount, defaultDimension),
+                _tmpGeneralJournalAccountEntry.Quantity,
+                _tmpGeneralJournalAccountEntry.TransactionCurrencyAmount,
+                _tmpGeneralJournalAccountEntry.TransactionCurrencyCode,
+                defaultDimension,
+                generalJournalEntry.PostingLayer,
+                generalJournalEntry.AccountingDate,
+                LedgerTransType::FINMDAReversal);
+            resultList.addEnd(tmpLedgerJournalTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reversTrans</Name>
+				<Source><![CDATA[
+    protected void reversTrans(Set _distributedTransSet)
+    {
+        SetEnumerator   enumerator = _distributedTransSet.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            FINTmpVoucherProcessorEngineParm    parm = enumerator.current();
+
+            this.reverseSingleTrans(parm);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeFinancialDistribution</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects07_2020. This method is obsolete')]
+    protected void executeFinancialDistribution()
+    {
+        MapEnumerator amountsToDistributeEnumerator = amountsToDistribute.getEnumerator();
+        
+        while (amountsToDistributeEnumerator.moveNext())
+        {
+            Common              orderLine = amountsToDistributeEnumerator.currentKey();
+
+            if (orderLine.TableId != tableNum(PurchLine) && orderLine.TableId != tableNum(SalesLine))
+            {
+                continue;
+            }
+
+            Map                 amountsMap = amountsToDistributeEnumerator.currentValue();
+            MapEnumerator       amountsMapEnumerator = amountsMap.getEnumerator();
+            AmountCur           lineAmount;
+            AmountCur           discount;
+            LedgerPostingType   ledgerPostingTypeLineAmount = this.ledgerPostingTypeLineAmount(orderLine);
+            LedgerPostingType   ledgerPostingTypeDiscount = this.ledgerPostingTypeLineDiscount(orderLine);
+            Set                 distributedTransSet = new Set(Types::Record);
+            
+            while (amountsMapEnumerator.moveNext())
+            {
+                LedgerPostingType   postingType = amountsMapEnumerator.currentKey();
+                AmountCur           distributionAmount;
+                container           transSetPacked;
+                Set                 transSet;
+
+                [distributionAmount, transSetPacked] = amountsMapEnumerator.currentValue();
+
+                if (postingType == ledgerPostingTypeLineAmount)
+                {
+                    lineAmount += distributionAmount;
+                    transSet = Set::create(transSetPacked);
+                    distributedTransSet = Set::union(distributedTransSet, transSet);
+                }
+                if (postingType == ledgerPostingTypeDiscount)
+                {
+                    discount += distributionAmount;
+                    transSet = Set::create(transSetPacked);
+                    distributedTransSet = Set::union(distributedTransSet, transSet);
+                }
+            }
+            
+            if (lineAmount || discount)
+            {
+                FINPeriodDistributionType distributionType;
+                distributionType = FINPeriodDistributionType::construct(FINPeriodDistributionEngineType::Financial,
+                    generalJournalEntry,
+                    generalJournalEntry.AccountingDate,
+                    this.getInvoiceId(orderLine),
+                    orderLine,
+                    lineAmount,
+                    discount,
+                    orderLine.(fieldName2Id(orderLine.TableId, fieldStr(SalesLine, CurrencyCode))),
+                    this.ledgerDimensionLineAmount(orderLine),
+                    this.lineDiscountLedgerDimension(orderLine),
+                    0,
+                    null,
+                    LedgerPostingType::None);
+
+                distributionType.run();
+
+                if (!distributionType.parmNothingToDistribute() && distributedTransSet)
+                {
+                    periodicLedgerDimDistributionAccount = (orderLine.TableId ==tableNum(SalesLine) ?
+                        parameters.FINLedgerDimensionAccountRental : parameters.FINLedgerDimensionAccountSubRental);
+                    this.reversTrans(distributedTransSet);
+                }
+                
+                resultList = List::merge(resultList, distributionType.getResult());
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeProjInvoiceEmplDistribution</Name>
+				<Source><![CDATA[
+    protected void executeProjInvoiceEmplDistribution()
+    {
+        MapEnumerator amountsToDistributeEnumerator = amountsToDistribute.getEnumerator();
+        
+        while (amountsToDistributeEnumerator.moveNext())
+        {
+            ProjInvoiceEmpl invoiceLine = amountsToDistributeEnumerator.currentKey() as ProjInvoiceEmpl;
+
+            if (!invoiceLine.RecId || invoiceLine.TableId != tableNum(ProjInvoiceEmpl))
+            {
+                continue;
+            }
+
+            SalesLine salesLine = invoiceLine.FINGetSalesLine();
+
+            Map           amountsMap = amountsToDistributeEnumerator.currentValue();
+            MapEnumerator amountsMapEnumerator = amountsMap.getEnumerator();
+            
+            while (amountsMapEnumerator.moveNext())
+            {
+                this.executeDistribution(amountsMapEnumerator.currentKey(), amountsMapEnumerator.currentValue(), invoiceLine, salesLine, invoiceLine.CurrencyId);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeProjJournalTransCostDistribution</Name>
+				<Source><![CDATA[
+    protected void executeProjJournalTransCostDistribution()
+    {
+        MapEnumerator amountsToDistributeEnumerator = amountsToDistribute.getEnumerator();
+        
+        while (amountsToDistributeEnumerator.moveNext())
+        {
+            ProjJournalTrans journalLine = amountsToDistributeEnumerator.currentKey() as ProjJournalTrans;
+
+            if (!journalLine.RecId || journalLine.TableId != tableNum(ProjJournalTrans) || journalLine.INVRefTableId != tableNum(SalesLine))
+            {
+                continue;
+            }
+
+            SalesLine salesLine = SalesLine::findRecId(journalLine.INVRefRecId);
+
+            Map           amountsMap = amountsToDistributeEnumerator.currentValue();
+            MapEnumerator amountsMapEnumerator = amountsMap.getEnumerator();
+            
+            while (amountsMapEnumerator.moveNext())
+            {
+                this.executeDistribution(amountsMapEnumerator.currentKey(), amountsMapEnumerator.currentValue(), journalLine, salesLine, journalLine.CurrencyId);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOrderLineFromMarkupTrans</Name>
+				<Source><![CDATA[
+    protected Common getOrderLineFromMarkupTrans(MarkupTrans _markupTrans)
+    {
+        Common  orderLine;
+
+        if (_markupTrans.TransTableId == tableNum(PurchLine))
+        {
+            orderLine = PurchLine::findRecId(_markupTrans.TransRecId);
+        }
+        else if (_markupTrans.TransTableId == tableNum(SalesLine))
+        {
+            orderLine = SalesLine::findRecId(_markupTrans.TransRecId);
+        }
+        else if (_markupTrans.TransTableId == tableNum(VendInvoiceTrans))
+        {
+            VendInvoiceTrans    vendInvoiceTrans = VendInvoiceTrans::findRecId(_markupTrans.TransRecId);
+            orderLine = vendInvoiceTrans.purchLine();
+        }
+        else if (_markupTrans.TransTableId == tableNum(CustInvoiceTrans))
+        {
+            CustInvoiceTrans    custInvoiceTrans = CustInvoiceTrans::findRecId(_markupTrans.TransRecId);
+            orderLine = custInvoiceTrans.salesLine();
+        }
+
+        return orderLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeMarkupDistribution</Name>
+				<Source><![CDATA[
+    protected void executeMarkupDistribution()
+    {
+        MapEnumerator amountsToDistributeEnumerator = amountsToDistribute.getEnumerator();
+        
+        while (amountsToDistributeEnumerator.moveNext())
+        {
+            MarkupTrans     markupTrans = amountsToDistributeEnumerator.currentKey() as MarkupTrans;
+            Map             amountsMap = amountsToDistributeEnumerator.currentValue();
+            MapEnumerator   amountsMapEnumerator = amountsMap.getEnumerator();
+
+            if (!markupTrans 
+            ||   markupTrans.FINMarkupAccountType == FINMarkupAccountType::None
+            ||   markupTrans.FINMarkupAccountType == FINMarkupAccountType::DeliveryTransport
+            ||   markupTrans.FINMarkupAccountType == FINMarkupAccountType::ReturnTransport)
+            {
+                continue;
+            }
+
+            MarkupTable markupTable = markupTable::find(markupTrans.ModuleType, markupTrans.MarkupCode);
+            Common      orderLine = this.getOrderLineFromMarkupTrans(markupTrans);
+            
+            if (!markupTable || !orderLine)
+            {
+                continue;
+            }
+
+            while (amountsMapEnumerator.moveNext())
+            {
+                this.executeDistribution(amountsMapEnumerator.currentKey(), amountsMapEnumerator.currentValue(), markupTrans, orderLine, markupTrans.CurrencyCode);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeDistribution</Name>
+				<Source><![CDATA[
+    protected void executeDistribution(LedgerPostingType _postingType, container _amounts, Common _ledgerRefBuffer, Common _orderLine, CurrencyCode _currencCode)
+    {
+        AmountCur                           postAmount;
+        container                           transSetPacked;
+        FINTmpVoucherProcessorEngineParm    parm;
+ 
+        // for specific Markup code transactions will have the same posting type
+        [postAmount, transSetPacked] = _amounts;
+                
+        Set distributedTransSet = Set::create(transSetPacked);
+        SetEnumerator setEnumerator = distributedTransSet.getEnumerator();
+                
+        if (setEnumerator.moveNext())
+        {
+            parm = setEnumerator.current();
+        }
+            
+        if (postAmount)
+        {
+            DimensionDefault defaultDimension = LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(parm.LedgerDimension);
+            LedgerDimensionDefaultAccount defaultAccount = LedgerDefaultAccountHelper::getDefaultAccountFromLedgerDimension(parm.LedgerDimension);
+
+            FINPeriodDistributionEngineType periodDistributionEngineType = this.getPeriodDistributionEngineType(_ledgerRefBuffer);
+
+            FINPeriodDistributionType distributionType;
+            distributionType = FINPeriodDistributionType::construct(periodDistributionEngineType,
+                        generalJournalEntry,
+                        generalJournalEntry.AccountingDate,
+                        this.getInvoiceId(_orderLine),
+                        _ledgerRefBuffer,
+                        postAmount,
+                        0,
+                        _currencCode,
+                        defaultAccount,
+                        0,
+                        defaultDimension,
+                        _orderLine,
+                        _postingType);
+            
+            distributionType.run();
+
+            if (!distributionType.parmNothingToDistribute() && distributedTransSet)
+            {
+                periodicLedgerDimDistributionAccount = (_orderLine.TableId ==tableNum(SalesLine) ?
+                            parameters.FINLedgerDimensionAccountRental : parameters.FINLedgerDimensionAccountSubRental);
+                    
+                this.reversTrans(distributedTransSet);
+            }
+
+            resultList = List::merge(resultList, distributionType.getResult());
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPeriodDistributionEngineType</Name>
+				<Source><![CDATA[
+    protected FINPeriodDistributionEngineType getPeriodDistributionEngineType(Common _ledgerRefBuffer)
+    {
+        FINPeriodDistributionEngineType ret;
+
+        switch (_ledgerRefBuffer.TableId)
+        {
+            case tableNum(ProjInvoiceEmpl):
+                ret = FINPeriodDistributionEngineType::ProjInvoiceEmpl;
+                break;
+
+            case tableNum(MarkupTrans):
+                FINCustInvoiceTransCredit custInvoiceTransCredit;
+                MarkupTrans markupTrans = _ledgerRefBuffer;
+
+                select firstonly RecId from custInvoiceTransCredit
+                    where custInvoiceTransCredit.CustInvoiceTransRecId == markupTrans.TransRecId;
+
+                ret = custInvoiceTransCredit.RecId ? FINPeriodDistributionEngineType::CustInvoiceTransCredit : FINPeriodDistributionEngineType::Markup;
+                break;
+
+            default:
+                ret = FINPeriodDistributionEngineType::Markup;
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeCostPriceDistribution</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects07_2020. This method is obsolete')]
+    protected void executeCostPriceDistribution()
+    {
+        MapEnumerator amountsToDistributeEnumerator = amountsToDistribute.getEnumerator();
+        
+        while (amountsToDistributeEnumerator.moveNext())
+        {
+            Common                      orderLine = amountsToDistributeEnumerator.currentKey();
+            FINPeriodDistributionType   distributionType;
+
+            distributionType = FINPeriodDistributionType::construct(FINPeriodDistributionEngineType::Cost,
+                generalJournalEntry,
+                generalJournalEntry.AccountingDate,
+                this.getInvoiceId(orderLine),
+                orderLine,
+                0,
+                0,
+                orderLine.(fieldName2Id(orderLine.TableId, fieldStr(SalesLine, CurrencyCode))),
+                0,
+                0,
+                0,
+                null, 
+                LedgerPostingType::None);
+
+            distributionType.run();
+
+            resultList = List::merge(resultList, distributionType.getResult());
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getResult</Name>
+				<Source><![CDATA[
+    public List getResult()
+    {
+        return resultList;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>engineId</Name>
+				<Source><![CDATA[
+    public Num engineId()
+    {
+        return #engineId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public Description description()
+    {
+        return "@DNR:PeriodDistributionDescr";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>publisher</Name>
+				<Source><![CDATA[
+    public Name publisher()
+    {
+        return "@DNR:ToIncreasePublisher";
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,306 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORSubrentalSynchroniser</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class RORSubrentalSynchroniser
+{
+    RORParameters   parameters;
+    SalesLine       salesLine;
+    PurchLIne       purchLine;
+
+    Map             orders2open;
+    Set             openOrders;
+
+    boolean         promptedForSynchronization;
+    boolean         openSynchronizationForm;
+    boolean         forceStopTierRangeRecalculation;
+    boolean         skipUpdateHostRecord;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>addOrders2open</Name>
+				<Source><![CDATA[
+    void addOrders2open(RORRentalHeader _rentalHeader)
+    {
+        if (!orders2open.exists(_rentalHeader.HeaderId))
+        {
+            orders2open.insert(_rentalHeader.HeaderId, _rentalHeader);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addRentalHeader2SynchronizeDates</Name>
+				<Source><![CDATA[
+    abstract void addRentalHeader2SynchronizeDates(RORRentalDateTimes   _origRentalDateTimes,
+                                                   RORRentalDateTimes   _rentalDateTimes,
+                                                   boolean              _onRentChanged,
+                                                   boolean              _offRentChanged,
+                                                   boolean              _expOffRentChange)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cancelUpdate</Name>
+				<Source><![CDATA[
+    protected void cancelUpdate()
+    {
+        throw error("@DNR2694");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>datesTimesMatch</Name>
+				<Source><![CDATA[
+    public boolean datesTimesMatch(RORRentalDateTimes       _rentalDatesFirst,
+                                   RORRentalDateTimes       _rentalDatesSecond,
+                                   RORRentalDateTimeType    _rentalDateTimeType)
+    {
+        boolean     ret;
+        TransDate   testDate;
+        int         fieldId;
+    
+        testDate = dateNull() + 1;
+        fieldId  = RORRentalDateTimes::dateTimeType2FieldId(_rentalDateTimeType);
+    
+        if (_rentalDatesFirst.(fieldId) == _rentalDatesSecond.(fieldId)
+        || (DateTimeUtil::date(_rentalDatesFirst.(fieldId)) < testDate && DateTimeUtil::date(_rentalDatesSecond.(fieldId)) < testDate))
+        {
+            ret = true;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    void new()
+    {
+        parameters = RORParameters::find();
+    
+        orders2open = new Map(Types::String, Types::Record);
+        openOrders  = new Set(Types::String);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>openAmendmentOrderForm</Name>
+				<Source><![CDATA[
+    void openAmendmentOrderForm()
+    {
+        MapEnumerator   mapEnumerator;
+        RORRentalHeader rentalHeader;
+    
+        if (openSynchronizationForm)
+        {
+            mapEnumerator = orders2open.getEnumerator();
+    
+            while (mapEnumerator.moveNext())
+            {
+                // ... but open each only once.
+                if (!openOrders.in(mapEnumerator.currentKey()))
+                {
+                    openOrders.add(mapEnumerator.currentKey());
+    
+                    rentalHeader = mapEnumerator.currentValue();
+    
+                    this.openOrderForm(rentalHeader);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>openOrderForm</Name>
+				<Source><![CDATA[
+    void openOrderForm(RORRentalHeader _rentalHeader)
+    {
+        Args        args;
+        FormRun     formRun;
+    
+        args = new Args();
+        args.caller(this);
+        args.record(_rentalHeader);
+        args.name(_rentalHeader.TableId == tableNum(SalesTable) ? formStr(RORSalesTable) : formStr(RORPurchTable));
+    
+        formRun = ClassFactory::formRunClassOnClient(args);
+        formRun.init();
+    
+        if (formRun)
+        {
+            formRun.run();
+            formRun.detach();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setPromptedForSynchronization</Name>
+				<Source><![CDATA[
+    private void setPromptedForSynchronization()
+    {
+        DialogButton    dialogButton;
+    
+        // Only check for synchronization once
+        if (!promptedForSynchronization)
+        {
+            openSynchronizationForm = true;
+    
+            // If the parameter OpenOrderFormForSynchronization is checked
+            // then show the dialog that lets the user decide whether to open the linked order form
+            // otherwise the linked order form will open without showing a dialog.
+            if (parameters.OpenOrderFormForSynchronization)
+            {
+                dialogButton = Box::yesNoCancel(this.synchronizationMsg(), DialogButton::Yes, "@DNR2692");
+    
+                switch (dialogButton)
+                {
+                    case DialogButton::Yes :
+                        openSynchronizationForm = true;
+                        break;
+    
+                    case DialogButton::No :
+                        openSynchronizationForm = false;
+                        break;
+    
+                    default :
+                        this.cancelUpdate();
+                }
+            }
+        }
+    
+        promptedForSynchronization = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>synchronizationMsg</Name>
+				<Source><![CDATA[
+    abstract protected str synchronizationMsg()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>triggerUpdateSubRentalDates</Name>
+				<Source><![CDATA[
+    public void triggerUpdateSubRentalDates(RORRentalDateTimes _origRentalDateTimes, RORRentalDateTimes _rentalDateTimes)
+    {
+        boolean offRentChanged;
+        boolean onRentChanged;
+        boolean expOffRentChanged;
+    
+        // check if date/time changed
+        if (!this.datesTimesMatch(_origRentalDateTimes, _rentalDateTimes, RORParameters::dateTimeTypeInvoicingStart()))
+        {
+            onRentChanged = true;
+        }
+    
+        if (!this.datesTimesMatch(_origRentalDateTimes, _rentalDateTimes, RORParameters::dateTimeTypeInvoicingEnd()))
+        {
+            offRentChanged = true;
+        }
+    
+        if (!this.datesTimesMatch(_origRentalDateTimes, _rentalDateTimes, RORParameters::dateTimeTypeInvoicingExpectedEnd()))
+        {
+            expOffRentChanged = true;
+        }
+    
+        if (onRentChanged || offRentChanged || expOffRentChanged)
+        {
+            this.addRentalHeader2SynchronizeDates(_origRentalDateTimes, _rentalDateTimes, onRentChanged, offRentChanged, expOffRentChanged);
+    
+            if (!orders2open.empty())
+            {
+                this.setPromptedForSynchronization();
+                this.openAmendmentOrderForm();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateModifySubrentalEnd</Name>
+				<Source><![CDATA[
+    abstract boolean validateModifySubrentalEnd(InventTransId _lineId, INVPeriodEndDateTime _periodEndDateTime)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateModifySubrentalStart</Name>
+				<Source><![CDATA[
+    abstract boolean validateModifySubrentalStart(InventTransId _lineId, INVPeriodStartDateTime _periodStartDateTime)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmForceStopTierRangeRecalculation</Name>
+				<Source><![CDATA[
+    public boolean parmForceStopTierRangeRecalculation(boolean _forceStopTierRangeRecalculation = forceStopTierRangeRecalculation)
+    {
+        forceStopTierRangeRecalculation = _forceStopTierRangeRecalculation;
+        return forceStopTierRangeRecalculation;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmskipUpdateHostRecord</Name>
+				<Source><![CDATA[
+    public boolean parmskipUpdateHostRecord(boolean _skipUpdateHostRecord = skipUpdateHostRecord)
+    {
+        skipUpdateHostRecord = _skipUpdateHostRecord;
+        return skipUpdateHostRecord;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    static RORSubrentalSynchroniser construct(TableId _tableId)
+    {
+        switch (_tableId)
+        {
+            case tableNum(SalesTable),
+                tableNum(SalesLine) :
+                    return new RORSubrentalSynchroniser_Sales();
+    
+            case tableNum(PurchTable),
+                tableNum(PurchLine) :
+                    return new RORSubrentalSynchroniser_Purch();
+
+            case tableNum(SalesQuotationTable),
+                tableNum(SalesQuotationLine) :
+                    return new RORSubrentalSynchroniser_Quotation();
+        }
+    
+        throw error(Error::wrongUseOfFunction(funcName()));
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

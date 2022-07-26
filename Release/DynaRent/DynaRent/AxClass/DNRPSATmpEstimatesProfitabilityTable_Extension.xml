@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPSATmpEstimatesProfitabilityTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(PSATmpEstimatesProfitability))]
+public final class DNRPSATmpEstimatesProfitabilityTable_Extension
+{
+    // extension methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>RORPopulatePSATmpEstimatesProfitability</Name>
+				<Source><![CDATA[
+    // Duplicated from /Tables/PSATmpEstimatesProfitability/methods/populatePSATmpEstimatesProfitability
+    public static PSATmpEstimatesProfitability RORPopulatePSATmpEstimatesProfitability(SalesQuotationTable _salesQuotationTable)
+    {
+        PSATmpEstimatesProfitability    estimatesProfitability;
+        SalesQuotationLine              salesQuotationLine;
+        AmountCur                       totalCostPrice;
+        AmountCur                       totalSalesPrice;
+        QuotationProjTransType          curProjTransType;
+        RORProjTransType                curRORProjTransType;
+        RAGParameters                   ragParameters = RAGParameters::find();
+        RORSalesQuotationTotals_Trans   salesQuotationTotals_Trans;
+        INVTmpInvoiceTransDataTable     tmpInvoiceTransDataTable;
+        FINCostPriceRental              costPriceRental;
+        BOBObjectTable                  objectTable;
+        SalesQuotationLine              salesQuotationLineCopy;
+        boolean                         isCurrencyExchange;
+        CurrencyExchangeHelper          currencyExchangeHelper;
+
+        void insertSummaryLines()
+        {
+            estimatesProfitability.TransType                = enum2str(curProjTransType);
+            estimatesProfitability.RORProjTransType         = curRORProjTransType;
+
+            if (isCurrencyExchange)
+            {
+                estimatesProfitability.EstimatedRevenue = currencyExchangeHelper.calculateTransactionToAccounting(_salesQuotationTable.CurrencyCode, totalSalesPrice, true);
+            }
+            else
+            {
+                estimatesProfitability.EstimatedRevenue         = totalSalesPrice;
+            }
+            estimatesProfitability.EstimatedCost            = totalCostPrice;
+            estimatesProfitability.EstimatedProfit          = estimatesProfitability.EstimatedRevenue - estimatesProfitability.EstimatedCost;
+
+            if (estimatesProfitability.EstimatedRevenue != 0)
+            {
+                estimatesProfitability.EstimatedProfitMargin = estimatesProfitability.EstimatedProfit / estimatesProfitability.EstimatedRevenue * 100;
+            }
+            else
+            {
+                estimatesProfitability.EstimatedProfitMargin = 0;
+            }
+            estimatesProfitability.insert();
+        }
+
+        void clearTotals()
+        {
+            totalCostPrice = 0;
+            totalSalesPrice = 0;
+        }
+
+        if (estimatesProfitability.companyCurrency() != _salesQuotationTable.CurrencyCode)
+        {
+            isCurrencyExchange = true;
+
+            currencyExchangeHelper = CurrencyExchangeHelper::newExchangeDate(
+                                                            Ledger::primaryLedger(CompanyInfo::findDataArea(curext()).RecId),
+                                                            DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+        }
+    
+        while select salesQuotationLine
+            order by ProjTransType, RORProjTransType
+                     where salesQuotationLine.QuotationId == _salesQuotationTable.QuotationId
+        {
+            if (curProjTransType == QuotationProjTransType::None)
+            {
+                curProjTransType = salesQuotationLine.ProjTransType;
+                curRORProjTransType = salesQuotationLine.RORProjTransType;
+            }
+    
+            if (curProjTransType != salesQuotationLine.ProjTransType
+            || curRORProjTransType != salesQuotationLine.RORProjTransType)
+            {
+                insertSummaryLines();
+                curProjTransType = salesQuotationLine.ProjTransType;
+                curRORProjTransType = salesQuotationLine.RORProjTransType;
+                clearTotals();
+            }
+    
+            salesQuotationTotals_Trans = new RORSalesQuotationTotals_Trans(_salesQuotationTable, SalesUpdate::All);
+            
+            if (salesQuotationLine.RORProjTransType == RORProjTransType::Rental
+            && salesQuotationLine.RORTradeType != RORTradeType::SalesPurch)
+            {                    
+                // TODO: think how to implement it with new invoicing framework
+                totalCostPrice += 0;
+                if (ProjLineProperty::find(salesQuotationLine.LinePropertyId).ToBeInvoiced == NoYes::Yes)
+                {
+                    totalSalesPrice += 0;
+                }                
+            }
+            else
+            {
+                totalCostPrice += salesQuotationLine.SalesQty * salesQuotationLine.CostPrice;
+
+                if (ProjLineProperty::find(salesQuotationLine.LinePropertyId).ToBeInvoiced == NoYes::Yes)
+                {
+                    if (!salesQuotationLine.projId() || ProjInvoiceTable::isBillingRuleInvoiceable(salesQuotationLine.projId(), salesQuotationLine.ProjCategoryId,''))
+                    {
+                        totalSalesPrice += salesQuotationLine.LineAmount;
+                    }
+                }
+            }
+        }
+
+        if (totalCostPrice != 0 || totalSalesPrice != 0)
+        {
+            insertSummaryLines();
+        }
+
+        select sum(EstimatedCost), sum(EstimatedRevenue), sum(EstimatedProfit) from estimatesProfitability;
+
+        estimatesProfitability.TransType                = "@SYS14107";
+        estimatesProfitability.EstimatedCost            = estimatesProfitability.EstimatedCost;
+        estimatesProfitability.EstimatedRevenue         = estimatesProfitability.EstimatedRevenue;
+        estimatesProfitability.EstimatedProfit          = estimatesProfitability.EstimatedRevenue -  estimatesProfitability.EstimatedCost;
+
+        if (estimatesProfitability.EstimatedRevenue != 0)
+        {
+            estimatesProfitability.EstimatedProfitMargin = estimatesProfitability.EstimatedProfit / estimatesProfitability.EstimatedRevenue * 100;
+        }
+        else
+        {
+            estimatesProfitability.EstimatedProfitMargin = 0;
+        }
+
+        estimatesProfitability.insert();
+
+        return estimatesProfitability;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesPackingSlipJournalPostClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesPackingSlipJournalPost))]
+public final class DNRSalesPackingSlipJournalPostClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>mustPostInterCompany</Name>
+				<Source><![CDATA[
+    protected boolean mustPostInterCompany()
+    {
+        boolean ret = next mustPostInterCompany();
+        return ret || salesParmTable.RORAutomaticallyPostSubRental;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInventory</Name>
+				<Source><![CDATA[
+    protected void updateInventory(InventMovement _inventMovement)
+    {
+        _inventMovement.BOBParmTransSign(-_inventMovement.transSign());
+        _inventMovement.BOBParmTransDate(salesParmTable.Transdate);
+        _inventMovement.BOBParmTransTime(salesParmTable.BOBTransTime);
+
+        if (salesLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            next updateInventory(_inventMovement);
+        }
+        else
+        {
+            // Copied from the original method
+            SalesPackingSlipJournalPostPostInventoryState  postInventoryState = SalesPackingSlipJournalPostPostInventoryState::construct();
+            CustPackingSlipTrans                           localCustPackingSlipTrans = this.journalLine().data();
+
+            List list = SalesParmSubLine::buildSalesParmSubLineList(salesParmLine.RecId);
+            Counter subLines = list.elements();
+            if (subLines > 0)
+            {
+                ListEnumerator le = list.getEnumerator();
+                SalesQty       salesQtyTotalRemain    = localCustPackingSlipTrans.Qty + localCustPackingSlipTrans.Remain;
+                InventQty      inventQtyTotalRemain   = localCustPackingSlipTrans.inventQty + localCustPackingSlipTrans.RemainInvent;
+                PdsCWInventQty cwInventQtyTotalRemain = localCustPackingSlipTrans.PdsCWQty + localCustPackingSlipTrans.PdsCWRemain;
+
+                while (le.moveNext())
+                {
+                    SalesParmSubLine salesParmSubLine = le.current();
+
+                    localCustPackingSlipTrans.Qty          = salesParmSubLine.DeliverNow;
+                    localCustPackingSlipTrans.InventQty    = salesParmSubLine.InventNow;
+                    localCustPackingSlipTrans.PdsCWQty     = salesParmSubLine.PdsCWDeliverNow;
+                    salesQtyTotalRemain                   -= salesParmSubLine.DeliverNow;
+                    inventQtyTotalRemain                  -= salesParmSubLine.InventNow;
+                    cwInventQtyTotalRemain                -= salesParmSubLine.PdsCWDeliverNow;
+                    localCustPackingSlipTrans.Remain       = salesQtyTotalRemain;
+                    localCustPackingSlipTrans.RemainInvent = inventQtyTotalRemain;
+                    localCustPackingSlipTrans.PdsCWRemain  = cwInventQtyTotalRemain;
+
+                    SalesPackingSlipJournalPostUpdateInventoryLineParameters updateInventoryLineParameters = SalesPackingSlipJournalPostUpdateInventoryLineParameters::construct();
+                    updateInventoryLineParameters.inventMovement = _inventMovement;
+                    updateInventoryLineParameters.custPackingSlipTrans = localCustPackingSlipTrans;
+                    updateInventoryLineParameters.salesParmSubLine  = salesParmSubLine;
+                    updateInventoryLineParameters.wmsRouteId = salesParmSubLine.WMSRouteId;
+
+                    postInventoryState.hasSubLines = true;
+                    this.updateInventoryForLine(updateInventoryLineParameters, postInventoryState);
+                }
+
+                if (salesLine.Complete && abs(_inventMovement.transQtyUnit()) != abs(postInventoryState.updateNow))
+                {
+                    throw error("@SYS25384");
+                }
+            }
+            else
+            {
+                SalesPackingSlipJournalPostUpdateInventoryLineParameters updateInventoryLineParameters = SalesPackingSlipJournalPostUpdateInventoryLineParameters::construct();
+                updateInventoryLineParameters.inventMovement = _inventMovement;
+                updateInventoryLineParameters.custPackingSlipTrans  = localCustPackingSlipTrans;
+
+                postInventoryState.hasSubLines  = false;
+                this.updateInventoryForLine(updateInventoryLineParameters, postInventoryState);
+            }
+
+            updateNow           = postInventoryState.updateNow;
+            updateNowInvent     = postInventoryState.inventUpdateNow;
+            cwUpdateNow         = postInventoryState.cwUpdateNow;
+        }
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLine</Name>
+				<Source><![CDATA[
+    protected void updateSourceLine()
+    {
+        // Add to qty awaiting return
+        if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            salesLine.RORRemainSalesReturn  += salesParmLine.DeliverNow;
+            salesLine.RORRemainInventReturn += salesParmLine.InventNow;
+        }
+
+        next updateSourceLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postInventory</Name>
+				<Source><![CDATA[
+    protected void postInventory()
+    {
+        //TODO check this - SalesPackingSlipJournalPost::PostInventory class method itself calls this method - which is twice the call for same thing
+        if(salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental)
+        {
+            // change status of dummy invent trans into Registered if neccessary
+            // this.RORUpdateInventoryWithPicking();
+
+            // also 'deliver' the compensating transaction
+            inventMovement = InventMovement::construct(salesLine, InventMovSubType::BOBCompensatingTrans);
+            this.updateInventory(inventMovement);
+        }
+
+        next postInventory();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkBeforePostingLine</Name>
+				<Source><![CDATA[
+    protected void checkBeforePostingLine()
+    {
+        SalesParmLine           salesParmLineLocal  = SalesParmLine::findInventTransId(salesParmTable.ParmId, salesLine.InventTransId);
+        BOBRentalInventOnHand   onHand              = new BOBRentalInventOnHand();
+    
+        if(!onHand.validateStatusUpdate(salesLine, salesParmLineLocal.InventNow, BOBRentalSubStatus::Delivered))
+        {
+            throw error(strFmt("@DNR7097", salesParmLineLocal.DeliverNow, salesLine.ItemId));
+        }
+
+        next checkBeforePostingLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>endPost</Name>
+				<Source><![CDATA[
+    protected void endPost()
+    {
+        next endPost();
+
+        if (!salesParmTable.salesParmUpdate().Proforma)
+        {
+            this.BOBUpdateObjects(salesParmTable);
+        }
+
+        FormLetterContract chainFormletterContract = this.parmChainFormletterContract();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateObjects</Name>
+				<Source><![CDATA[
+    // extension methods
+
+
+    private void BOBUpdateObjects(salesParmTable _salesParmTable)
+    {
+        SalesParmLine                       salesParmLine;
+        SalesTable                          salesTable;
+        SalesLine                           salesLine;
+        InventTrans                         inventTrans;
+        InventTransOriginSalesLine          inventTransOriginSalesLine;
+        InventDim                           inventDim;
+        BOBObjectTable                      objectTable;
+        WPPWorkOrderTable                   workOrderTable;
+        WPPWorkOrderLine                    workOrderLine;
+        WPPWorkOrderTaskTable               workOrderTaskTable;
+        InventLocation                      inventLocation;
+        LogisticsEntityPostalAddressView    addressView;
+        WPPParameters                       parameters;
+        CustPackingSlipJour                 custPackingSlipJour;
+        LogisticsPostalAddressRecId         postalAddress;
+        boolean                             updateLocationLog;
+        RecId                               objectTableRecIdPrev;
+        Set                                 updatedObjects = new Set(Types::Int64);
+        InventTable                         inventTable;
+        EcoResProduct                       ecoResProduct;
+        ;
+    
+        updateLocationLog = true;
+        parameters = WPPParameters::find();
+    
+        while select salesParmLine
+        where salesParmLine.ParmId == _salesParmTable.ParmId
+        &&    salesParmLine.TableRefId == _salesParmTable.TableRefId
+        &&    salesParmLine.DeliverNow != 0
+            join RecId from salesTable
+            where salesTable.SalesId == salesParmLine.OrigSalesId
+                join RORTradeType, RORParentLineRecId, TableId, RecId from salesLine
+                where salesLine.SalesId == salesTable.SalesId
+                &&    salesLine.RecId == salesParmLine.SalesLineRecId
+                    join TableId from inventTransOriginSalesLine
+                    where inventTransOriginSalesLine.SalesLineDataAreaId == salesLine.dataAreaId
+                    &&    inventTransOriginSalesLine.SalesLineInventTransId == salesLine.InventTransId
+                        join TableId from inventTrans
+                        where inventTrans.InventTransOrigin == inventTransOriginSalesLine.InventTransOrigin
+                            join TableId, InventLocationId from inventDim
+                            where inventDim.inventDimId == inventTrans.InventDimId
+                            &&    inventDim.inventSerialId // serialized rental items only
+                                join TableId from inventTable
+                                where inventTable.ItemId == inventTrans.ItemId
+                                    join TableId from ecoResProduct
+                                    where ecoResProduct.RecId == inventTable.Product
+                                    &&    ecoResProduct.BOBRentalTypeId
+                                        join objectTable
+                                        where objectTable.InventSerialId == inventDim.inventSerialId
+                                        &&    objectTable.AcqProductNumber == ecoResProduct.DisplayProductNumber
+                                            join TableId from custPackingSlipJour
+                                            where custPackingSlipJour.SalesId == salesTable.SalesId
+                                                outer join RecId, RORReturnInventLocationId, WorkOrderId from workOrderTable
+                                                where (workOrderTable.OrderTableId == salesLine.TableId
+                                                &&     workOrderTable.OrderRecId   == salesLine.RecId) ||
+                                                        (workOrderTable.OrderTableId == salesTable.TableId
+                                                &&     workOrderTable.OrderRecId   == salesTable.RecId)
+                                                    outer join TaskId from workOrderLine
+                                                    where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+        {
+            updateLocationLog = true;
+    
+            // Can't be in the big while select, because it won't find a record when using outer join
+            // Using only join will find a record, but then the packing slip posting wihout a work order won't update the location anymore
+            select firstOnly workOrderTaskTable
+            where workOrderTaskTable.TaskId == workOrderLine.TaskId
+            &&    workOrderTaskTable.TaskType == WPPTaskType::Delivery;
+    
+            if ((objectTableRecIdPrev != objectTable.RecId
+            ||  workOrderTaskTable)
+            // if object table processed more than once then it needs to be updated only for the first time
+            && !updatedObjects.in(objectTable.RecId))
+            {
+                // When a sales line is linked to a work order and a task on the work order line
+                // is setup as delivery task then the object is updated when the packing slip is
+                // posted from the work order line status update
+                if (workOrderTable.RecId
+                ||  WPPWorkOrderTable::workOrderLinkedToOrderLineParent(salesLine.RORParentLineRecId, tableNum(SalesLine)))
+                {
+                    if (!workOrderTaskTable.RecId)
+                    {
+                        workOrderTaskTable = WPPWorkOrderTable::findTaskTableLinkedToOrderLineParent(salesLine.RORParentLineRecId, tableNum(SalesLine));
+                    }
+    
+                    if (workOrderTaskTable.TaskId   == parameters.InternalLoadTaskId
+                    ||  workOrderTaskTable.TaskType == WPPTaskType::Load)
+                    {
+                        postalAddress = parameters.InTransitAddress;
+                    }
+                    else
+                    if (workOrderTaskTable.TaskId == parameters.InternalDeliveryTaskId)
+                    {
+                        if (workOrderTable.RORReturnInventLocationId)
+                        {
+                            select firstOnly TableId from inventLocation
+                            where inventLocation.InventLocationId == workOrderTable.RORReturnInventLocationId
+                                outer join PostalAddress from addressView
+                                where addressView.IsPrimary
+                                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                                &&    addressView.Entity == inventLocation.RecId;
+                        }
+                        else
+                        {
+                            select firstOnly TableId from inventLocation
+                            where inventLocation.InventLocationId == inventDim.InventLocationId
+                                outer join PostalAddress from addressView
+                                where addressView.IsPrimary
+                                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                                &&    addressView.Entity == inventLocation.RecId;
+                        }
+    
+                        postalAddress = addressView.PostalAddress;
+                    }
+                    else
+                    if (workOrderTaskTable.TaskType == WPPTaskType::Delivery)
+                    {
+                        postalAddress = salesParmLine.DeliveryPostalAddress;
+                    }
+                    else
+                    {
+                        updateLocationLog = false;
+                    }
+                }
+                else
+                {
+                    postalAddress = salesParmLine.DeliveryPostalAddress;
+                }
+    
+                if(salesParmLine.DeliverNow > 0)
+                {
+                    BOBObjectManager::deliverSalesLine(objectTable, salesParmLine, postalAddress, updateLocationLog);
+                }
+                else
+                {
+                    BOBObjectManager::unDeliverSalesLine(objectTable, salesParmLine, salesTable);
+                }
+                updatedObjects.add(objectTable.RecId);
+    
+                objectTableRecIdPrev = objectTable.RecId;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPMustDuplicateTask</Name>
+				<Source><![CDATA[
+    public void WPPMustDuplicateTask()
+    {
+        if (!this.WPPParmMustDuplicateWorkOrderLine()
+        &&   salesParmTable.WPPDuplTaskOnPartialFormLetterPosting
+        ///&&   chainFormletterContract.WPPParmMustDuplicateTask()
+            )
+        {
+            this.WPPParmMustDuplicateWorkOrderLine(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

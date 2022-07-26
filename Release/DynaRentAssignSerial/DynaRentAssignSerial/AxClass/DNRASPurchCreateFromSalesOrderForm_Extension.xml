@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRASPurchCreateFromSalesOrderForm_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(formStr(PurchCreateFromSalesOrder))]
+public final class DNRASPurchCreateFromSalesOrderForm_Extension
+{
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    void init()
+    {
+        next init();
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRASAssignSerial)))
+        {
+            DNRASSplitLines.visible(!purchCreateFromSalesOrder.RORparmForcePurchTypePurchase());
+
+            this.design().controlName(formControlStr(PurchCreateFromSalesOrder, RORPurchasePrice)).enabled(false);
+            this.design().controlName(formControlStr(PurchCreateFromSalesOrder, ROREditSubRentalLineDisc)).visible(false);
+
+            FormRealControl displaySubRentalGrossAmountCtrl = this.design().controlName(formControlStr(PurchCreateFromSalesOrder, RORDisplaySubRentalGrossAmount));
+            displaySubRentalGrossAmountCtrl.enabled(false);
+            displaySubRentalGrossAmountCtrl.visible(false);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASSetSubRentalGrossAmount</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    public RORRentalGrossAmount DNRASSetSubRentalGrossAmount(SalesLine _salesLine, boolean _set, RORRentalGrossAmount _grossAmount)
+    {
+        this.selectTmpPurchLinePrice(_salesLine);
+
+        if (_set)
+        {
+            tmpPurchLinePrice.RORSubRentalGrossAmount = _grossAmount;
+            tmpPurchLinePrice.DNRSkipSetPriceDisc = true;
+            tmpPurchLinePrice.Price = tmpPurchLinePrice.PurchQty ? _grossAmount / tmpPurchLinePrice.PurchQty : 0;
+            tmpPurchLinePrice.setLineAmount();
+
+            tmpPurchLinePrice.write();
+        }
+
+        return tmpPurchLinePrice.RORSubRentalGrossAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASSplitLines</Name>
+				<Source><![CDATA[
+    public List DNRASSplitLines()
+    {
+        List ret = new List(Types::String);
+        SalesLine salesLine = salesLine_ds.getFirst();
+   
+        while (salesLine.RecId)
+        {
+            if (salesLine.DNRASMaySplitLine())
+            {
+                boolean isParentIncluded = true;
+
+                if (salesLine.RORParentLineRecId)
+                {
+                    SalesLine salesLineParent = SalesLine::findRecId(salesLine.RORParentLineRecId);
+
+                    this.selectTmpPurchLinePrice(salesLineParent);
+                    isParentIncluded = tmpPurchLinePrice.Included;
+                }
+
+                this.selectTmpPurchLinePrice(salesLine);
+            
+                if (tmpPurchLinePrice.PurchQty > 1 && tmpPurchLinePrice.Included)
+                {
+                    if (!isParentIncluded)
+                    {
+                        checkFailed(strFmt("@DNR:SerializedItemParentNotSelected", salesLine.ItemId));
+                        salesLine = salesLine_ds.getNext();
+                        continue;
+                    }
+
+                    DNRASSplitEngine splitEngine = DNRASSplitEngine::construct(salesLine, salesLine.SalesQty - 1);
+                    splitEngine.run();
+
+                    Map splitLinesMap = splitEngine.parmSplitLinesMap();
+                    this.DNRASUpdateTmpPurchLines(splitLinesMap);
+
+                    ret.addEnd(salesLine.InventTransId);
+                    ret.appendList(splitLinesMap.lookup(salesLine.RecId));
+                }
+            }
+
+            salesLine = salesLine_ds.getNext();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASConfirmAfterSplit</Name>
+				<Source><![CDATA[
+    private void DNRASConfirmAfterSplit(List _inventTransIds)
+    {
+        List lineList = new List(Types::Record);
+        ListEnumerator inventTransIdsEnumerator = _inventTransIds.getEnumerator();
+
+        while (inventTransIdsEnumerator.moveNext())
+        {
+            lineList.addEnd(SalesLine::findInventTransId(inventTransIdsEnumerator.current()));
+        }
+
+        SalesTable salesTable = SalesTable::find(salesLine.SalesId);
+
+        SalesFormLetter salesFormLetter = SalesFormLetter::construct(DocumentStatus::Confirmation);
+        salesFormLetter.parmLineList(lineList.pack());
+        salesFormLetter.createFromLines(true);
+        salesFormLetter.update(salesTable);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASResetInventTransIdRange</Name>
+				<Source><![CDATA[
+    private void DNRASResetInventTransIdRange(List _inventTransIds)
+    {
+        QueryBuildRange qbdRange = SysQuery::findOrCreateRange(salesLine_ds.queryBuildDataSource(), fieldNum(SalesLine, InventTransId));
+
+        if (qbdRange && !_inventTransIds.empty())
+        {
+            ListEnumerator inventTransIdsEnumerator = _inventTransIds.getEnumerator();
+            String255 queryBuildValueStr;
+
+            while (inventTransIdsEnumerator.moveNext())
+            {
+                queryBuildValueStr = queryBuildValueStr ?
+                                     inventTransIdsEnumerator.current() :
+                                     queryBuildValueStr + ', ' + inventTransIdsEnumerator.current();
+            }
+
+            qbdRange.value(queryBuildValueStr);
+        }
+
+        salesLine_ds.research(true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASUpdateTmpPurchLines</Name>
+				<Source><![CDATA[
+    private void DNRASUpdateTmpPurchLines(Map _salesLineMap)
+    {
+        if (_salesLineMap.empty())
+        {
+            return;
+        }
+
+        MapEnumerator salesLineMapEnumerator = _salesLineMap.getEnumerator();
+
+        while (salesLineMapEnumerator.moveNext())
+        {
+            SalesLine salesLine = SalesLine::findRecId(salesLineMapEnumerator.currentKey());
+            List splitLines = salesLineMapEnumerator.currentValue();
+
+            if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+            {
+                this.selectTmpPurchLinePrice(salesLine);
+
+                PriceCur mainLinePrice  = tmpPurchLinePrice.Price;
+                DiscPct mainLineLinePercent = tmpPurchLinePrice.LinePercent;
+                VendAccount mainLineAccountNum = tmpPurchLinePrice.AccountNum;
+                boolean mainLineIncluded = tmpPurchLinePrice.Included;
+                
+                tmpPurchLinePrice.DNRASInitFromSalesLine(salesLine);
+                tmpPurchLinePrice.write();
+
+                ListEnumerator splitLinesEnumerator = splitLines.getEnumerator();
+
+                while (splitLinesEnumerator.moveNext())
+                {
+                    InventTransId inventTransId = splitLinesEnumerator.current();
+                    salesLine = SalesLine::findInventTransId(inventTransId);
+                    this.selectTmpPurchLinePrice(salesLine);
+
+                    tmpPurchLinePrice.DNRASInitFromSalesLine(salesLine, mainLinePrice, mainLineLinePercent);
+                    tmpPurchLinePrice.AccountNum = mainLineAccountNum;
+                    tmpPurchLinePrice.Included = mainLineIncluded;
+                    tmpPurchLinePrice.write();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASEvent_PurchCreateFromSalesOrder_SalesLineDS_OnActivated</Name>
+				<Source><![CDATA[
+    // Event-handler methods
+
+    [FormDataSourceEventHandler(formDataSourceStr(PurchCreateFromSalesOrder, SalesLine), FormDataSourceEventType::Activated)]
+    public static void DNRASEvent_PurchCreateFromSalesOrder_SalesLineDS_OnActivated(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRASAssignSerial)))
+        {
+            FormRun formRun = _sender.formRun();
+            PurchCreateFromSalesOrder purchCreateFromSalesOrder = formRun.args().caller();
+            SalesLine salesLine = _sender.cursor();
+
+            FormControl splitLineCtrl = formRun.design().controlName(formControlStr(PurchCreateFromSalesOrder, DNRASSplitLines));
+            splitLineCtrl.enabled(purchCreateFromSalesOrder.DNRParmIsRentalCaller() && salesLine.DNRASMaySplitLine());
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASEvent_PurchCreateFromSalesOrder_DNRASSplitLinesCTRL_OnClicked</Name>
+				<Source><![CDATA[
+    [FormControlEventHandler(formControlStr(PurchCreateFromSalesOrder, DNRASSplitLines), FormControlEventType::Clicked)]
+    public static void DNRASEvent_PurchCreateFromSalesOrder_DNRASSplitLinesCTRL_OnClicked(FormControl _sender, FormControlEventArgs _eventArgs)
+    {
+        Object formRunObj = _sender.formRun() as Object;
+
+        List inventTransIds = formRunObj.DNRASSplitLines();
+        formRunObj.DNRASConfirmAfterSplit(inventTransIds);
+        formRunObj.DNRASResetInventTransIdRange(inventTransIds);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

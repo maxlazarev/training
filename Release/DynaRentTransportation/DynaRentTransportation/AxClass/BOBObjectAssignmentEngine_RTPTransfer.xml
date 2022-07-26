@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBObjectAssignmentEngine_RTPTransfer</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBObjectAssignmentEngine_RTPTransfer extends BOBObjectAssignmentEngine
+{
+    InventTransferLine inventTransferLine;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>assign</Name>
+				<Source><![CDATA[
+    protected void assign()
+    {
+        BOBObjectTable objectTable = BOBObjectTable::findInventSerialId(newSerialNum);
+        
+        if (objectTable)
+        {
+            // Make sure the Serial Number is already created in the current company
+            InventSerial::BOBFindOrCreateSerialNumber(objectTable.RentalTypeId, newSerialNum);
+        }
+    
+        InventDim inventDim = inventTransferLine.inventDim();
+        inventDim.inventSerialId = newSerialNum;
+    
+        inventTransferLine.InventDimId = InventDim::findOrCreate(inventDim).InventDimId;
+    
+        // record will be updated to database outside of this class, in intercompanyMirror
+        if (!forceSkipValidation)
+        {
+            if (!inventTransferLine.RecId) // record is being created
+            {
+                inventTransferLine.insert();
+            }
+            else
+            {
+                if (inventTransferLine.ItemId == inventTransferLine.orig().ItemId)
+                {
+                    inventTransferLine.update();
+                }
+                else // if a different item is assigned, first we need to drop the inventory, then manually recreate it
+                {
+                    // SalesLine selected for update, in this case the _dropInvent variable is set to true
+                    // which causes the salesLine not to be selected for update
+                    inventTransferLine.selectForUpdate(true);
+                    inventTransferLine.update(true);
+                    this.updateInventory();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>refreshFinancialDimensions</Name>
+				<Source><![CDATA[
+    protected void refreshFinancialDimensions()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setRentalLine</Name>
+				<Source><![CDATA[
+    protected void setRentalLine(RORRentalLine _rentalLine)
+    {
+        inventTransferLine = _rentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unassign</Name>
+				<Source><![CDATA[
+    protected void unassign()
+    {
+        InventDim       inventDim;
+        BOBObjectTable  objectTable;
+    
+        inventTransferLine.selectForUpdate(true);
+    
+        boolean mustDropInvent = (inventTransferLine.ItemId != inventTransferLine.orig().ItemId);
+    
+        select firstonly inventDim
+        where inventDim.inventDimId == inventTransferLine.InventDimId
+            join Category from objectTable
+            where objectTable.InventSerialId == currentSerialNum;
+    
+        inventDim.inventSerialId = '';
+    
+        inventTransferLine.InventDimId = InventDim::findOrCreate(inventDim).InventDimId;
+    
+        // if a different item was assigned, first we need to drop the inventory, then manually recreate it
+        if (mustDropInvent)
+        {
+            inventTransferLine.update(true);
+            this.updateInventory();
+        }
+        else
+        {
+            inventTransferLine.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean         ret = true;
+        BOBObjectTable  objectTable;
+        BOBRentalType   rentalType;
+
+        if (inventTransferLine.RORTradeType == RORTradeType::SalesPurch && !inventTransferLine.BOBRentalTypeId)
+        {
+            return true;
+        }
+
+        if (inventTransferLine.BOBRentalTypeId)
+        {
+            rentalType = BOBRentalType::find(inventTransferLine.BOBRentalTypeId);
+
+            if (!rentalType)
+            {
+                ret = checkFailed(strFmt("@DNR6076", inventTransferLine.ItemId));
+            }
+    
+            if (rentalType.Classification != BOBRentalTypeClassification::Serialized)
+            {
+                ret = checkFailed(strFmt("@DNR1762", rentalType.Classification));
+            }
+            
+            if (newSerialNum)
+            {
+                ret = ret && inventTransferLine.RTPCheckDuplicateSerialNum(newSerialNum);
+
+                objectTable = BOBObjectTable::findInventSerialId(newSerialNum);
+    
+                if (inventTransferLine.RORTradeType == RORTradeType::SalesPurch)
+                {
+                    if (ret && objectTable && objectTable.Category != BOBObjectCategory::Inventory)
+                    {
+                        ret = checkFailed(strFmt("@DNR:ObjectOfTypeMayBeAssigned", BOBObjectCategory::Inventory));
+                    }
+                }
+                else
+                {
+                    if(!objectTable)
+                    {
+                        ret = checkFailed(strFmt("@DNR6375", newSerialNum));
+                    }
+
+                    if (ret && objectTable.Category != BOBObjectCategory::Rental
+                            && objectTable.Category != BOBObjectCategory::SubRental)
+                    {
+                        ret = checkFailed(strFmt("@DNR6376", BOBObjectCategory::Rental, BOBObjectCategory::SubRental));
+                    }
+            
+                    if (objectTable.Category == BOBObjectCategory::Rental || objectTable.Category == BOBObjectCategory::SubRental)
+                    {
+                        ret = ret && this.checkObjectAvailability();
+                    }
+                }
+            }
+        }
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

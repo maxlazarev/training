@@ -1,0 +1,3724 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>RORPurchCreateOrder</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class RORPurchCreateOrder extends FormRun
+{
+    PurchTableType          purchTableType;
+    PurchTableForm          purchTableForm;
+
+    PurchCreateOrderForm    purchCreateOrderForm;
+    PurchAgreementId        purchAgreementId;
+
+    NumberSeqFormHandler    numberSeqFormHandlerPurchId;
+    boolean                 transferCurrencyAndDeliveryAddressFromAgreement;
+    boolean                 createRentalDateTimes;
+
+    // <GEERU>
+    #ISOCountryRegionCodes
+    boolean countryRegion_RU;
+    // </GEERU>
+
+    // Please notice
+    // This field control PurchTable_contactPersonId is hidden in the form, but must be avalible
+    // in order to make it possible to have lookup on contact-NAME
+
+    BankLCImportFeatureChecker      bankLCImportFeatureChecker;
+    BankLGFeatureChecker            bankLGFeatureChecker;
+
+    boolean isPurchTableEnabled_W;
+
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canClose</Name>
+				<Source><![CDATA[
+    boolean canClose()
+    {
+        boolean datesOK = true;
+
+        if (element.closedOk())
+        {
+            datesOK = isConfigurationkeyEnabled(configurationKeyNum(RORRentalDateTimes)) && RORRentalDateTimes.validateWrite();
+        }
+
+        if (purchTableType && !element.closedOk())
+        {
+            purchTableType.formMethodClose();
+        }
+
+        if (element.closedOk() 
+            && (!purchTable_ds.validateWrite() 
+                || (vendorName.allowEdit() && !vendorName.validate())
+                || !datesOK))
+        {
+            return false;
+        }
+
+        purchTable_ds.write();
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeType</Name>
+				<Source><![CDATA[
+    void changeType(PurchaseType _purchaseType)
+    {
+        if (purchTableType)
+        {
+            numberSeqFormHandlerPurchId = purchTableType.parmNumberSeqFormHandlerPurchId();
+        }
+
+        purchCreateOrderForm = PurchCreateOrderForm::construct(_purchaseType, purchTableForm.project());
+
+        if (purchTableForm.project())
+        {
+            purchTableType = new PurchTableType_Project(purchTable);
+        }
+        else
+        {
+            purchTableType       = purchTable.type();
+        }
+
+        purchTableType.parmNumberSeqFormHandlerPurchId(numberSeqFormHandlerPurchId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>configBankDocumentControls</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Configs the Bank Document Controls.
+    /// </summary>
+    public void configBankDocumentControls()
+    {
+        boolean enableDocumentType = false;
+
+        if (bankLCImportFeatureChecker.checkFeatureEnabled()
+            || bankLGFeatureChecker.checkFeatureEnabled())
+        {
+            enableDocumentType = purchTable.type().mayBankDocumentTypeBeModified();
+            purchTable_DS.object(fieldNum(PurchTable, BankDocumentType)).enabled(enableDocumentType);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>removePurchAgreementLink</Name>
+				<Source><![CDATA[
+    private void removePurchAgreementLink()
+    {
+        if (purchTable.OrderAccount)
+        {
+            if (transferCurrencyAndDeliveryAddressFromAgreement)
+            {
+                purchTable.initFromVendTable(VendTable::find(purchTable.OrderAccount));
+            }
+            transferCurrencyAndDeliveryAddressFromAgreement = false;
+            purchTable.MatchingAgreement = 0;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canPurchAgreementBeLinked</Name>
+				<Source><![CDATA[
+    private boolean canPurchAgreementBeLinked(PurchAgreementId _purchAgreementId)
+    {
+        if (!_purchAgreementId)
+        {
+            return false;
+        }
+
+        PurchAgreementHeader purchAgreementHeader = PurchAgreementHeader::findAgreementId(_purchAgreementId);
+
+        if (!purchAgreementHeader)
+        {
+            checkFailed(strFmt("@SYS112224",
+                            _purchAgreementId, "@SYS309959", tableId2pname(tableNum(PurchAgreementHeader))));
+            return false;
+        }
+
+        if ((purchTable.OrderAccount
+            && purchAgreementHeader.VendAccount
+            && purchTable.OrderAccount != purchAgreementHeader.VendAccount)||
+            (purchTable.InvoiceAccount
+            && purchAgreementHeader.purchAgreementHeaderDefault().VendorInvoiceAccount
+            && purchAgreementHeader.purchAgreementHeaderDefault().VendorInvoiceAccount != purchTable.InvoiceAccount))
+        {
+            checkFailed(strFmt("@GLS115616"));
+            return false;
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>editPurchAgreementId</Name>
+				<Source><![CDATA[
+    //BP Deviation Documented
+    edit PurchAgreementId editPurchAgreementId(boolean _set, PurchAgreementId _purchAgreementId)
+    {
+        PurchAgreementHeader    purchAgreementHeader;
+        AgreementHeaderDefault  agreementHeaderDefault;
+        #ISOCountryRegionCodes
+
+        if (_set)
+        {
+            if (_purchAgreementId != purchAgreementId)
+            {
+                purchAgreementHeader = PurchAgreementHeader::findAgreementId(_purchAgreementId);
+
+                if (purchAgreementHeader.RecId)
+                {
+                    if (!this.canPurchAgreementBeLinked(_purchAgreementId))
+                    {
+                        this.removePurchAgreementLink();
+                        return purchAgreementId;
+                    }
+
+                    agreementHeaderDefault = AgreementHeaderDefault::findAgreementHeader(purchAgreementHeader.RecId);
+                    if (purchTable.ProjId
+                        && agreementHeaderDefault.Project
+                        && purchTable.ProjId != agreementHeaderDefault.Project)
+                    {
+                        info("@SYS334900");
+                        return purchAgreementId;
+                    }
+
+                    if (purchAgreementHeader.canReleaseAgreement(purchTable.DeliveryDate))
+                    {
+                        transferCurrencyAndDeliveryAddressFromAgreement = true;
+                        purchAgreementId = _purchAgreementId;
+                        if (Box::yesNo("@SYS311926",DialogButton::Yes) == DialogButton::Yes)
+                        {
+                            purchTable.CurrencyCode = purchAgreementHeader.Currency;
+                            purchTable.LanguageId = purchAgreementHeader.Language;
+
+                            purchTable.initFromPurchAgreementHeader(purchAgreementHeader);
+
+                            purchTable_CurrencyCode.update();
+                            purchTable_ds.refresh();
+                        }
+                        else
+                        if (countryRegion_RU)
+                        {
+                            purchTable.DefaultDimension = purchTable.copyDimension(purchAgreementHeader.DefaultDimension);
+                        }
+                    }
+                    else
+                    {
+                        transferCurrencyAndDeliveryAddressFromAgreement = false;
+                        throw error("@SYS103075");
+                    }
+                }
+                else if (!_purchAgreementId)
+                {
+                    purchAgreementId = _purchAgreementId;
+                    transferCurrencyAndDeliveryAddressFromAgreement = false;
+                    if (countryRegion_RU)
+                    {
+                        purchTable.DefaultDimension = AgreementHeaderExt_RU::clearAgreementDimension(purchTable.DefaultDimension);
+                    }
+                }
+            }
+        }
+
+        return purchAgreementId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>enableFieldsActive_IN</Name>
+				<Source><![CDATA[
+    void enableFieldsActive_IN()
+    {
+        if (!TaxParameters::find().Customs_IN)
+        {
+            purchTable_W_ds.object(fieldNum(PurchTable_W, CustomsImportOrder_IN)).visible(false);
+        }
+        else
+        {
+            purchTable_W_ds.object(fieldNum(PurchTable_W, CustomsImportOrder_IN)).visible(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    void init()
+    {
+        isPurchTableEnabled_W = PurchTable_W::isExtensionEnabled();
+
+        super();
+
+        if (! element.args().caller())
+        {
+            throw error("@SYS22539");
+        }
+
+        bankLCImportFeatureChecker = BankLCImportFeatureChecker::construct();
+        bankLGFeatureChecker       = BankLGFeatureChecker::construct();
+
+        purchTable_DS.object(fieldNum(PurchTable, BankDocumentType)).visible(
+            bankLCImportFeatureChecker.checkFeatureEnabled()
+                || bankLGFeatureChecker.checkFeatureEnabled());
+
+        purchTableForm          = element.args().caller();
+        purchCreateOrderForm    = PurchCreateOrderForm::construct(purchTableForm.defaultPurchaseType(),purchTableForm.project());
+
+        TaxVATNumTable::enableLookupVATNum(purchTable_VATNum);
+        logisticsPostalAddress_ds.addFieldToSelectionList(fieldNum(LogisticsPostalAddress, CountryRegionId));
+
+        if (SysCountryRegionCode::isLegalEntityInCountryRegion([#isoIN]))
+        {
+            element.enableFieldsActive_IN();
+        }
+        countryRegion_RU = SysCountryRegionCode::isLegalEntityInCountryRegion([#isoRU]);
+        if (countryRegion_RU)
+        {
+            element.design().controlName(formControlStr(PurchCreateOrder, editPurchAgreementId)).visible(false);
+        }
+
+        if (purchTableForm.parmNumberSeqFormHandlerPurchId() != null)
+        {
+            numberSeqFormHandlerPurchId = purchTableForm.parmNumberSeqFormHandlerPurchId();
+            numberSeqFormHandlerPurchId.parmFormDataSource(purchTable_ds);
+        }
+
+        element.updateDesign();
+        PurchTable_ds.updateDesign();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifyForm</Name>
+				<Source><![CDATA[
+    void  modifyForm()
+    {
+        boolean showVATNum = purchCreateOrderForm.showVATNum();
+
+
+        purchTable_ds.object(fieldNum(PurchTable, PurchId)).allowEdit(purchCreateOrderForm.allowEditPurchId());
+        purchTable_ds.object(fieldNum(PurchTable, PurchId)).skip(!purchCreateOrderForm.allowEditPurchId());
+
+        purchTable_ds.object(fieldNum(PurchTable, ReturnItemNum)).visible(purchCreateOrderForm.returnItemNum());
+
+        purchTable_ds.object(fieldNum(PurchTable, ProjId)).allowEdit(purchCreateOrderForm.editProjId(purchTableForm.projId()));
+        purchTable_ds.object(fieldNum(PurchTable, ProjId)).skip(!purchCreateOrderForm.editProjId(purchTableForm.projId()));
+        purchTable_ds.object(fieldNum(PurchTable, WPPIsRentalProject)).allowEdit(purchCreateOrderForm.editProjId(purchTableForm.projId()));
+
+        purchTable_ds.object(fieldNum(PurchTable, vatNum)).visible(showVATNum);
+        groupTax.visible(showVATNum);
+
+        purchTable_ds.object(fieldNum(PurchTable, PurchaseType)).allowEdit(purchTableForm.editPurchaseType());
+        purchTable_ds.object(fieldNum(PurchTable, PurchaseType)).skip(!purchTableForm.editPurchaseType());
+
+        element.configBankDocumentControls();
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>orderAccountModified</Name>
+				<Source><![CDATA[
+    public void orderAccountModified()
+    {
+        PurchTable_RU       purchTable_RU;
+    
+        if (purchTable.OrderAccount)
+        {
+            purchTable_ds.object(fieldNum(PurchTable, OneTimeVendor)).allowEdit(false);
+            purchTable_ds.object(fieldNum(PurchTable, OneTimeVendor)).skip(true);
+        }
+        else
+        {
+            purchTable_ds.object(fieldNum(PurchTable, OneTimeVendor)).allowEdit(true);
+            purchTable_ds.object(fieldNum(PurchTable, OneTimeVendor)).skip(false);
+        }
+    
+        var vendor = VendTable::find(purchTable.OrderAccount);
+        purchTable_ds.object(fieldNum(PurchTable, ChangeRequestRequired)).allowEdit(PurchParameters::find().ChangeRequestAllowOverride && vendor.ChangeRequestOverride && vendor.ChangeRequestAllowOverride);
+    
+        if (countryRegion_RU)
+        {
+            purchTable.DefaultDimension = AgreementHeaderExt_RU::clearAgreementDimension(purchTable.DefaultDimension);
+    
+            purchTable_RU = purchTable.PurchTable_RU();
+            purchTable_RU.AgreementHeaderExt_RU = 0;
+            purchTable.packPurchTable_RU(purchTable_RU);
+        }
+
+        if (purchTable.MatchingAgreement)
+        {
+            this.removePurchAgreementLink();
+        }
+
+        groupInterCompany.enabled(purchTable.vendTable_OrderAccount().interCompanyTradingRelationActive());
+        vendorName.text(purchTable.vendorName());
+        if (purchTable.OrderAccount != purchTable.InvoiceAccount)
+        {
+            invoiceName.text(purchTable.invoiceName());
+        }
+        else
+        {
+            // No need to look up the invoice name if the account is not different from the order account as it will cause a RPC.
+            invoiceName.text(vendorName.text());
+        }
+    
+        if (purchTableForm && purchTableForm.RORParmInventLocationId())
+        {
+            purchTable.InventSiteId     = '';
+            purchTable.InventLocationId = purchTableForm.RORParmInventLocationId();
+            purchTable.modifiedField(fieldNum(PurchTable, InventLocationId));
+        }
+    
+        purchTable_ds.refresh();
+        purchTable_ds.rereadReferenceDataSources();
+        if (isPurchTableEnabled_W)
+        {
+            purchTable_W_ds.refresh();
+            purchTable_W_ds.rereadReferenceDataSources();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    void  run()
+    {
+        VendAccount     accountNum;
+    
+        purchTable_ds.create();
+        createRentalDateTimes = isConfigurationkeyEnabled(configurationKeyNum(RORRentalDateTimes));
+        RORRentalDateTimes_ds.create();
+        element.modifyForm();
+    
+        super();
+    
+        accountNum = element.args().parm();
+
+        if (!accountNum)
+        {
+            accountNum = purchTableForm.vendAccount();
+        }
+    
+        if (accountNum != '')
+        {
+            purchTable.OrderAccount = accountNum;
+            purchTable.transferOrderAccount();
+            element.orderAccountModified();
+        }
+        else
+        {
+            purchTable_orderAccount.setFocus();
+        }
+    
+        if (!purchTableType)
+        {
+            element.close();
+            throw Exception::Error;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateDesign</Name>
+				<Source><![CDATA[
+    private void updateDesign()
+    {
+        boolean showRentalDateTimes = isConfigurationkeyEnabled(configurationKeyNum(RORRentalDateTimes));
+
+        TabPageRentalDates.visible(showRentalDateTimes);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="">
+			<DataSource>
+				<Name>PurchTable</Name>
+				<Methods>
+					<Method>
+						<Name>research</Name>
+						<Source><![CDATA[
+        public void research(boolean _retainPosition = false)
+        {
+            //Disable the refresh feature in this form. Do not invoke "super(_retainPosition);".
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>editVendorName</Name>
+						<Source><![CDATA[
+        public edit VendName editVendorName(boolean _set, VendName _vendorName)
+        {
+            if (_set)
+            {
+                purchTable.PurchName = _vendorName;
+                purchTable.transferToOneTimeVendor();
+            }
+
+            return purchTable.PurchName;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>reread</Name>
+						<Source><![CDATA[
+        public void reread()
+        {
+            if (purchTable.RecId)
+            {
+                super();
+            }
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>write</Name>
+						<Source><![CDATA[
+        void write()
+        {
+            boolean hasExensionTableEnabled = PurchTable::hasExensionTableEnabled();
+
+            if (!element.closedOk())
+            {
+                return;
+            }
+
+            try
+            {
+                purchTableType.formMethodDataSourceWrite(element, purchTable_ds);
+                
+                // We keep for now the SysExtensionSerializerMap::packAll(), even if it is not used anymore.
+                // In the future the SysExtension Framework will be revamped and we will perform the change then.
+                if (hasExensionTableEnabled)
+                {
+                    purchTable.SysExtensionSerializerMap::packAll();
+                }
+
+                PurchAgreementHeader  purchAgreementHeader;
+                AgreementReleaseHeaderMatch agreementReleaseHeaderMatch;
+
+                // <GEERU>
+                PurchAgreementHeaderExt_RU      purchAgreementHeaderExt;
+                PurchTable_RU                   purchTable_RU;
+                // </GEERU>
+
+                ttsbegin;
+
+                if (purchTable.ProjId && !purchTable.isProjectSalesItemReqPO())
+                {
+                    purchTable.initFromProjInvoiceTable();
+                }
+
+                if (purchAgreementId)
+                {
+                    purchAgreementHeader = PurchAgreementHeader::findAgreementId(purchAgreementId);
+                    purchTable.MatchingAgreement = purchAgreementHeader.RecId;
+                    // <GEERU>
+                    if (SysCountryRegionCode::isLegalEntityInCountryRegion([#isoRU]))
+                    {
+                        purchAgreementHeaderExt = PurchAgreementHeaderExt_RU::findByPurchAgreementHeader(purchAgreementHeader.RecId);
+
+                        purchTable_RU = purchTable.purchTable_RU();
+                        purchTable_RU.AgreementHeaderExt_RU = purchAgreementHeaderExt.RecId;
+                        purchTable.packPurchTable_RU(purchTable_RU);
+
+                        purchTable.DefaultDimension = purchTable.copyDimension(purchAgreementHeader.DefaultDimension);
+                    }
+                    // </GEERU>
+                }
+                
+                purchTable.insert(false);
+
+                if (purchAgreementHeader.RecId)
+                {
+                    agreementReleaseHeaderMatch.initFromAgreementHeader(purchAgreementHeader);
+                    agreementReleaseHeaderMatch.initFromPurchTable(purchTable);
+                    agreementReleaseHeaderMatch.insert();
+                }
+
+                RORRentalDateTimes.initFromHost(purchTable);
+                RORRentalDateTimes.write();
+
+                if(purchTable.InterCompanyOrder && purchTable.PurchaseType == PurchaseType::RORSubRental)
+                {
+                    changecompany(purchTable.InterCompanyCompanyId)
+                    {
+                        SalesTable  salesTableIC = SalesTable::find(purchTable.InterCompanySalesId);
+                        new RORRentalDateSynchroniser().copyRentalDateTimes(RORRentalDateTimes, null, salesTableIC);
+                    }
+                }
+
+                ttscommit;
+
+                // We keep for now the SysExtensionSerializerMap::packAll(), even if it is not used anymore.
+                // In the future the SysExtension Framework will be revamped and we will perform the change then.
+                if (hasExensionTableEnabled)
+                {
+                    purchTable.SysExtensionSerializerMap::unpackAll();
+                }
+            }
+            catch (Exception::Error)
+            {
+                purchTable.RecId = 0;
+                element.close();
+                throw Exception::Error;
+            }
+
+            purchTable_ds.refresh();
+
+            // We keep for now the SysExtensionSerializerMap::packAll(), even if it is not used anymore.
+            // In the future the SysExtension Framework will be revamped and we will perform the change then.
+            if (PurchTable::hasExensionTableEnabled())
+            {
+                purchTable.SysExtensionSerializerMap::packAll();
+            }
+
+            purchTableForm.purchTable(purchTable);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>validateWrite</Name>
+						<Source><![CDATA[
+        boolean validateWrite()
+        {
+            boolean ret;
+
+            if (!element.closedOk())
+            {
+                return true;
+            }
+
+            if (PurchTable::find(purchTable.PurchId))
+            {
+                return checkFailed(strFmt("@SYS23485",purchTable.PurchId));
+            }
+
+            if (SysCountryRegionCode::isLegalEntityInCountryRegion([#isoIN])
+                && TaxParameters::find().Customs_IN)
+            {
+                if (purchTable_W.CustomsImportOrder_IN    == NoYes::Yes &&
+                    purchTable.PurchaseType             != PurchaseType::Purch)
+                {
+                    return checkFailed("@GLS5766");
+                }
+            }
+            ret = super();
+
+            if (ret && !purchTableType.formMethodDataSourceValidateWrite(element, purchTable_ds))
+            {
+                ret = false;
+            }
+
+            if (purchAgreementId)
+            {
+                if (!element.canPurchAgreementBeLinked(purchAgreementId))
+                {
+                    element.removePurchAgreementLink();
+                    ret = false;
+                }
+            }
+
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>initValue</Name>
+						<Source><![CDATA[
+        void initValue()
+        {
+            super();
+
+            purchTableForm.purchTable(PurchTable);
+        
+            purchTableForm.initValues();
+            purchTable.PurchaseType = purchTableForm.defaultPurchaseType();
+            purchTable.ProjId       = purchTableForm.projId();
+            
+            if(purchTable.ProjId)
+            {
+                purchTable.WPPIsRentalProject = NoYes::Yes;
+            }
+        
+            if (purchTableForm.RORParmInventLocationId())
+            {
+                purchTable.InventLocationId = purchTableForm.RORParmInventLocationId();
+                purchTable.modifiedField(fieldNum(PurchTable, InventLocationId));
+            }
+                    
+            element.changeType(purchTable.PurchaseType);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>create</Name>
+						<Source><![CDATA[
+        void  create(boolean append = false)
+        {
+            if (!purchTable.PurchId)
+            {
+                super(append);
+
+                purchTableType.formMethodDataSourceCreate(element, purchTable_ds);
+                purchTableForm.parmNumberSeqFormHandlerPurchId(purchTableType.parmNumberSeqFormHandlerPurchId());
+            }
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            super();
+
+            this.object(fieldNum(PurchTable, RORVenueCode)).mandatory(RORParameters::find().isWorkLocationMandatory);
+            
+            this.cacheAddMethod(tableMethodStr(PurchTable,ContactPersonName), true);
+            this.cacheAddMethod(tableMethodStr(PurchTable,agreementDocumentTitle_RU), true);
+            this.cacheAddMethod(tableMethodStr(PurchTable,interCompanyOriginDisplay), true);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>updateDesign</Name>
+						<Source><![CDATA[
+        public void updateDesign()
+        {
+            PurchTable_ds.object(fieldNum(PurchTable, ProjId)).allowEdit(PurchTable.WPPIsRentalProject);
+            PurchTable_ds.object(fieldNum(PurchTable, ProjId)).mandatory(PurchTable.WPPIsRentalProject);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields>
+					<Field>
+						<DataField>ContactPersonId</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            void modified()
+            {
+                super();
+                purchTable_ds.refresh();
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>DeliveryPostalAddress</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            public void modified()
+            {
+                super();
+
+                purchTable_ds.refresh();
+            }
+
+]]></Source>
+							</Method>
+							<Method>
+								<Name>lookupReference</Name>
+								<Source><![CDATA[
+            public Common lookupReference(FormReferenceControl _formReferenceControl)
+            {
+                Common ret;
+                LogisticsLocationSelectionLookup_Purch lookup;
+
+                lookup = LogisticsLocationSelectionLookup_Purch::newParameters(_formReferenceControl);
+
+                lookup.parmInventSiteId(purchTable.InventSiteId);
+                lookup.parmInventLocationId(purchTable.InventLocationId);
+
+                lookup.addRoleByType(LogisticsLocationRoleType::Delivery);
+                lookup.parmReturnLocation(false);
+
+                ret = lookup.performFormLookup();
+                return ret;
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>InterCompanyOrder</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            public void modified()
+            {
+                super();
+
+                element.configBankDocumentControls();
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>InventLocationId</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            public void modified()
+            {
+                super();
+
+                purchTable_ds.refresh();
+                purchTable_ds.rereadReferenceDataSources();
+            }
+
+]]></Source>
+							</Method>
+							<Method>
+								<Name>lookup</Name>
+								<Source><![CDATA[
+            public void lookup(FormControl _formControl, str _filterStr)
+            {
+                if (purchTable.InventSiteId)
+                {
+                    InventLocation::lookupBySiteIdAllTypes(_formControl, purchTable.InventSiteId);
+                }
+                else
+                {
+                    super(_formControl, _filterStr);
+                }
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>InventSiteId</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            public void modified()
+            {
+                super();
+
+                purchTable_ds.refresh();
+                purchTable_ds.rereadReferenceDataSources();
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>InvoiceAccount</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            public void  modified()
+            {
+                super();
+                invoiceName.text(purchTable.invoiceName());
+                purchTable_ds.refresh();
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>OneTimeVendor</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            void modified()
+            {
+                super();
+
+                if (!VendTable::createOneTimeAccountValidate())
+                {
+                    purchTable.OneTimeVendor = NoYes::No;
+                }
+
+                if (purchTable.OneTimeVendor)
+                {
+                    purchTable.createOneTimeAccount();
+                    purchTable_ds.object(fieldNum(PurchTable, OneTimeVendor)).allowEdit(false);
+                    purchTable_ds.object(fieldNum(PurchTable, OneTimeVendor)).skip(true);
+                    vendorName.allowEdit(true);
+                    vendorName.mandatory(true);
+                    purchTable_orderAccount.setFocus();
+                }
+
+                purchTable_ds.refresh();
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>OrderAccount</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            void modified()
+            {
+                super();
+                element.orderAccountModified();
+            }
+
+]]></Source>
+							</Method>
+							<Method>
+								<Name>validate</Name>
+								<Source><![CDATA[
+            public boolean validate()
+            {
+                boolean ret = super();
+                editPurchAgreementId.allowEdit(purchTable.OrderAccount ? true : false);
+
+                return ret;
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>PurchaseType</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            void modified()
+            {
+                super();
+
+                element.changeType(purchTable.PurchaseType);
+                element.modifyForm();
+
+                purchTable_ds.refresh();
+
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>RORPriceTimeUnit</DataField>
+						<Methods>
+							<Method>
+								<Name>lookupReference</Name>
+								<Source><![CDATA[
+            public Common lookupReference(FormReferenceControl _formReferenceControl)
+            {
+                return UnitOfMeasureLookup::lookupReferenceForUnitOfMeasureClass(_formReferenceControl, UnitOfMeasureClass::Time);
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>RORVenueCode</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            public void modified()
+            {
+                super();
+
+                PurchTable_ds.updateDesign();
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>WorkerPurchPlacer</DataField>
+						<Methods>
+							<Method>
+								<Name>lookupReference</Name>
+								<Source><![CDATA[
+            public Common lookupReference(FormReferenceControl _formReferenceControl)
+            {
+                return HcmWorkerLookup::newOnlyActiveWorkers().lookupWorker(_formReferenceControl);
+            }
+
+]]></Source>
+							</Method>
+							<Method>
+								<Name>resolveReference</Name>
+								<Source><![CDATA[
+            public Common resolveReference(FormReferenceControl _formReferenceControl)
+            {
+                Common ret;
+
+                ret = super(_formReferenceControl);
+
+                if (!ret.RecId || !HcmWorkerLookup::newOnlyActiveWorkers().validateWorker(ret.RecId))
+                {
+                    ret.clear();
+                }
+
+                return ret;
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+					<Field>
+						<DataField>WPPIsRentalProject</DataField>
+						<Methods>
+							<Method>
+								<Name>modified</Name>
+								<Source><![CDATA[
+            public void modified()
+            {
+                super();
+
+                PurchTable_ds.updateDesign();
+            }
+
+]]></Source>
+							</Method>
+						</Methods>
+					</Field>
+				</Fields>
+			</DataSource>
+			<DataSource>
+				<Name>PurchTable_W</Name>
+				<Methods>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            if (isPurchTableEnabled_W)
+            {
+                this.linkType(FormLinkType::OuterJoin);
+            }
+            super();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+			<DataSource>
+				<Name>RORRentalDateTimes</Name>
+				<Methods>
+					<Method>
+						<Name>validateWrite</Name>
+						<Source><![CDATA[
+        public boolean validateWrite()
+        {
+            boolean ret = true;
+        
+            //ret = super();
+        
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>executeQuery</Name>
+						<Source><![CDATA[
+        public void executeQuery()
+        {
+            //super();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>write</Name>
+						<Source><![CDATA[
+        public void write()
+        {
+            //super();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>create</Name>
+						<Source><![CDATA[
+        public void create(boolean _append = false)
+        {
+            super(_append);
+        
+            if (createRentalDateTimes)
+            {
+                RORRentalDateTimes.initRentalDateTimes(PurchTable);
+        
+                if (purchTableForm.RORParmSelectionFromDateTime())
+                {
+                    RORRentalDateTimes.OnRentDateTime = DateTimeUtil::removeTimeZoneOffset(purchTableForm.RORParmSelectionFromDateTime(), DateTimeUtil::getUserPreferredTimeZone());
+                    RORRentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+                }
+                
+                if (purchTableForm.RORParmSelectionToDateTime())
+                {
+                    
+                    RORRentalDateTimes.OffRentDateTime = DateTimeUtil::removeTimeZoneOffset(purchTableForm.RORParmSelectionToDateTime(), DateTimeUtil::getUserPreferredTimeZone());
+                    if (RORRentalDateTimes.validateField(fieldNum(RORRentalDateTimes, OffRentDateTime)))
+                    {
+                        RORRentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OffRentDateTime));
+                    }
+                    else
+                    {
+                        warning("@DNR8596");
+                    }
+                }
+        
+                RORRentalDateTimes.populateNonSqlFields();
+
+                createRentalDateTimes = false;
+            }
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+		</DataSources>
+		<DataControls xmlns="">
+			<Control>
+				<Name>PurchTable_OrderAccount</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>modified</Name>
+						<Source><![CDATA[
+        public boolean modified()
+        {
+            boolean ret;
+    
+            ret = super();
+
+            if (purchAgreementId)
+            {
+                if (!element.canPurchAgreementBeLinked(purchAgreementId))
+                {
+                    element.removePurchAgreementLink();
+                }
+            }
+   
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>editContactPersonName</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>jumpRef</Name>
+						<Source><![CDATA[
+        public void jumpRef()
+        {
+            purchTable_ContactPersonId.jumpRef();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>lookup</Name>
+						<Source><![CDATA[
+        void lookup()
+        {
+            ContactPerson::lookupVendContactPerson(purchTable_contactPersonId,
+                                                   purchTable.OrderAccount,
+                                                   this,
+                                                   purchTable.ContactPersonId);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>ContactPersonName</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>lookup</Name>
+						<Source><![CDATA[
+        void lookup()
+        {
+            ContactPerson::lookupVendContactPerson(purchTable_contactPersonId,
+                                                   purchTable.OrderAccount,
+                                                   this,
+                                                   purchTable.ContactPersonId);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>editPurchAgreementId_RU</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>jumpRef</Name>
+						<Source><![CDATA[
+        public void jumpRef()
+        {
+            PurchAgreementHeaderExt_RU::purchAgreementJumpRef(
+                AgreementHeaderExt_RU::findByAgreementId(purchAgreementId).RecId);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>lookup</Name>
+						<Source><![CDATA[
+        public void lookup()
+        {
+            PurchAgreementHeader::purchAgreementLookup(this, purchTable);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>editPurchAgreementId</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>lookup</Name>
+						<Source><![CDATA[
+        public void lookup()
+        {
+            PurchAgreementHeader::purchAgreementLookup(this, purchTable);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>PurchTable_VATNum</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>jumpRef</Name>
+						<Source><![CDATA[
+        void jumpRef()
+        {
+            if (TaxVATNumTable::taxVATNumTableEnabled())
+            {
+                TaxVATNumTable::jumpRefVATNum(purchTable, element);
+            }
+            else
+            {
+                super();
+            }
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>lookup</Name>
+						<Source><![CDATA[
+        void lookup()
+        {
+            if (TaxVATNumTable::taxVATNumTableEnabled())
+            {
+                TaxVATNumTable::lookupVATNum(purchTable_VATNum,purchTable);
+            }
+            else
+            {
+                super();
+            }
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources>
+		<AxFormDataSource xmlns="">
+			<Name>PurchTable</Name>
+			<Table>PurchTable</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>AccountingDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>AccountingDistributionTemplate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>AddressRefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>AddressRefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>AutoSummaryModuleType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>AvailSalesDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BankCentralBankPurposeCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BankCentralBankPurposeText</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>BankDocumentType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CashDisc</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CashDiscPercent</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ChangeRequestRequired</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ConfirmedDlv</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ConfirmedDlvEarliest</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ConfirmingPO</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ConsTarget_JP</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ContactPersonId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ContractNum_SA</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CountyOrigDest</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CovStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>createdBy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>createdDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CrossDockingDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CurrencyCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>dataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DefaultDimension</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DeliveryDate</DataField>
+					<Mandatory>Yes</Mandatory>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DeliveryName</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DeliveryPostalAddress</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DeliveryType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DiscPercent</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DlvMode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DlvTerm</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DNRCalendarId</DataField>
+					<Mandatory>Yes</Mandatory>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DocumentState</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DocumentStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Email</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EndDisc</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EnterpriseNumber</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExchangeRateDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FinalizeClosingDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FixedDueDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FixedExchRate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FreightSlipType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FreightZone</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FSHAutoCreated</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InclTax</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyAllowIndirectCreation</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyCompanyId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyCustPurchOrderFormNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyDirectDelivery</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyOrder</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyOrigin</DataField>
+					<Visible>No</Visible>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyOriginalCustAccount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanyOriginalSalesId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InterCompanySalesId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IntrastatAddValue_LV</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IntrastatFulfillmentDate_HU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventLocationId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventSiteId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>INVInvoiceProfileId</DataField>
+					<Mandatory>Yes</Mandatory>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceAccount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceAutoNumbering_LT</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InvoiceRegister_LT</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsEncumbranceRequired</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>IsModified</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ItemBuyerGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LanguageId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LineDisc</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ListCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LocalDeliveryDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ManualEntryChangepolicy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MarkupGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MatchingAgreement</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MCRDropShipment</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>MultiLineDisc</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NumberSequenceGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OneTimeSupplier</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OneTimeVendor</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OrderAccount</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PackedExtensions</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PackingSlipAutoNumbering_LT</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PackingSlipRegister_LT</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Partition</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Payment</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PaymentSched</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PaymMode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PaymSpec</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Port</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PostingProfile</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PriceGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ProjId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchaseOrderHeaderCreationMethod</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchaseType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchName</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchOrderFormNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchPoolId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchStatus</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReasonTableRef</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReceiptDateConfirmed</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReplenishmentLocation</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReqAttention</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Requester</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RetailDriverDetails</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RetailRetailStatusType</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReturnItemNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReturnReasonCodeId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ReturnReplacementCreated</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RORCalendarId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RORIsModified</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RORPriceTimeUnit</DataField>
+					<Mandatory>Yes</Mandatory>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RORVenueCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ServiceAddress</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ServiceCategory</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ServiceDate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ServiceName</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SettleVoucher</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ShippingDateConfirmed</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ShippingDateRequested</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SkipCreateMarkup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SkipUpdate</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SkipVersioning</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SourceDocumentHeader</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SourceDocumentLine</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StatProcId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SystemEntryChangePolicy</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SystemEntrySource</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TAMVendRebateGroupId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxPeriodPaymentCode_PL</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransactionCode</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Transport</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransportationDocument</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>UnitedVATInvoice_LT</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>URL</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VATNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VendGroup</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VendInvoiceDeclaration_IS</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>VendorRef</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>WorkerPurchPlacer</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>WPPIsRentalProject</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>WPPWorkOrderTemplateId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources>
+				<AxFormReferencedDataSource>
+					<Name>LogisticsPostalAddress</Name>
+					<Table>LogisticsPostalAddress</Table>
+					<Fields>
+						<AxFormDataSourceField>
+							<DataField>Address</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>Apartment_RU</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>Building_RU</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>BuildingCompliment</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>City</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>CityKana_JP</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>CityRecId</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>CountryRegionId</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>County</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>dataAreaId</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>District</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>DistrictName</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>FlatId_RU</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>HouseId_RU</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>IsPrivate</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>Latitude</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>Location</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>Longitude</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>modifiedBy</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>modifiedDateTime</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>PostBox</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>PrivateForParty</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>RecId</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>State</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>Street</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>StreetId_RU</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>StreetKana_JP</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>StreetNumber</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>TableId</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>TimeZone</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>ValidFrom</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>ValidTo</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>ZipCode</DataField>
+						</AxFormDataSourceField>
+						<AxFormDataSourceField>
+							<DataField>ZipCodeRecId</DataField>
+						</AxFormDataSourceField>
+					</Fields>
+					<ReferencedDataSources />
+					<JoinSource>PurchTable</JoinSource>
+					<LinkType>OuterJoin</LinkType>
+					<JoinRelation>DeliveryPostalAddress</JoinRelation>
+				</AxFormReferencedDataSource>
+			</ReferencedDataSources>
+			<AutoNotify>No</AutoNotify>
+			<AutoSearch>No</AutoSearch>
+			<DelayActive>No</DelayActive>
+			<LinkType>Passive</LinkType>
+			<AllowDelete>No</AllowDelete>
+			<InsertAtEnd>No</InsertAtEnd>
+			<InsertIfEmpty>No</InsertIfEmpty>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>PurchTable_W</Name>
+			<Table>PurchTable_W</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>createdDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CustomsImportOrder_IN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>CustomsInvoiceRegistered_IN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>dataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EmplAccount_RU</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>NatureOfAssessee_IN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PurchTable</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TaxBranch</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TCSGroup_IN</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TDSGroup_IN</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AutoNotify>No</AutoNotify>
+			<AutoSearch>No</AutoSearch>
+			<DelayActive>No</DelayActive>
+			<JoinSource>PurchTable</JoinSource>
+			<LinkType>Passive</LinkType>
+			<AllowDelete>No</AllowDelete>
+			<InsertAtEnd>No</InsertAtEnd>
+			<InsertIfEmpty>No</InsertIfEmpty>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+		<AxFormDataSource xmlns="">
+			<Name>RORRentalDateTimes</Name>
+			<Table>RORRentalDateTimes</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>BuildDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>dataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EventEndDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>EventStartDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ExpectedOffRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InboundDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InspectionDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OffRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OnRentDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>OutboundDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ParentRentalDateTimes</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>PreparationDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefRecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RefTableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestedDeliveryDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RequestedPickupDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>StrikeDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>SynchronizeFromParent</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<JoinSource>PurchTable</JoinSource>
+			<AllowCheck>No</AllowCheck>
+			<AllowDelete>No</AllowDelete>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+	</DataSources>
+	<Design>
+		<Caption xmlns="">@DNR7034</Caption>
+		<DialogSize xmlns="">Medium</DialogSize>
+		<HideToolbar xmlns="">Yes</HideToolbar>
+		<Pattern xmlns="">Dialog</Pattern>
+		<PatternVersion xmlns="">1.2</PatternVersion>
+		<StatusBarStyle xmlns="">SimpleWithoutClose</StatusBarStyle>
+		<Style xmlns="">Dialog</Style>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormGroupControl">
+				<Name>DialogContent</Name>
+				<HeightMode>SizeToAvailable</HeightMode>
+				<Pattern>Custom</Pattern>
+				<Type>Group</Type>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormTabControl">
+						<Name>ContentTabs</Name>
+						<Type>Tab</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>VendorTab</Name>
+								<Type>TabPage</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupVendor</Name>
+										<ElementPosition>447392426</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>5</VerticalSpacing>
+										<VerticalSpacingMode>Fixed</VerticalSpacingMode>
+										<Width>0</Width>
+										<WidthMode>SizeToAvailable</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormCheckBoxControl">
+												<Name>PurchTable_OneTimeVendor</Name>
+												<ElementPosition>536870910</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>CheckBox</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>OneTimeVendor</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_OrderAccount</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>805306365</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>OrderAccount</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>VendorName</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741820</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Skip>Yes</Skip>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>EditVendorName</DataMethod>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>editContactPersonName</Name>
+												<ElementPosition>1342177275</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>editContactPersonName</DataMethod>
+												<DataSource>PurchTable</DataSource>
+												<LookupButton>Always</LookupButton>
+												<PresenceDataField>ContactPersonId</PresenceDataField>
+												<PresenceDataSource>PurchTable</PresenceDataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>ContactPersonName</Name>
+												<ElementPosition>1610612730</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<Visible>No</Visible>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>ContactPersonName</DataMethod>
+												<DataSource>PurchTable</DataSource>
+												<ForegroundColor>DisabledText</ForegroundColor>
+												<LookupButton>Always</LookupButton>
+												<PresenceIndicatorAllowed>No</PresenceIndicatorAllowed>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormCheckBoxControl">
+												<Name>PurchTable_CustomsImportOrder_IN</Name>
+												<ElementPosition>1744830457</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>CheckBox</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>CustomsImportOrder_IN</DataField>
+												<DataSource>PurchTable_W</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_ContactPersonId</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1879048185</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<Visible>No</Visible>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>ContactPersonId</DataField>
+												<DataSource>PurchTable</DataSource>
+												<PresenceIndicatorAllowed>No</PresenceIndicatorAllowed>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>Agreement_RU</Name>
+												<ConfigurationKey>TradeBlanketOrder</ConfigurationKey>
+												<CountryRegionCodes>RU</CountryRegionCodes>
+												<ElementPosition>2013265915</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormStringControl">
+														<Name>editPurchAgreementId_RU</Name>
+														<AutoDeclaration>Yes</AutoDeclaration>
+														<ElementPosition>1073741822</ElementPosition>
+														<FilterExpression>%1</FilterExpression>
+														<HeightMode>Auto</HeightMode>
+														<Type>String</Type>
+														<VerticalSpacing>-1</VerticalSpacing>
+														<WidthMode>Auto</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataMethod>editPurchAgreementId</DataMethod>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormStringControl">
+														<Name>agreementDocumentTitle_RU</Name>
+														<ElementPosition>1610612733</ElementPosition>
+														<FilterExpression>%1</FilterExpression>
+														<HeightMode>Auto</HeightMode>
+														<Type>String</Type>
+														<VerticalSpacing>-1</VerticalSpacing>
+														<WidthMode>Auto</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataMethod>agreementDocumentTitle_RU</DataMethod>
+														<DataSource>PurchTable</DataSource>
+													</AxFormControl>
+												</Controls>
+												<Columns>2</Columns>
+												<Caption>@GLS105065</Caption>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+										</Controls>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>RORVenue</Name>
+										<ElementPosition>671088639</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>SizeToAvailable</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>RORVenue_RORVenueCode</Name>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>RORVenueCode</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+										</Controls>
+										<DataGroup>RORVenue</DataGroup>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupDeliveryAddress</Name>
+										<ElementPosition>894784852</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<Width>0</Width>
+										<WidthMode>SizeToAvailable</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>NameAndAddress</Name>
+												<Type>Group</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormStringControl">
+														<Name>groupDeliveryAddress_DeliveryName</Name>
+														<ElementPosition>858993458</ElementPosition>
+														<FilterExpression>%1</FilterExpression>
+														<HeightMode>Auto</HeightMode>
+														<Type>String</Type>
+														<VerticalSpacing>-1</VerticalSpacing>
+														<WidthMode>Auto</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>DeliveryName</DataField>
+														<DataSource>PurchTable</DataSource>
+														<MultiLine>Yes</MultiLine>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormStringControl">
+														<Name>LogisticsPostalAddress_Address</Name>
+														<ElementPosition>1717986916</ElementPosition>
+														<FilterExpression>%1</FilterExpression>
+														<HeightMode>Auto</HeightMode>
+														<Type>String</Type>
+														<VerticalSpacing>-1</VerticalSpacing>
+														<WidthMode>Auto</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>Address</DataField>
+														<DataSource>LogisticsPostalAddress</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<Columns>2</Columns>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>PurchTable_DeliveryPostalAddressGrp</Name>
+												<ElementPosition>1288490187</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>SizeToAvailable</HeightMode>
+												<Type>Group</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<Width>0</Width>
+												<WidthMode>SizeToAvailable</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormReferenceGroupControl">
+														<Name>PurchTable_DeliveryPostalAddress</Name>
+														<ElementPosition>858993458</ElementPosition>
+														<FilterExpression>%1</FilterExpression>
+														<HeightMode>Auto</HeightMode>
+														<Type>ReferenceGroup</Type>
+														<VerticalSpacing>-1</VerticalSpacing>
+														<WidthMode>Auto</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<Controls>
+															<AxFormControl xmlns=""
+																i:type="AxFormStringControl">
+																<Name>PurchTable_DeliveryPostalAddress_Location_Description</Name>
+																<DataRelationPath>DeliveryPostalAddress.Location</DataRelationPath>
+																<FilterExpression>%1</FilterExpression>
+																<HeightMode>Auto</HeightMode>
+																<Type>String</Type>
+																<VerticalSpacing>-1</VerticalSpacing>
+																<WidthMode>Auto</WidthMode>
+																<FormControlExtension
+																	i:nil="true" />
+															</AxFormControl>
+														</Controls>
+														<DataSource>PurchTable</DataSource>
+														<Label>@SYS7924</Label>
+														<ReferenceField>DeliveryPostalAddress</ReferenceField>
+														<ReplacementFieldGroup>LocationReference</ReplacementFieldGroup>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormMenuFunctionButtonControl">
+														<Name>LogisticsLocationSelect</Name>
+														<ElementPosition>1288490187</ElementPosition>
+														<FilterExpression>%1</FilterExpression>
+														<HeightMode>Auto</HeightMode>
+														<Type>MenuFunctionButton</Type>
+														<VerticalSpacing>-1</VerticalSpacing>
+														<WidthMode>Auto</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<ButtonDisplay>ImageOnly</ButtonDisplay>
+														<DataSource>PurchTable</DataSource>
+														<MenuItemName>LogisticsLocationSelect</MenuItemName>
+														<NormalImage>Map</NormalImage>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormMenuFunctionButtonControl">
+														<Name>DirPartyPostalAddressNew</Name>
+														<AutoDeclaration>Yes</AutoDeclaration>
+														<ElementPosition>1717986916</ElementPosition>
+														<FilterExpression>%1</FilterExpression>
+														<HeightMode>Auto</HeightMode>
+														<Type>MenuFunctionButton</Type>
+														<VerticalSpacing>-1</VerticalSpacing>
+														<WidthMode>Auto</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<ButtonDisplay>ImageOnly</ButtonDisplay>
+														<DataSource>PurchTable</DataSource>
+														<MenuItemName>CompanyDirPartyPostalAddressNew</MenuItemName>
+														<NormalImage>New</NormalImage>
+														<Text>@SYS118234</Text>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<Columnspace>4</Columnspace>
+												<ColumnspaceMode>Fixed</ColumnspaceMode>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+										</Controls>
+										<Breakable>No</Breakable>
+										<Caption>@SYS333539</Caption>
+									</AxFormControl>
+								</Controls>
+								<Caption>@SYS8079</Caption>
+								<FastTabExpanded>Yes</FastTabExpanded>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPageGeneral</Name>
+								<ElementPosition>1073741822</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>TabPage</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<Width>0</Width>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupPurchId</Name>
+										<ElementPosition>477218588</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>4</VerticalSpacing>
+										<VerticalSpacingMode>Fixed</VerticalSpacingMode>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_PurchId</Name>
+												<ElementPosition>715827882</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>PurchId</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormComboBoxControl">
+												<Name>PurchTable_PurchaseType</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>ComboBox</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>PurchaseType</DataField>
+												<DataSource>PurchTable</DataSource>
+												<Items />
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_InvoiceAccount</Name>
+												<ElementPosition>1431655764</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InvoiceAccount</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>InvoiceName</Name>
+												<AllowEdit>No</AllowEdit>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1789569705</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Skip>Yes</Skip>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<Width>0</Width>
+												<WidthMode>SizeToAvailable</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Label>@SYS92116</Label>
+											</AxFormControl>
+										</Controls>
+										<Caption>@SYS319737</Caption>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupReferences</Name>
+										<ElementPosition>715827882</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>4</VerticalSpacing>
+										<VerticalSpacingMode>Fixed</VerticalSpacingMode>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_ReturnItemNum</Name>
+												<ElementPosition>715827882</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>ReturnItemNum</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormCheckBoxControl">
+												<Name>PurchTable_WPPIsRentalProject</Name>
+												<ElementPosition>920350134</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>CheckBox</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>WPPIsRentalProject</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_ProjId</Name>
+												<ElementPosition>1073741823</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>ProjId</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>editPurchAgreementId</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ConfigurationKey>TradeBlanketOrder</ConfigurationKey>
+												<ElementPosition>1431655764</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>editPurchAgreementId</DataMethod>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormComboBoxControl">
+												<Name>PurchTable_BankDocumentType</Name>
+												<ElementPosition>1789569705</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>ComboBox</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>BankDocumentType</DataField>
+												<DataSource>PurchTable</DataSource>
+												<Items />
+											</AxFormControl>
+										</Controls>
+										<Caption>@SYS14018</Caption>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupCurrency</Name>
+										<ElementPosition>954437176</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_CurrencyCode</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1431655764</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<Width>0</Width>
+												<WidthMode>SizeToAvailable</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>CurrencyCode</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+										</Controls>
+										<Caption>@SYS129076</Caption>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupStorageDimensions</Name>
+										<ElementPosition>1193046470</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_InventSiteId</Name>
+												<ElementPosition>1073741822</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InventSiteId</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_InventLocationId</Name>
+												<ElementPosition>1610612733</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InventLocationId</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+										</Controls>
+										<Caption>@SYS333537</Caption>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupDates</Name>
+										<ElementPosition>1431655764</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>4</VerticalSpacing>
+										<VerticalSpacingMode>Fixed</VerticalSpacingMode>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateControl">
+												<Name>PurchTable_AccountingDate</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ConfigurationKey>LedgerAdv2BudgetCtrl</ConfigurationKey>
+												<ElementPosition>1073741822</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>Date</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>AccountingDate</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormDateControl">
+												<Name>PurchTable_DeliveryDate</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1610612733</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>Date</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>DeliveryDate</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+										</Controls>
+										<Caption>@SYS333540</Caption>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupInterCompany</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<ElementPosition>1670265058</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>4</VerticalSpacing>
+										<VerticalSpacingMode>Fixed</VerticalSpacingMode>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormCheckBoxControl">
+												<Name>InterCompany_InterCompanyOrder</Name>
+												<ElementPosition>715827882</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>CheckBox</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InterCompanyOrder</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>InterCompany_InterCompanyCompanyId</Name>
+												<ElementPosition>1073741823</ElementPosition>
+												<Enabled>No</Enabled>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Skip>Yes</Skip>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InterCompanyCompanyId</DataField>
+												<DataSource>PurchTable</DataSource>
+												<LookupButton>Never</LookupButton>
+												<ShowLabel>No</ShowLabel>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>InterCompany_InterCompanySalesId</Name>
+												<ElementPosition>1431655764</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<Visible>No</Visible>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>InterCompanySalesId</DataField>
+												<DataSource>PurchTable</DataSource>
+												<LookupButton>Never</LookupButton>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>groupInterCompany_M_interCompanyOriginDisplay</Name>
+												<AllowEdit>No</AllowEdit>
+												<ElementPosition>1789569705</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<Visible>No</Visible>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataMethod>interCompanyOriginDisplay</DataMethod>
+												<DataSource>PurchTable</DataSource>
+												<Label>@SYS13342</Label>
+											</AxFormControl>
+										</Controls>
+										<Caption>@SYS333538</Caption>
+										<DataGroup>Intercompany</DataGroup>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>groupTax</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<ElementPosition>1908874352</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>4</VerticalSpacing>
+										<VerticalSpacingMode>Fixed</VerticalSpacingMode>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_VATNum</Name>
+												<AutoDeclaration>Yes</AutoDeclaration>
+												<ElementPosition>1073741822</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>VATNum</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_EnterpriseNumber</Name>
+												<ElementPosition>1610612733</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>EnterpriseNumber</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+										</Controls>
+										<Caption>@SYS333536</Caption>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+								</Controls>
+								<ArrangeMethod>Auto</ArrangeMethod>
+								<Columns>3</Columns>
+								<ColumnsMode>Fill</ColumnsMode>
+								<Caption>@SYS316573</Caption>
+								<FastTabExpanded>No</FastTabExpanded>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPageRental</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>966367638</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>TabPage</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>Auto</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>HeaderRental</Name>
+										<ElementPosition>1073741822</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>INVRentalInvoicing_INVInvoiceProfileId</Name>
+												<ElementPosition>858993458</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>INVInvoiceProfileId</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>HeaderRental_DNRCalendarId</Name>
+												<Type>String</Type>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>DNRCalendarId</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormReferenceGroupControl">
+												<Name>INVRentalInvoicing_RORPriceTimeUnit</Name>
+												<ElementPosition>1717986916</ElementPosition>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>ReferenceGroup</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls />
+												<DataSource>PurchTable</DataSource>
+												<ReferenceField>RORPriceTimeUnit</ReferenceField>
+											</AxFormControl>
+										</Controls>
+										<DataGroup>INVRentalInvoicing</DataGroup>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>WPPWorkOrderTemplate</Name>
+										<ElementPosition>1610612733</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>WPPWorkOrderTemplate_WPPWorkOrderTemplateId</Name>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<DataField>WPPWorkOrderTemplateId</DataField>
+												<DataSource>PurchTable</DataSource>
+											</AxFormControl>
+										</Controls>
+										<DataGroup>WPPWorkOrderTemplate</DataGroup>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+								</Controls>
+								<ArrangeMethod>Auto</ArrangeMethod>
+								<ColumnsMode>Fill</ColumnsMode>
+								<Caption>@DNR8</Caption>
+								<DataSource>PurchTable</DataSource>
+								<Scrollbars>Auto</Scrollbars>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPageRentalDates</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1288490184</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>TabPage</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>Auto</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>PreRentalDateTimes</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>PreparationDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>PreparationDateTime_PreparationDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>PreparationDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>PreparationDateTime_PreparationTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>PreparationTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>PreparationDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>OutboundDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>OutboundDateTime_OutboundDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>OutboundDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>OutboundDateTime_OutboundTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>OutboundTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>OutboundDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>RequestedDeliveryDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>RequestedDeliveryDateTime_RequestedDeliveryDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>RequestedDeliveryDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>RequestedDeliveryDateTime_RequestedDeliveryTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>RequestedDeliveryTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>RequestedDeliveryDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>OnRentDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>OnRentDateTime_OnRentDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>OnRentDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>OnRentDateTime_OnRentTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>OnRentTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>OnRentDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>BuildDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>BuildDateTime_BuildDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>BuildDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>BuildDateTime_BuildTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>BuildTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>BuildDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>EventStartDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>EventStartDateTime_EventStartDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>EventStartDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>EventStartDateTime_EventStartTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>EventStartTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>EventStartDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+										</Controls>
+										<Caption>@DNR100</Caption>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormGroupControl">
+										<Name>PostRentalDateTimes</Name>
+										<HeightMode>Auto</HeightMode>
+										<Type>Group</Type>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>EventEndDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>EventEndDateTime_EventEndDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>EventEndDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>EventEndDateTime_EventEndTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>EventEndTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>EventEndDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>StrikeDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>StrikeDateTime_StrikeDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>StrikeDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>StrikeDateTime_StrikeTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>StrikeTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>StrikeDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>ExpectedOffRentDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>ExpectedOffRentDateTime_ExpectedOffRentDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>ExpectedOffRentDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>ExpectedOffRentDateTime_ExpectedOffRentTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>ExpectedOffRentTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>ExpectedOffRentDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>OffRentDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>OffRentDateTime_OffRentDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>OffRentDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>OffRentDateTime_OffRentTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>OffRentTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>OffRentDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>RequestedPickupDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>RequestedPickupDateTime_RequestedPickupDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>RequestedPickupDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>RequestedPickupDateTime_RequestedPickupTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>RequestedPickupTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>RequestedPickupDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>InboundDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>InboundDateTime_InboundDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>InboundDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>InboundDateTime_InboundTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>InboundTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>InboundDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormGroupControl">
+												<Name>InspectionDateTime</Name>
+												<HeightMode>Auto</HeightMode>
+												<Type>Group</Type>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+												<Controls>
+													<AxFormControl xmlns=""
+														i:type="AxFormDateControl">
+														<Name>InspectionDateTime_InspectionDate</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Date</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>InspectionDate</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+													<AxFormControl xmlns=""
+														i:type="AxFormTimeControl">
+														<Name>InspectionDateTime_InspectionTime</Name>
+														<HeightMode>Auto</HeightMode>
+														<Type>Time</Type>
+														<Width>130</Width>
+														<WidthMode>Manual</WidthMode>
+														<FormControlExtension
+															i:nil="true" />
+														<DataField>InspectionTime</DataField>
+														<DataSource>RORRentalDateTimes</DataSource>
+													</AxFormControl>
+												</Controls>
+												<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+												<DataGroup>InspectionDateTime</DataGroup>
+												<DataSource>RORRentalDateTimes</DataSource>
+												<FrameType>None</FrameType>
+											</AxFormControl>
+										</Controls>
+										<Caption>@DNR110</Caption>
+									</AxFormControl>
+								</Controls>
+								<Columns>2</Columns>
+								<Caption>@DNR6</Caption>
+								<FastTabExpanded>Yes</FastTabExpanded>
+								<Scrollbars>Auto</Scrollbars>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPageAdministration</Name>
+								<ElementPosition>1610612733</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>TabPage</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<Width>0</Width>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>groupAdministraton_ItemBuyerGroupId</Name>
+										<ElementPosition>536870910</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ItemBuyerGroupId</DataField>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormReferenceGroupControl">
+										<Name>groupAdministraton_WorkerPurchPlacer</Name>
+										<ElementPosition>805306365</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>ReferenceGroup</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>groupAdministraton_WorkerPurchPlacer_DirPerson_FK_Name</Name>
+												<DataRelationPath>WorkerPurchPlacer_FK.DirPerson_FK</DataRelationPath>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+											</AxFormControl>
+										</Controls>
+										<DataSource>PurchTable</DataSource>
+										<ReferenceField>WorkerPurchPlacer</ReferenceField>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormReferenceGroupControl">
+										<Name>groupAdministraton_Requester</Name>
+										<ElementPosition>1073741820</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>ReferenceGroup</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>groupAdministraton_Requester_DirPerson_FK_Name</Name>
+												<DataRelationPath>Requester_FK.DirPerson_FK</DataRelationPath>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+											</AxFormControl>
+										</Controls>
+										<DataSource>PurchTable</DataSource>
+										<ReferenceField>Requester</ReferenceField>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>groupAdministraton_PurchPoolId</Name>
+										<ElementPosition>1342177275</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>PurchPoolId</DataField>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>groupAdministraton_LanguageId</Name>
+										<ElementPosition>1610612730</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>LanguageId</DataField>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormCheckBoxControl">
+										<Name>groupAdministraton_ChangeRequestRequired</Name>
+										<ElementPosition>1879048185</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>CheckBox</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DataField>ChangeRequestRequired</DataField>
+										<DataSource>PurchTable</DataSource>
+									</AxFormControl>
+								</Controls>
+								<ColumnsMode>Fill</ColumnsMode>
+								<Caption>@SYS40777</Caption>
+								<DataSource>PurchTable</DataSource>
+								<FastTabExpanded>No</FastTabExpanded>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormTabPageControl">
+								<Name>TabPageUnplannedPurchases</Name>
+								<ConfigurationKey>PublicSector</ConfigurationKey>
+								<ElementPosition>1879048189</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>TabPage</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<Width>0</Width>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormReferenceGroupControl">
+										<Name>PurchTable_ConfirmingPO</Name>
+										<ElementPosition>1431655764</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>ReferenceGroup</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<Controls>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_ConfirmingPO_ConfirmingPOID</Name>
+												<DataRelationPath>ConfirmingPO</DataRelationPath>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+											</AxFormControl>
+											<AxFormControl xmlns=""
+												i:type="AxFormStringControl">
+												<Name>PurchTable_ConfirmingPO_LanguageId</Name>
+												<DataRelationPath>ConfirmingPO</DataRelationPath>
+												<FilterExpression>%1</FilterExpression>
+												<HeightMode>Auto</HeightMode>
+												<Type>String</Type>
+												<VerticalSpacing>-1</VerticalSpacing>
+												<WidthMode>Auto</WidthMode>
+												<FormControlExtension
+													i:nil="true" />
+											</AxFormControl>
+										</Controls>
+										<DataSource>PurchTable</DataSource>
+										<ReferenceField>ConfirmingPO</ReferenceField>
+									</AxFormControl>
+								</Controls>
+								<ColumnsMode>Fill</ColumnsMode>
+								<Caption>@SPS591</Caption>
+								<DataSource>PurchTable</DataSource>
+								<FastTabExpanded>No</FastTabExpanded>
+							</AxFormControl>
+						</Controls>
+						<DataSource>PurchTable</DataSource>
+						<Style>FastTabs</Style>
+					</AxFormControl>
+				</Controls>
+				<Style>DialogContent</Style>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormButtonGroupControl">
+				<Name>DialogCommitButtons</Name>
+				<ElementPosition>1342177278</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<LeftMode>AutoRight</LeftMode>
+				<Top>0</Top>
+				<TopMode>BottomEdge</TopMode>
+				<Type>ButtonGroup</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>OK</Name>
+						<ElementPosition>1073741822</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>CommandButton</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ButtonDisplay>TextOnly</ButtonDisplay>
+						<Command>OK</Command>
+						<DefaultButton>Yes</DefaultButton>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>Cancel</Name>
+						<ElementPosition>1610612733</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>CommandButton</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ButtonDisplay>TextOnly</ButtonDisplay>
+						<Command>Cancel</Command>
+					</AxFormControl>
+				</Controls>
+				<ArrangeMethod>HorizontalRight</ArrangeMethod>
+				<DataSource>PurchTable</DataSource>
+				<Style>DialogCommitContainer</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

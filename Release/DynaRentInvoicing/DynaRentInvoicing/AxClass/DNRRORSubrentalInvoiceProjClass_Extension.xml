@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRRORSubrentalInvoiceProjClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(RORSubrentalInvoiceProj))]
+public final class DNRRORSubrentalInvoiceProjClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setCostPrice</Name>
+				<Source><![CDATA[
+    public void setCostPrice(projJournalTrans _projJournalTrans, PurchLine _purchLine, VendInvoiceTrans _vendInvoiceTrans)
+    {
+        next setCostPrice(_projJournalTrans, _purchLine, _vendInvoiceTrans);
+
+        if(_purchLine.purchTable().PurchaseType == PurchaseType::RORSubRental)
+        {
+            VendInvoiceInfoTable    parmTable = this.purchInvoiceJournalPost.parmParmTable();
+            VendInvoiceInfoLine     vendInvoiceInfoLine = VendInvoiceInfoLine::findInventTransId(parmTable.ParmId, parmTable.TableRefId, _purchLine.InventTransId);
+
+            _projJournalTrans.CostPrice = vendInvoiceInfoLine.FINLineAmount;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalLine</Name>
+				<Source><![CDATA[
+    public void createJournalLine(ProjJournalTable _hourJournalTable, PurchLine _purchLine, VendInvoiceTrans _vendInvoiceTrans)
+    {
+        next createJournalLine(_hourJournalTable, _purchLine, _vendInvoiceTrans);
+
+        Map purchLine2ProjJournalLineLocal = this.getPurchLine2JournalLine();
+        PurchLine purchLine = _purchLine;
+        VendInvoiceTrans vendInvoiceTrans = _vendInvoiceTrans;
+        FINVendInvoiceTrans finVendInvoiceTrans;
+        ProjJournalTrans projJournalTransParent;
+        RAGParameters ragParameters = RAGParameters::find();
+        InventTable inventTable;
+        AmountCur transportInsuranceAmount;
+
+        if (purchLine2ProjJournalLineLocal && purchLine2ProjJournalLineLocal.exists(purchLine.RecId))
+        {
+            TransactionID transId = purchLine2ProjJournalLineLocal.lookup(purchLine.RecId);
+
+            select firstonly projJournalTransParent
+            where projJournalTransParent.TransId == transId;
+
+            select firstonly finVendInvoiceTrans
+            where finVendInvoiceTrans.VendInvoiceTransRecId == vendInvoiceTrans.RecId;
+        }
+
+        if (projJournalTransParent && finVendInvoiceTrans)
+        {
+            if (finVendInvoiceTrans.TransportCalcPacked)
+            {
+                // Create hour trans for Delivery and Return.
+                FINTransportPriceJournalizer transportJournalizer = new FINTransportPriceJournalizer();
+                transportJournalizer.unpack(finVendInvoiceTrans.TransportCalcPacked);
+
+                AmountCur deliveryAmount = transportJournalizer.getDeliveryAmount();
+                transportInsuranceAmount+= deliveryAmount;
+                if (deliveryAmount)
+                {
+                    RORSubrentalInvoiceProj::RORCreateJournalLineForExtraItem(purchLine, projJournalTransParent, ragParameters.ItemIdTransport, deliveryAmount);
+                }
+                    
+                AmountCur returnAmount = transportJournalizer.getReturnAmount();
+                transportInsuranceAmount+=returnAmount;
+                if (returnAmount)
+                {
+                    RORSubrentalInvoiceProj::RORCreateJournalLineForExtraItem(purchLine, projJournalTransParent, ragParameters.ItemIdReturnTransport, returnAmount);
+                }
+            }
+
+            if (finVendInvoiceTrans.RentalCalcPacked)
+            {
+                // Create hour trans for Insurance.
+                FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+                rentalJournalizer.unpack(finVendInvoiceTrans.RentalCalcPacked);
+                AmountCur insuranceAmount = rentalJournalizer.getInsuranceAmount();
+                transportInsuranceAmount += insuranceAmount;
+
+                if (insuranceAmount)
+                {
+                    RORSubrentalInvoiceProj::RORCreateJournalLineForExtraItem(purchLine, projJournalTransParent, ragParameters.ItemIdInsurance, insuranceAmount);
+                }
+            }
+        }
+
+        if (transportInsuranceAmount && projJournalTransParent.CostPrice)
+        {
+            projJournalTransParent.selectForUpdate(true);
+            projJournalTransParent.CostPrice -= transportInsuranceAmount;
+            projJournalTransParent.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setStartEndDateTime</Name>
+				<Source><![CDATA[
+    public container setStartEndDateTime(projJournalTrans _projJournalTrans, PurchLine _purchLine, VendInvoiceTrans _vendInvoiceTrans)
+    {
+        // Implemented in Dynarent model
+        TransDateTime   startDateTime, endDateTime;
+
+        [startDateTime, endDateTime] = next setStartEndDateTime(_projJournalTrans, _purchLine, _vendInvoiceTrans);
+
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+        while select journalizedInvoicePeriod
+            where journalizedInvoicePeriod.RefTableId == _vendInvoiceTrans.TableId
+            &&    journalizedInvoicePeriod.RefRecId == _vendInvoiceTrans.RecId
+        {
+            TransDateTime   startDateTimeFromTable = journalizedInvoicePeriod.PeriodStartDateTime;
+            TransDateTime endDateTimeFromTable = journalizedInvoicePeriod.PeriodEndDateTime;
+
+            startDateTime = startDateTime ? min(startDateTime, startDateTimeFromTable) : startDateTimeFromTable;
+            endDateTime = endDateTime ? max(endDateTime, endDateTimeFromTable) : endDateTimeFromTable;
+        }
+
+        return [startDateTime, endDateTime];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCreateJournalLineForExtraItem</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    protected static void RORCreateJournalLineForExtraItem(PurchLine _purchLine, ProjJournalTrans _parentJournalTrans, ItemId _itemId, CostPrice _costPrice)
+    {
+        ProjJournalTrans projJournalTrans;
+        InventTable inventTable = InventTable::find(_itemId);
+
+        projJournalTrans.data(_parentJournalTrans);
+        projJournalTrans.TransId = '';
+        projJournalTrans.LineNum = 0;
+        projJournalTrans.Txt = strFmt("Order line - %1, item - %2.", _purchLine.LineNumber, _itemId);
+        projJournalTrans.CategoryId = (_purchLine.RORTradeType == RORTradeType::SubRental) ? inventTable.RORProjCategoryIdSubRental : inventTable.RORProjCategoryIdRental;
+        projJournalTrans.CostPrice = _costPrice;
+        projJournalTrans.insert();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

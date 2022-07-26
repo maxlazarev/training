@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RTPWPPWorkOrderStatusUpdateClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(WPPWorkOrderStatusUpdate))]
+public final class RTPWPPWorkOrderStatusUpdateClass_Extension
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getInventTransferLine</Name>
+				<Source><![CDATA[
+    protected InventTransferLine getInventTransferLine(RecId _recId)
+    {
+        InventTransferLine inventTransferLine = next getInventTransferLine(_recId);
+
+        inventTransferLine = WHSShipmentTable::RTPGetSourceBufferForShipmentRecId(_recId) as InventTransferLine;
+
+        return inventTransferLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generateFormLetterListForShipment</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    protected List generateFormLetterListForShipment(DocumentStatus  _documentStatus)
+    {
+        List                deliveryList;
+        ListEnumerator      enumerator;
+        Set                 deliverySet;
+        SalesLine           salesLine, salesLineChild;
+        WPPWorkOrderTable   workOrderTable;
+        WHSLoadLine         loadLine;
+        WHSShipmentTable    shipment;
+    
+        deliveryList = next generateFormLetterListForShipment(_documentStatus);
+
+        deliveryList = new List(Types::Record);
+        deliverySet = new Set(Types::Int64);
+        workOrderTable = workOrderLine.workOrderTable();
+    
+        while select salesLine
+            exists join loadLine
+            where loadLine.inventTransId == salesLine.InventTransId
+                join TableId from shipment
+                where shipment.shipmentId   == loadLine.shipmentId
+                &&    shipment.TableId      == workOrderTable.OrderTableId
+                &&    shipment.RecId        == workOrderTable.OrderRecId
+        {
+            deliveryList.addEnd(salesLine);
+            deliverySet.add(salesLine.RecId);
+        }
+    
+        // add also related contract item lines
+        enumerator = deliveryList.getEnumerator();
+        while (enumerator.moveNext())
+        {
+            salesLine = enumerator.current();
+            while select salesLineChild
+            where salesLineChild.SalesId == salesLine.SalesId
+            && salesLineChild.RORParentLineRecId == salesLine.RecId
+            && salesLineChild.RORLineType != RORLineType::Normal
+            {
+                if (_documentStatus == DocumentStatus::PackingSlip && !deliverySet.in(salesLineChild.RecId))
+                {
+                    // Check whether the salesLine is a contract element
+                    if (salesLineChild.RORLineType != RORLineType::Normal)
+                    {
+                        deliveryList.addEnd(salesLineChild);
+                        deliverySet.add(salesLineChild.RecId);
+                    }
+                    else
+                    if (this.mustBeDelivered(salesLineChild, workOrderTable.OrderRecId))
+                    {
+                        if (WPPAssociatedDelivery::existItemId(salesLineChild.ItemId))
+                        {
+                            if (this.checkAssociatedDeliveryTask(salesLineChild))
+                            {
+                                deliveryList.addEnd(salesLineChild);
+                                deliverySet.add(salesLineChild.RecId);
+                            }
+                        }
+                        else if (salesLineChild.RORTradeType != RORTradeType::SalesPurch)
+                        {
+                            if (this.checkItemModelGroup(salesLineChild))
+                            {
+                                deliveryList.addEnd(salesLineChild);
+                                deliverySet.add(salesLineChild.RecId);
+                            }
+                        }
+                        else if (!blockDeliverySet || !blockDeliverySet.in(salesLineChild.RORGetParentLine().RecId))
+                        {
+                            deliveryList.addEnd(salesLineChild);
+                            deliverySet.add(salesLineChild.RecId);
+                        }
+                    }
+                    else
+                    // When associated delivery is setup for the current Item, Task and Status
+                    // then the line should be delivered
+                    if (WPPAssociatedDelivery::existStatus(salesLineChild.ItemId, workOrderLine.TaskId, this.workOrderLineStatus()))
+                    {
+                        deliveryList.addEnd(salesLineChild);
+                        deliverySet.add(salesLineChild.RecId);
+                    }
+                }
+                else if  (!deliverySet.in(salesLineChild.RecId))
+                {
+                    deliveryList.addEnd(salesLineChild);
+                    deliverySet.add(salesLineChild.RecId);
+                }
+            }
+        }
+    
+        return deliveryList;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateOrderLineForShipment</Name>
+				<Source><![CDATA[
+    protected boolean validateOrderLineForShipment(
+        RefTableId    _orderTableId,
+        RefRecId      _orderRecId)
+    {
+        boolean             ret;
+        SalesLine           salesLine;
+        InventTransferLine  inventTransferLine;
+        WHSShipmentTable    shipment;
+        WHSLoadLine         loadLine;
+        InventDim           inventDim;
+        InventTable         inventTable;
+        BOBRentalType       rentalType;
+        InventTransOrigin   inventTransOrigin;
+        InventTrans         inventTrans;
+        EcoResProduct       ecoResProduct;
+    
+        ret = next validateOrderLineForShipment(_orderTableId, _orderRecId);
+    
+        switch (_orderTableId)
+        {
+            case tableNum(WHSShipmentTable):
+                shipment = WHSShipmentTable::RTPGetShipmentForRecId(_orderRecId);
+                break;
+        }
+    
+        if (shipment)
+        {
+            // check shipment lines linked to sales line
+            select firstOnly RecId from loadLine
+            where loadLine.inventTransType == InventTransType::Sales
+            &&    loadLine.shipmentId      == shipment.shipmentId
+                join RecId from salesLine
+                where salesLine.SalesId         == loadLine.OrderNum
+                &&    salesLine.InventTransId   == loadLine.InventTransId
+                    join RecId from inventTransOrigin
+                    where inventTransOrigin.InventTransId == salesLine.InventTransId
+                        join RecId from inventTrans
+                        where inventTrans.InventTransOrigin == inventTransOrigin.RecId
+                            exists join inventDim
+                            where inventDim.inventDimId == inventTrans.InventDimId
+                            &&   !inventDim.inventSerialId
+                                join TableId from inventTable
+                                where inventTable.ItemId == salesLine.ItemId
+                                    join TableId from ecoResProduct
+                                    where ecoResProduct.RecId == inventTable.Product
+                                        join TableId from rentalType
+                                        where rentalType.RentalTypeId   == ecoResProduct.BOBRentalTypeId
+                                        &&    rentalType.Classification == BOBRentalTypeClassification::Serialized;
+    
+            if (salesLine.RecId)
+            {
+                ret = checkFailed(strFmt("@DNR7185", new DictEnum(enumNum(WPPWorkOrderLineStatus)).value2Label(this.workOrderLineStatus())));
+            }
+    
+            if (ret)
+            {
+                // check shipment lines linked to transfer order line
+                select firstOnly RecId from loadLine
+                where loadLine.inventTransType == InventTransType::TransferOrderShip
+                &&    loadLine.shipmentId      == shipment.shipmentId
+                    join RecId from inventTransferLine
+                    where inventTransferLine.TransferId     == loadLine.OrderNum
+                    &&    inventTransferLine.InventTransId  == loadLine.InventTransId
+                        join RecId from inventTransOrigin
+                        where inventTransOrigin.InventTransId == inventTransferLine.InventTransId
+                            join RecId from inventTrans
+                            where inventTrans.InventTransOrigin == inventTransOrigin.RecId
+                                exists join inventDim
+                                where inventDim.inventDimId == inventTrans.InventDimId
+                                &&   !inventDim.inventSerialId
+                                    join TableId from inventTable
+                                    where inventTable.ItemId == inventTransferLine.ItemId
+                                        join TableId from ecoResProduct
+                                        where ecoResProduct.RecId == inventTable.Product
+                                            join TableId from rentalType
+                                            where rentalType.RentalTypeId   == ecoResProduct.BOBRentalTypeId
+                                            &&    rentalType.Classification == BOBRentalTypeClassification::Serialized;
+    
+                if (inventTransferLine.RecId)
+                {
+                    ret = checkFailed(strFmt("@DNR7185", new DictEnum(enumNum(WPPWorkOrderLineStatus)).value2Label(this.workOrderLineStatus())));
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

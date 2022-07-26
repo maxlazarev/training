@@ -1,0 +1,542 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRRORRentalLineMap_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(mapStr(RORRentalLine))]
+public final class DNRRORRentalLineMap_Extension
+{
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>canOpenRentalEditorForm</Name>
+				<Source><![CDATA[
+    public boolean canOpenRentalEditorForm()
+    {
+        boolean ret = next canOpenRentalEditorForm();
+
+        if (ret && this.TableId == tableNum(SalesLine) && this.TradeType == RORTradeType::SalesPurch)
+        {
+            SalesLine salesLine = this as SalesLine;
+
+            ret = salesLine.FINValidateActiveInvoiceProposal();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINExistsJournalizedPeriod</Name>
+				<Source><![CDATA[
+    public boolean FINExistsJournalizedPeriod()
+    {
+        boolean ret;
+
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+        switch (this.TableId)
+        {
+            case tableNum(SalesLine) :
+                CustInvoiceTrans custInvoiceTrans;
+
+                select firstonly RecId from journalizedInvoicePeriod
+                    join TableId from custInvoiceTrans
+                    where custInvoiceTrans.RecId == journalizedInvoicePeriod.RefRecId
+                    &&    custInvoiceTrans.TableId == journalizedInvoicePeriod.RefTableId
+                    &&    custInvoiceTrans.InventTransId == this.InventTransId;
+                break;
+
+            case tableNum(PurchLine) :
+                VendInvoiceTrans vendInvoiceTrans;
+
+                select firstonly RecId from journalizedInvoicePeriod
+                    join TableId from vendInvoiceTrans
+                    where vendInvoiceTrans.RecId == journalizedInvoicePeriod.RefRecId
+                    &&    vendInvoiceTrans.TableId == journalizedInvoicePeriod.RefTableId
+                    &&    vendInvoiceTrans.InventTransId == this.InventTransId;
+                break;
+        }
+
+        ret = (journalizedInvoicePeriod.RecId ? true : false);
+        return (next FINExistsJournalizedPeriod() || ret);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINExistUninvoicedCreditedForLine</Name>
+				<Source><![CDATA[
+    public boolean FINExistUninvoicedCreditedForLine()
+    {
+        return (next FINExistUninvoicedCreditedForLine() || FINInvoicePeriodQtyFinancial::existForCharging(this.TableId, this.RecId, this.RORRentalLine::FINTimeZoneOrder()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINHasPriceAdjustments</Name>
+				<Source><![CDATA[
+    public boolean FINHasPriceAdjustments(TableId _tableId,
+        RecId                   _recId,
+        INVInvoicingOptions     _invoicingOptions,
+        INVCalculationDateTime  _calculationDateTime)
+    {
+        boolean ret = next FINHasPriceAdjustments(_tableId, _recId, _invoicingOptions, _calculationDateTime);
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+        if (_invoicingOptions.parmIncludeCredits())
+        {
+            switch (_tableId)
+            {
+                case tableNum(SalesLine):
+                    FINCustInvoiceTrans finCustInvoiceTrans;
+                    CustInvoiceTrans custInvoiceTrans;
+
+                    select firstonly RecId from finCustInvoiceTrans
+                    where finCustInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit
+                        join RecId, TableId from custInvoiceTrans
+                        where custInvoiceTrans.RecId == finCustInvoiceTrans.CustInvoiceTransRecId
+                        &&    custInvoiceTrans.InventTransId == this.InventTransId
+                            exists join journalizedInvoicePeriod
+                            where journalizedInvoicePeriod.RefTableId == custInvoiceTrans.TableId
+                            &&    journalizedInvoicePeriod.RefRecId == custInvoiceTrans.RecId
+                            &&    journalizedInvoicePeriod.PeriodStartDateTime <= _calculationDateTime;
+                    if (finCustInvoiceTrans)
+                    {
+                        ret = true;
+                    }
+                    break;
+
+                case tableNum(PurchLine):
+                    FINVendInvoiceTrans finVendInvoiceTrans;
+                    VendInvoiceTrans vendInvoiceTrans;
+
+                    select firstonly RecId from finVendInvoiceTrans
+                    where finVendInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit
+                        join RecId, TableId from vendInvoiceTrans
+                        where vendInvoiceTrans.RecId == finVendInvoiceTrans.VendInvoiceTransRecId
+                        &&    vendInvoiceTrans.InventTransId == this.InventTransId
+                            exists join journalizedInvoicePeriod
+                            where journalizedInvoicePeriod.RefTableId == vendInvoiceTrans.TableId
+                            &&    journalizedInvoicePeriod.RefRecId == vendInvoiceTrans.RecId
+                            &&    journalizedInvoicePeriod.PeriodStartDateTime <= _calculationDateTime;
+
+                    if (finVendInvoiceTrans)
+                    {
+                        ret = true;
+                    }
+                    break;
+            }
+        }
+         
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINHasOpenDays</Name>
+				<Source><![CDATA[
+    public boolean FINHasOpenDays(RefTableId    _refTableId,
+                                  RefRecId      _refRecId,
+                                  boolean       _isHourlyInvoicing)
+    {
+        boolean ret = next FINHasOpenDays(_refTableId, _refRecId, _isHourlyInvoicing);
+
+        RORRentalDateTimes rentalDateTimes = RORRentalDateTimes::findReference(_refTableId, _refRecId);
+
+        if (rentalDateTimes)
+        {
+            Timezone    timeZoneOrder   = this.RORRentalLine::FINTimeZoneOrder();
+            TransDate   startDate       = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(rentalDateTimes.getOnRentDateTime(), timeZoneOrder));
+            TransDate   endDate         = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(rentalDateTimes.getOffRentDateTime(), timeZoneOrder));
+            TransDate   currentDate     = startDate;
+
+            if (currentDate)
+            {
+                FINInvoicePeriodQtyPhysical periodPhysical;
+
+                select firstonly periodPhysical
+                where periodPhysical.RefTableId == _refTableId
+                &&    periodPhysical.RefRecId   == _refRecId;
+
+                Map calendarMap = new Map(Types::String, Types::Enum);
+
+                calendarMap.insert(this.CalendarId, _isHourlyInvoicing);
+
+                FINInvoicePeriodAmendment invoicePeriodAmendment;
+
+                while select StrValue from invoicePeriodAmendment
+                where invoicePeriodAmendment.RefTableId     == periodPhysical.RefTableId
+                &&    invoicePeriodAmendment.RefRecId       == periodPhysical.RefRecId
+                &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+                &&    (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed)
+                {
+                    calendarMap.insert(invoicePeriodAmendment.StrValue, _isHourlyInvoicing);
+                }
+
+                FINWorkCalendar workCalendar = new FINWorkCalendar();
+
+                workCalendar.populate(calendarMap, startDate, endDate);
+
+                while (currentDate <= endDate)
+                {
+                    if (currentDate == startDate)
+                    {
+                        ret = false;
+                    }
+
+                    if (workCalendar.isDateOpen(this.CalendarId, currentDate))
+                    {
+                        ret = true;
+
+                        break;
+                    }
+
+                    currentDate++;
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInvoicePeriodMultiplier</Name>
+				<Source><![CDATA[
+    public void updateInvoicePeriodMultiplier(TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        next updateInvoicePeriodMultiplier(_fromDateTime, _toDateTime);
+
+        this.FINUpdateInvoicePeriodMultiplier(_fromDateTime, _toDateTime);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustKeepCallerOrigPrices</Name>
+				<Source><![CDATA[
+    public boolean mustKeepCallerOrigPrices()
+    {
+        boolean mustKeepCallerOrigPrices = next mustKeepCallerOrigPrices();
+
+        if (!mustKeepCallerOrigPrices)
+        {
+            FINRentalInvoiceProfile invoiceProfile = FINRentalInvoiceProfile::find(this.INVInvoiceProfileId);
+            if (invoiceProfile.PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating)
+            {
+                // Multiplier calculated during creation and price/amount was already modified on an original line; no need to fetch value from agreement again for RLE line.
+                mustKeepCallerOrigPrices = true;
+            }
+        }
+
+        return mustKeepCallerOrigPrices;       
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateInvoicePeriodMultiplier</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    private void FINUpdateInvoicePeriodMultiplier(TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+        
+        update_recordset invoicePeriodQtyPhysical
+        setting PriceTierMultiplier = this.INVRateMultiplierTier
+        where invoicePeriodQtyPhysical.RefTableId == this.TableId
+        &&    invoicePeriodQtyPhysical.RefRecId == this.RecId        
+            exists join invoicePeriodQtyFinancial
+            where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+            &&    !invoicePeriodQtyFinancial.InvoiceId
+            &&    (!_fromDateTime || invoicePeriodQtyFinancial.PeriodStartDateTime >= _fromDateTime)
+            &&    (!_toDateTime   || invoicePeriodQtyFinancial.PeriodEndDateTime <= _toDateTime);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINPostingModuleType</Name>
+				<Source><![CDATA[
+    public FINPostingModuleType FINPostingModuleType()
+    {
+        FINPostingModuleType ret;
+        
+        if(this.TableId == tableNum(SalesLine) || this.TableId == tableNum(SalesQuotationLine))
+        {
+            switch(this.TradeType)
+            {
+                case RORTradeType::Rental: return FINPostingModuleType::SalesRental;
+                case RORTradeType::SubRental: return FINPostingModuleType::SalesSubrental;
+            }
+        }
+        else if(this.TableId == tableNum(PurchLine) && this.TradeType == RORTradeType::SubRental)
+        {
+            return FINPostingModuleType::PurchSubrental;
+        }
+        
+        throw error("");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINInitComponentPriceFromRentalEditorLine</Name>
+				<Source><![CDATA[
+    public static void FINInitComponentPriceFromRentalEditorLine(RORRentalLine _rentalLine, RORRentalEditorLine _rentalEditorLine)
+    {
+        RORInsurancePercentage  insurancePercentage;
+        RORInsuranceCalcBasis   insuranceCalcBasis;
+        AmountCur               deliveryAmount;
+        AmountCur               returnAmount;
+
+        deliveryAmount = _rentalEditorLine.TransportPrice * _rentalEditorLine.RentalQty;
+        returnAmount = _rentalEditorLine.ReturnTransportPrice * _rentalEditorLine.RentalQty;
+        insurancePercentage = _rentalEditorLine.InsurancePercentage;
+        insuranceCalcBasis = _rentalEditorLine.InsuranceCalcBasis;
+
+        switch (_rentalLine.TableId)
+        {
+            case tableNum(SalesLine) :
+                SalesLine salesLine = _rentalLine as SalesLine;
+                salesLine.RORDeliveryGrossAmount = deliveryAmount;
+                salesLine.RORDeliveryPercentage = _rentalEditorLine.TransportPriceDisc;
+                salesLine.RORRecalculateDeliveryAmount();
+
+                salesLine.RORReturnGrossAmount = returnAmount;
+                salesLine.RORReturnPercentage = _rentalEditorLine.ReturnTransportDisc;
+                salesLine.RORRecalculateReturnAmount();
+
+                salesLine.RORInsuranceNetPercentage = insurancePercentage;
+                salesLine.RORInsuranceGrossAmount = salesLine.RORRentalGrossAmount * salesLine.RORInsuranceGrossPercentage / 100;
+
+                salesLine.RORInsuranceNetAmount = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ?
+                    salesLine.RORInsuranceGrossAmount :
+                    salesLine.RORRentalLine::editNetAmount(false, 0) * salesLine.RORInsuranceNetPercentage / 100);
+                break;
+
+            case tableNum(SalesQuotationLine) :
+                SalesQuotationLine salesQuotationLine = _rentalLine as SalesQuotationLine;
+                salesQuotationLine.RORDeliveryGrossAmount = deliveryAmount;
+                salesQuotationLine.RORDeliveryPercentage = _rentalEditorLine.TransportPriceDisc;
+                salesQuotationLine.RORRecalculateDeliveryAmount();
+
+                salesQuotationLine.RORReturnGrossAmount = returnAmount;
+                salesQuotationLine.RORReturnPercentage = _rentalEditorLine.ReturnTransportDisc;
+                salesQuotationLine.RORRecalculateReturnAmount();
+
+                salesQuotationLine.RORInsuranceNetPercentage = insurancePercentage;
+                salesQuotationLine.RORInsuranceGrossAmount = salesQuotationLine.RORRentalGrossAmount * salesQuotationLine.RORInsuranceGrossPercentage / 100;
+
+                salesQuotationLine.RORInsuranceNetAmount = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ?
+                    salesQuotationLine.RORInsuranceGrossAmount :
+                    salesQuotationLine.RORRentalLine::editNetAmount(false, 0) * salesQuotationLine.RORInsuranceNetPercentage / 100);
+                break;
+
+            case tableNum(PurchLine) :
+                PurchLine purchLine = _rentalLine as PurchLine;
+                purchLine.RORDeliveryGrossAmount = deliveryAmount;
+                purchLine.RORDeliveryPercentage = _rentalEditorLine.TransportPriceDisc;
+                purchLine.RORRecalculateDeliveryAmount();
+
+                purchLine.RORReturnGrossAmount = returnAmount;
+                purchLine.RORReturnPercentage = _rentalEditorLine.ReturnTransportDisc;
+                purchLine.RORRecalculateReturnAmount();
+
+                purchLine.RORInsuranceNetPercentage = insurancePercentage;
+                purchLine.RORInsuranceGrossAmount = purchLine.RORRentalGrossAmount * purchLine.RORInsuranceGrossPercentage / 100;
+
+                purchLine.RORInsuranceNetAmount = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ?
+                    purchLine.RORInsuranceGrossAmount :
+                    purchLine.RORRentalLine::editNetAmount(false, 0) * purchLine.RORInsuranceNetPercentage / 100);
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINTimeZoneOrder</Name>
+				<Source><![CDATA[
+    public Timezone FINTimeZoneOrder()
+    {
+        Timezone timeZoneOrder = next FINTimeZoneOrder();
+
+        switch (this.TableId)
+        {
+            case tableNum(SalesLine):
+                SalesTable salesTable = SalesTable::find(this.HeaderId);
+
+                timeZoneOrder = salesTable.FINTimeZoneOrder ? salesTable.FINTimeZoneOrder : DateTimeUtil::getCompanyTimeZone();
+
+                break;
+
+            case tableNum(SalesQuotationLine):
+                SalesQuotationTable salesQuotationTable = SalesQuotationTable::find(this.HeaderId);
+
+                timeZoneOrder = salesQuotationTable.FINTimeZoneOrder ? salesQuotationTable.FINTimeZoneOrder : DateTimeUtil::getCompanyTimeZone();
+
+                break;
+
+            case tableNum(PurchLine):
+                PurchTable purchTable = PurchTable::find(this.HeaderId);
+
+                timeZoneOrder = purchTable.FINTimeZoneOrder ? purchTable.FINTimeZoneOrder : DateTimeUtil::getCompanyTimeZone();
+
+                break;
+
+            case tableNum(RORRentalEditorLine):
+                RORRentalEditorLine rentalEditorLine = this as RORRentalEditorLine;
+
+                timeZoneOrder = rentalEditorLine.FINTimeZoneOrder();
+
+                break;
+
+            default:
+                throw error(Error::wrongUseOfFunction(funcName()));
+
+                break;
+        }
+
+        return timeZoneOrder;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initPricingFromRentalLine_post</Name>
+				<Source><![CDATA[
+    // Event handler methods
+
+    [PostHandlerFor(tableStr(RORRentalLine), tableMethodStr(RORRentalLine, initPricingFromRentalLine))]
+    public static void initPricingFromRentalLine_post(XppPrePostArgs _args)
+    {
+        RORRentalLine rentalLine = _args.getThis();
+        RORRentalLine rentalLineFrom = _args.getArg('_rentalLine');
+
+        if (rentalLineFrom.TableId == tableNum(RORRentalEditorLine))
+        {
+            RORRentalEditorLine rentalEditorLine = rentalLineFrom;
+            RORRentalLine::FINInitComponentPriceFromRentalEditorLine(rentalLine, rentalEditorLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateFromRentalEditorLine_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(tableStr(RORRentalLine), tableMethodStr(RORRentalLine, updateFromRentalEditorLine))]
+    public static void updateFromRentalEditorLine_post(XppPrePostArgs _args)
+    {
+        RORRentalLine rentalLine = _args.getThis();
+        RORRentalEditorLine rentalEditorLine = _args.getArg('_rentalEditorLine');
+        
+        RORRentalLine::FINInitComponentPriceFromRentalEditorLine(rentalLine, rentalEditorLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCurrentNetPrice</Name>
+				<Source><![CDATA[
+    public FINCurrentNetPrice RORCurrentNetPrice()
+    {
+        FINCurrentNetPrice netPrice;
+        
+        netPrice = next RORCurrentNetPrice();
+
+        if (hasFieldAccess(tableNum(RORRentalLine), fieldNum(RORRentalLine, RentalGrossAmount)))
+        {
+            FINInvoicePeriodAmendment invoicePeriodAmendment;
+            TransDateTime currentDateTime = DateTimeUtil::getSystemDateTime();
+            boolean priceAmendmentFound;
+            RORRentalDiscPercent rentalDiscPercent;
+
+            while select invoicePeriodAmendment
+            order by RecId desc
+            where invoicePeriodAmendment.RefTableId == this.TableId
+            &&    invoicePeriodAmendment.RefRecId == this.RecId
+            &&    invoicePeriodAmendment.FromDateTime <= currentDateTime
+            &&    invoicePeriodAmendment.ToDateTime >= currentDateTime
+            &&    (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed)
+            &&    (invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::RentalPrice || invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::LinePercent)
+            {
+                if (invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::RentalPrice)
+                {
+                    if (priceAmendmentFound)
+                    {
+                        continue;
+                    }
+
+                    priceAmendmentFound = true;
+                    netPrice = invoicePeriodAmendment.RealValue;
+                }
+
+                if (invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::LinePercent)
+                {
+                    if (rentalDiscPercent)
+                    {
+                        continue;
+                    }
+
+                    rentalDiscPercent = invoicePeriodAmendment.RealValue;
+                }
+
+                if (priceAmendmentFound && rentalDiscPercent)
+                {
+                    break;
+                }
+            }
+
+            if (rentalDiscPercent)
+            {
+                netPrice -= netPrice * rentalDiscPercent / 100;
+            }
+            else if (this.LinePercent)
+            {
+                netPrice -= netPrice * this.LinePercent / 100;
+            }
+        }
+    
+        return netPrice;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkAllowEdit</Name>
+				<Source><![CDATA[
+    public container checkAllowEdit(boolean _mustUseAmendment)
+    {
+        boolean  allowEditQty, allowEditRentalPricing, allowEditSalesPricing;
+
+        [allowEditRentalPricing, allowEditSalesPricing, allowEditQty] = next checkAllowEdit(_mustUseAmendment);
+        if (this.TradeType == RORTradeType::SalesPurch && this.TableId == tableNum(SalesLine))
+        {
+            SalesLine salesLine = this as SalesLine;  
+
+            if (!salesLine.FINValidateActiveInvoiceProposal())
+            {
+                return [false, false, false];
+            }
+        }
+
+        return [allowEditRentalPricing, allowEditSalesPricing, allowEditQty];
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

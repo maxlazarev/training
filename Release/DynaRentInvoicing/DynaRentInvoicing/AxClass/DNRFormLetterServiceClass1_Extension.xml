@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRFormLetterServiceClass1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(FormletterService))]
+public final class DNRFormLetterServiceClass1_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createAndPostJournal</Name>
+				<Source><![CDATA[
+    protected void createAndPostJournal()
+    {
+        FINSalesTotalsDisposableContext context;
+        FINSalesTotals finSalesTotals;
+
+        RORParameters parameters = RORParameters::find();
+
+        if (!parameters.FINSkipTotalJournalizationCalcOnConfirmation)
+        {
+            if (formletterParmTable.TableId == tableNum(SalesParmTable)
+            &&  formLetterContract
+            &&  formLetterContract is SalesFormLetterConfirmContract)
+            {
+                SalesParmTable salesParmTable = formletterParmTable as SalesParmTable;
+                SalesTable salesTable = salesParmTable.salesTable();
+
+                if (salesTable.SalesType == SalesType::RORRental)
+                {
+                    finSalesTotals = new FINSalesTotals();
+                    finSalesTotals.parmCallerBuffer(salesTable);
+                    finSalesTotals.prepareDataForTotals();
+
+                    // Only initialize the context when confirming a rental order. 
+                    // Otherwise this method can be called multiple times in one process (e.g. posting a project invoice proposal), resulting in nesting of the context
+                    context = new FINSalesTotalsDisposableContext();
+                    context.parmSalesTotals(finSalesTotals);
+                }
+            }
+        }
+
+        next createAndPostJournal();
+
+        if (!parameters.FINSkipTotalJournalizationCalcOnConfirmation && finSalesTotals)
+        {
+            finSalesTotals.cleanupPrecalculatedData();
+            context.dispose();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournal</Name>
+				<Source><![CDATA[
+    protected void createJournal(Common _parmTable)
+    {
+        next createJournal(_parmTable);
+
+        if ((_parmTable.TableId == tableNum(SalesParmTable))
+        && (journal.TableId == tableNum(CustInvoiceJour)))
+        {
+            SalesParmTable salesParmTable   = _parmTable as SalesParmTable;
+            SalesParmUpdate salesParmUpdate = salesParmTable.salesParmUpdate();
+
+            CustInvoiceJour custInvoiceJour = journal;
+            custInvoiceJour.selectForUpdate();
+            custInvoiceJour.FINCalculationDateTime = salesParmUpdate.INVCalculationDateTime;
+
+            if (salesParmUpdate.FINProforma)
+            {
+                custInvoiceJour.FINIsRentalProposal = NoYes::Yes;
+            }
+
+            custInvoiceJour.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        next run();
+
+        FormletterOutputContract outputContract = this.getOutputContract();
+
+        if (outputContract
+        &&  outputContract.parmJournal())
+        {
+            if (outputContract.parmJournal().TableId == tableNum(CustInvoiceJour))
+            {
+                CustInvoiceJour custInvoiceJour = outputContract.parmJournal() as CustInvoiceJour;
+
+                FINMarkupWorkTrans::deleteParmId(custInvoiceJour.ParmId);
+            }
+            else if (outputContract.parmJournal().TableId == tableNum(ProjInvoiceJour))
+            {
+                ProjInvoiceJour projInvoiceJour = outputContract.parmJournal() as ProjInvoiceJour;
+
+                if (projInvoiceJour.ProposalId)
+                {
+                    FINMarkupWorkTransReference markupWorkTransReference;
+                    markupWorkTransReference.skipDataMethods(true);
+                    delete_from markupWorkTransReference
+                    where markupWorkTransReference.ParmId == projInvoiceJour.ProposalId;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalPost</Name>
+				<Source><![CDATA[
+    protected FormletterJournalPost createJournalPost(Common _parmTable)
+    {
+        FormletterJournalPost ret = next createJournalPost(_parmTable);
+
+        if (_parmTable.TableId == tableNum(SalesParmTable)
+        &&  ret is SalesInvoiceJournalPost)
+        {
+            SalesParmTable salesParmTable   = _parmTable as SalesParmTable;
+            SalesParmUpdate salesParmUpdate = salesParmTable.salesParmUpdate();
+
+                if (salesParmUpdate.FINProforma)
+                {
+                    // Don't do actual posting when creating invoice proposal.
+                    ret = null;
+
+                    // Use custom class instead. This will create a rental invoice proposal that can be posted later.
+                    FINSalesInvoiceProformaJournalCreate salesInvoiceProformaJournalCreate = FINSalesInvoiceProformaJournalCreate::newFormLetterService(this, salesParmTable);
+
+                    salesInvoiceProformaJournalCreate.run();
+                }
+            
+                if (salesParmUpdate.Proforma)
+                {
+                    FINSalesInvoiceProformaJournalMarkup salesInvoiceProformaJournalMarkup = FINSalesInvoiceProformaJournalMarkup::newFormLetterService(this, salesParmTable, ret);
+                    salesInvoiceProformaJournalMarkup.run();
+                }
+         }
+
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>handleError</Name>
+				<Source><![CDATA[
+    protected void handleError(
+        LogText             _logText,
+        FormletterParmTable _formletterParmTable)
+    {
+        next handleError(_logText, _formletterParmTable);
+
+        if (journal.RecId && journal.TableId == tableNum(ProjInvoiceJour))
+        {
+            ProjInvoiceJour failedJour = journal;
+            // Delete created misc. charges if invoice post failed.
+            FINMarkupWorkTransReference::deleteMarkupTransForParmId(failedJour.ProposalId);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCreditForm_Subrental</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINCreditForm_Subrental extends FINCreditForm
+{        
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createCreditManager</Name>
+				<Source><![CDATA[
+    protected FINCreditManager createCreditManager()
+    {
+        return FINCreditManager::construct(SalesPurch::Purch);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createParmLine</Name>
+				<Source><![CDATA[
+    private void createParmLine(VendInvoiceJour _vendInvoiceJour, VendInvoiceTrans _vendInvoiceTrans)
+    {
+        FINCreditLine creditParmLine;
+         
+        creditParmLine.initValue();
+        creditParmLine.Locked = NoYes::Yes;
+        creditParmLine.initFromJournal(_vendInvoiceJour);
+        creditParmLine.initFromOriginal(_vendInvoiceTrans);
+        creditParmLine.insert();           
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>excludedLines</Name>
+				<Source><![CDATA[
+    public Set excludedLines()
+    {
+        FINCreditLine creditParmLine;
+        FINCreditLineDetails creditParmLineDetails;
+        VendInvoiceTrans vendInvoiceTrans;
+        PurchLine purchLine;
+
+        Set excludedLines = super();
+
+        while select CreditLineRefRecId from creditParmLineDetails
+            exists join creditParmLine
+            where creditParmLine.JourRefTableId == callerBuffer.TableId
+            &&    creditParmLine.JourRefRecId == callerBuffer.RecId
+            &&    creditParmLine.RecId == creditParmLineDetails.CreditLineRefRecId
+                join RecId from vendInvoiceTrans
+                where vendInvoiceTrans.TableId == creditParmLine.RefTableId
+                &&    vendInvoiceTrans.RecId == creditParmLine.RefRecId
+                    join RecId from purchLine
+                    where purchLine.InventTransId == vendInvoiceTrans.InventTransId
+                    &&    purchLine.RORTradeType == RORTradeType::SalesPurch
+        {
+            excludedLines.add(creditParmLineDetails.CreditLineRefRecId);
+        }
+
+        return excludedLines;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>extendQuery</Name>
+				<Source><![CDATA[
+    public void extendQuery(QueryBuildDataSource _queryBuildDataSource, JoinMode _joinMode = JoinMode::ExistsJoin)
+    {
+        QueryBuildDataSource qbdsVendInvoiceTrans = _queryBuildDataSource.addDataSource(tableNum(VendInvoiceTrans));
+        qbdsVendInvoiceTrans.relations(true);
+        qbdsVendInvoiceTrans.joinMode(_joinMode);
+        
+        QueryBuildRange queryBuildRange = qbdsVendInvoiceTrans.addRange(FieldNum(VendInvoiceTrans, DataAreaId));
+        queryBuildRange.value(strFmt('((%1.%2 != %3) || ((%1.%2 == %3) && (%1.%4 > 0)))',
+                                     qbdsVendInvoiceTrans.name(),
+                                     fieldStr(VendInvoiceTrans, RORTradeType),
+                                     enum2int(RORTradeType::SalesPurch),
+                                     fieldStr(VendInvoiceTrans, Qty)));
+            
+        QueryBuildDataSource qbdsCreditLine = qbdsVendInvoiceTrans.addDataSource(tableNum(FINCreditLine));
+        qbdsCreditLine.relations(true);
+        qbdsCreditLine.joinMode(JoinMode::NoExistsJoin);
+        SysQuery::findOrCreateRange(qbdsCreditLine, fieldNum(FINCreditLine, DocumentState)).value(SysQuery::value(VersioningDocumentState::Finalized));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findNewestInvoiceId</Name>
+				<Source><![CDATA[
+    private void findNewestInvoiceId()
+    {
+        VendInvoiceTrans    vendInvoiceTransLocal;
+        VendInvoiceTrans    vendInvoiceTransOriginal;
+            
+        newestInvoiceId = invoiceId;
+    
+        if (invoiceId)
+        {
+            select firstonly InvoiceId from vendInvoiceTransLocal
+            order by RecId desc
+                exists join vendInvoiceTransOriginal
+                where vendInvoiceTransOriginal.RecId != vendInvoiceTransLocal.RecId
+                &&    vendInvoiceTransOriginal.InventTransId == vendInvoiceTransLocal.InventTransId
+                &&    vendInvoiceTransOriginal.InvoiceId == invoiceId;
+    
+            if (vendInvoiceTransLocal.InvoiceId)
+            {
+                newestInvoiceId = vendInvoiceTransLocal.InvoiceId;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMainInstruction</Name>
+				<Source><![CDATA[
+    public str getMainInstruction(AddUpdate _openMode)
+    {
+        str mainInstruction;
+        ;
+    
+        if (_openMode == AddUpdate::Update)
+        {
+            mainInstruction = "@DNR7410";
+        }
+        else
+        {
+            mainInstruction = "@DNR7411";
+        }
+    
+        return mainInstruction;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasCreditParmLine</Name>
+				<Source><![CDATA[
+    protected boolean hasCreditParmLine(boolean _checkOtherInvoices = false, boolean _excludePendingLines = false)
+    {
+        boolean ret;
+        vendInvoiceJour vendInvoiceJour;
+        vendInvoiceJour vendInvoiceJourOther;
+        FINCreditLine   creditParmLine;
+            
+        vendInvoiceJour = creditFormRun.dataSource().cursor();
+    
+        if (_checkOtherInvoices)
+        {
+            select firstonly RecId from vendInvoiceJourOther
+            where vendInvoiceJourOther.PurchId == vendInvoiceJour.PurchId
+            && vendInvoiceJourOther.RecId != vendInvoiceJour.RecId
+                exists join creditParmLine
+                where creditParmLine.JourRefTableId == vendInvoiceJourOther.TableId
+                &&    creditParmLine.JourRefRecId   == vendInvoiceJourOther.RecId;
+            
+            if(vendInvoiceJourOther)
+            {
+                ret = true;
+            }
+        }
+        else
+        {
+            select firstOnly RecId from creditParmLine
+            where creditParmLine.JourRefTableId == vendInvoiceJour.TableId
+            &&    creditParmLine.JourRefRecId   == vendInvoiceJour.RecId;
+    
+            ret = (creditParmLine.RecId != 0);
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCallerBuffer</Name>
+				<Source><![CDATA[
+    public void initCallerBuffer(Common _callerBuffer)
+    {
+        vendInvoiceJour vendInvoiceJour;
+        PurchTable      purchTable;
+    
+        super(_callerBuffer);
+    
+        switch (_callerBuffer.TableId)
+        {
+            case tableNum(vendInvoiceJour) :
+                vendInvoiceJour = _callerBuffer as vendInvoiceJour;
+                purchTable = vendInvoiceJour.purchTable();
+                orderId = vendInvoiceJour.PurchId;
+                invoiceAccount = vendInvoiceJour.InvoiceAccount;
+                invoiceId = vendInvoiceJour.InvoiceId;
+                this.findNewestInvoiceId();
+                break;
+    
+            case tableNum(PurchTable) :
+                purchTable = _callerBuffer as PurchTable;
+                orderId = purchTable.PurchId;
+                invoiceAccount = purchTable.InvoiceAccount;
+                invoiceId = '';
+                break;
+    
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateParmLine</Name>
+				<Source><![CDATA[
+    public void populateParmLine()
+    {
+        if (!callerCreditParmLineDetails)
+        {
+            Query                   query = new Query();
+            QueryRun                queryRun;
+            QueryBuildDataSource    queryBuildDataSource;
+            vendInvoiceTrans        vendInvoiceTrans;
+            vendInvoiceJour         vendInvoiceJour;
+            ;
+    
+            queryBuildDataSource = query.addDataSource(tableNum(vendInvoiceJour));
+    
+            if (orderId)
+            {
+                queryBuildDataSource.addRange(fieldNum(vendInvoiceJour, PurchId)).value(queryValue(orderId));
+            }
+    
+            if (invoiceAccount)
+            {
+                queryBuildDataSource.addRange(fieldNum(vendInvoiceJour, InvoiceAccount)).value(queryValue(invoiceAccount));
+            }
+    
+            if (invoiceId)
+            {
+                queryBuildDataSource.addRange(fieldNum(vendInvoiceJour, InvoiceId)).value(queryValue(invoiceId));
+            }
+    
+            this.extendQuery(queryBuildDataSource, JoinMode::InnerJoin);
+    
+            queryRun = new QueryRun(query);
+    
+            while (queryRun.next())
+            {
+                if (queryRun.changed(tableNum(vendInvoiceJour)))
+                {
+                    vendInvoiceJour = queryRun.get(tableNum(vendInvoiceJour));
+                }
+    
+                if (queryRun.changed(tableNum(vendInvoiceTrans)))
+                {
+                    vendInvoiceTrans = queryRun.get(tableNum(vendInvoiceTrans));
+    
+                    this.createParmLineForSubrentalLine(vendInvoiceJour, vendInvoiceTrans);                    
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createParmLineForSubrentalLine</Name>
+				<Source><![CDATA[
+    private void createParmLineForSubrentalLine(VendInvoiceJour _vendInvoiceJour, VendInvoiceTrans _vendInvoiceTrans)
+    {
+        FINInvoicePeriodQtyFinancial periodQtyFinancial;
+        FINInvoicePeriodQtyPhysical periodQtyPhysical;
+        PurchLine purchLineLocal;
+
+        select firstonly purchLineLocal
+        where purchLineLocal.InventTransId == _vendInvoiceTrans.InventTransId        
+            outer join RecId from periodQtyPhysical
+            where periodQtyPhysical.RefTableId == purchLineLocal.TableId
+            &&    periodQtyPhysical.RefRecId == purchLineLocal.RecId
+                join RecId from periodQtyFinancial
+                where periodQtyFinancial.InvPeriodQtyPhysicalRecId == periodQtyPhysical.RecId
+                &&    periodQtyFinancial.InvoiceId == _vendInvoiceTrans.InvoiceId;
+    
+        if (!purchLineLocal)
+        {
+            select firstonly purchLineLocal
+            where purchLineLocal.InventTransId == _vendInvoiceTrans.InventTransId
+            &&    purchLineLocal.RORTradeType == RORTradeType::SalesPurch;
+        }
+
+        // Make sure that rental line has correct invoice periods
+        if (periodQtyPhysical || purchLineLocal.RORTradeType == RORTradeType::SalesPurch)
+        {
+            this.createParmLine(_vendInvoiceJour, _vendInvoiceTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCreateParmLine</Name>
+				<Source><![CDATA[
+    private boolean canCreateParmLine(PurchLine _purchLine, VendInvoiceTrans _vendInvoiceTrans)
+    {
+        boolean canCreateParmLine;
+
+        if (_purchLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            // Do not let re-credit a credit line.
+            canCreateParmLine = _purchLine.PurchQty > 0;
+
+            // There might be only one credit per salesPurchLine so let create credit only if no previous credit exists or it was rejected.
+            canCreateParmLine = canCreateParmLine && !FINCreditLine::isSalesPurchLineCredited(_purchLine.InventTransId);
+        }
+        else
+        {
+            FINVendInvoiceTrans finVendInvoiceTrans;
+
+            select firstonly PeriodStatus from finVendInvoiceTrans
+                where finVendInvoiceTrans.VendInvoiceTransRecId == _vendInvoiceTrans.RecId;
+
+            if (callerBuffer && finVendInvoiceTrans && finVendInvoiceTrans.PeriodStatus != FINInvoiceTransPeriodStatus::Credited)
+            {
+                canCreateParmLine = true;
+            }
+            else if (!callerBuffer && finVendInvoiceTrans && finVendInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit)
+            {
+                canCreateParmLine = true;
+            }
+        }
+
+        return canCreateParmLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>salesPurch</Name>
+				<Source><![CDATA[
+    public SalesPurch salesPurch()
+    {
+        return SalesPurch::Purch;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

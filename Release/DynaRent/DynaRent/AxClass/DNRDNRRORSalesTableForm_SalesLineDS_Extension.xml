@@ -1,0 +1,428 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRDNRRORSalesTableForm_SalesLineDS_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(formDataSourceStr(DNRRORSalesTable, SalesLine))]
+public final class DNRDNRRORSalesTableForm_SalesLineDS_Extension
+{
+    private RecId lastSelectedSalesLineRecId;
+    private boolean deleteWarningShown;
+
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>promptValidationDelete</Name>
+				<Source><![CDATA[
+    protected boolean promptValidationDelete()
+    {
+        boolean ret = next promptValidationDelete() && !deleteWarningShown;
+
+        deleteWarningShown = true;
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustResetPriceOnItemIdModified</Name>
+				<Source><![CDATA[
+    protected container mustResetPriceOnItemIdModified()
+    {
+        container ret = next mustResetPriceOnItemIdModified();
+        SalesLine salesLine = this.cursor() as SalesLine;
+        SalesTable salesTable = element.salesTable();
+
+        ret = salesLine.itemIdChanged(salesTable.MatchingAgreement != 0 || salesLine.ItemId, salesTable.MatchingAgreement, true /* perform product variant validation */);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCreateSalesLine</Name>
+				<Source><![CDATA[
+    protected boolean mustCreateSalesLine()
+    {
+        boolean ret = next mustCreateSalesLine();
+        SalesTable salesTable = element.salesTable();
+        return ret && salesTable.checkAccount();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    public boolean validateWrite()
+    {
+        MCRSalesLineDropShipment mcrSalesLineDropShipment = element.RORMCRSalesLineDropShipment();
+        NoYes dropShipmentFlag = mcrSalesLineDropShipment.DropShipment;
+
+        // Skip the if-block where the inventdim is updated
+        mcrSalesLineDropShipment.DropShipment = NoYes::No;
+        boolean ret = next validateWrite();
+        mcrSalesLineDropShipment.DropShipment = dropShipmentFlag;
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reread</Name>
+				<Source><![CDATA[
+    public void reread()
+    {
+        next reread();
+        this.RORRefreshInventDim();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>itemIdModified</Name>
+				<Source><![CDATA[
+    void itemIdModified()
+    {
+        next itemIdModified();
+        this.RORUpdateLineFieldsMandatory();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>active</Name>
+				<Source><![CDATA[
+    int active(/*boolean _mcrFormPartUpdateOnly*/)
+    {
+        int ret = next active(/*_mcrFormPartUpdateOnly*/);
+
+        SalesTable salesTable = element.salesTable();
+
+        element.design().controlName(formControlStr(DNRRORSalesTable, RORInventTransWMS_Pick)).enabled(!salesTable.isCreditNote_PL());
+
+        this.RORUpdateLineButtonsDesign();
+        this.RORUpdateLineFieldsMandatory();
+
+        if(salesTable.SalesStatus == SalesStatus::Canceled)
+        {
+            this.allowEdit(false);
+        }
+
+        element.BOBUpdateDesign_SalesLineDS();
+
+        FormDataSource inventDim_ds = element.RORInventDim_ds();
+        SalesLine salesLine = this.cursor() as SalesLine;
+
+        inventDim_ds.object(fieldNum(InventDim, InventSerialId)).enabled(salesLine.RORTradeType != RORTradeType::SubRental);
+
+        element.checkCreditNoteLine();
+
+        element.design().controlName(formControlStr(DNRRORSalesTable, ButtonLineQuickQuote)).enabled(this.allowCreate());
+        element.design().controlName(formControlStr(DNRRORSalesTable, SalesLineDeliveryDetails)).enabled(salesLine.RORTradeType == RORTradeType::SalesPurch);
+        
+        boolean allowEditRentalPricing, allowEditSalesPricing, allowEditQty;
+
+        [allowEditRentalPricing, allowEditSalesPricing, allowEditQty] = salesLine.RORRentalLine::CheckAllowEdit();
+        element.RORUpdateDesign_SalesLineDS(allowEditRentalPricing, allowEditSalesPricing, allowEditQty);
+        element.RORUpdateDesign();
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        next init();
+        this.cacheAddMethod(tableMethodStr(SalesLine, RORdisplayVenueCode));
+        this.cacheAddMethod(tableMethodStr(SalesLine, RORdisplayLineStatus));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>write</Name>
+				<Source><![CDATA[
+    void write(/*boolean _calculateConfirmedDates*/)
+    {
+        SalesLine salesLine_Orig;
+        SalesLine salesLine = element.RORSalesLine();
+
+        salesLine_Orig.data(salesLine.orig());
+        element.RORParmSalesLine_Orig(salesLine_Orig);
+
+        next write(/*_calculateConfirmedDates*/);
+
+        if (CustParameters::find().AutomaticTotalDiscount)
+        {
+            element.RORSalesLine().salesTable(true).updateFinalDisc();
+        }
+
+        if (element.RORParmShowRentalLineEditor())
+        {
+            salesLine.RORRentalLine::openRentalLineEditor(element);
+        }
+        else if (element.RORParmUpdateKitPricing())
+        {
+            SalesLine localSalesLine;
+            localSalesLine.data(salesLine);
+            if (salesLine.RecId == 0)
+            {
+                RORRentalLineEditorForm::createSupplementaryItemsLines(salesLine);
+            }
+            else
+            {
+                ttsBegin;
+                salesLine.RORRentalLine::updateKitComponentPricing(RORKitPricingActionType::ModifyLine, !element.RORParmLineAmountModified());
+                ttsCommit;
+            }
+            this.research();
+            this.positionToRecord(localSalesLine);
+            element.RORParmLineAmountModified(false);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linkActive</Name>
+				<Source><![CDATA[
+    void linkActive()
+    {
+        next linkActive();
+
+        element.setCaptionText();
+
+        if (!element.RORSalesLine() && element.salesTable() && !element.inViewMode())
+        {
+            element.design().controlName(formControlStr(DNRRORSalesTable, SalesLine_ItemId)).setFocus();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>delete</Name>
+				<Source><![CDATA[
+    void delete()
+    {
+        SalesLine salesLine = element.RORSalesLine();
+
+        element.RORParmRecIdParent(salesLine.RORParentLineRecid);
+        element.RORParmSalesLinePreDelete(salesLine.data());
+
+        boolean mustResearch = (salesLine.RecId == this.getLastSelectedSalesLineRecId());
+
+        next delete();
+
+        if (mustResearch)
+        {
+            this.research();
+            lastSelectedSalesLineRecId = 0;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateExplosionCTP</Name>
+				<Source><![CDATA[
+    public void updateExplosionCTP()
+    {
+        boolean mustResetDeliveryDateControlType;
+        SalesLine salesLine = element.RORSalesLine();
+
+        if (salesLine.DeliveryDateControlType == SalesDeliveryDateControlType::CTP)
+        {
+            salesLine.DeliveryDateControlType = SalesDeliveryDateControlType::None;
+            mustResetDeliveryDateControlType = true;
+        }
+
+        next updateExplosionCTP();
+
+        if(mustResetDeliveryDateControlType)
+        {
+            salesLine.DeliveryDateControlType = SalesDeliveryDateControlType::CTP;
+
+            this.write(false);
+
+            SalesConfirmDatesCommandStrategy confirmDatesStrategy = SalesConfirmDatesCommandStrategy::newParameters(
+                    salesLine.DeliveryDateControlType,
+                    max(salesLine.ShippingDateRequested, DateTimeUtil::getToday(DateTimeUtil::getUserPreferredTimeZone())),
+                    dateNull(),
+                    true);
+
+            confirmDatesStrategy.run(salesLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORRefreshInventDim</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    private void RORRefreshInventDim()
+    {
+        SalesLine salesLine = element.RORSalesLine();
+        FormDataSource inventDim_ds = element.RORInventDim_ds();
+        InventDim inventDim = inventDim_ds.cursor() as InventDim;
+
+        if (salesLine.InventDimId != inventDim.InventDimId)
+        {
+            inventDim.data(InventDim::find(salesLine.InventDimId));
+            inventDim_ds.setCurrent();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateLineFieldsMandatory</Name>
+				<Source><![CDATA[
+    private void RORUpdateLineFieldsMandatory()
+    {
+        SalesLine salesLine = element.RORSalesLine();
+        boolean isSalesPurch = (salesLine.RORTradeType == RORTradeType::SalesPurch);
+        
+        this.object(fieldNum(SalesLine, INVInvoiceProfileId)).mandatory(!isSalesPurch);
+        this.object(fieldNum(SalesLine, DNRCalendarId)).mandatory(!isSalesPurch);
+        this.object(fieldNum(SalesLine, RORPriceTimeUnit)).mandatory(!isSalesPurch);
+        this.object(fieldNum(SalesLine, INVRentalModeId)).mandatory(!isSalesPurch);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateLineButtonsDesign</Name>
+				<Source><![CDATA[
+    private void RORUpdateLineButtonsDesign()
+    {
+        SalesLine salesLine = element.RORSalesLine();
+        SalesTable salesTable = element.salesTable();
+
+        boolean canCreateSubRentalAndBacktoBack = salesLine.RORTradeType == RORTradeType::Rental          &&
+                                                salesLine.SalesType == SalesType::RORRental             &&
+                                                salesLine.SalesStatus == SalesStatus::Backorder         &&
+                                                salesLine.RemainInventPhysical != 0                     &&
+                                                salesTable.FINCreditCheckNoWarning(true, false)         &&
+                                                salesTable.type().canCreatePurchOrder()                 &&
+                                                // line should not have object assigned yet
+                                               !salesLine.inventDim().inventSerialId                   &&
+                                                salesLine.type().RORcanCreatePurchOrder();
+
+        element.design().controlName(formControlStr(DNRRORSalesTable, RORCreateSubRentalOrder)).enabled(canCreateSubRentalAndBacktoBack);
+        element.design().controlName(formControlStr(DNRRORSalesTable, DNRPurchCreateFromSalesOrder_Back2BackLines)).enabled(canCreateSubRentalAndBacktoBack);
+        
+        element.design().controlName(formControlStr(DNRRORSalesTable, RORSubrentalReference)).enabled((salesLine.RORTradeType == RORTradeType::SubRental || salesTable.InterCompanyDirectDeliveryOrig) && RORSubrentalReference::existSales(salesLine.InventTransId));
+        element.design().controlName(formControlStr(DNRRORSalesTable, RORRentalLineEditorFormButton)).enabled(salesLine.RORRentalLine::canOpenRentalEditorForm());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLastSelectedSalesLineRecId</Name>
+				<Source><![CDATA[
+    private RecId getLastSelectedSalesLineRecId()
+    {
+        SalesLine salesLineLocal;
+        
+        if(!lastSelectedSalesLineRecId)
+        {
+            for(salesLineLocal = this.getFirst(true) ? this.getFirst(true) : this.cursor(); salesLineLocal; salesLineLocal = this.getnext())
+            {
+                lastSelectedSalesLineRecId = salesLineLocal.RecId;
+            }
+        }
+        
+        return lastSelectedSalesLineRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_SalesLineDS_OnDeleting</Name>
+				<Source><![CDATA[
+    // Event-handler methods
+
+    [FormDataSourceEventHandler(formDataSourceStr(DNRRORSalesTable, SalesLine), FormDataSourceEventType::Deleting)]
+    public static void DNREvent_SalesLineDS_OnDeleting(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        SalesLine salesLine = _sender.cursor() as SalesLine;
+
+        if(salesLine.RecId && salesLine.RORHasChildren(false, false))
+        {
+            salesLine.type().RORDeleteChildren();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_SalesLineDS_OnDeleted</Name>
+				<Source><![CDATA[
+    [FormDataSourceEventHandler(formDataSourceStr(DNRRORSalesTable, SalesLine), FormDataSourceEventType::Deleted)]
+    public static void DNREvent_SalesLineDS_OnDeleted(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        Object formRunObj = _sender.formRun() as Object;
+        SalesTable salesTable = formRunObj.salesTable();
+        SalesLine salesLinePreDelete = formRunObj.RORParmSalesLinePreDelete();
+        RecId recIdParent = formRunObj.RORParmRecIdParent();
+        SalesLine salesLine = _sender.cursor() as SalesLine;
+
+        if (salesTable.SalesType == SalesType::RORRental)
+        {
+            salesLinePreDelete.RORRentalLine::updateContractWithChanges();
+        }
+
+        // Update kit pricing if the deleted line was part of a kit
+        if (salesLine.RecId && recIdParent)
+        {
+            RORKitPriceManager::construct(SalesLine::findRecId(recIdParent, true), RORKitPriceUpdateType::FromKit, RORKitPricingActionType::DeleteLine).run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_SalesLineDS_OnWriting</Name>
+				<Source><![CDATA[
+    [FormDataSourceEventHandler(formDataSourceStr(DNRRORSalesTable, SalesLine), FormDataSourceEventType::Writing)]
+    public static void DNREvent_SalesLineDS_OnWriting(FormDataSource _sender, FormDataSourceEventArgs _eventArgs)
+    {
+        Object formRunObj = _sender.formRun() as Object;
+        SalesLine salesLine = _sender.cursor() as SalesLine;
+        SalesLine salesLine_Orig = formRunObj.RORParmSalesLine_Orig();
+
+        boolean showRentalLineEditor = RORRentalLineEditorForm::mustAutoShowRentalLineEditor(salesLine);
+        boolean updateKitPricing = (!showRentalLineEditor && salesLine.RORRentalLine::canUpdateKitPricing());
+
+        boolean rereadLines;
+
+        if(salesLine.RORRentalLine::canCascadeFieldsToLines(salesLine_Orig))
+        {
+            salesLine.RORRentalLine::cascadeFieldsToLines(salesLine_Orig, false, formRunObj.RORParmConvertPrices());
+            rereadLines = true;
+        }
+
+        formRunObj.RORParmReReadLines(rereadLines);
+        formRunObj.RORParmShowRentalLineEditor(showRentalLineEditor);
+        formRunObj.RORParmUpdateKitPricing(updateKitPricing);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

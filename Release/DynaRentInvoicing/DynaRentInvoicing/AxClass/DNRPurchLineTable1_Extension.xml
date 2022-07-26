@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchLineTable1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(PurchLine))]
+public final class DNRPurchLineTable1_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>isInvoiceMatched</Name>
+				<Source><![CDATA[
+    public boolean isInvoiceMatched()
+    {
+        boolean ret = next isInvoiceMatched();
+
+        if (this.RORTradeType == RORTradeType::SubRental)
+        {
+            // In general we always want to be able to modify price related fields on subrental line (we can restrict it on invoice profile level setup)
+            // even if an order is fully invoiced (in such case a credit will be created)
+            // Until no further bugs are reported we don't need to change updating of field purchLine.IsInvoiceMatched itself.
+            ret = false;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update(boolean _dropInvent, boolean _updateOrderLineOfDeliverySchedule, boolean _updatePurchTableDropShipStatus)
+    {
+        PurchLine purchLineOrig = this.orig();
+
+        next update(_dropInvent, _updateOrderLineOfDeliverySchedule, _updatePurchTableDropShipStatus);
+
+        if (this.RORTradeType           != RORTradeType::SalesPurch
+        && (this.INVInvoiceProfileId    != purchLineOrig.INVInvoiceProfileId
+        ||  this.RORPriceTimeUnit       != purchLineOrig.RORPriceTimeUnit))
+        {
+            FINRentalInvoiceProfile invoiceProfile = FINRentalInvoiceProfile::find(this.INVInvoiceProfileId);
+            
+            if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::RangeCalendar
+            && ((!this.dataSource() || !purchLineOrig.RecId || Box::yesNoCancel("@DNR:RangeTierRecalculation", DialogButton::Yes))))
+            {
+                FINPriceTierRangeRecalculate priceTierRangeRecalculate = new FINPriceTierRangeRecalculate();
+                priceTierRangeRecalculate.parmIsManualRecalculation(true);
+                priceTierRangeRecalculate.run(this);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINIsManualCalculationEngineEnabled</Name>
+				<Source><![CDATA[
+    // extension methods
+    public boolean FINIsManualCalculationEngineEnabled()
+    {
+        boolean ret;
+
+        if (FINInvoiceCalculatorEngineSetup::isEngineActive(FINRentalAccountType::Manual))
+        {
+            UnitOfMeasure rateCode = UnitOfMeasure::find(this.RORPriceTimeUnit);
+            
+            if (rateCode && rateCode.FINInvoiceManualEngine)
+            {
+                ret = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCheckRentalHoursRegistered</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is no longer used. Rental hour registration functionality does not exists anymore.", false)]
+    public static boolean  FINCheckRentalHoursRegistered(PurchLine _purchLineParent)
+    {        
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINIsUnregisterdHourOrderLine</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is no longer used. Rental hour registration functionality does not exists anymore.", false)]
+    public static boolean FINIsUnregisterdHourOrderLine(PurchLine _purchLine)
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetTierMultiplierOnCreation_post</Name>
+				<Source><![CDATA[
+    // event handler methods
+
+    [PostHandlerFor(tableStr(PurchLine), tableMethodStr(PurchLine, INVSetTierMultiplierOnCreation))]
+    public static void INVSetTierMultiplierOnCreation_post(XppPrePostArgs _args)
+    {
+        boolean manualRecalculation = _args.getArg('_manualRecalculation');
+        PurchLine purchLine = _args.getThis();
+                
+        if (purchLine && INVInvoicePeriodHost::canCalcMuliplierOnCreation(purchLine.TableId, purchLine.RecId, false))
+        {            
+            PurchLine purchLineLocal;
+            purchLineLocal.data(purchLine.data());
+            INVRateMultiplierTier rateMultiplier = FINPeriodSpecificationManager::getTierMultiplierOnCreation(purchLineLocal);
+            
+            // Avoid division by 0.
+            if (purchLine.INVRateMultiplierTier && rateMultiplier && purchLine.INVRateMultiplierTier != rateMultiplier)
+            {
+                purchLine.RORRentalGrossAmount = CurrencyExchangeHelper::amount(purchLine.RORRentalGrossAmount / purchLine.INVRateMultiplierTier * rateMultiplier, purchLine.CurrencyCode);
+                purchLine.LineAmount = CurrencyExchangeHelper::amount(purchLine.LineAmount / purchLine.INVRateMultiplierTier * rateMultiplier, purchLine.CurrencyCode);
+                purchLine.INVRateMultiplierTier = rateMultiplier;
+                purchLine.RORRentalLine::rentalPricesModified();
+            } 
+            else if (!purchLine.INVRateMultiplierTier || !rateMultiplier)
+            {
+                purchLine.RORRentalGrossAmount = 0;
+                purchLine.LineAmount = 0;
+                purchLine.INVRateMultiplierTier = rateMultiplier;
+                purchLine.RORRentalLine::rentalPricesModified();
+            }
+        }            
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVsetTierMultiplierRateOnCreation_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(tableStr(PurchLine), tableMethodStr(PurchLine, INVSetTierMultiplierRateOnCreation))]
+    public static void INVsetTierMultiplierRateOnCreation_post(XppPrePostArgs _args)
+    {
+        PurchLine purchLine = _args.getThis();
+        PurchLine purchLineOrig = purchLine.orig();
+        boolean forceCalculation;
+        boolean invoiceProfileOnCreation = FINRentalInvoiceProfile::find(purchLine.INVInvoiceProfileId).PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating;
+        boolean invoiceProfileOrigOnCreation = FINRentalInvoiceProfile::find(purchLineOrig.INVInvoiceProfileId).PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating;
+
+        if ((purchLine.INVInvoiceProfileId != purchLineOrig.INVInvoiceProfileId
+        ||   purchLine.DNRCalendarId != purchLineOrig.DNRCalendarId)
+        && (invoiceProfileOnCreation || invoiceProfileOrigOnCreation))
+        {
+            forceCalculation = true;
+        }
+        
+        if (purchLine
+        && (forceCalculation || INVInvoicePeriodHost::canCalcMuliplierOnCreation(purchLine.TableId, purchLine.RecId, false)))
+        {
+            ttsbegin;
+
+            purchLine.selectForUpdate(true);
+
+            PurchLine purchLineLocal;
+            purchLineLocal.data(purchLine.data());
+            INVRateMultiplierTier rateMultiplier = 1;
+            
+            // Set calculated multiplier on line level only if current invoice profile requires that.
+            if (invoiceProfileOnCreation)
+            {
+                rateMultiplier = FINPeriodSpecificationManager::getTierMultiplierOnCreation(purchLineLocal);
+            }
+
+            // Avoid division by 0.
+            if (purchLine.INVRateMultiplierTier && rateMultiplier && purchLine.INVRateMultiplierTier != rateMultiplier)
+            {
+                purchLine.RORRentalGrossAmount = CurrencyExchangeHelper::amount(purchLine.RORRentalGrossAmount / purchLine.INVRateMultiplierTier * rateMultiplier, purchLine.CurrencyCode);
+                purchLine.LineAmount = CurrencyExchangeHelper::amount(purchLine.LineAmount / purchLine.INVRateMultiplierTier * rateMultiplier, purchLine.CurrencyCode);
+                purchLine.INVRateMultiplierTier = rateMultiplier;
+                purchLine.RORRentalLine::rentalPricesModified();
+            }
+            else if (!purchLine.INVRateMultiplierTier || !rateMultiplier)
+            {
+                purchLine.RORRentalGrossAmount = 0;
+                purchLine.LineAmount = 0;
+                purchLine.INVRateMultiplierTier = rateMultiplier;
+                purchLine.RORRentalLine::rentalPricesModified();
+            }
+
+            NoYes isPriceTierMultiplierCalculated = invoiceProfileOnCreation;
+            FINInvoicePeriodQtyPhysical::updateInvoicePeriodMultiplier(purchLine.TableId, purchLine.RecId, isPriceTierMultiplierCalculated);
+
+            purchLine.update();
+            
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORDisplayCurrentNetPrice</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display FINCurrentNetPrice RORDisplayCurrentNetPrice()
+    {
+        return this.RORRentalLine::RORCurrentNetPrice();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,760 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINMarkupTransGenerator</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINMarkupTransGenerator
+{
+    FINInvoiceCalculatorParm    invoiceCalculatorParm;
+    Map                         markupCodeMap;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINMarkupTransGenerator construct(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        FINMarkupTransGenerator ret = new FINMarkupTransGenerator();
+        ret.setInvoiceCalculatorParm(_invoiceCalculatorParm);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new()
+    {
+        markupCodeMap = new Map(Types::Container, Types::String);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInvoiceCalculatorParm</Name>
+				<Source><![CDATA[
+    public void setInvoiceCalculatorParm(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        invoiceCalculatorParm = _invoiceCalculatorParm;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMarkupCodeForResult</Name>
+				<Source><![CDATA[
+    public void getMarkupCodeForResult()
+    {
+        List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+        boolean mustBeInvoiced = invoiceCalculatorParm.MustBeInvoiced;
+
+        if(resultList.empty())
+        {
+            return;
+        }
+
+        RORRentalLine           rentalLine = invoiceCalculatorParm.rentalLine();
+        ListEnumerator          enumerator = resultList.getEnumerator();
+        List                    newResultList = new List(Types::Class);
+        AmountCur               totalMarkupAmount;
+        AmountCur               totalInvoiceAmount;
+        FINRentalConceptCode    conceptCode;
+        SalesLine               salesLine = rentalLine as SalesLine;
+
+        if (salesLine)
+        {
+            conceptCode = salesLine.salesTable().FINRentalConceptCode;
+        }
+
+        while (enumerator.moveNext())
+        {
+            FINInvoiceCalcResult calcResult = enumerator.current();
+            container cacheCon;
+            FINRentalAccountType accountType = calcResult.accountType == FINRentalAccountType::ProjectHours ? FINRentalAccountType::Price : calcResult.accountType;
+
+            cacheCon = FINInvoicePosting::getMarkupCodeCached(rentalLine, accountType, conceptCode);
+
+            calcResult.initFromCacheContainer(cacheCon);
+            totalMarkupAmount += calcResult.amountCur;
+                
+            if (invoiceCalculatorParm.ParmLineTableId == tableNum(PSAtmpProjProposalTrans)
+            && calcResult.accountType == FINRentalAccountType::ProjectHours)
+            {
+                calcResult.mustCharge = NoYes::No;
+            }
+
+            if (calcResult.mustCharge)
+            {
+                totalInvoiceAmount += calcResult.amountCur;
+            }
+
+            if (calcResult.amountCur != 0)
+            {
+                mustBeInvoiced = true;
+            }
+
+            newResultList.addEnd(calcResult);
+        }
+             
+        invoiceCalculatorParm.InvoiceCalcResultListPacked = newResultList.pack();
+        invoiceCalculatorParm.MarkupAmount = CurrencyExchangeHelper::amount(totalMarkupAmount, rentalLine.CurrencyCode);
+        invoiceCalculatorParm.InvoiceAmount = CurrencyExchangeHelper::amount(totalInvoiceAmount, rentalLine.CurrencyCode);
+        invoiceCalculatorParm.MustBeInvoiced = mustBeInvoiced;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMarkupTrans</Name>
+				<Source><![CDATA[
+    public static void createMarkupTrans(ParmId _parmId, RefTableId _parmLineTableId = 0, RefRecId _parmLineRecId = 0)
+    {
+        FINInvoiceCalculatorParm    invoiceCalculatorParm;
+        RecordInsertList            insertList = new RecordInsertList(tableNum(MarkupTrans));
+        Map                         lineNumMap = new Map(Types::Int64, Types::Real);
+
+        while select InvoiceCalcResultListPacked, OrderLinePacked, OrderLineTableId, OrderLineRecId from invoiceCalculatorParm
+        where invoiceCalculatorParm.ParmId == _parmId
+        &&    (!_parmLineTableId || invoiceCalculatorParm.ParmLineTableId == _parmLineTableId)
+        &&    (!_parmLineRecId || invoiceCalculatorParm.ParmLineRecId == _parmLineRecId)
+        {
+            List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            ListEnumerator enumerator = resultList.getEnumerator();
+            MarkupTrans markupTrans;
+
+            while(enumerator.moveNext())
+            {
+                FINInvoiceCalcResult calcResult = enumerator.current();
+                markupTrans.clear();
+                markupTrans.TransTableId = invoiceCalculatorParm.OrderLineTableId;
+                markupTrans.TransRecId = invoiceCalculatorParm.OrderLineRecId;
+                
+                if (lineNumMap.exists(markupTrans.TransRecId))
+                {
+                    markupTrans.LineNum = lineNumMap.lookup(markupTrans.TransRecId) + 1;
+                }
+                else
+                {
+                    markupTrans.LineNum = MarkupTrans::lastLineNum(markupTrans.TransTableId, markupTrans.TransRecId) + 1;
+                }
+                lineNumMap.insert(markupTrans.TransRecId, markupTrans.LineNum);
+                markupTrans.FINInitFromInvoiceCalcResult(calcResult);
+
+                RORRentalLine rentalLine = invoiceCalculatorParm.rentalLine();
+                markupTrans.FINInitFromRentalLine(rentalLine);
+
+                if (calcResult.isReversal && calcResult.markupTransRecId) // Use previously invoiced tax information
+                {
+                    MarkupTrans markupTransInvoiced = markupTrans::findRecId(calcResult.markupTransRecId);
+                    markupTrans.TaxGroup = markupTransInvoiced.TaxGroup;
+                    markupTrans.TaxItemGroup = markupTransInvoiced.TaxItemGroup;
+                }
+
+                markupTrans.InterCompanySkipUpdate = NoYes::Yes;
+                                
+                insertList.add(markupTrans);
+
+                FINMarkupTransGenerator::generatePercentageMarkupTrans(insertList, markupTrans, rentalLine, lineNumMap);
+            }
+        }
+
+        insertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLineAndOrderIdsFromRentalLine</Name>
+				<Source><![CDATA[
+    private static container getLineAndOrderIdsFromRentalLine(RORRentalLine _rentalLine)
+    {
+        RefRecId lineRecId, orderRecId;
+        RefTableId lineTableId, orderTableId;
+
+        switch (_rentalLine.TableId)
+        {
+            case tableNum(SalesLine):
+                SalesLine salesLine = _rentalLine;
+                lineRecId = salesLine.RecId;
+                lineTableId = salesLine.TableId;
+                
+                SalesTable salesTable = salesLine.salesTable();
+                orderRecId = salesTable.RecId;
+                orderTableId = salesTable.TableId;
+                break;
+
+            case tableNum(PurchLine):
+                PurchLine purchLine = _rentalLine;
+                lineRecId = purchLine.RecId;
+                lineTableId = purchLine.TableId;
+
+                PurchTable purchTable = purchLine.purchTable();
+                orderRecId = purchTable.RecId;
+                orderTableId = purchTable.TableId;
+                break;
+
+            case tableNum(SalesQuotationLine):
+                SalesQuotationLine salesQuotationLine = _rentalLine;
+                lineRecId = salesQuotationLine.RecId;
+                lineTableId = salesQuotationLine.TableId;
+
+                SalesQuotationTable salesQuotationTable = salesQuotationLine.salesQuotationTable();
+                orderRecId = salesQuotationTable.RecId;
+                orderTableId = salesQuotationTable.TableId;
+                break;
+
+            default:
+            // do nothing
+        }
+
+        return [lineRecId, lineTableId, orderRecId, orderTableId];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generatePercentageMarkupTrans</Name>
+				<Source><![CDATA[
+    private static void generatePercentageMarkupTrans(RecordInsertList _insertList, MarkupTrans _markupTrans, RORRentalLine _rentalLine, Map _lineNumMap)
+    {
+        RecId lineRecId, orderRecId;
+        TableId lineTableId, orderTableId;
+
+        [lineRecId, lineTableId, orderRecId, orderTableId] = FINMarkupTransGenerator::getLineAndOrderIdsFromRentalLine(_rentalLine);
+
+        MarkupTrans markupTransHeader, markupTransLine, newMarkupTrans;
+        MarkupTable markupTable;
+
+        if (lineRecId && lineTableId)
+        {
+            while select markupTransLine
+            where markupTransLine.TransRecId == lineRecId
+            &&    markupTransLine.TransTableId == lineTableId
+            &&    markupTransLine.MarkupCategory == MarkupCategory::Percent
+                exists join markupTable
+                where markupTable.MarkupCode == _markupTrans.MarkupCode
+                &&    (markupTable.ModuleType == MarkupModuleType::Cust || markupTable.ModuleType == MarkupModuleType::Vend)
+                // Do not add to header totals internal charges like rental cost
+                &&   (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend)
+            {
+                buf2Buf(_markupTrans, newMarkupTrans);
+                
+                FINMarkupTransGenerator::initNewMarkupTrans(newMarkupTrans, markupTransLine, _lineNumMap);
+
+                _lineNumMap.insert(newMarkupTrans.TransRecId, newMarkupTrans.LineNum);
+                _insertList.add(newMarkupTrans);
+            }
+        }
+
+        if (orderRecId && orderTableId)
+        {
+            while select markupTransHeader
+            where markupTransHeader.TransRecId == orderRecId
+            &&    markupTransHeader.TransTableId == orderTableId
+            &&    markupTransHeader.MarkupCategory == MarkupCategory::Percent
+                exists join markupTable
+                where markupTable.MarkupCode == _markupTrans.MarkupCode
+                &&    (markupTable.ModuleType == MarkupModuleType::Cust || markupTable.ModuleType == MarkupModuleType::Vend)
+                // Do not add to header totals internal charges like rental cost
+                &&   (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend)
+            {
+                buf2Buf(_markupTrans, newMarkupTrans);
+
+                FINMarkupTransGenerator::initNewMarkupTrans(newMarkupTrans, markupTransHeader, _lineNumMap);
+                
+                _lineNumMap.insert(newMarkupTrans.TransRecId, newMarkupTrans.LineNum);
+                _insertList.add(newMarkupTrans);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initNewMarkupTrans</Name>
+				<Source><![CDATA[
+    private static void initNewMarkupTrans(MarkupTrans _newMarkupTrans, MarkupTrans _oldMarkupTrans, Map _lineNumMap)
+    {
+        _newMarkupTrans.Value = Markup::FINGetMarkupAmountFromMarkupCategory(_oldMarkupTrans, 0, 0, _newMarkupTrans.Value, _newMarkupTrans.Value, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), 0, '', false, false);
+        _newMarkupTrans.Txt = _oldMarkupTrans.Txt + ' - ' + _newMarkupTrans.Txt;
+        _newMarkupTrans.MarkupCode = _oldMarkupTrans.MarkupCode;
+        _newMarkupTrans.FINGeneratedFromPercentage = NoYes::Yes;
+            
+        if (_lineNumMap.exists(_newMarkupTrans.TransRecId))
+        {
+            _newMarkupTrans.LineNum = _lineNumMap.lookup(_newMarkupTrans.TransRecId) + 1;
+        }
+        else
+        {
+            _newMarkupTrans.LineNum = MarkupTrans::lastLineNum(_newMarkupTrans.TransTableId, _newMarkupTrans.TransRecId) + 1;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMarkupTransForProposal</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInsertMethodInLoop", "Cannot be refactored without altering functionality of method")]
+    public static void createMarkupTransForProposal(ParmId _parmId)
+    {
+        FINInvoiceCalculatorParm    invoiceCalculatorParm;
+        Map                         lineNumMap = new Map(Types::Int64, Types::Real);
+
+        while select InvoiceCalcResultListPacked, OrderLinePacked, OrderLineTableId, OrderLineRecId from invoiceCalculatorParm
+        where invoiceCalculatorParm.ParmId == _parmId
+        {
+            List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            ListEnumerator enumerator = resultList.getEnumerator();
+            MarkupTrans markupTrans;
+
+            while(enumerator.moveNext())
+            {
+                FINInvoiceCalcResult calcResult = enumerator.current();
+
+                if (calcResult.accountType == FINRentalAccountType::ProjectHours
+                 && !calcResult.mustCharge)
+                {
+                    // Proj hour transaction will be charged as in std ax.
+                    continue;
+                }
+
+                markupTrans.clear();
+                markupTrans.TransTableId = invoiceCalculatorParm.OrderLineTableId;
+                markupTrans.TransRecId = invoiceCalculatorParm.OrderLineRecId;
+                
+                if (lineNumMap.exists(markupTrans.TransRecId))
+                {
+                    markupTrans.LineNum = lineNumMap.lookup(markupTrans.TransRecId) + 1;
+                }
+                else
+                {
+                    markupTrans.LineNum = MarkupTrans::lastLineNum(markupTrans.TransTableId, markupTrans.TransRecId) + 1;
+                }
+                lineNumMap.insert(markupTrans.TransRecId, markupTrans.LineNum);
+                markupTrans.FINInitFromInvoiceCalcResult(calcResult);
+
+                RORRentalLine rentalLine = invoiceCalculatorParm.rentalLine();
+                markupTrans.FINInitFromRentalLine(rentalLine);
+                markupTrans.InterCompanySkipUpdate = NoYes::Yes;
+                
+                // Insert() used instead of RecordInsertList to be sure that there is an actual record with RecId linked with FINMarkupWorkTransReference record.
+                markupTrans.insert();
+
+                FINMarkupTransGenerator::generatePercentageMarkupTransForProposal(markupTrans, rentalLine, lineNumMap, _parmId);
+
+                // Reference let the system delete markupTrans records if project invoice posting would fail.
+                FINMarkupWorkTransReference::createMarkupWorkTransReference(markupTrans.RecId, 0, _parmId);
+            }
+        }        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generatePercentageMarkupTransForProposal</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInsertMethodInLoop", "Cannot be refactored without altering functionality of method")]
+    private static void generatePercentageMarkupTransForProposal(MarkupTrans _markupTrans, RORRentalLine _rentalLine, Map _lineNumMap, ParmId _parmId)
+    {
+        RecId lineRecId, orderRecId;
+        TableId lineTableId, orderTableId;
+
+        [lineRecId, lineTableId, orderRecId, orderTableId] = FINMarkupTransGenerator::getLineAndOrderIdsFromRentalLine(_rentalLine);
+
+        MarkupTrans markupTransHeader, markupTransLine, newMarkupTrans;
+        MarkupTable markupTable;
+
+        if (lineRecId && lineTableId)
+        {
+            while select markupTransLine
+            where markupTransLine.TransRecId == lineRecId
+            &&    markupTransLine.TransTableId == lineTableId
+            &&    markupTransLine.MarkupCategory == MarkupCategory::Percent
+                exists join markupTable
+                where markupTable.MarkupCode == _markupTrans.MarkupCode
+                &&    (markupTable.ModuleType == MarkupModuleType::Cust || markupTable.ModuleType == MarkupModuleType::Vend)
+                // Do not add to header totals internal charges like rental cost
+                &&   (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend)
+            {
+                buf2Buf(_markupTrans, newMarkupTrans);
+                
+                FINMarkupTransGenerator::initNewMarkupTrans(newMarkupTrans, markupTransLine, _lineNumMap);
+
+                _lineNumMap.insert(newMarkupTrans.TransRecId, newMarkupTrans.LineNum);
+                
+                newMarkupTrans.insert();
+                FINMarkupWorkTransReference::createMarkupWorkTransReference(newMarkupTrans.RecId, 0, _parmId);
+            }
+        }
+
+        if (orderRecId && orderTableId)
+        {
+            while select markupTransHeader
+            where markupTransHeader.TransRecId == orderRecId
+            &&    markupTransHeader.TransTableId == orderTableId
+            &&    markupTransHeader.MarkupCategory == MarkupCategory::Percent
+                exists join markupTable
+                where markupTable.MarkupCode == _markupTrans.MarkupCode
+                &&    (markupTable.ModuleType == MarkupModuleType::Cust || markupTable.ModuleType == MarkupModuleType::Vend)
+                // Do not add to header totals internal charges like rental cost
+                &&   (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend)
+            {
+                buf2Buf(_markupTrans, newMarkupTrans);
+
+                FINMarkupTransGenerator::initNewMarkupTrans(newMarkupTrans, markupTransHeader, _lineNumMap);
+                
+                _lineNumMap.insert(newMarkupTrans.TransRecId, newMarkupTrans.LineNum);
+                
+                newMarkupTrans.insert();
+                FINMarkupWorkTransReference::createMarkupWorkTransReference(newMarkupTrans.RecId, 0, _parmId);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createVendDraftMarkupTrans</Name>
+				<Source><![CDATA[
+    public static void createVendDraftMarkupTrans(ParmId _parmId, PurchLine _purchLine, VendInvoiceInfoLine _vendInvoiceInfoLine)
+    {
+        FINInvoiceCalculatorParm    invoiceCalculatorParm;
+        RecordInsertList            insertList = new RecordInsertList(tableNum(MarkupTrans));
+        Map                         lineNumMap = new Map(Types::Int64, Types::Real);
+
+        while select InvoiceCalcResultListPacked, OrderLinePacked, OrderLineTableId, OrderLineRecId from invoiceCalculatorParm
+        where invoiceCalculatorParm.ParmId == _parmId
+        &&    (!_purchLine.RecId || (invoiceCalculatorParm.OrderLineTableId == _purchLine.TableId && invoiceCalculatorParm.OrderLineRecId == _purchLine.RecId))
+        {
+            List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            ListEnumerator enumerator = resultList.getEnumerator();
+            MarkupTrans markupTrans;
+            
+            while(enumerator.moveNext())
+            {
+                FINInvoiceCalcResult calcResult = enumerator.current();
+                markupTrans.clear();
+                markupTrans.TransTableId = _vendInvoiceInfoLine.TableId;
+                markupTrans.TransRecId = _vendInvoiceInfoLine.RecId;
+                markupTrans.OrigTableId = _purchLine.TableId;
+                markupTrans.OrigRecId   = _purchLine.RecId;
+                
+                if (lineNumMap.exists(markupTrans.TransRecId))
+                {
+                    markupTrans.LineNum = lineNumMap.lookup(markupTrans.TransRecId) + 1;
+                }
+                else
+                {
+                    markupTrans.LineNum = MarkupTrans::lastLineNum(markupTrans.TransTableId, markupTrans.TransRecId) + 1;
+                }
+                lineNumMap.insert(markupTrans.TransRecId, markupTrans.LineNum);
+                markupTrans.FINInitFromInvoiceCalcResult(calcResult);
+                markupTrans.FINInitFromRentalLine(invoiceCalculatorParm.rentalLine());
+
+                markupTrans.TaxGroup     = _vendInvoiceInfoLine.TaxGroup ? _vendInvoiceInfoLine.TaxGroup : markupTrans.TaxGroup;
+                markupTrans.TaxItemGroup = _vendInvoiceInfoLine.TaxItemGroup ? _vendInvoiceInfoLine.TaxItemGroup : markupTrans.TaxItemGroup;
+                
+                insertList.add(markupTrans);
+            }
+        }
+      
+        insertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    public static void createMarkupWorkTrans(ParmId _parmId, RefTableId _parmLineTableId = 0, RefRecId _parmLineRecId = 0)
+    {
+        FINInvoiceCalculatorParm    invoiceCalculatorParm;
+        RecordInsertList            insertList = new RecordInsertList(tableNum(FINMarkupWorkTrans));
+
+        while select InvoiceCalcResultListPacked, OrderLinePacked, OrderLineTableId, OrderLineRecId, ParmLineTableId, ParmLineRecId, ParmId from invoiceCalculatorParm
+        where invoiceCalculatorParm.ParmId == _parmId
+        &&    (!_parmLineTableId || invoiceCalculatorParm.ParmLineTableId == _parmLineTableId)
+        &&    (!_parmLineRecId || invoiceCalculatorParm.ParmLineRecId == _parmLineRecId)
+        {
+            FINMarkupWorkTrans  markupWorkTrans;
+
+            delete_from markupWorkTrans
+            where markupWorkTrans.RefTableId == invoiceCalculatorParm.OrderLineTableId
+            &&    markupWorkTrans.RefRecId   == invoiceCalculatorParm.OrderLineRecId;
+
+            List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            ListEnumerator enumerator = resultList.getEnumerator();
+            
+            while(enumerator.moveNext())
+            {
+                FINInvoiceCalcResult calcResult = enumerator.current();
+
+                markupWorkTrans.clear();
+                markupWorkTrans.RefTableId = invoiceCalculatorParm.OrderLineTableId;
+                markupWorkTrans.RefRecId = invoiceCalculatorParm.OrderLineRecId;
+                markupWorkTrans.ParmLineTableId = invoiceCalculatorParm.ParmLineTableId;
+                markupWorkTrans.ParmLineRecId = invoiceCalculatorParm.ParmLineRecId;
+                markupWorkTrans.initFromInvoiceCalcResult(calcResult);
+                markupWorkTrans.ParmId = invoiceCalculatorParm.ParmId;
+                    
+                RORRentalLine rentalLine = invoiceCalculatorParm.rentalLine();
+                markupWorkTrans.initFromRentalLine(rentalLine);
+
+                if (calcResult.isReversal && calcResult.markupTransRecId) // Use previously invoiced tax information
+                {
+                    MarkupTrans markupTransInvoiced = markupTrans::findRecId(calcResult.markupTransRecId);
+                    markupWorkTrans.TaxGroup = markupTransInvoiced.TaxGroup;
+                    markupWorkTrans.TaxItemGroup = markupTransInvoiced.TaxItemGroup;
+                }
+
+                if (calcResult.accountType == FINRentalAccountType::ProjectHours
+                 && !calcResult.mustCharge)
+                {
+                    // Proj hour transaction will be charged as in std ax.
+                    markupWorkTrans.IsProjHour = true;
+                }
+                else
+                {
+                    insertList.add(markupWorkTrans);
+                }
+
+                FINMarkupTransGenerator::generatePercentageMarkupWorkTrans(insertList, markupWorkTrans, rentalLine);
+            }
+        }
+
+        insertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generatePercentageMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    private static void generatePercentageMarkupWorkTrans(RecordInsertList _insertList, FINMarkupWorkTrans _markupWorkTrans, RORRentalLine _rentalLine)
+    {
+        RecId lineRecId, orderRecId;
+        TableId lineTableId, orderTableId;
+
+        [lineRecId, lineTableId, orderRecId, orderTableId] = FINMarkupTransGenerator::getLineAndOrderIdsFromRentalLine(_rentalLine);
+
+        MarkupTrans markupTransHeader, markupTransLine;
+        MarkupTable markupTable;
+        FINMarkupWorkTrans newMarkupWorkTrans;
+
+        if (lineRecId && lineTableId)
+        {
+            while select markupTransLine
+            where markupTransLine.TransRecId == lineRecId
+            &&    markupTransLine.TransTableId == lineTableId
+            &&    markupTransLine.MarkupCategory == MarkupCategory::Percent
+                exists join markupTable
+                where markupTable.MarkupCode == _markupWorkTrans.MarkupCode
+                &&    (markupTable.ModuleType == MarkupModuleType::Cust || markupTable.ModuleType == MarkupModuleType::Vend)
+                // Do not add to header totals internal charges like rental cost
+                &&   (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend)
+            {
+                buf2Buf(_markupWorkTrans, newMarkupWorkTrans);
+                newMarkupWorkTrans.AmountCur = Markup::FINGetMarkupAmountFromMarkupCategory(markupTransLine, 0, 0, _markupWorkTrans.AmountCur, _markupWorkTrans.AmountCur, DateTimeUtil::date(DateTimeUtil::getSystemDateTime()), 0, '', false, false);
+                _insertList.add(newMarkupWorkTrans);
+            }
+        }
+
+        if (orderRecId && orderTableId)
+        {
+            while select markupTransHeader
+            where markupTransHeader.TransRecId == orderRecId
+            &&    markupTransHeader.TransTableId == orderTableId
+            &&    markupTransHeader.MarkupCategory == MarkupCategory::Percent
+                exists join markupTable
+                where markupTable.MarkupCode == _markupWorkTrans.MarkupCode
+                &&    (markupTable.ModuleType == MarkupModuleType::Cust || markupTable.ModuleType == MarkupModuleType::Vend)
+                // Do not add to header totals internal charges like rental cost
+                &&   (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend)
+            {
+                buf2Buf(_markupWorkTrans, newMarkupWorkTrans);
+                newMarkupWorkTrans.AmountCur = Markup::FINGetMarkupAmountFromMarkupCategory(markupTransHeader, 0, 0, _markupWorkTrans.AmountCur, _markupWorkTrans.AmountCur, DateTimeUtil::date(DateTimeUtil::getSystemDateTime()), 0, '', false, false);
+                _insertList.add(newMarkupWorkTrans);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMarkupTransForParmId</Name>
+				<Source><![CDATA[
+    public static Set createMarkupTransForParmId(ParmId _parmId)
+    {
+        Set RecIdSet = new Set(Types::Int64);
+
+        FINMarkupWorkTrans  markupWorkTrans;
+        MarkupTable markupTable;
+        SalesLine salesLine;
+
+        ttsbegin;
+        while select markupWorkTrans
+            where markupWorkTrans.ParmId == _parmId
+                join salesLine
+                where salesLine.TableId == markupWorkTrans.RefTableId
+                &&    salesLine.RecId == markupWorkTrans.RefRecId
+                    exists join markupTable
+                    where markupTable.MarkupCode == markupWorkTrans.MarkupCode
+                    &&    markupTable.ModuleType == MarkupModuleType::Cust
+                    // Do not add to header totals internal charges like rental cost
+                    && (markupTable.CustType == MarkupType::CustVend ||
+                        markupTable.VendType == MarkupType::CustVend)
+        {
+            RecId recId = FINMarkupWorkTrans::createMarkupTransFromMarkupWorkTrans(markupWorkTrans, salesLine);
+            recIdSet.add(recId);
+        }
+        ttscommit;
+
+        return recIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMarkupTransForParmIdParmLine</Name>
+				<Source><![CDATA[
+    public static Set createMarkupTransForParmIdParmLine(ParmId _parmId, RefTableId _parmLineTableId, RefRecId _parmLineRecId)
+    {
+        Set RecIdSet = new Set(Types::Int64);
+
+        FINMarkupWorkTrans  markupWorkTrans;
+        MarkupTable markupTable;
+        SalesLine salesLine;
+
+        ttsbegin;
+        while select markupWorkTrans
+            where markupWorkTrans.ParmId == _parmId
+            &&    markupWorkTrans.ParmLineTableId == _parmLineTableId
+            &&    markupWorkTrans.ParmLineRecId == _parmLineRecId
+                join salesLine
+                where salesLine.TableId == markupWorkTrans.RefTableId
+                &&    salesLine.RecId == markupWorkTrans.RefRecId
+                    exists join markupTable
+                    where markupTable.MarkupCode == markupWorkTrans.MarkupCode
+                    &&    markupTable.ModuleType == MarkupModuleType::Cust
+                    // Do not add to header totals internal charges like rental cost
+                    && (markupTable.CustType == MarkupType::CustVend ||
+                        markupTable.VendType == MarkupType::CustVend)
+        {
+            RecId recId = FINMarkupWorkTrans::createMarkupTransFromMarkupWorkTrans(markupWorkTrans, salesLine);
+            recIdSet.add(recId);
+        }
+        ttscommit;
+
+        return recIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMarkupTransForProposalId</Name>
+				<Source><![CDATA[
+    public static Set createMarkupTransForProposalId(ProjProposalId _proposalId)
+    {
+        Set recIdSet = new Set(Types::Int64);
+
+        FINMarkupWorkTrans  markupWorkTrans;
+        MarkupTable markupTable;
+        SalesLine salesLine;
+
+        ttsbegin;
+        while select markupWorkTrans
+            where markupWorkTrans.ParmId == _proposalId
+                join salesLine
+                where salesLine.TableId == markupWorkTrans.RefTableId
+                &&    salesLine.RecId == markupWorkTrans.RefRecId
+                    exists join markupTable
+                    where markupTable.MarkupCode == markupWorkTrans.MarkupCode
+                    &&    markupTable.ModuleType == MarkupModuleType::Cust
+                    // Do not add to header totals internal charges like rental cost
+                    && (markupTable.CustType == MarkupType::CustVend ||
+                        markupTable.VendType == MarkupType::CustVend)
+        {
+            RecId recId = FINMarkupWorkTrans::createMarkupTransFromMarkupWorkTrans(markupWorkTrans, salesLine);
+            FINMarkupWorkTransReference::createMarkupWorkTransReference(recId, markupWorkTrans.RecId, _proposalId);
+            recIdSet.add(recId);
+        }
+
+        Set::union(recIdSet, FINMarkupTransGenerator::createMarkupTransForProposalIdHeader(_proposalId));
+
+        ttscommit;
+
+        return recIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMarkupTransForProposalIdHeader</Name>
+				<Source><![CDATA[
+    public static Set createMarkupTransForProposalIdHeader(ProjProposalId _proposalId)
+    {
+        Set recIdSet = new Set(Types::Int64);
+
+        FINMarkupWorkTrans  markupWorkTrans;
+        MarkupTable markupTable;
+        SalesTable salesTable;
+
+        while select markupWorkTrans
+        where markupWorkTrans.ParmId    == _proposalId
+            join salesTable
+            where salesTable.TableId    == markupWorkTrans.RefTableId
+            &&    salesTable.RecId      == markupWorkTrans.RefRecId
+                exists join markupTable
+                where markupTable.MarkupCode    == markupWorkTrans.MarkupCode
+                &&    markupTable.ModuleType    == MarkupModuleType::Cust
+                &&   (markupTable.CustType      == MarkupType::CustVend ||
+                      markupTable.VendType      == MarkupType::CustVend)
+        {
+            RecId recId = FINMarkupWorkTrans::createMarkupTransFromMarkupWorkTrans(markupWorkTrans, salesTable);
+            FINMarkupWorkTransReference::createMarkupWorkTransReference(recId, markupWorkTrans.RecId, _proposalId);
+            recIdSet.add(recId);
+        }
+
+        return recIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteMarkupTransForSet</Name>
+				<Source><![CDATA[
+    public static void deleteMarkupTransForSet(Set _recIdSet)
+    {
+        MarkupTrans markupTrans;
+
+        if (_recIdSet && !_recIdSet.empty())
+        {
+            SetEnumerator enumerator = _recIdSet.getEnumerator();
+            
+            ttsbegin;
+            while (enumerator.moveNext())
+            {
+                RecId deletedRecId = enumerator.current();
+                                
+                select firstonly forupdate markupTrans
+                where markupTrans.RecId == deletedRecId
+                && markupTrans.Keep == false;
+
+                if (markupTrans)
+                {
+                    markupTrans.delete();
+                }
+            }
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

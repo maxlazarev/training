@@ -1,0 +1,451 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRAssetPostClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(AssetPost))]
+public final class DNRAssetPostClass_Extension
+{
+    private RecId               callerJourTransRecId;
+    private CustInvoiceTrans    dnrCustInvoiceTrans;
+    private boolean             isCallerA2IConvJourTrans;
+    private boolean             isCallerA2SConvJourTrans;
+    private InventTransOriginId purchLineOriginId;
+    private InventQty           updateQty;
+    private InventLocationId    updateWarehouse;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>check</Name>
+				<Source><![CDATA[
+    public boolean check(boolean budget, boolean _checkNetBookValue)
+    {
+        boolean ret = next check(budget, _checkNetBookValue);
+        
+        if (ret && this.checkAssetTransTypeValidForDisposal())
+        {
+            ret = this.BOBValidateDepreciationDates();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkAssetTransTypeValidForDisposal</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. This method is obsolete')]
+    protected boolean checkAssetTransTypeValidForDisposal()
+    {
+        return next checkAssetTransTypeValidForDisposal();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromCashDiscTrans</Name>
+				<Source><![CDATA[
+    public void initFromCashDiscTrans(AssetTrans _assetTrans, CustVendTrans _custVendTrans, AssetAmount _discAmountMST, AssetAmount _baseAmountMST)
+    {
+        AssetTable  assetTableLocal;
+        PurchLine   purchLine;
+        InventDim   inventDim;
+
+        select firstOnly InventLocationId from inventDim
+            exists join purchLine
+            where purchLine.InventDimId == inventDim.inventDimId
+                join TableId from assetTableLocal
+                where assetTableLocal.PurchLineRecId == purchLine.RecId
+                &&    assetTableLocal.AssetId == _assetTrans.AssetId;
+    
+        updateWarehouse = inventDim.InventLocationId;
+
+        next initFromCashDiscTrans(_assetTrans, _custVendTrans, _discAmountMST, _baseAmountMST);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromCustInvoiceTrans</Name>
+				<Source><![CDATA[
+    public void initFromCustInvoiceTrans(CustInvoiceTrans _custInvoiceTrans)
+    {
+        next initFromCustInvoiceTrans(_custInvoiceTrans);
+
+        CustInvoiceJour     custInvoiceJour;
+        CustInvoiceTable    custInvoiceTable;
+        CustInvoiceLine     custInvoiceLine;
+
+        select firstonly TableId from custInvoiceJour
+        where custInvoiceJour.InvoiceId             == _custInvoiceTrans.InvoiceId
+        &&    custInvoiceJour.InvoiceDate           == _custInvoiceTrans.InvoiceDate
+        &&    custInvoiceJour.NumberSequenceGroup   == _custInvoiceTrans.NumberSequenceGroup
+        &&    custInvoiceJour.SalesId               == _custInvoiceTrans.SalesId
+            join TableId from custInvoiceTable
+            where custInvoiceTable.InvoiceId == custInvoiceJour.InvoiceId
+            &&    custInvoiceTable.InvoiceDate == custInvoiceJour.InvoiceDate
+            &&    custInvoiceTable.numberSequenceGroup == custInvoiceJour.numberSequenceGroup
+                join BOBInventLocationId, Quantity from custInvoiceLine
+                where custInvoiceLine.ParentRecId == custInvoiceTable.RecId
+                &&    custInvoiceLine.LineNum == _custInvoiceTrans.LineNum;
+    
+        updateWarehouse = custInvoiceLine.BOBInventLocationId;
+        updateQty       = custInvoiceLine.Quantity;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromInventJournalTrans</Name>
+				<Source><![CDATA[
+    void initFromInventJournalTrans(InventJournalTrans _inventJournalTrans, InventUpd_Financial _inventUpd_Financial)
+    {
+        next initFromInventJournalTrans(_inventJournalTrans, _inventUpd_Financial);
+
+        updateWarehouse = _inventJournalTrans.inventDim().InventLocationId;
+        updateQty       = _inventJournalTrans.Qty;
+        
+        switch(_inventJournalTrans.inventJournalTable().BOBInventJournalType)
+        {
+            case BOBInventJournalType::AssetToInvent:
+                isCallerA2IConvJourTrans = true;
+                callerJourTransRecId = _inventJournalTrans.RecId;
+                break;
+
+            case BOBInventJournalType::AssetToScrap:
+                isCallerA2IConvJourTrans = true;
+                break;
+    
+            case BOBInventJournalType::InventToAsset:
+                callerJourTransRecId = _inventJournalTrans.RecId;
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromInventMovement</Name>
+				<Source><![CDATA[
+    void initFromInventMovement(InventMovement _inventMovement, InventUpd_Financial _inventUpd_Financial, AmountMST _amountMST)
+    {
+        // *** Repeated code
+        InventTransOrigin   inventTransOrigin;
+        InventTrans         inventTrans;
+        PurchLine           purchLine;
+
+        select firstonly InventTransId, Party, RecId from inventTransOrigin
+        where inventTransOrigin.RecId == _inventMovement.inventTransOriginId()
+        &&    inventTransOrigin.ReferenceCategory == InventTransType::Purch
+            join InvoiceId, CurrencyCode from inventTrans
+            where inventTrans.InventTransOrigin == inventTransOrigin.RecId
+            &&    inventTrans.InvoiceId == _inventUpd_Financial.parmInvoiceId()  //to get correct invent trans record for the current invoice when the line has been split/partial invoice posting.
+            &&    (!_inventUpd_Financial.parmPackingSlipId() || inventTrans.PackingSlipId  == _inventUpd_Financial.parmPackingSlipId())
+            &&    (!_inventUpd_Financial.parmVoucherPhysical() || inventTrans.VoucherPhysical == _inventUpd_Financial.parmVoucherPhysical());
+
+        if (inventTransOrigin)
+        {
+            purchLine = InventTransOriginPurchLine::purchLine(inventTransOrigin.RecId);
+    
+            if (purchLine)
+            {
+                purchLineOriginId = inventTransOrigin.RecId;
+            }
+        }
+
+        next initFromInventMovement(_inventMovement, _inventUpd_Financial, _amountMST);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromInvoiceCashDiscTrans</Name>
+				<Source><![CDATA[
+    public void initFromInvoiceCashDiscTrans(LedgerJournalTrans _ledgerJournalTrans)
+    {
+        next initFromInvoiceCashDiscTrans(_ledgerJournalTrans);
+        
+        updateWarehouse = ledgerJournalTrans_Asset.BOBInventLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromLedgerJournalTrans</Name>
+				<Source><![CDATA[
+    public void initFromLedgerJournalTrans(LedgerJournalTrans       _ledgerJournalTrans,
+                                           LedgerJournalTrans       _originalLedgerJournalTrans,
+                                           LedgerJournalTrans_Asset _ledgerJournalTrans_Asset,
+                                           boolean                  _isOffset,
+                                           TaxAmount                _taxAmount,
+                                           TaxAmount                _taxAmountInCostPrice)
+    {
+        next initFromLedgerJournalTrans(_ledgerJournalTrans, _originalLedgerJournalTrans, _ledgerJournalTrans_Asset, _isOffset, _taxAmount, _taxAmountInCostPrice);
+
+        updateWarehouse = ledgerJournalTrans_Asset.BOBInventLocationId;
+        updateQty       = ledgerJournalTrans.Qty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newCustInvoiceTrans</Name>
+				<Source><![CDATA[
+    static AssetPost newCustInvoiceTrans(LedgerVoucher _ledgerVoucher, CustInvoiceTrans _custInvoiceTrans)
+    {
+        AssetPost ret = next newCustInvoiceTrans(_ledgerVoucher, _custInvoiceTrans);
+
+        ret.DNRParmCustInvoiceTrans(_custInvoiceTrans);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>post</Name>
+				<Source><![CDATA[
+    public void post(boolean _updateLedger, boolean _autoDerivedPosting, boolean postToCurrent, boolean postToFAOffset)
+    {
+        next post(_updateLedger, _autoDerivedPosting, postToCurrent, postToFAOffset);
+
+        if (dnrCustInvoiceTrans.RecId)
+        {
+            BOBObjectManager::postFreeTextInvoiceLine(dnrCustInvoiceTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePostCaseForDisposalSale</Name>
+				<Source><![CDATA[
+    protected void updatePostCaseForDisposalSale(AssetBook _assetBook)
+    {
+        CurrentOperationsTax postingLayer = _assetBook.currentOperationsTax();
+        this.BOBCheckUpdateAssetQty(assetTable, assetTrans.TransType, postingLayer);
+
+        next updatePostCaseForDisposalSale(_assetBook);
+
+        if (postingLayer == CurrentOperationsTax::Current)
+        {
+            BOBRentalTransManager::newAssetUpdate().postAssetTrans(assetTrans, updateWarehouse, updateQty, callerJourTransRecId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePostCaseForDisposalScrap</Name>
+				<Source><![CDATA[
+    protected void updatePostCaseForDisposalScrap(AssetBook _assetBook)
+    {
+        CurrentOperationsTax postingLayer = _assetBook.currentOperationsTax();
+        this.BOBCheckUpdateAssetQty(assetTable, assetTrans.TransType, postingLayer);
+
+        next updatePostCaseForDisposalScrap(_assetBook);
+        
+        if (postingLayer == CurrentOperationsTax::Current)
+        {
+            BOBRentalTransManager::newAssetUpdate().postAssetTrans(assetTrans, updateWarehouse, updateQty);
+        }
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePostCaseForAcquisitionAdj</Name>
+				<Source><![CDATA[
+    protected boolean updatePostCaseForAcquisitionAdj(AssetBook _assetBook, AssetTable _assetTable)
+    {
+        this.updateFromVendInvoiceInfoLine(assetTable);
+        this.BOBCheckUpdateAssetQty(assetTable, assetTrans.TransType, _assetBook.currentOperationsTax());
+
+        boolean ret = next updatePostCaseForAcquisitionAdj(_assetBook, _assetTable);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateAcquisitionForPost</Name>
+				<Source><![CDATA[
+    protected void updateAcquisitionForPost(AssetBook _assetBook)
+    {
+        if(assetTrans.TransType == AssetTransType::Acquisition)
+        {
+            CurrentOperationsTax postingLayer = _assetBook.currentOperationsTax();
+
+            this.BOBCheckUpdateAssetQty(assetTable, assetTrans.TransType, postingLayer);
+    
+            // when assetTable is updated then assetBook is updated as well
+            if(AssetBook::find(_assetBook.AssetId, _assetBook.BookId).recVersion != _assetBook.recVersion)
+            {
+                _assetBook.reread();
+    
+                _assetBook.PurchId           = purchId;
+                _assetBook.VendAccount       = vendAccount;
+                _assetBook.VendInvoiceId     = vendInvoiceId;
+            }
+        }
+
+        next updateAcquisitionForPost(_assetBook);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePostCaseForAcquisition</Name>
+				<Source><![CDATA[
+    protected boolean updatePostCaseForAcquisition(AssetBook _assetBook, AssetParameters _assetParameters)
+    {
+        boolean ret = next updatePostCaseForAcquisition(_assetBook, _assetParameters);
+
+        CurrentOperationsTax postingLayer = _assetBook.currentOperationsTax();
+
+        if(postingLayer == CurrentOperationsTax::Current)
+        {
+            if(purchLineOriginId)
+            {
+                BOBRentalTransManager::newAssetUpdate().acquireAssetFromPurchInvoice(assetTrans, purchLineOriginId);
+            }
+            else
+            {
+                BOBRentalTransManager::newAssetUpdate().postAssetTrans(assetTrans, updateWarehouse, updateQty, callerJourTransRecId);
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBCheckUpdateAssetQty</Name>
+				<Source><![CDATA[
+    // extension methods
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void BOBCheckUpdateAssetQty(AssetTable _assetTable, AssetTransType _transType, CurrentOperationsTax _postingLayer)
+    {
+        AssetTable      bulkParentAsset;
+        AssetQuantity   updateQtyLocal;
+
+        if(ledgerJournalTrans && ledgerJournalTrans_Asset)
+        {
+            updateQtyLocal = ledgerJournalTrans.Qty;
+        }
+        else if(isCallerA2IConvJourTrans || isCallerA2SConvJourTrans)
+        {
+            updateQtyLocal = updateQty;
+        }
+    
+        if(updateQtyLocal
+        && _postingLayer == CurrentOperationsTax::Current
+        && _assetTable.BOBIsBulkChild()
+        && (_transType == AssetTransType::Acquisition    ||
+            _transType == AssetTransType::AcquisitionAdj ||
+            _transType == AssetTransType::DisposalSale   ||
+            _transType == AssetTransType::DisposalScrap))
+        {
+            _assetTable.Quantity += updateQtyLocal;
+    
+            if(_assetTable.Quantity >= 0)
+            {
+                _assetTable.update();
+    
+                update_recordSet bulkParentAsset
+                setting Quantity = bulkParentAsset.Quantity + updateQtyLocal
+                where bulkParentAsset.AssetId == _assetTable.MainAssetId;
+            }
+            else
+            {
+                throw error("@DNR8150");
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBIsBulkAsset</Name>
+				<Source><![CDATA[
+    private boolean BOBIsBulkAsset(AssetId _assetID)
+    {
+        AssetTable assetTableLocal = AssetTable::find(_assetId);
+
+        return (assetTableLocal.BOBIsBulkParent || assetTableLocal.BOBIsBulkChild());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBValidateDepreciationDates</Name>
+				<Source><![CDATA[
+    private boolean BOBValidateDepreciationDates()
+    {
+        boolean ret = true;
+
+        if (this.BOBIsBulkAsset(assetTrans.AssetId))
+        {
+            return ret; // no additional validations necessary on bulk fixed assets
+        }
+    
+        AssetBook assetBookCheck;
+
+        select firstonly assetBookCheck
+        where assetBookCheck.AssetId == assetTrans.AssetId
+        &&    !assetBookCheck.LastDepreciationDate;
+    
+        if (assetBookCheck)
+        {
+            ret = checkFailed(strFmt("@DNR2531", assetBookCheck.AssetId));
+        }
+        else
+        {
+            AssetTable assetTableCheck;
+
+            select RecId from assetTableCheck
+            where assetTableCheck.AssetId == assetTrans.AssetId
+            &&    !assetTableCheck.BOBDepreciateUntil;
+    
+            if (assetTableCheck)
+            {
+                ret = checkFailed(strFmt("@DNR8147", assetTrans.AssetId));
+            }
+        }
+    
+        assetBookCheck = AssetBook::find(assetTrans.AssetId, assetTrans.BookId);
+    
+        TransDate deprUntilDate = assetBookCheck.assetTable().BOBDepreciateUntil;
+        TransDate deprUntilDateLastRun = assetBookCheck.LastDepreciationDate;
+    
+        if (deprUntilDate != deprUntilDateLastRun && assetBookCheck.LifeTimeRest > 0)
+        {
+            ret = checkFailed("@DNR2532");
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmCustInvoiceTrans</Name>
+				<Source><![CDATA[
+    public CustInvoiceTrans DNRParmCustInvoiceTrans(CustInvoiceTrans _dnrCustInvoiceTrans = dnrCustInvoiceTrans)
+    {
+        dnrCustInvoiceTrans = _dnrCustInvoiceTrans;
+        return dnrCustInvoiceTrans;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

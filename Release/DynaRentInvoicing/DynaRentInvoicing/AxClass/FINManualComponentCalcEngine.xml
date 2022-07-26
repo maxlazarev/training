@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINManualComponentCalcEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINManualComponentCalcEngine implements FINIInvoiceCalculatorGenericEngine
+{
+    FINInvoiceCalculatorParm        invoiceCalculatorParm;
+    Common                          parmLine;
+    RORRentalLine                   rentalLine;
+    FINInvoicingOptions             invoicingOptions;
+    FINManualComponentJournalizer   journalizedData;
+    #define.engineId('Manual')
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>mustBeActive</Name>
+				<Source><![CDATA[
+    public boolean mustBeActive()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINManualComponentCalcEngine construct(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        FINManualComponentCalcEngine calcEngine = new FINManualComponentCalcEngine();
+        calcEngine.initParameters(_invoiceCalculatorParm);
+        return calcEngine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParameters</Name>
+				<Source><![CDATA[
+    public void initParameters(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        invoiceCalculatorParm = _invoiceCalculatorParm;
+        parmLine = invoiceCalculatorParm.parmLine();
+        rentalLine = invoiceCalculatorParm.rentalLine();
+      
+        invoicingOptions = invoiceCalculatorParm.getInvoicingOptions();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustRunEngine</Name>
+				<Source><![CDATA[
+    protected boolean mustRunEngine()
+    {
+        boolean ret = false;
+
+        if (invoicingOptions.includeUninvoiced)
+        {
+            UnitOfMeasure rateCode = UnitOfMeasure::find(rentalLine.PriceTimeUnit);
+            
+            if (rateCode && rateCode.FINInvoiceManualEngine)
+            {
+                ret = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    public void process()
+    {
+        List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+        FINManualPriceComponent manualPriceComponent;
+
+        journalizedData = new FINManualComponentJournalizer();
+
+        if (this.mustRunEngine())
+        {
+            FINCreditPendingChangesReference pendingChangesReference;
+
+            while select manualPriceComponent
+            where manualPriceComponent.TransTableId == rentalLine.TableId
+            &&    manualPriceComponent.TransRecId == rentalLine.RecId            
+            &&    (!manualPriceComponent.IsCredit ||
+                   (manualPriceComponent.IsCredit && manualPriceComponent.ToDateTime <= invoicingOptions.calculationDateTime))
+                outer join pendingChangesReference
+                where pendingChangesReference.RefTableId == manualPriceComponent.TableId
+                &&    pendingChangesReference.RefRecId == manualPriceComponent.RecId
+                &&    pendingChangesReference.DocumentState == VersioningDocumentState::Approved
+            {
+                
+                // Ignore pending credits unless credit preview
+                if (!manualPriceComponent.IsCredit || pendingChangesReference || invoicingOptions.isCreditPreview)
+                {
+                    if (manualPriceComponent.IsCredit
+                    && !this.mustIncludeManualPriceComponent(manualPriceComponent))
+                    {
+                        continue;
+                    }
+
+                    FINInvoiceCalcResult result = FINInvoiceCalcResult::construct(FINRentalAccountType::Manual, manualPriceComponent.AmountCur);
+                    resultList.addEnd(result);
+                    journalizedData.addResult(manualPriceComponent);
+
+                    invoiceCalculatorParm.MustBeInvoiced = true;
+                }
+            }
+
+            invoiceCalculatorParm.WasAnyEngineExecuted = NoYes::Yes;
+                
+            invoiceCalculatorParm.InvoiceCalcResultListPacked = resultList.pack();
+            invoiceCalculatorParm.ManualCalcPacked = journalizedData.pack();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustIncludeManualPriceComponent</Name>
+				<Source><![CDATA[
+    private boolean mustIncludeManualPriceComponent(FINManualPriceComponent _manualPriceComponent)
+    {
+        boolean ret = true;
+
+        // Prevent re-invoicing without crediting first
+        if (!invoicingOptions.includeCredited)
+        {
+            switch (rentalLine.TableId)
+            {
+                case tableNum(SalesLine) :                    
+                    SalesLine salesLine = rentalLine;
+                    ret = !FINCustInvoiceTrans::checkIsCreditManualComponentPosted(salesLine, _manualPriceComponent)
+                        && FINCustInvoiceTrans::mustCalculatePeriodDateAllDeliveries(salesLine, _manualPriceComponent.FromDateTime, _manualPriceComponent.ToDateTime);
+                    
+                    if (ret && salesLine.salesTable().ProjId)
+                    {
+                        ret = !FINProjInvoiceItem::checkIsCreditManualComponentPosted(salesLine, _manualPriceComponent)
+                            && FINProjInvoiceItem::mustCalculatePeriodDateAllDeliveries(salesLine, _manualPriceComponent.FromDateTime, _manualPriceComponent.ToDateTime);
+                    }
+                    break;
+
+                case tableNum(PurchLine) :
+                    PurchLine purchLine = rentalLine;
+                    ret = !FINVendInvoiceTrans::checkIsCreditManualComponentPosted(purchLine, _manualPriceComponent)
+                        && FINVendInvoiceTrans::mustCalculatePeriodDateAllDeliveries(purchLine, _manualPriceComponent.FromDateTime, _manualPriceComponent.ToDateTime);
+                    break;
+
+                case tableNum(SalesQuotationLine) :
+                    ret = true;
+                    break;
+            }
+        }
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>engineId</Name>
+				<Source><![CDATA[
+    public Num engineId()
+    {
+        return #engineId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public Description description()
+    {
+        return "@DNR:ManualEngineDescr";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>publisher</Name>
+				<Source><![CDATA[
+    public Name publisher()
+    {
+        return "@DNR:ToIncreasePublisher";
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

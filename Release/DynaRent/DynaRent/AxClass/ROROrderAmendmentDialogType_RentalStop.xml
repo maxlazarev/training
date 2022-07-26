@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>ROROrderAmendmentDialogType_RentalStop</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class ROROrderAmendmentDialogType_RentalStop extends ROROrderAmendmentDialogType
+{
+    INVPeriodStartDateTime  startDateTime;
+    INVPeriodEndDateTime    endDateTime;
+    CalendarId              calendarId;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>cascadeToChildLines_PurchLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method"),
+     SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Cannot be refactored without altering functionality of method")]
+    private void cascadeToChildLines_PurchLine(PurchLine    _purchLine)
+    {
+        PurchLine purchLineChild;
+            
+        while select forupdate purchLineChild       
+        where       purchLineChild.PurchId              == _purchLine.PurchId
+        &&          purchLineChild.RORParentLineRecId   == _purchLine.RecId
+        &&          purchLineChild.RORTradeType         == _purchLine.RORTradeType
+        &&          purchLineChild.DNRCalendarId        == _purchLine.DNRCalendarId
+        {
+            Map changesMap = new Map(Types::Container, Types::Container);
+            changesMap.insert([startDateTime, endDateTime, 'CalendarId'], [calendarId]);
+            INVInvoicePeriodHost invoicePeriodHost = purchLineChild;
+            ROROrderAmendmentDialogType::runFinancialChanges(invoicePeriodHost, changesMap);
+
+            // update also sub-kits.
+            this.cascadeToChildLines_PurchLine(purchLineChild);            
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeToChildLines_SalesLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method"),
+     SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Cannot be refactored without altering functionality of method")]
+    private void cascadeToChildLines_SalesLine(SalesLine    _salesLine)
+    {
+        SalesLine salesLineChild;
+           
+        while select forupdate salesLineChild
+        where       salesLineChild.SalesId              == _salesLine.SalesId
+        &&          salesLineChild.RORParentLineRecId   == _salesLine.RecId
+        &&          salesLineChild.RORTradeType         != RORTradeType::SalesPurch
+        &&          salesLineChild.DNRCalendarId        == _salesLine.DNRCalendarId
+        {
+            Map changesMap = new Map(Types::Container, Types::Container);
+            changesMap.insert([startDateTime, endDateTime, 'CalendarId'], [calendarId]);
+            INVInvoicePeriodHost invoicePeriodHost = salesLineChild;
+            ROROrderAmendmentDialogType::runFinancialChanges(invoicePeriodHost, changesMap);
+    
+            // update also sub-kits.
+            this.cascadeToChildLines_SalesLine(salesLineChild);           
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>determineCalendarId</Name>
+				<Source><![CDATA[
+    private CalendarId determineCalendarId()
+    {
+        switch (tmpOrderAmendmentDialogTable.CalendarType)
+        {
+            case RORRentalCalendarType::RentalStop:
+                calendarId = RORParameters::find().RentalStopCalendar;
+                break;
+    
+            case RORRentalCalendarType::RentalActivation:
+                calendarId = RORParameters::find().RentalActiveCalendar;
+                break;
+    
+            default:
+                calendarId = common.TableId == tableNum(PurchLine) ?
+                                common.(fieldNum(PurchLine, DNRCalendarId)) :
+                                common.(fieldNum(SalesLine, DNRCalendarId));
+                break;
+        }
+    
+        return calendarId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getWarningText</Name>
+				<Source><![CDATA[
+    public InfologText getWarningText()
+    {
+        return '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+    
+        rentalStopOneDayActive = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reasonType</Name>
+				<Source><![CDATA[
+    public DNRReasonType reasonType()
+    {
+        return DNRReasonType::RentalStop;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source>
+          <![CDATA[
+    public void run()
+    {
+        calendarId = this.determineCalendarId();
+        TimeZone userTimeZone = DateTimeUtil::getUserPreferredTimeZone();
+    
+        if (rentalStopOneDayActive)
+        {
+            // When the rental stop starts on the on rent date or
+            // stops at the off rent date then take the time off the on rent/off rent time
+            RORRentalDateTimes rentalDateTimesLocal = this.findRentalDateTimes();
+    
+            startDateTime  = DateTimeUtil::applyTimeZoneOffset(rentalDateTimesLocal.OnRentDateTime , DateTimeUtil::getOriginatingTimeZone(rentalDateTimesLocal.OnRentDateTime ));
+            endDateTime    = DateTimeUtil::applyTimeZoneOffset(rentalDateTimesLocal.OffRentDateTime, DateTimeUtil::getOriginatingTimeZone(rentalDateTimesLocal.OffRentDateTime));
+    
+            if (tmpOrderAmendmentDialogTable.RentalStopDate == DateTimeUtil::date(startDateTime))
+            {
+                startDateTime = rentalDateTimesLocal.getOnRentDateTime();
+            }
+            else
+            {
+                startDateTime = DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::newDateTime(tmpOrderAmendmentDialogTable.RentalStopDate, 0), userTimeZone);
+            }
+    
+            if (tmpOrderAmendmentDialogTable.RentalStopDate == DateTimeUtil::date(endDateTime))
+            {
+                endDateTime = rentalDateTimesLocal.OffRentDateTime;
+            }
+            else
+            {
+                endDateTime = DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::newDateTime(tmpOrderAmendmentDialogTable.RentalStopDate + 1, 0), userTimeZone);
+            }
+    
+            tmpOrderAmendmentDialogTable.EffectiveDateTimeFrom = tmpOrderAmendmentDialogTable.RentalStopDate == DateTimeUtil::date(startDateTime) ? startDateTime : DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::applyTimeZoneOffset(startDateTime, userTimeZone), userTimeZone);
+            tmpOrderAmendmentDialogTable.EffectiveDateTimeTo   = tmpOrderAmendmentDialogTable.RentalStopDate == DateTimeUtil::date(endDateTime) ? endDateTime : DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::applyTimeZoneOffset(endDateTime, userTimeZone), userTimeZone);
+        }
+        else
+        {
+            startDateTime = DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::applyTimeZoneOffset(tmpOrderAmendmentDialogTable.EffectiveDateTimeFrom, userTimeZone), userTimeZone);
+            endDateTime   = DateTimeUtil::removeTimeZoneOffset(DateTimeUtil::applyTimeZoneOffset(tmpOrderAmendmentDialogTable.EffectiveDateTimeTo  , userTimeZone), userTimeZone);
+        }
+    
+        ttsBegin;
+
+        INVInvoicePeriodHost invoicePeriodHost;
+
+        switch (common.TableId)
+        {
+            case tableNum(PurchLine):
+                PurchLine purchLine = common as PurchLine;
+               
+                Map changesMapPurch = new Map(Types::Container, Types::Container);
+                changesMapPurch.insert([startDateTime, endDateTime, 'CalendarId'], [calendarId]);
+                invoicePeriodHost = purchLine;
+                ROROrderAmendmentDialogType::runFinancialChanges(invoicePeriodHost, changesMapPurch);
+
+                this.cascadeToChildLines_PurchLine(purchLine);
+                break;
+    
+            case tableNum(SalesLine):
+                SalesLine salesLine = common as SalesLine;
+                
+                Map changesMapSales = new Map(Types::Container, Types::Container);
+                changesMapSales.insert([startDateTime, endDateTime, 'CalendarId'], [calendarId]);
+                invoicePeriodHost = salesLine;
+                ROROrderAmendmentDialogType::runFinancialChanges(invoicePeriodHost, changesMapSales);
+
+                this.cascadeToChildLines_SalesLine(salesLine);
+                break;
+        }
+    
+        super();
+        
+        ttsCommit;
+    
+        if (confirmOrder)
+        {
+            this.confirmOrder();
+        }
+        else
+        {
+            this.WPPSynchronizeWorkOrder();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLine</Name>
+				<Source><![CDATA[
+    protected void updateSourceLine(Common _sourceLine)
+    {
+        switch (_sourceLine.TableId)
+        {
+            case tableNum(PurchLine):
+                PurchLine purchLine = PurchLine::findRecId(_sourceLine.RecId, true);
+                this.initSourceLineForUpdate(purchLine);
+                purchLine.update();
+                break;
+    
+            case tableNum(SalesLine):
+                SalesLine salesLine = SalesLine::findRecId(_sourceLine.RecId, true);
+                this.initSourceLineForUpdate(salesLine);
+                salesLine.update();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSourceLineForUpdate</Name>
+				<Source><![CDATA[
+    protected void initSourceLineForUpdate(Common _sourceLine)
+    {
+        switch (_sourceLine.TableId)
+        {
+            case tableNum(PurchLine):
+                PurchLine purchLine = _sourceLine as PurchLine;
+                purchLine.RORIsModified = NoYes::Yes;
+                break;
+
+            case tableNum(SalesLine):
+                SalesLine salesLine = _sourceLine as SalesLine;
+                salesLine.RORIsModified = NoYes::Yes;
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

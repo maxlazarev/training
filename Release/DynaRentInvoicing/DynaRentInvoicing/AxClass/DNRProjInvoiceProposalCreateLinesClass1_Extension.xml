@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRProjInvoiceProposalCreateLinesClass1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(ProjInvoiceProposalCreateLines))]
+public final class DNRProjInvoiceProposalCreateLinesClass1_Extension
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>runSalesLineQuery</Name>
+				<Source><![CDATA[
+    // Chain-of-command wrapper class
+    protected void runSalesLineQuery(ProjInvoiceProjId _projInvoiceProjId, ProjId _projId)
+    {
+        next runSalesLineQuery(_projInvoiceProjId, _projId);
+
+        // Standard code is ignoring orders with status Created (it needs to be confirmed to be picked by invoicing)
+        // so when calling Rental Totals we have to repeat validation and run doSalesLine for those orders.
+        if (proposalCreateLinesParams.FINParmEstimationParmId())
+        {
+            Query query = this.createSalesLineQuery(_projInvoiceProjId, _projId);
+
+            QueryBuildDataSource salesTableQBDS = query.dataSourceTable(tableNum(SalesTable));
+            
+            // OLd version of standard query had range on DocumentStatus but now it is gone.
+            if (salesTableQBDS
+            &&  salesTableQBDS.findRange(fieldNum(SalesTable, DocumentStatus)))
+            {
+                QueryRun runQuery = new QueryRun(query);
+
+                while (runQuery.next())
+                {
+                    SalesLine salesLine = runQuery.get(tableNum(SalesLine));
+                    SalesTable salesTable = salesLine.salesTable();
+
+                    if (salesTable.SalesType == SalesType::RORRental
+                    && salesTable.DocumentStatus == DocumentStatus::None
+                    && this.checkDoSalesLine(runQuery))
+                    {
+                        this.doSalesLine(salesLine, _projInvoiceProjId, true, '');
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transactionAmount</Name>
+				<Source><![CDATA[
+    public Amount transactionAmount(CurrencyCode _currencyCode)
+    {
+        AmountCur amountCur = next transactionAmount(_currencyCode);
+
+        PSATmpProjProposalTrans proposalTransDisplay = this.getProposalTransDisplay();
+
+        select sum(FINLineAmount), sum(IndirectAmount) from proposalTransDisplay where
+            proposalTransDisplay.CurrencyCode == _currencyCode &&
+            proposalTransDisplay.Selected     == true;
+
+        amountCur = proposalTransDisplay.FINLineAmount + proposalTransDisplay.IndirectAmount;
+
+        while select sum(FINLineAmount), sum(IndirectAmount) from proposalTransDisplay group by CurrencyCode where
+            proposalTransDisplay.CurrencyCode != _currencyCode &&
+            proposalTransDisplay.Selected     == true
+        {
+            amountCur += CurrencyExchangeHelper::curAmount2CurAmount(proposalTransDisplay.FINLineAmount + proposalTransDisplay.IndirectAmount, proposalTransDisplay.CurrencyCode, _currencyCode, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+        }
+
+        return amountCur;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(ProjInvoiceProposalCreateLines), methodStr(ProjInvoiceProposalCreateLines, run))]
+    public static void run_post(XppPrePostArgs _args)
+    {
+        ProjInvoiceProposalCreateLines      hostObject = _args.getThis();
+        ParmId                              parmId;
+        boolean                             isEstimation = false;
+        
+        if (hostObject.parmProposalCreateLinesParams().FINParmEstimationParmId())
+        {
+            parmId = hostObject.parmProposalCreateLinesParams().FINParmEstimationParmId();
+            isEstimation = true;
+        }
+        else
+        {
+            if (hostObject.parmProposalCreateLinesParams().FINInvoiceCalcParmId())
+            {
+                parmId = hostObject.parmProposalCreateLinesParams().FINInvoiceCalcParmId();
+            }
+            else
+            {
+                parmId = NumberSeq::newGetNum(formletterParmData::numRefParmId()).num();
+                hostObject.parmProposalCreateLinesParams().FINInvoiceCalcParmId(parmId);
+            }
+        }
+
+        
+
+        using(FINInvoiceServiceController_RentalProjInvoice invoiceServiceController = FINInvoiceServiceController_RentalProjInvoice::construct(parmId, hostObject.getProposalTransDisplay(), hostObject.parmProposalCreateLinesParams()))
+        {
+            ttsbegin;
+
+            invoiceServiceController.init();
+            invoiceServiceController.setCalcEstimation(isEstimation);
+            invoiceServiceController.run();
+                        
+            FINMarkupTransGenerator::createMarkupWorkTrans(parmId);
+              
+            PSATmpProjProposalTrans transDisplay;
+
+            transDisplay.setTmpData(hostObject.getProposalTransDisplay());
+
+            FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+            while select invoiceCalculatorParm
+            where invoiceCalculatorParm.ParmId == parmId
+            {
+                select firstonly transDisplay
+                where transDisplay.RefRecId == invoiceCalculatorParm.OrderLineRecId;
+
+                if (!transDisplay)
+                {
+                    continue;
+                }
+
+                FINProjHourJournalizer journalizedData = new FINProjHourJournalizer();
+                journalizedData.unpack(invoiceCalculatorParm.ProjHoursCalcPacked);
+                Set projTransSet = journalizedData.getSetOfProjTransRecIds();
+                if (!projTransSet.empty())
+                {
+                    SetEnumerator enumerator = projTransSet.getEnumerator();
+                    while (enumerator.moveNext())
+                    {
+                        RecId transRecId = enumerator.current();
+                        ProjEmplTrans projEmplTrans = ProjEmplTrans::findRecId(transRecId);
+
+                        if (projEmplTrans)
+                        {
+                            hostObject.FINDoEmpl(projEmplTrans, true, '');
+                        }
+                    }
+                }
+            }
+
+            // Update all non salesorder related records
+            PSATmpProjProposalTrans transCreate = hostObject.FINGetProposalTransDisplayCreate();
+
+            transDisplay.setTmpData(hostObject.getProposalTransDisplay());
+
+            while select forupdate transDisplay
+            where transDisplay.LineAmount
+            &&   !transDisplay.FINLineAmount
+            {
+                transDisplay.FINLineAmount = transDisplay.LineAmount;
+                transDisplay.update();
+
+                select firstonly forupdate transCreate
+                where transCreate.RefTableId == transDisplay.RefTableId
+                &&    transCreate.RefRecId == transDisplay.RefRecId;
+
+                if (transCreate)
+                {
+                    transCreate.LineAmount = transDisplay.FINLineAmount;
+                    transCreate.FINParmId = parmId;
+                    transCreate.update();
+                }
+            }
+            
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getQueryPost</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(ProjInvoiceProposalCreateLines), methodStr(ProjInvoiceProposalCreateLines, getQuery))]
+    public static void getQueryPost(XppPrePostArgs _args)
+    {
+        TableId                                     tableIdTrans;
+        Query                                       query;
+        QueryBuildDataSource                        qbdsTrans;
+       
+        query           = _args.getReturnValue();
+        qbdsTrans       = query.dataSourceNo(1);
+           
+        tableIdTrans        = _args.getArgNum(3);
+
+        if (tableIdTrans == tableNum(ProjEmplTrans)
+        // When usinf TransferToProject feature then all hour transactions are posted the same way regardless if they are linked with an order or not.
+        && !RORParameters::find().RentalProjectInvoicing)
+        {
+            qbdsTrans.addRange(new DictTable(tableIdTrans).fieldName2Id("INVRefTableId")).value(SysQuery::valueEmptyString());
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

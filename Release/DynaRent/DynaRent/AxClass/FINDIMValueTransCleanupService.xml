@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINDIMValueTransCleanupService</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class FINDIMValueTransCleanupService
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>cleanup</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    public void cleanup(FINDIMValueTransCleanupDataContract _dataContract)
+    {
+        FINDimValueTrans      dimValueCount;
+        MapEnumerator         mapEnumerator;
+        DataArea              dataArea;
+        int                   countBefore, countAfter;
+
+        Map dimValueTransToDelete = this.retriveTablesFromSetup(_dataContract);
+        mapEnumerator = dimValueTransToDelete.getEnumerator();
+
+        select count(RecId) from dimValueCount;
+        countBefore = dimValueCount.RecId;
+
+        while (mapEnumerator.moveNext())
+        {
+            while select id from dataArea
+            where !dataArea.isVirtual
+            {
+                changeCompany(dataArea.id)
+                {
+                    SysDaQueryObject valueTransQuery =  FINDIMValueTransCleanupService::getCleanupQuery(mapEnumerator.currentKey(), mapEnumerator.currentValue());
+                    
+                    if (valueTransQuery)
+                    {
+                        try
+                        {
+                            SysDaDeleteStatement deleteStatement = new SysDaDeleteStatement();
+                            SysDaDeleteObject    deleteObject    = new SysDaDeleteObject(valueTransQuery);
+
+                            ttsbegin;
+                            deleteStatement.delete(deleteObject);
+                            ttscommit;
+                        }
+                        catch (Exception::Deadlock)
+                        {
+                            retry;
+                        }
+                    }
+                }
+            }
+        }
+
+        select count(RecId) from dimValueCount;
+        countAfter = dimValueCount.RecId;
+
+        info(strFmt("@DNR:X1recordsDeletedInTotal", countBefore - countAfter));
+        this.doIndex();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCleanupQuery</Name>
+				<Source><![CDATA[
+    private static SysDaQueryObject getCleanupQuery(TableId _tableId, container _attributeCon)
+    {
+        SysDaQueryObject valueTransQuery;
+        FINDimValueTrans dimValueTrans;
+        
+        Common  common    = new DictTable(_tableId).makeRecord();
+        SysDaQueryObject hostRecordQuery = FINDimValueController::construct(common).getCleanupQuery();
+                        
+        if (hostRecordQuery)
+        {
+            valueTransQuery = new SysDaQueryObject(dimValueTrans);
+            valueTransQuery.whereClause(
+                                new SysDaEqualsExpression(new SysDaFieldExpression(dimValueTrans, fieldStr(FINDimValueTrans, RefTableId)),
+                                                          new SysDaValueExpression(_tableId)));
+                        
+            SysDaQueryExpression attributeWhereClause;
+            SysDaEqualsExpression attributeExpression;
+
+            for (int conPos = 1; conPos <= conlen(_attributeCon); conPos++)
+            {
+                attributeExpression = new SysDaEqualsExpression(new SysDaFieldExpression(dimValueTrans, fieldStr(FINDimValueTrans, DimensionAttribute)),
+                                                                new SysDaValueExpression(conpeek(_attributeCon, conPos)));
+                if (attributeWhereClause)
+                {
+                    attributeWhereClause = attributeWhereClause.or(attributeExpression);
+                }
+                else
+                {
+                    attributeWhereClause = attributeExpression;
+                }
+            }
+
+            if (attributeWhereClause)
+            {
+                valueTransQuery.whereClause(valueTransQuery.whereClause().and(attributeWhereClause));
+            }
+
+            SysDaQueryExpression valueTransQueryExpression;
+            valueTransQueryExpression = new SysDaEqualsExpression(new SysDaFieldExpression(common, fieldStr(Common, RecId)),
+                                                                  new SysDaFieldExpression(dimValueTrans, fieldStr(FINDimValueTrans, RefRecId)));
+            if (hostRecordQuery.whereClause())
+            {
+                hostRecordQuery.whereClause(hostRecordQuery.whereClause().and(valueTransQueryExpression));
+            }
+            else
+            {
+                hostRecordQuery.whereClause(valueTransQueryExpression);
+            }
+
+            valueTransQuery.joinClause(SysDaJoinKind::ExistsJoin, hostRecordQuery);
+        }
+
+        return valueTransQuery;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>retriveTablesFromSetup</Name>
+				<Source><![CDATA[
+    private Map retriveTablesFromSetup(FINDIMValueTransCleanupDataContract _dataContract)
+    {
+        container   ret;
+        QueryRun    attrSetupQueryRun = new QueryRun(new Query(SysOperationHelper::base64Decode(_dataContract.parmPackedQuery())));
+        Map         dimValueTransToDelete = new Map(Types::Integer, Types::Container);
+        FINDimAttributeSetup dimAttrSetup;
+
+
+        while (attrSetupQueryRun.next())
+        {
+            dimAttrSetup = attrSetupQueryRun.get(tableNum(FINDimAttributeSetup));
+
+            if(dimValueTransToDelete.exists(dimAttrSetup.RefTableId))
+            {
+                ret = [dimAttrSetup.DimensionAttribute] + dimValueTransToDelete.lookup(dimAttrSetup.RefTableId);
+            }
+            else
+            {
+                ret = [dimAttrSetup.DimensionAttribute];
+            }
+
+            dimValueTransToDelete.insert(dimAttrSetup.RefTableId, ret);
+        }
+
+        return dimValueTransToDelete;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>doIndex</Name>
+				<Source><![CDATA[
+    private void doIndex()
+    {
+        DictTable           dTab = new DictTable(tableNum(FINDimValueTrans));
+        indexId             curIdxId;
+        int                 idxCnt;
+        int                 i;
+        SqlDataDictionary   sqlDict = new SqlDataDictionary();
+
+        if (dTab)
+        {
+            curIdxId    = dTab.indexNext(0);
+            idxCnt      = dTab.indexCnt();
+
+            for (i = 1; i <= idxCnt; i++)
+            {
+                try
+                {
+                    new SqlDataDictionaryPermission(methodstr(SqlDataDictionary, tableReindex)).assert();
+                    sqlDict.tableReindex(tableNum(FINDimValueTrans), curIdxId);
+                    CodeAccessPermission::revertAssert();
+                }
+                catch
+                {
+                    exceptionTextFallThrough();
+                }
+                curIdxId = dTab.indexNext(curIdxId);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

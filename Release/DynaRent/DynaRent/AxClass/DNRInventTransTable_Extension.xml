@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRInventTransTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(InventTrans))]
+public final class DNRInventTransTable_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkFixFields</Name>
+				<Source><![CDATA[
+    public void checkFixFields(InventConsistencyCheck_Trans _inventConsistencyCheck_Trans, InventTransOrigin _inventTransOrigin)
+    {
+        if (!this.DatePhysical && this.DateFinancial && _inventConsistencyCheck_Trans.checkFix() == CheckFix::Fix)
+        {
+            this.BOBPckSlpUpdDateTime = DateTimeUtil::newDateTime(this.DateFinancial, 0);
+        }
+
+        next checkFixFields(_inventConsistencyCheck_Trans, _inventTransOrigin);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insert</Name>
+				<Source><![CDATA[
+    public void insert(NoYes _dropInventOnHand, InventDimId _inventDimIdTransferIssue)
+    {
+        next insert(_dropInventOnHand, _inventDimIdTransferIssue);
+
+        this.BOBRegisterInventTransRecIdForSync(BOBRentalTransSyncEvent::OnInserted);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isInventTransInitialized</Name>
+				<Source><![CDATA[
+    public static boolean isInventTransInitialized(InventTrans _inventTrans)
+    {
+        boolean ret = next isInventTransInitialized(_inventTrans);
+
+        DNRInventTransIsInventTransInitializedDisposableContext context = DNRInventTransIsInventTransInitializedDisposableContext::current();
+        
+        if (context)
+        {
+            ret = (ret
+                   && _inventTrans.BOBIsCompensatingTrans == context.DNRParmIsCompensatingTrans()
+                   && _inventTrans.BOBReturnNoteUpdDateTime == context.DNRParmReturnNoteUpdDateTime());
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update(NoYes _dropInventOnHand, NoYes _canDropInventSumDelta, InventDimId _inventDimIdTransferIssue)
+    {
+        next update(_dropInventOnHand, _canDropInventSumDelta, _inventDimIdTransferIssue);
+
+        this.BOBRegisterInventTransRecIdForSync(BOBRentalTransSyncEvent::OnUpdated);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSumUp</Name>
+				<Source><![CDATA[
+    public void updateSumUp(NoYes _always, boolean _disableCacheForBufferCheck, Set _deletedTransactions)
+    {
+        using(DNRInventTransIsInventTransInitializedDisposableContext context = new DNRInventTransIsInventTransInitializedDisposableContext())
+        {
+            context.DNRParmIsCompensatingTrans(this.BOBIsCompensatingTrans); // The values are used in /Classes/DNRInventTransTable_Extension/Methods/isInventTransInitialized
+            context.DNRParmReturnNoteUpdDateTime(this.BOBReturnNoteUpdDateTime);
+
+            next updateSumUp(_always, _disableCacheForBufferCheck, _deletedTransactions);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>sumUpTryDeleteBuffer</Name>
+				<Source><![CDATA[
+    protected boolean sumUpTryDeleteBuffer(InventTrans _bufferToDelete, Set _deletedTrans)
+    {
+        boolean ret = next sumUpTryDeleteBuffer(_bufferToDelete, _deletedTrans);
+
+        if (ret)
+        {
+            BOBRentalTransManager::newInventMovement(InventMovement::construct(this), this).synchronize();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBRegisterInventTransRecIdForSync</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private void BOBRegisterInventTransRecIdForSync(BOBRentalTransSyncEvent _rentalTransSyncEvent)
+    {
+        BOBRentalTransSyncDisposableContext context = BOBRentalTransSyncDisposableContext::current();
+
+        if (!this.BOBIsCompensatingTrans && context)
+        {
+            BOBRentalTransSyncParameters parameters = context.peek();
+
+            if (parameters)
+            {
+                if (parameters.getSyncEvent() == _rentalTransSyncEvent
+                &&  (!parameters.getInventTransRecIdFilter() || parameters.getInventTransRecIdFilter() == this.RecId))
+                {
+                    parameters.addInventTransRecId(this.RecId);
+                }
+            }
+            else
+            {
+                throw error("There is no object on the stack.");
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDisplayAvailRentalQtyImage</Name>
+				<Source><![CDATA[
+    display ResourceId BOBDisplayAvailRentalQtyImage()
+    {
+        #ResAppl
+    
+        SalesLine           salesLine;
+        InventTransOrigin   origin;
+        boolean             ok = true;
+        BOBRentalQty        qtyToCheck = -this.Qty;
+    
+        if (qtyToCheck > 0)
+        {
+            select firstOnly salesLine
+                exists join origin
+                where origin.RecId == this.InventTransOrigin
+                &&    origin.InventTransId == salesLine.InventTransId;
+    
+            if (salesLine)
+            {
+                ok = new BOBRentalInventOnHand().displayIssueCheck(salesLine, qtyToCheck);
+            }
+        }
+    
+        return (ok ? #ImageBlank2 : #ImageWarning);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_OnDeleted</Name>
+				<Source><![CDATA[
+    // event handler methods
+
+    [DataEventHandler(tableStr(InventTrans), DataEventType::Deleted)]
+    public static void DNREvent_OnDeleted(Common _sender, DataEventArgs _eventArgs)
+    {
+        InventTrans hostObj = _sender as InventTrans;
+        BOBRentalTransManager::newInventMovement(InventMovement::construct(hostObj), hostObj).deleteInventTrans();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDisplayRORReturnNote</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display RORReturnNoteId_Rental BOBDisplayRORReturnNote()
+    {
+        CustRORReturnNoteTrans returnNoteTrans;
+
+        if (this.BOBReturnNoteUpdDateTime)
+        {
+            TransDate returnNoteDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(this.BOBReturnNoteUpdDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+            InventTransOrigin inventTransOrigin;
+
+            select firstOnly RecId from inventTransOrigin
+            where inventTransOrigin.RecId == this.InventTransOrigin
+                join ReturnNoteId from returnNoteTrans
+                where returnNoteTrans.InventTransId == inventTransOrigin.InventTransId
+                &&    returnNoteTrans.DeliveryDate == returnNoteDate
+                &&    returnNoteTrans.Qty == -this.Qty;
+        }
+
+        return returnNoteTrans.ReturnNoteId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

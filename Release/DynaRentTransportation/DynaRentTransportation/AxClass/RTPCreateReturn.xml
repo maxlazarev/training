@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RTPCreateReturn</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RTPCreateReturn
+{
+    Common              common;
+    SalesTable          salesTable;
+    InventJournalTable  inventJournalTable;
+    SalesLine           callerSalesLine;
+
+    int                 createdLines, skipLines;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkReturnLineAddedBefore</Name>
+				<Source><![CDATA[
+    private boolean checkReturnLineAddedBefore(SalesLine    _salesLine)
+    {
+        boolean             ret;
+                    
+        // Check only for correct info displayed to a user.
+        if (!_salesLine.RORRemainSalesReturn)
+        {
+            InventJournalTrans inventJournalTransOther;
+            InventJournalTable inventJournalTableOther;
+            RTPInventJournalTransSalesLineReference journalTransSalesLineReference;
+    
+            select firstonly RecId from inventJournalTransOther
+                join TableId from inventJournalTableOther
+                where inventJournalTableOther.JournalId == inventJournalTransOther.JournalId
+                &&    inventJournalTableOther.JournalType == InventJournalType::RTPReturn
+                &&    inventJournalTableOther.RTPCustAccount == _salesLine.CustAccount
+                    join TableId from journalTransSalesLineReference
+                    where journalTransSalesLineReference.InventJournalTransRecId == inventJournalTransOther.RecId
+                    &&    journalTransSalesLineReference.SalesLineRecId == _salesLine.RecId;
+
+            if (inventJournalTransOther)
+            {
+                ret = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findOrCreateInventJournalTable</Name>
+				<Source><![CDATA[
+    private void findOrCreateInventJournalTable(SalesLine _salesLine)
+    {          
+        InventJournalTrans inventJournalTransOther;
+        RTPInventJournalTransSalesLineReference journalTransSalesLineReference;
+
+        select firstonly inventJournalTable
+        where inventJournalTable.JournalType == InventJournalType::RTPReturn
+        &&    inventJournalTable.RTPCustAccount == _salesLine.CustAccount
+        &&    inventJournalTable.RTPReturnInventLocationId == _salesLine.RORReturnInventLocationId
+        &&    !inventJournalTable.Posted
+            exists join inventJournalTransOther
+            where inventJournalTransOther.JournalId == inventJournalTable.JournalId
+                join journalTransSalesLineReference
+                where journalTransSalesLineReference.InventJournalTransRecId == inventJournalTransOther.RecId
+                &&    journalTransSalesLineReference.SalesLineRecId == _salesLine.RecId;
+
+        if (!inventJournalTable)
+        {
+            this.createInventJournalTable(_salesLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findAndUpdateInventJournalLine</Name>
+				<Source><![CDATA[
+    private boolean findAndUpdateInventJournalLine(SalesLine _salesLine)
+    {
+        boolean ret = false;
+        InventJournalTrans inventJournalTransOther;
+        RTPInventJournalTransSalesLineReference journalTransSalesLineReference;
+
+        select inventJournalTransOther
+        where inventJournalTransOther.JournalId == inventJournalTable.JournalId
+            join journalTransSalesLineReference
+            where journalTransSalesLineReference.InventJournalTransRecId == inventJournalTransOther.RecId
+            &&    journalTransSalesLineReference.SalesLineRecId == _salesLine.RecId;
+
+        if (inventJournalTransOther)
+        {
+            // If journal line already exists then only updated qty when needed
+            ret = true;
+
+            if (journalTransSalesLineReference.RemainSalesReturn != _salesLine.RORRemainSalesReturn)
+            {
+                Qty qtyDifference = (_salesLine.RORRemainSalesReturn - journalTransSalesLineReference.RemainSalesReturn);
+                inventJournalTransOther.selectForUpdate(true);
+                inventJournalTransOther.RTPAvailableReturnQty += qtyDifference;
+                inventJournalTransOther.update();
+                journalTransSalesLineReference.selectForUpdate(true);
+                journalTransSalesLineReference.RemainSalesReturn += qtyDifference;
+                journalTransSalesLineReference.update();
+            }
+        }
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findBulkInventJournalLine</Name>
+				<Source><![CDATA[
+    // method called only for bulk item if reord for specific _salesLine doesn't exists
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Update happens in method createInventJournalLine()")]
+    private InventJournalTrans findBulkInventJournalLine(SalesLine _salesLine)
+    {
+        InventJournalTrans inventJournalTransOther;
+        
+        select forupdate inventJournalTransOther
+        where inventJournalTransOther.JournalId == inventJournalTable.JournalId
+        &&    inventJournalTransOther.ItemId == _salesLine.ItemId;
+                    
+        return inventJournalTransOther;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventJournalTable</Name>
+				<Source><![CDATA[
+    private void createInventJournalTable(SalesLine _salesLine)
+    {
+        InventJournalName   inventJournalName = InventJournalName::find(WPPParameters::find().RTPInventJournalId_Return);
+    
+        if (!inventJournalName)
+        {
+            throw error("@DNR6671");
+        }
+    
+        inventJournalTable.clear();
+        inventJournalTable.initValue();
+        inventJournalTable.initFromInventJournalName(inventJournalName);
+        inventJournalTable.JournalType = InventJournalType::RTPReturn;
+        inventJournalTable.JournalId = JournalTableData::newTable(inventJournalTable).nextJournalId();
+        inventJournalTable.RTPReturnDateTime = DateTimeUtil::getSystemDateTime();
+        inventJournalTable.RTPCustAccount = salesTable.CustAccount;
+        inventJournalTable.RORIsAmendment = NoYes::Yes;
+        inventJournalTable.RTPReturnInventLocationId = _salesLine.RORReturnInventLocationId;
+        inventJournalTable.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInventJournalTransFromLine</Name>
+				<Source><![CDATA[
+    private void createInventJournalTransFromLine(SalesLine _salesLine)
+    {                        
+        if (this.checkReturnLineAddedBefore(_salesLine))
+        {
+            skipLines++;
+        }
+        else if (_salesLine.RORRemainSalesReturn)
+        {
+            if (!inventJournalTable)
+            {
+                this.findOrCreateInventJournalTable(_salesLine);
+                
+                //After adding the lines the header record will be updated with the total lines added. We will piggyback on this update
+                //to add the return warehouse of the first line on the header.
+                inventJournalTable.RTPReturnInventLocationId = _salesLine.RORReturnInventLocationId;
+            }
+    
+            if (!this.findAndUpdateInventJournalLine(_salesLine))
+            {
+                RTPReturnNoteLinesGenerate returnNoteLinesGenerate = RTPReturnNoteLinesGenerate::construct();
+                returnNoteLinesGenerate.parmInventJournalTable(inventJournalTable);
+                returnNoteLinesGenerate.parmSalesId(_salesLine.SalesId);
+                returnNoteLinesGenerate.parmSalesLineRecId(_salesLine.RecId);
+                returnNoteLinesGenerate.run();
+            }
+    
+            createdLines++;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>openForm</Name>
+				<Source><![CDATA[
+    private void openForm()
+    {
+        Args args = new Args();
+        args.record(inventJournalTable);
+        new MenuFunction(menuItemDisplayStr(RTPInventJournalTableReturn), MenuItemType::Display).run(args);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCommon</Name>
+				<Source><![CDATA[
+    public Common parmCommon(Common _common = common)
+    {
+        common = _common;
+    
+        return common;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        SalesLine   salesLine;
+        
+        ttsbegin;
+    
+        if (common.TableId == tableNum(SalesTable))
+        {
+            salesTable =common;
+            
+            while select salesLine
+            where salesLine.SalesId == salesTable.SalesId
+            &&   !salesLine.Blocked
+            &&   (salesLine.RORTradeType == RORTradeType::Rental ||
+                  salesLine.RORTradeType == RORTradeType::SubRental)
+            {
+                this.createInventJournalTransFromLine(salesLine);
+            }
+        }
+        else if (common.TableId == tableNum(SalesLine))
+        {
+            salesLine = common;
+            callerSalesLine = salesLine;
+            salesTable = salesLine.salesTable();
+    
+            this.createInventJournalTransFromLine(salesLine);
+        }
+    
+        ttscommit;
+
+        if (inventJournalTable && createdLines)
+        {
+            ttsBegin;
+            inventJournalTable.selectForUpdate(true);
+            InventJournalTable::initTotal(inventJournalTable);
+            inventJournalTable.update();
+            ttsCommit;
+    
+            this.openForm();
+        }
+        else if (skipLines)
+        {
+            info("@DNR10024");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static client void main(Args _args)
+    {
+        RTPCreateReturn     createReturn;
+        common              common;
+        ;
+    
+        if (!_args.record())
+        {
+            throw error(Error::missingRecord(''));
+        }
+    
+        common = _args.record();
+    
+        createReturn = new RTPCreateReturn();
+        createReturn.parmCommon(common);
+    
+        createReturn.run();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPManageHourJournal</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPManageHourJournal
+{
+    // Tables
+    WPPWorkOrderTable               workOrderTable;
+    WPPWorkOrderLine                workOrderLine;
+    ProjJournalTable                projJournalTable;
+    ProjTable                       projTable;
+
+    // Classes
+    ProjJournalTableData            journalTableData;
+
+    // Variables
+    boolean                         canContinue,
+                                    runDialog,
+                                    skipCheckCreateLines;
+    TransDate                       fromDate, toDate;
+    TransDateTime                   fromDateTime, toDateTime;
+    WPPResourceId                   resourceId;
+    RefRecId                        workOrderLineResourceRecId;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>parmWorkOrderTable</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderTable parmWorkOrderTable(WPPWorkOrderTable _workOrderTable = workOrderTable)
+    {
+        workOrderTable = _workOrderTable;
+        return workOrderTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createHourJournal</Name>
+				<Source><![CDATA[
+    protected boolean createHourJournal()
+    {
+        ProjParameters  projParameters;
+        ProjJournalName projJournalName;
+        boolean         ret;
+    
+        projParameters  = ProjParameters::find();
+        projJournalName = ProjJournalName::find(projParameters.EmplJournalNameId);
+    
+        if (!projJournalTable.JournalId)
+        {
+            projJournalTable.JournalId = NumberSeq::newGetNum(ProjParameters::numRefProjJournalId()).num();
+        }
+    
+        projJournalTable.initValue();
+        projJournalTable.initFromProjJournalName(projJournalName);
+        projJournalTable.JournalType       = ProjJournalType::Hour;
+        projJournalTable.CategoryId        = projParameters.EmplCategory;
+        projJournalTable.VoucherDateChange = projJournalName.VoucherDateChange;
+        projJournalTable.ProjId            = workOrderLine.ProjId;
+
+        BOBObjectTable objectTable = workOrderTable.BOBObjectTable();
+        projJournalTable.Description = workOrderLine.TaskId + ' ' + objectTable.RentalTypeId + ' ' + objectTable.ObjectId;
+
+        if (projJournalTable.validateWrite())
+        {
+            projJournalTable.insert();
+            ret = true;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createQuery</Name>
+				<Source><![CDATA[
+    protected query createQuery()
+    {
+        Query query = new Query();
+    
+        QueryBuildDataSource qbdsWorkOrderLineResource = query.addDataSource(tableNum(WPPWorkOrderLineResource));
+        qbdsWorkOrderLineResource.addRange(fieldNum(WPPWorkOrderLineResource, ResourceType)).value(SysQuery::value(WrkCtrGroupWrkCtr::WrkCtr));
+        qbdsWorkOrderLineResource.addRange(fieldNum(WPPWorkOrderLineResource, RecId)).value(SysQuery::value(workOrderLineResourceRecId));
+        qbdsWorkOrderLineResource.update(true);
+    
+        QueryBuildDataSource qbdsResourceTable = qbdsWorkOrderLineResource.addDataSource(tableNum(WPPResourceTable));
+        qbdsResourceTable.addSelectionField(fieldNum(WPPResourceTable, TableId));
+        qbdsResourceTable.relations(true);
+    
+        QueryBuildDataSource qbdsResourceType = qbdsResourceTable.addDataSource(tableNum(WPPResourceType));
+        qbdsResourceType.joinMode(JoinMode::ExistsJoin);
+        qbdsResourceType.relations(true);
+        qbdsResourceType.addRange(fieldNum(WPPResourceType, BlockRegistration)).value(SysQuery::value(NoYes::No));
+    
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createWorkOrderLineProjJournalLink</Name>
+				<Source><![CDATA[
+    protected void createWorkOrderLineProjJournalLink()
+    {
+        WPPWorkOrderLineProjJournalLink workOrderLineProjJournalLink = WPPWorkOrderLineProjJournalLink::find(workOrderLine.RecId, projJournalTable.JournalId);
+    
+        if (!workOrderLineProjJournalLink)
+        {
+            workOrderLineProjJournalLink.initFromProjJournalTable(projJournalTable);
+            workOrderLineProjJournalLink.initFromWorkOrderLine(workOrderLine);
+    
+            workOrderLineProjJournalLink.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCalendar</Name>
+				<Source><![CDATA[
+    protected DNRCalendarDate getCalendar(DNRCalendarId _calendarId, TransDate _transDate)
+    {
+        DNRCalendarDate workCalendarDate;
+        DNRCalendarId   calendarId;
+    
+        workCalendarDate = DNRCalendarDate::find(_calendarId, _transDate);
+    
+        while (workCalendarDate.WorkTimeControl == WorkTimeControl::UseBasic)
+        {
+            calendarId       = DNRCalendarTable::find(workCalendarDate.CalendarId).BasicCalendarId;
+            workCalendarDate = DNRCalendarDate::find(calendarId, _transDate);
+        }
+    
+        return workCalendarDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjCategory</Name>
+				<Source><![CDATA[
+    protected ProjCategoryIdAll getProjCategory(WPPResourceId _resourceId)
+    {
+        WPPResourceTable    resourceTable;
+        WPPResourceType     resourceType;
+        
+        if(_resourceId)
+        {
+            select firstOnly ProjCategoryIdDefault from resourceType
+                exists join resourceTable
+                where resourceTable.ResourceId == _resourceId
+                &&    resourceTable.ResourceTypeId == resourceType.ResourceTypeId;
+        }
+
+         return resourceType.ProjCategoryIdDefault;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjJournalTable</Name>
+				<Source><![CDATA[
+    protected void getProjJournalTable()
+    {
+        WPPWorkOrderLineProjJournalLink  workOrderLineProjJournalLink;
+    
+        workOrderLineProjJournalLink = WPPWorkOrderLineProjJournalLink::findNotPosted(workOrderLine.RecId);
+    
+        if (workOrderLineProjJournalLink)
+        {
+            projJournalTable = ProjJournalTable::Find(workOrderLineProjJournalLink.ProjJournalId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init(boolean _skipCheckCreateLines = false)
+    {
+        skipCheckCreateLines = _skipCheckCreateLines;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new(Args _args)
+    {
+        WPPWorkOrderLineResource    workOrderLineResource;
+    
+        workOrderLineResource      = _args.record();
+        workOrderLineResourceRecId = workOrderLineResource.RecId;
+        workOrderLine              = workOrderLineResource.workOrderLine();
+        projTable                  = ProjTable::find(workOrderLine.ProjId);
+        workOrderTable             = workOrderLine.workOrderTable();
+        resourceId                 = workOrderLineResource.ResourceId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCanContinue</Name>
+				<Source><![CDATA[
+    public boolean parmCanContinue(boolean _canContinue = canContinue)
+    {
+        canContinue = _canContinue;
+    
+        return canContinue;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>returnProjJournalTable</Name>
+				<Source><![CDATA[
+    public ProjJournalTable returnProjJournalTable()
+    {
+        return projJournalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        this.createWorkOrderLineProjJournalLink();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateProjJournalTableTotalsOrDelete</Name>
+				<Source><![CDATA[
+    public void updateProjJournalTableTotalsOrDelete()
+    {
+        this.updateProjJournalTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateProjJournalTable</Name>
+				<Source><![CDATA[
+    protected void updateProjJournalTable()
+    {
+        ProjJournalTable    localProjJournalTable;
+    
+        ttsBegin;
+        localProjJournalTable = ProjJournalTable::find(projJournalTable.JournalId, true);
+    
+        if (localProjJournalTable)
+        {
+            ProjJournalTable::InitTotal(localProjJournalTable);
+    
+            // If number of lines is larger than 0 then there are lines
+            // and update the ProjJournalTable
+            if (localProjJournalTable.NumOfLines > 0)
+            {
+                localProjJournalTable.update();
+            }
+            // otherwise delete the journal
+            else
+            {
+                localProjJournalTable.delete();
+            }
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateResourcePlanningTable</Name>
+				<Source><![CDATA[
+    protected void updateResourcePlanningTable(WPPWorkOrderLineResource _workOrderLineResource,
+                                               ProjJournalTrans         _projJournalTrans)
+    {
+        _workOrderLineResource.ActualFromDateTime = DateTimeUtil::newDateTime(fromDate, DateTimeUtil::time(_workOrderLineResource.PlannedFromDateTime));
+        _workOrderLineResource.ActualToDateTime   = DateTimeUtil::newDateTime(toDate, DateTimeUtil::time(_workOrderLineResource.PlannedToDateTime));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static client server WPPManageHourJournal construct(Args _args)
+    {
+        switch (_args.parmEnum())
+        {
+            case WPPIncludeJournalLines::No:
+                return new WPPManageHourJournal_ExclJournalLines(_args);
+    
+            default:
+                return new WPPManageHourJournal_InclJournalLines(_args);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

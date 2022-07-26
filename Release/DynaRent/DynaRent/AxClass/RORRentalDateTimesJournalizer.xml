@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORRentalDateTimesJournalizer</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RORRentalDateTimesJournalizer
+{
+    private Common rentalDateTimesHost;
+    private Common rentalDateTimesRecipient;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(Common _rentalDateTimesHost, Common _rentalDateTimesRecipient)
+    {
+        rentalDateTimesHost = _rentalDateTimesHost;
+        rentalDateTimesRecipient = _rentalDateTimesRecipient;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if(rentalDateTimesHost is SalesQuotationTable)
+        {
+            SalesQuotationTable salesQuotationTableSource = rentalDateTimesHost as SalesQuotationTable;
+
+            if(salesQuotationTableSource.QuotationType == QuotationType::RORRental || salesQuotationTableSource.QuotationType == QuotationType::RORProjRental)
+            {
+                switch(rentalDateTimesRecipient.TableId)
+                {
+                    case tableNum(SalesTable):
+                        this.transformQuotationIntoOrder();
+                        break;
+
+                    case tableNum(CustQuotationJour):
+                        this.postQuotation();
+                        break;
+
+                    case tableNum(CustQuotationConfirmJour):
+                        this.postQuotationConfirmation();
+                        break;
+                }
+            }
+        }
+        else if(rentalDateTimesHost is SalesTable)
+        {
+            SalesTable salesTableSource = rentalDateTimesHost as SalesTable;
+
+            if(salesTableSource.SalesType == SalesType::RORRental)
+            {
+                switch(rentalDateTimesRecipient.TableId)
+                {
+                    case tableNum(CustConfirmJour):
+                        this.postRentalOrderConfirmation();
+                        break;
+
+                    case tableNum(CustInvoiceJour):
+                        this.postRentalOrderInvoice();
+                        break;
+                }
+            }
+        }
+        else if(rentalDateTimesHost is PurchTable)
+        {
+            PurchTable purchTableSource = rentalDateTimesHost as PurchTable;
+
+            if(purchTableSource.purchaseType == PurchaseType::RORSubRental)
+            {
+                switch(rentalDateTimesRecipient.TableId)
+                {
+                    case tableNum(VendPurchOrderJour):
+                        this.postSubRentalOrderConfirmation();
+                        break;
+
+                    case tableNum(PurchTableVersion):
+                        this.postSubRentalOrderChange();
+                        break;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transformQuotationIntoOrder</Name>
+				<Source><![CDATA[
+    private void transformQuotationIntoOrder()
+    {
+        SalesQuotationTable salesQuotationTable = rentalDateTimesHost as SalesQuotationTable;
+        SalesTable          salesTable = rentalDateTimesRecipient as SalesTable;
+
+        SalesQuotationLine  salesQuotationLine;
+        SalesLine           salesLine;
+        
+        RORRentalDateTimes  rentalDateTimesSalesQuotationTable = salesQuotationTable.RORRentalDateTimesHost::rentalDateTimes();
+        RORRentalDateTimes  rentalDateTimesSalesQuotationLine;
+        RORRentalDateTimes  rentalDateTimesSalesLine;
+
+        // don't copy rental dates/times for header, this has already been performed by /Classes/DNRSalesQuotationEditLinesForm_Sales_ConfirClass_Extension/createSalesTable
+
+        while select rentalDateTimesSalesLine
+            join TableId from salesLine
+            where salesLine.SalesId == salesTable.SalesId
+            &&    salesLine.TableId == rentalDateTimesSalesLine.RefTableId
+            &&    salesLine.RecId == rentalDateTimesSalesLine.RefRecId
+                join TableId from salesQuotationLine
+                where salesQuotationLine.QuotationId == salesQuotationTable.QuotationId
+                &&    salesQuotationLine.InventTransId == salesLine.RORInventTransIdSource
+                    join  rentalDateTimesSalesQuotationLine
+                    where rentalDateTimesSalesQuotationLine.RefTableId == salesQuotationLine.TableId
+                    &&    rentalDateTimesSalesQuotationLine.RefRecId == salesQuotationLine.RecId
+        {
+            this.updateRentalDateTimes(rentalDateTimesSalesQuotationLine, rentalDateTimesSalesLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postQuotation</Name>
+				<Source><![CDATA[
+    private void postQuotation()
+    {
+        SalesQuotationTable salesQuotationTable = rentalDateTimesHost as SalesQuotationTable;
+        CustQuotationJour   custQuotationJour = rentalDateTimesRecipient as CustQuotationJour;
+
+        SalesQuotationLine  salesQuotationLine;
+        CustQuotationTrans  custQuotationTrans;
+        
+        RORRentalDateTimes  rentalDateTimes;
+        
+        // Copy header rental date times
+        this.copyRentalDateTimes(salesQuotationTable.RORRentalDateTimesHost::rentalDateTimes(), custQuotationJour);
+        
+        // Copy line rental date times
+        while select custQuotationTrans
+        where custQuotationTrans.SalesId == custQuotationJour.SalesId
+        &&    custQuotationTrans.QuotationId == custQuotationJour.QuotationId
+        &&    custQuotationTrans.QuotationDate == custQuotationJour.QuotationDate
+            join TableId from salesQuotationLine
+            where salesQuotationLine.QuotationId == salesQuotationTable.QuotationId
+            &&    salesQuotationLine.InventTransId ==  custQuotationTrans.InventTransId
+                join rentalDateTimes
+                where rentalDateTimes.RefTableId == salesQuotationLine.TableId
+                &&    rentalDateTimes.RefRecId == salesQuotationLine.RecId
+        {
+            this.copyRentalDateTimes(rentalDateTimes, custQuotationTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postQuotationConfirmation</Name>
+				<Source><![CDATA[
+    private void postQuotationConfirmation()
+    {
+        SalesQuotationTable         salesQuotationTable = rentalDateTimesHost as SalesQuotationTable;
+        CustQuotationConfirmJour    custQuotationConfirmJour = rentalDateTimesRecipient as CustQuotationConfirmJour;
+
+        SalesQuotationLine          salesQuotationLine;
+        CustQuotationConfirmTrans   custQuotationConfirmTrans;
+
+        RORRentalDateTimes rentalDateTimes;
+        
+        this.copyRentalDateTimes(salesQuotationTable.RORRentalDateTimesHost::rentalDateTimes(), custQuotationConfirmJour);
+
+        while select custQuotationConfirmTrans
+        where custQuotationConfirmTrans.QuotationDate == custQuotationConfirmJour.QuotationDate
+        &&    custQuotationConfirmTrans.QuotationConfirmId == custQuotationConfirmJour.QuotationConfirmId
+        &&    custQuotationConfirmTrans.SalesId == custQuotationConfirmJour.SalesId
+            join TableId from salesQuotationLine
+            where salesQuotationLine.QuotationId == salesQuotationTable.QuotationId
+            &&    salesQuotationLine.InventTransId == custQuotationConfirmTrans.InventTransId
+                join rentalDateTimes
+                where rentalDateTimes.RefTableId == salesQuotationLine.TableId
+                &&    rentalDateTimes.RefRecId == salesQuotationLine.RecId
+        {
+            this.copyRentalDateTimes(rentalDateTimes, custQuotationConfirmTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postRentalOrderConfirmation</Name>
+				<Source><![CDATA[
+    private void postRentalOrderConfirmation()
+    {
+        SalesTable          salesTable = rentalDateTimesHost as SalesTable;
+        CustConfirmJour     custConfirmJour = rentalDateTimesRecipient as CustConfirmJour;
+
+        SalesLine           salesLine;
+        CustConfirmTrans    custConfirmTrans;
+
+        RORRentalDateTimes  rentalDateTimes;
+
+        this.copyRentalDateTimes(salesTable.RORRentalDateTimesHost::rentalDateTimes(), custConfirmJour);
+
+        while select custConfirmTrans
+        where custConfirmTrans.SalesId == custConfirmJour.SalesId
+        &&    custConfirmTrans.ConfirmId == custConfirmJour.ConfirmId
+        &&    custConfirmTrans.ConfirmDate == custConfirmJour.ConfirmDate
+            join TableId from salesLine
+            where   salesLine.SalesId == SalesTable.SalesId
+            &&      salesLine.InventTransId == custConfirmTrans.InventTransId
+                join rentalDateTimes
+                where rentalDateTimes.RefTableId == salesLine.TableId
+                &&    rentalDateTimes.RefRecId == salesLine.RecId
+        {
+            this.copyRentalDateTimes(rentalDateTimes, custConfirmTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postRentalOrderInvoice</Name>
+				<Source><![CDATA[
+    private void postRentalOrderInvoice()
+    {
+        SalesTable          salesTable = rentalDateTimesHost as SalesTable;
+        CustInvoiceJour     custInvoiceJour = rentalDateTimesRecipient as CustInvoiceJour;
+
+        SalesLine           salesLine;
+        CustInvoiceTrans    custInvoiceTrans;
+
+        RORRentalDateTimes  rentalDateTimes;
+
+        this.copyRentalDateTimes(salesTable.RORRentalDateTimesHost::rentalDateTimes(), custInvoiceJour);
+        
+        while select custInvoiceTrans
+        where custInvoiceTrans.SalesId == custInvoiceJour.SalesId
+        &&    custInvoiceTrans.InvoiceId == custInvoiceJour.InvoiceId
+        &&    custInvoiceTrans.InvoiceDate == custInvoiceJour.InvoiceDate
+        &&    custInvoiceTrans.numberSequenceGroup == custInvoiceJour.numberSequenceGroup
+            join TableId from salesLine
+            where salesLine.SalesId == custInvoiceJour.SalesId
+            &&    salesLine.InventTransId == custInvoiceTrans.InventTransId
+                join rentalDateTimes
+                where rentalDateTimes.RefTableId == salesLine.TableId
+                &&    rentalDateTimes.RefRecId == salesLine.RecId
+        {
+            this.copyRentalDateTimes(rentalDateTimes, custInvoiceTrans);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postSubRentalOrderConfirmation</Name>
+				<Source><![CDATA[
+    // RLAM - When a purchase order is confirmed, only the header is copied to the VendPurchorderJour
+    // The lines are copied to the PurchTableHistory (and corresponding PurchLineHistory) tables
+    // This is handled by the postSubRentalOrderChange method below
+    private void postSubRentalOrderConfirmation()
+    {
+        PurchTable          purchTable = rentalDateTimesHost as PurchTable;
+        VendPurchOrderJour  vendPurchOrderJour = rentalDateTimesRecipient as VendPurchOrderJour;
+
+        this.copyRentalDateTimes(purchTable.RORRentalDateTimesHost::rentalDateTimes(), vendPurchOrderJour);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postSubRentalOrderChange</Name>
+				<Source><![CDATA[
+    private void postSubRentalOrderChange()
+    {
+        PurchTable          purchTable = rentalDateTimesHost as PurchTable;
+        PurchTableVersion   purchTableVersion = rentalDateTimesRecipient as PurchTableVersion;
+
+        PurchLine           purchLine;
+        PurchLineHistory    purchLineHistory;
+
+        RORRentalDateTimes  rentalDateTimes;
+
+        Set                 recIdSet = new Set(Types::Int64);
+
+        PurchTableValidPeriodVersion purchTableValidPeriodVersion;
+        select firstonly ValidFromDateTime, ValidToDateTime from purchTableValidPeriodVersion
+        where purchTableValidPeriodVersion.RecId == purchTableVersion.RecId;
+
+        while select purchLineHistory
+        where   purchLineHistory.PurchId == purchTable.PurchId
+        &&      purchLineHistory.ValidFrom == purchTableValidPeriodVersion.ValidFromDateTime
+        &&      purchLineHistory.ValidTo == purchTableValidPeriodVersion.ValidToDateTime
+            join RecId from purchLine
+            where   purchLine.InventTransId == purchLineHistory.InventTransId
+            &&      purchLine.IsModified
+            &&      !purchLine.IsDeleted
+                join rentalDateTimes
+                where   rentalDateTimes.RefTableId == purchLine.TableId
+                &&      rentalDateTimes.RefRecId == purchLine.RecId
+        {
+            if(!recIdSet.in(purchLine.RecId))
+            {
+                this.copyRentalDateTimes(rentalDateTimes, purchLineHistory);
+                recIdSet.add(purchLine.RecId);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalDateTimes</Name>
+				<Source><![CDATA[
+    private void updateRentalDateTimes(RORRentalDateTimes _rentalDateTimesFrom, RORRentalDateTimes _rentalDateTimesTo)
+    {
+        _rentalDateTimesTo.selectForUpdate(true);
+        _rentalDateTimesTo.initFromRentalDateTimes(_rentalDateTimesFrom);
+        _rentalDateTimesTo.update();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyRentalDateTimes</Name>
+				<Source><![CDATA[
+    private void copyRentalDateTimes(RORRentalDateTimes _rentalDateTimesFrom, Common _hostTo)
+    {
+        if(_rentalDateTimesFrom && _hostTo)
+        {
+            RORRentalDateTimes rentalDateTimesTo;
+            rentalDateTimesTo.data(_rentalDateTimesFrom);
+            rentalDateTimesTo.RefTableId                = _hostTo.TableId;
+            rentalDateTimesTo.RefRecId                  = _hostTo.RecId;
+            rentalDateTimesTo.SynchronizeFromParent     = NoYes::No;
+            rentalDateTimesTo.ParentRentalDateTimes     = 0;
+            rentalDateTimesTo.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

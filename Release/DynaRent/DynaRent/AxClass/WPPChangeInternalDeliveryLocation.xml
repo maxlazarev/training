@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPChangeInternalDeliveryLocation</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPChangeInternalDeliveryLocation extends RunBase
+{
+    WPPWorkOrderLine    workOrderLine;
+    WPPWorkOrderTable   workOrderTable;
+    SalesPurchLine      salesPurchLine;
+    InventJournalTable  inventJournalTable;
+
+    DialogField         dfInventLocationIdOld;
+    DialogField         dfInventLocationIdNew;
+
+    InventLocationId    inventLocationIdOld;
+    InventLocationId    inventLocationIdNew;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        DialogRunbase   dialog;
+    
+        dialog = super();
+    
+        dfInventLocationIdOld = dialog.addFieldValue(extendedTypeStr(InventLocationId), inventLocationIdOld, "@DNR5565");
+        dfInventLocationIdOld.allowEdit(false);
+    
+        dfInventLocationIdNew = dialog.addField(extendedTypeStr(InventLocationId), "@DNR5566");
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        boolean ret;
+    
+        ret = super();
+    
+        inventLocationIdNew = dfInventLocationIdNew.value();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(WPPWorkOrderLine    _workOrderLine)
+    {
+        InventLocationId    inventLocationId;
+        SalesLine           salesLine;
+    
+        super();
+    
+        workOrderLine = _workOrderLine;
+        workOrderTable = workOrderLine.workOrderTable(true);
+    
+        switch (workOrderTable.OrderTableId)
+        {
+            case tableNum(PurchLine):
+                salesPurchLine = PurchLine::findRecId(workOrderTable.OrderRecId);
+                inventLocationId = salesPurchLine.salesPurchLineInterface().inventDim().InventLocationId;
+                break;
+    
+            case tableNum(SalesLine):
+                salesPurchLine = SalesLine::findRecId(workOrderTable.OrderRecId);
+                salesLine = salesPurchLine;
+    
+                inventLocationId = salesLine.RORReturnInventLocationId ? salesLine.RORReturnInventLocationId : salesPurchLine.salesPurchLineInterface().inventDim().InventLocationId;
+                break;
+
+            case tableNum(InventJournalTable):
+                inventLocationId = this.getInventJournalTableInventLocationId(workOrderTable.OrderRecId);                
+                break;
+        }
+    
+        inventLocationIdOld = (salesPurchLine || inventJournalTable) ? inventLocationId : workOrderTable.InventLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInventJournalTableInventLocationId</Name>
+				<Source><![CDATA[
+    protected InventLocationId getInventJournalTableInventLocationId(RecId _recId)
+    {
+        InventLocationId inventLocationId;
+        return inventLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        InventDim               inventDim;
+        ROROrderAmendmentLog    orderAmendmentLog;
+        SalesLine               salesLine;
+    
+        ttsBegin;
+        super();
+    
+        if (workOrderTable.OrderTableId
+        &&  workOrderTable.OrderRecId)
+        {
+            switch (workOrderTable.OrderTableId)
+            {
+                case tableNum(PurchLine):
+                    PurchLine purchLine = salesPurchLine;
+                    inventDim = salesPurchLine.salesPurchLineInterface().inventDim();
+                    inventDim.InventLocationId = inventLocationIdNew;
+                    inventDim.InventSiteId = inventDim.inventLocation().InventSiteId;
+    
+                    purchLine.selectForUpdate(true);
+                    purchLine.InventDimId = InventDim::findOrCreate(inventDim).inventDimId;
+                    purchLine.update();
+                    break;
+    
+                case tableNum(SalesLine):
+                    salesLine = salesPurchLine;
+                    salesLine.selectForUpdate(true);
+                    salesLine.RORReturnInventLocationId = inventLocationIdNew;
+                    salesLine.update();
+                    break;
+            }
+    
+            if (salesPurchLine)
+            {
+                this.updateOrderLines(salesPurchLine.TableId, salesPurchLine.RecId);
+    
+                // Remember to set salesPurchLine.RORIsModified to Yes when inserting amendment log record.
+                orderAmendmentLog.initFromSalesPurchLine(salesPurchLine);
+                orderAmendmentLog.LogTxtGenerated = strFmt("@DNR7176", inventLocationIdOld, inventLocationIdNew);
+                orderAmendmentLog.insert();
+            }
+        }
+    
+        workOrderTable.selectForUpdate(true);
+        if (salesPurchLine)
+        {
+            workOrderTable.initFromSalesPurchLine(salesPurchLine);
+        }
+    
+        workOrderTable.RORReturnInventLocationId = inventLocationIdNew;
+        //workOrderTable.update();
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container packedClass)
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateOrderLines</Name>
+				<Source><![CDATA[
+    private void updateOrderLines(TableId       _tableId,
+                                  RORLineParent _parentLineRecId)
+    {
+        SalesLine       salesLine;
+        PurchLine       purchLine;
+        InventDim       inventDim;
+        BOBRentalType   rentalType;
+    
+        if (_tableId == tableNum(SalesLine))
+        {
+            while select forUpdate salesLine
+            where salesLine.RORParentLineRecId == _parentLineRecId
+                exists join rentalType
+                where (rentalType.RentalTypeId  == salesLine.BOBRentalTypeIdAssigned
+                ||     rentalType.RentalTypeId  == salesLine.BOBRentalTypeIdRequested)
+                &&    rentalType.Classification == BOBRentalTypeClassification::Serialized
+            {
+                salesLine.RORReturnInventLocationId = inventLocationIdNew;
+                salesLine.update();
+    
+                this.updateOrderLines(salesLine.TableId, salesLine.RecId);
+            }
+        }
+        else
+        if (_tableId == tableNum(PurchLine))
+        {
+            while select forUpdate purchLine
+            where purchLine.RORParentLineRecId == _parentLineRecId
+                exists join rentalType
+                where rentalType.RentalTypeId   == purchLine.BOBRentalTypeId
+                &&    rentalType.Classification == BOBRentalTypeClassification::Serialized
+            {
+                inventDim = purchLine.inventDim();
+                inventDim.InventLocationId = inventLocationIdNew;
+                inventDim.InventSiteId = inventDim.inventLocation().InventSiteId;
+    
+                purchLine.selectForUpdate(true);
+                purchLine.InventDimId = InventDim::findOrCreate(inventDim).inventDimId;
+                purchLine.update();
+    
+                this.updateOrderLines(purchLine.TableId, purchLine.RecId);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean ret;
+    
+        ret = super(_calledFrom);
+    
+        if (!inventLocationIdNew)
+        {
+            ret = checkFailed(strFmt("@SYS26332", "@SYS312960" + " " + "@SYS6437"));
+        }
+    
+        if (inventLocationIdNew == inventLocationIdOld)
+        {
+            ret = checkFailed("@DNR7175");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static WPPChangeInternalDeliveryLocation construct(WPPWorkOrderLine  _workOrderLine)
+    {
+        return new WPPChangeInternalDeliveryLocation(_workOrderLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    static ClassDescription description()
+    {
+        return "@DNR7202";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

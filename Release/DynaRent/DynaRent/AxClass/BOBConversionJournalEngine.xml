@@ -1,0 +1,682 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBConversionJournalEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBConversionJournalEngine
+{
+    InventJournalTable  convJourTable;
+    SalesLine           salesLine;
+    AssetParameters     parameters;
+
+    TransDate           callerTransDate;
+
+    InventJournalTable  inventJournalTable;
+    InventJournalTrans  inventJournalTrans;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkUpdateSalesLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void checkUpdateSalesLine()
+    {
+        SalesLine salesLineUpdate;
+    
+        if (salesLine.BOBConversionJourId != convJourTable.JournalId)
+        {
+            update_recordSet salesLineUpdate
+            setting BOBConversionJourId = convJourTable.JournalId
+            where salesLineUpdate.RecId == salesLine.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalTable</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void createJournalTable(BOBInventJournalType _inventJourType)
+    {
+        InventJournalName   journalName;
+        InventJournalTrans  convJourTrans;
+    
+        if (convJourTable)
+        {
+            this.registerConvJourTrans(false); // undo registration
+    
+            delete_from convJourTrans // delete previous lines
+            where convJourTrans.JournalId == convJourTable.JournalId;
+        }
+        else
+        {
+            journalName = InventJournalName::find(parameters.BOBAssetJournalNameId);
+    
+            if (journalName)
+            {
+                convJourTable.JournalNameId = journalName.JournalNameId;
+                convJourTable.initFromInventJournalName(journalName);
+                convJourTable.BOBInventJournalType = _inventJourType;
+                convJourTable.insert();
+            }
+            else
+            {
+                throw error(strFmt("@DNR2517", journalName.JournalNameId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalTrans</Name>
+				<Source><![CDATA[
+    private void createJournalTrans()
+    {
+        AssetBookId             bookIdDefault;
+        AssetBook               assetBook;
+        AssetBookTable          assetBookTable;
+        InventJournalTrans      convJourTrans;
+        InventJournalTableData  journalTableData;
+        InventJournalTransData  journalTransData;
+        BOBRentalType           rentalType;
+        TransDate               transDate;
+    
+        callerTransDate = (callerTransDate ? callerTransDate : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+        transDate = (salesLine.ShippingDateRequested ? salesLine.ShippingDateRequested : callerTransDate);
+        
+        rentalType = BOBRentalType::findFromItemId(salesLine.ItemId);
+
+        Debug::assert(rentalType.RecId != 0);
+    
+        switch(rentalType.Classification)
+        {
+            case BOBRentalTypeClassification::Serialized:
+                convJourTrans.initFromInventTable(salesLine.inventTable());
+                convJourTrans.InventDimId       = salesLine.InventDimId;
+                convJourTrans.TransDate         = transDate;
+                convJourTrans.Qty               = -salesLine.QtyOrdered;
+                convJourTrans.LineNum           = 1;
+                convJourTrans.AssetTransType    = AssetTransTypeJournal::DisposalSale;
+                convJourTrans.AssetId           = SalesLine::BOBEditAssetId(salesLine, false, '');
+                convJourTrans.RORRefRecId       = salesLine.RecId;
+    
+                bookIdDefault = parameters.BookIdDefault;
+                assetBook = AssetBook::find(convJourTrans.AssetId, bookIdDefault);
+    
+                if (assetBook && (assetBook.Status == AssetStatus::NoAcquisition || assetBook.Status == AssetStatus::Open))
+                {
+                    convJourTrans.AssetBookId = bookIdDefault;
+                    convJourTrans.CostPrice = assetBook.assetNetBookValue();
+                }
+                else
+                {
+                    select firstonly assetBook
+                    where assetBook.AssetId == convJourTrans.AssetId
+                    &&    (assetBook.Status == AssetStatus::NoAcquisition || assetBook.Status == AssetStatus::Open)
+                        exists join assetBookTable
+                        where assetBookTable.BookId == assetBook.BookId
+                        &&    assetBookTable.CurrentOperationsTax == CurrentOperationsTax::Current;
+    
+                    if (assetBook)
+                    {
+                        convJourTrans.AssetBookId = assetBook.BookId;
+                        convJourTrans.CostPrice = assetBook.assetNetBookValue();
+                    }
+                }
+    
+                journalTableData = new InventJournalTableData(convJourTable);
+                journalTransData = new InventJournalTransData(convJourTrans, journalTableData);
+                journalTransData.initFromJournalTable();
+    
+                if (journalTableData.journalVoucherNum() && journalTableData.journalTable().VoucherDraw == JournalVoucherDraw::Entering)
+                {
+                    journalTransData.initVoucher(convJourTrans.Voucher, true);
+                }
+    
+                convJourTrans.BOBSalesId = salesLine.SalesId;
+                convJourTrans.BOBSalesLineNum = salesLine.LineNum;
+
+                convJourTrans.CostAmount = convJourTrans.CostPrice * convJourTrans.Qty;
+                convJourTrans.insert();
+                break;
+    
+            case BOBRentalTypeClassification::Bulk:
+                using (DNRConversionJournalDisposableContext context = new DNRConversionJournalDisposableContext())
+                {
+                    context.parmRefRecId(salesLine.RecId);
+ 
+                    BOBConversionJournalEngine::createBulkProposal(SalesLine::BOBEditAssetId(salesLine, false, ''),
+                                                                   salesLine.InventDimId,
+                                                                   salesLine.QtyOrdered,
+                                                                   convJourTable.JournalId,
+                                                                   transDate,
+                                                                   AssetTransTypeJournal::DisposalSale);
+                }
+                break;
+    
+            default:
+                throw error(strFmt("@DNR5945", salesLine.ItemId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromSalesLine</Name>
+				<Source><![CDATA[
+    private void initFromSalesLine(SalesLine _salesLine)
+    {
+        salesLine = _salesLine;
+    
+        select firstOnly convJourTable
+        where convJourTable.JournalId == _salesLine.BOBConversionJourId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        parameters = AssetParameters::find();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerTransDate</Name>
+				<Source><![CDATA[
+    public TransDate parmCallerTransDate(TransDate _callerTransDate = callerTransDate)
+    {
+        callerTransDate = _callerTransDate;
+    
+        return callerTransDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>registerConvJourTrans</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Register or unregister the transactions in the inventory journal
+    /// </summary>
+    /// <param name="_register">
+    ///    A boolean value that indicates whether to register (true) or unregister (false)
+    /// </param>
+    
+    private void registerConvJourTrans(boolean _register)
+    {
+        TmpInventTransWMS       tmpInventTransWMS;
+        InventJournalTrans      convJourTrans;
+        InventTransWMS_Register register;
+        InventTransOrigin       inventTransOrigin;
+        InventTrans             inventTrans;
+        InventDim               inventDim;
+        LineNum                 lineNum = 1;
+    
+        while select convJourTrans
+        where convJourTrans.JournalId == convJourTable.JournalId
+            join TableId from inventTransOrigin
+            where inventTransOrigin.InventTransId == convJourTrans.InventTransId
+                join  inventTrans
+                where inventTrans.InventTransOrigin == inventTransOrigin.RecId
+                &&   ((_register && (inventTrans.StatusIssue == StatusIssue::Picked || inventTrans.StatusReceipt == StatusReceipt::Ordered))
+                ||    (!_register && inventTrans.StatusIssue != StatusIssue::Picked && inventTrans.StatusReceipt != StatusReceipt::Ordered))
+                    join  inventDim
+                    where inventDim.inventDimId == inventTrans.inventDimId
+        {
+            tmpInventTransWMS.clear();
+            tmpInventTransWMS.initFromInventTrans(inventTrans);
+            tmpInventTransWMS.ItemId            = inventTrans.ItemId;
+            tmpInventTransWMS.LineNum           = lineNum;
+            tmpInventTransWMS.ReferenceCategory = InventTransType::InventTransaction;
+            tmpInventTransWMS.ReferenceId       = convJourTable.JournalId;
+    
+            register = InventTransWMS_Register::newStandard(tmpInventTransWMS);
+            register.createFromInventTrans(inventTrans, inventDim);
+            register.updateInvent(convJourTrans);
+    
+            lineNum ++;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCreateJournalTrans</Name>
+				<Source><![CDATA[
+    private void RORCreateJournalTrans(Qty _qty)
+    {
+        AssetBookId             bookIdDefault;
+        AssetBook               assetBook;
+        AssetBookTable          assetBookTable;
+        InventJournalTrans      convJourTrans;
+        InventJournalTableData  journalTableData;
+        InventJournalTransData  journalTransData;
+        BOBRentalType           rentalType;
+        TransDate               transDate;
+        ItemId                  itemId = inventJournalTrans.ItemId;
+        InventDim               inventDim = inventJournalTrans.inventDim();
+        BOBObjectTable          objectTable;
+
+        callerTransDate = (callerTransDate ? callerTransDate : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+        transDate = callerTransDate;
+    
+        rentalType = BOBRentalType::findFromItemId(itemId);
+    
+        Debug::assert(rentalType.RecId != 0);
+    
+        switch(rentalType.Classification)
+        {
+            case BOBRentalTypeClassification::Serialized:
+                convJourTrans.initFromInventTable(InventTable::find(itemId));
+                convJourTrans.InventDimId       = inventDim.inventDimId;
+                convJourTrans.TransDate         = transDate;
+                convJourTrans.Qty               = - _qty;
+                convJourTrans.LineNum           = 1;
+                convJourTrans.AssetTransType    = AssetTransTypeJournal::DisposalScrap;
+                
+                objectTable = BOBObjectTable::findInventSerialId(inventDim.inventSerialId);
+                convJourTrans.AssetId = objectTable.assetId(transDate);
+    
+                bookIdDefault = parameters.BookIdDefault;
+                assetBook = AssetBook::find(convJourTrans.AssetId, bookIdDefault);
+    
+                if (assetBook && (assetBook.Status == AssetStatus::NoAcquisition || assetBook.Status == AssetStatus::Open))
+                {
+                    convJourTrans.AssetBookId = bookIdDefault;
+                    convJourTrans.CostPrice = assetBook.assetNetBookValue();
+                }
+                else
+                {
+                    select firstonly assetBook
+                    where assetBook.AssetId == convJourTrans.AssetId
+                    &&    (assetBook.Status == AssetStatus::NoAcquisition || assetBook.Status == AssetStatus::Open)
+                        exists join assetBookTable
+                        where assetBookTable.BookId == assetBook.BookId
+                        &&    assetBookTable.CurrentOperationsTax == CurrentOperationsTax::Current;
+    
+                    if (assetBook)
+                    {
+                        convJourTrans.AssetBookId = assetBook.BookId;
+                        convJourTrans.CostPrice = assetBook.assetNetBookValue();
+                    }
+                }
+    
+                journalTableData = new InventJournalTableData(convJourTable);
+                journalTransData = new InventJournalTransData(convJourTrans, journalTableData);
+                journalTransData.initFromJournalTable();
+    
+                if (journalTableData.journalVoucherNum() && journalTableData.journalTable().VoucherDraw == JournalVoucherDraw::Entering)
+                {
+                    journalTransData.initVoucher(convJourTrans.Voucher, true);
+                }
+    
+                convJourTrans.CostAmount = convJourTrans.CostPrice * convJourTrans.Qty;
+                convJourTrans.insert();
+                break;
+    
+            case BOBRentalTypeClassification::Bulk:
+                objectTable = BOBObjectTable::findBulkObject(rentalType.RentalTypeId);
+
+                BOBConversionJournalEngine::createBulkProposal(objectTable.assetId(transDate),
+                                                               inventDim.InventDimId,
+                                                               _qty,
+                                                               convJourTable.JournalId,
+                                                               transDate,
+                                                               AssetTransTypeJournal::DisposalScrap);
+                break;
+    
+            default:
+                throw error(strFmt("@DNR5945", itemId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORInitFromInventJournalTrans</Name>
+				<Source><![CDATA[
+    private void RORInitFromInventJournalTrans(InventJournalTrans _inventJournalTrans)
+    {
+        inventJournalTrans = _inventJournalTrans;
+        inventJournalTable = inventJournalTrans.inventJournalTable();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORValidate</Name>
+				<Source><![CDATA[
+    private boolean RORValidate()
+    {
+        boolean ret = true;
+    
+        if (!inventJournalTrans)
+        {
+            ret = checkFailed(strFmt("@SYS22828", "@SYS26522"));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    private boolean validate()
+    {
+        boolean ret = true;
+        UnitOfMeasureSymbol inventUnit;
+    
+        if (!salesLine)
+        {
+            ret = checkFailed(strFmt("@SYS22828", "@SYS26522"));
+        }
+        else
+        {
+            inventUnit = InventTableModule::find(salesLine.ItemId, ModuleInventPurchSales::Invent).UnitId;
+    
+            if (salesLine.SalesUnit != inventUnit)
+            {
+                ret = checkFailed(strFmt("@DNR8647", salesLine.ItemId, inventUnit));
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkMustReConfirm</Name>
+				<Source><![CDATA[
+    public static boolean checkMustReConfirm(salesLine _salesLine, SalesLine _salesLineOrig)
+    {
+        boolean ret = false;
+        InventDim inventDimNew, inventDimOrig;
+    
+        if (_salesLine.SalesQty != _salesLineOrig.SalesQty)
+        {
+            ret = true;
+        }
+        else if (_salesLine.InventDimId != _salesLineOrig.InventDimId)
+        {
+            select firstOnly RecId from inventDimNew
+            where inventDimNew.inventDimId == _salesLine.InventDimId
+                exists join inventDimOrig
+                where inventDimOrig.inventDimId == _salesLineOrig.InventDimId
+                &&   (inventDimOrig.InventSiteId     != inventDimNew.InventSiteId       ||
+                      inventDimOrig.InventLocationId != inventDimNew.InventLocationId   ||
+                      inventDimOrig.inventSerialId   != inventDimNew.inventSerialId);
+    
+            ret = (inventDimNew.RecId != 0);
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearConversionJournalId</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void clearConversionJournalId(InventJournalTable  _journalTable)
+    {
+        SalesLine salesLineUpdate;
+        
+        if (_journalTable.BOBInventJournalType == BOBInventJournalType::AssetToInvent)
+        {
+            update_recordSet salesLineUpdate
+            setting BOBConversionJourId = ''
+            where salesLineUpdate.BOBConversionJourId == _journalTable.JournalId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createBulkProposal</Name>
+				<Source><![CDATA[
+    public static server void createBulkProposal(AssetId                _assetId,
+                                                 InventDimId            _inventDimId,
+                                                 AssetQuantity          _qty,
+                                                 InventJournalId        _journalId,
+                                                 TransDate              _transDate,
+                                                 AssetTransTypeJournal  _journalTransType)
+    {
+        AssetTable              assetTableParent, assetTableChild;
+        AssetBook               assetBook;
+        AssetBookTable          assetBookTable;
+        AssetGroupBookSetup     assetGroupBookSetup;
+        AssetQuantity           qtyRemaining, qtyTotal;
+        AssetUnitOfMeasure      unitOfMeasure;
+        AssetParameters         parameters;
+        AssetBookId             bookId;
+        BOBObjectTable          objectTable;
+        BOBObjectAssetLog       objectAssetLog;
+        EcoResProduct           ecoResProduct;
+        InventTable             inventTable;
+        InventJournalTrans      journalTrans;
+        InventJournalTableData  journalTableData;
+        InventJournalTransData  journalTransData;
+        RecordInsertList        insertList;
+        Counter                 cnt;
+    
+        qtyRemaining    = -_qty;
+        parameters      = AssetParameters::find();
+        insertList      = new RecordInsertList(tableNum(inventJournalTrans));
+    
+        // get the relevant value model -- check the default one on the parameters first
+        // in case it's not populated there, use the bulk parent fixed asset's asset group's first value model in the 'current' layer
+        // in case it's not populated there either, use the bulk parent fixed asset's first value model in the 'current' layer
+        select firstOnly UnitOfMeasure, BOBIsBulkParent from assetTableParent
+        where assetTableParent.AssetId == _assetId
+            outer join TableId from assetGroupBookSetup
+            where assetGroupBookSetup.AssetGroup == assetTableParent.AssetGroup
+                outer join BookId from assetBookTable
+                where assetBookTable.BookId == assetGroupBookSetup.BookId
+                &&    assetBookTable.CurrentOperationsTax == CurrentOperationsTax::Current;
+    
+        if (!assetTableParent.BOBIsBulkParent)
+        {
+            throw error("@DNR8133");
+        }
+    
+        unitOfMeasure = assetTableParent.UnitOfMeasure;
+        bookId = (parameters.BookIdDefault ? parameters.BookIdDefault : assetBookTable.BookId);
+    
+        if (!bookId)
+        {
+            select firstOnly BookId from assetBook
+            where assetBook.AssetId == _assetId
+                exists join assetBookTable
+                where assetBookTable.BookId == assetBook.BookId
+                && assetBookTable.CurrentOperationsTax == CurrentOperationsTax::Current;
+    
+            bookId = assetBook.BookId;
+        }
+    
+        if (!bookId)
+        {
+            throw error("@SYS100036");
+        }
+        
+        RefRecId callerRecId;
+        DNRConversionJournalDisposableContext context = DNRConversionJournalDisposableContext::current();
+        
+        if (context && context.parmRefRecId())
+        {
+            callerRecId = context.parmRefRecId();
+        }
+    
+        // iterate the bulk child fixed assets whose relevant value model has the correct status
+        while select TableId from objectAssetLog
+        where objectAssetLog.AssetId == _assetId
+            join AssetId, Quantity from assetTableChild
+            where assetTableChild.DataAreaId == objectAssetLog.AssetCompanyId
+            &&    assetTableChild.MainAssetId == objectAssetLog.AssetId
+            &&    assetTableChild.Quantity > 0
+                join  assetBook
+                where assetBook.AssetId == assetTableChild.AssetId
+                &&    assetBook.BookId == bookId
+                &&    assetBook.Status == AssetStatus::Open
+                    join TableId from objectTable
+                    where objectTable.ObjectId == objectAssetLog.ObjectId
+                        join TableId from ecoResProduct
+                        where ecoResProduct.DisplayProductNumber == ecoResProduct.BOBRentalTypeId
+                        &&    ecoResProduct.BOBRentalTypeId == objectTable.RentalTypeId
+                            join ItemId from inventTable
+                            where inventTable.Product == ecoResProduct.RecId
+        {
+            journalTrans.clear();
+            journalTrans.TransDate         = _transDate;
+            journalTrans.JournalId         = _journalId;
+            journalTrans.AssetTransType    = _journalTransType;
+            journalTrans.AssetBookId       = bookId;
+            journalTrans.AssetId           = assetTableChild.AssetId;
+            journalTrans.ItemId            = inventTable.ItemId;
+            journalTrans.InventDimId       = _inventDimId;
+            journalTrans.Qty               = max(-assetTableChild.Quantity, qtyRemaining); 
+            journalTrans.CostPrice         = assetBook.assetNetBookValue() / assetTableChild.Quantity;
+            journalTrans.CostAmount        = journalTrans.CostPrice * journalTrans.Qty;
+            journalTrans.RORRefRecId       = callerRecId;
+    
+            journalTableData = new InventJournalTableData(journalTrans.inventJournalTable());
+            journalTransData = new InventJournalTransData(journalTrans, journalTableData);
+            journalTransData.initFromJournalTable();
+    
+            if (journalTableData.journalVoucherNum() && journalTableData.journalTable().VoucherDraw == JournalVoucherDraw::Entering)
+            {
+                journalTransData.initVoucher(journalTrans.Voucher, true);
+            }
+    
+            insertList.add(journalTrans);
+    
+            qtyRemaining -= journalTrans.Qty;
+            qtyTotal += journalTrans.Qty;
+    
+            if (qtyRemaining == 0)
+            {
+                break;
+            }
+        }
+    
+        cnt = insertList.insertDatabase();
+        info(strFmt("@DNR8135", cnt, qtyTotal, unitOfMeasure));
+    
+        if (qtyTotal != -_qty)
+        {
+            warning(strFmt("@DNR8136", -_qty, unitOfMeasure, qtyTotal));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORSyncFromInventJournalTrans</Name>
+				<Source><![CDATA[
+    public static void RORSyncFromInventJournalTrans(InventJournalTrans _inventJournalTrans, TransDate _transDate)
+    {
+        BOBConversionJournalEngine engine = new BOBConversionJournalEngine();
+        engine.RORInitFromInventJournalTrans(_inventJournalTrans);
+        engine.parmCallerTransDate(_transDate);
+    
+        if (engine.RORValidate())
+        {
+            ttsBegin;
+    
+            engine.createJournalTable(BOBInventJournalType::AssetToScrap);
+    
+            if (_inventJournalTrans.RORScrappedQty)
+            {
+                engine.RORCreateJournalTrans(_inventJournalTrans.RORScrappedQty);
+            }
+    
+            if (_inventJournalTrans.RORLostQty)
+            {
+                engine.RORCreateJournalTrans(_inventJournalTrans.RORLostQty);
+            }
+    
+            if (AssetParameters::find().BOBAutoRegisterInventA2I)
+            {
+                engine.registerConvJourTrans(true);
+            }
+    
+            ttsCommit;
+        }
+        else
+        {
+            throw error("@DNR8646");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>syncFromSalesLine</Name>
+				<Source><![CDATA[
+    public static void syncFromSalesLine(SalesLine _salesLine, TransDate _transDate = dateNull())
+    {
+        BOBConversionJournalEngine engine;
+    
+        engine = new BOBConversionJournalEngine();
+        engine.initFromSalesLine(_salesLine);
+        engine.parmCallerTransDate(_transDate);
+    
+        if (engine.validate())
+        {
+            ttsBegin;
+    
+            engine.createJournalTable(BOBInventJournalType::AssetToInvent);
+            engine.checkUpdateSalesLine();
+            engine.createJournalTrans();
+    
+            if (AssetParameters::find().BOBAutoRegisterInventA2I)
+            {
+                engine.registerConvJourTrans(true);
+            }
+
+            ttsCommit;
+        }
+        else
+        {
+            throw error("@DNR8646");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateDeleteJournal</Name>
+				<Source><![CDATA[
+    public static boolean validateDeleteJournal(InventJournalTable  _journalTable)
+    {
+        boolean ret = true;
+        salesLine salesLine;
+    
+        if (_journalTable.BOBInventJournalType == BOBInventJournalType::AssetToInvent)
+        {
+            select firstonly salesLine 
+            where salesLine.BOBConversionJourId ==  _journalTable.JournalId;
+
+            if (salesLine.isPackingSlipOrInvoiceUpdated())
+            {
+                ret= false;
+            }
+        }
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

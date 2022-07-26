@@ -1,0 +1,1125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINDimValueController</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public abstract class FINDimValueController
+{
+    Common  callerRecord;
+    Map     mapMethodCallCache;
+    
+    private boolean force;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setForceUpdate</Name>
+				<Source><![CDATA[
+    private void setForceUpdate(boolean _force)
+    {
+        force = _force;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>acceptCascadedUpdate</Name>
+				<Source><![CDATA[
+    protected boolean acceptCascadedUpdate()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>acceptUpdate</Name>
+				<Source><![CDATA[
+    //Extensibility method to be used in child/extension classes to bypass the update process
+    protected boolean acceptUpdate()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildCreateValueTransQuery</Name>
+				<Source><![CDATA[
+    protected Query buildCreateValueTransQuery()
+    {
+        Query                   query   = new Query();
+        QueryBuildDataSource    qbds    = query.addDataSource(tableNum(FINDimAttributeSetup));
+        
+        qbds.addRange(fieldNum(FINDimAttributeSetup, RefTableId)).value(queryValue(callerRecord.TableId));
+        
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildUpdateValueTransQuery</Name>
+				<Source><![CDATA[
+    protected Query buildUpdateValueTransQuery()
+    {
+        Query                   query                   = new Query();
+        QueryBuildDataSource    qbdsFINDimValueTrans    = query.addDataSource(tableNum(FINDimValueTrans));
+        
+        qbdsFINDimValueTrans.update(true);
+        qbdsFINDimValueTrans.addRange(fieldNum(FINDimValueTrans, RefTableId)).value(queryValue(callerRecord.TableId));
+        qbdsFINDimValueTrans.addRange(fieldNum(FINDimValueTrans, RefRecId)).value(queryValue(callerRecord.RecId));
+        // only update manual transactions if they're empty
+        qbdsFINDimValueTrans.addRange(fieldNum(FINDimValueTrans, DataAreaId)).value(strFmt('((%1 == %2) || (%3 == ""))', fieldStr(FINDimValueTrans, IsManual), enum2int(NoYes::No), fieldStr(FINDimValueTrans, DimensionValue)));
+
+        QueryBuildDataSource qbdsFINDimAttributeSetup = qbdsFINDimValueTrans.addDataSource(tableNum(FINDimAttributeSetup));
+
+        qbdsFINDimAttributeSetup.joinMode(JoinMode::InnerJoin);
+        qbdsFINDimAttributeSetup.relations(false);
+        qbdsFINDimAttributeSetup.addLink(fieldNum(FINDimValueTrans, DimensionAttribute), fieldNum(FINDimAttributeSetup, DimensionAttribute));
+        qbdsFINDimAttributeSetup.addLink(fieldNum(FINDimValueTrans, RefTableId), fieldNum(FINDimAttributeSetup, RefTableId));
+
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCleanupQuery</Name>
+				<Source><![CDATA[
+    public SysDaQueryObject getCleanupQuery()
+    {
+        return null;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>callMethod</Name>
+				<Source><![CDATA[
+    private FINDimValueResult callMethod(SysDictClass _class, MethodName _methodName)
+    {
+        FINDimValueResult valueResult;
+    
+        if(!mapMethodCallCache)
+        {
+            mapMethodCallCache = new Map(Types::String, Types::Class);
+        }
+    
+        if(mapMethodCallCache.exists(_methodName))
+        {
+            valueResult = mapMethodCallCache.lookup(_methodName);
+        }
+        else
+        {
+            new ExecutePermission().assert();
+            valueResult = _class.callObject(_methodName, this);
+            CodeAccessPermission::revertAssert();
+    
+            mapMethodCallCache.insert(_methodName, valueResult);
+        }
+    
+        // If we change the valueResult later on, we don't want those changes to also
+        // take effect in the cache. Therefore we unbox the variable here by cloning it.
+        return valueResult.clone();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeUpdate</Name>
+				<Source><![CDATA[
+    private void cascadeUpdate(Set _dimAttrRecIds)
+    {
+        SetEnumerator           tableIdEnumerator;
+        Common                  referencingRecord;
+        FINDimValueController   controller;
+        DictTable               dictTable;
+        FieldId                 fieldNumRecId;
+    
+        Query                   query;
+        QueryRun                queryRun;
+        QueryBuildDataSource    qbdsTable2Update;
+        QueryBuildDataSource    qbdsDimValueTransRef;
+        QueryBuildDataSource    qbdsDimValueTransUpdated;
+        str                     dimAttrRange;
+    
+        Set                     setRecIdsProcessed;
+        ;
+    
+        setRecIdsProcessed = new Set(Types::Int64);
+        tableIdEnumerator = this.getReferencingTables().getEnumerator();
+        dimAttrRange = this.set2Range(_dimAttrRecIds);
+    
+        while(tableIdEnumerator.moveNext())
+        {
+            dictTable = new DictTable(tableIdEnumerator.current());
+            fieldNumRecId = dictTable.fieldName2Id('RecId');
+            query = new Query();
+    
+            // Dimension transactions related to updated buffer (eg linked to SalesTable)
+            qbdsDimValueTransUpdated = query.addDataSource(tableNum(FINDimValueTrans));
+            qbdsDimValueTransUpdated.addRange(fieldNum(FINDimValueTrans, DimensionAttribute)).value(dimAttrRange);
+            qbdsDimValueTransUpdated.addRange(fieldNum(FINDimValueTrans, RefTableId)).value(SysQuery::value(callerRecord.TableId));
+            qbdsDimValueTransUpdated.addRange(fieldNum(FINDimValueTrans, RefRecId)).value(SysQuery::value(callerRecord.RecId));
+    
+            // Dimension transactions referencing updated dimension transactions
+            qbdsDimValueTransRef = qbdsDimValueTransUpdated.addDataSource(tableNum(FINDimValueTrans));
+            qbdsDimValueTransRef.relations(false);
+            qbdsDimValueTransRef.addLink(fieldNum(FINDimValueTrans, Id), fieldNum(FINDimValueTrans, DimensionValue));
+            qbdsDimValueTransRef.addLink(fieldNum(FINDimValueTrans, DimensionAttribute), fieldNum(FINDimValueTrans, DimensionAttribute));
+            qbdsDimValueTransRef.addRange(fieldNum(FINDimValueTrans, ValueType)).value(SysQuery::value(FINDimValueType::Reference));
+            qbdsDimValueTransRef.addRange(fieldNum(FINDimValueTrans, RefTableId)).value(SysQuery::value(dictTable.id()));
+    
+            // Child buffers linked to referencing dimension transactions (eg SalesLines)
+            qbdsTable2Update = qbdsDimValueTransRef.addDataSource(dictTable.id());
+            qbdsTable2Update.relations(false);
+            qbdsTable2Update.addLink(fieldNum(FINDimValueTrans, RefRecId), fieldNumRecId);
+    
+            queryRun = new QueryRun(query);
+    
+            while(queryRun.next())
+            {
+                referencingRecord = queryRun.get(dictTable.id());
+    
+                if(!setRecIdsProcessed.in(referencingRecord.RecId))
+                {
+                    controller = FINDimValueController::construct(referencingRecord);
+
+                    controller.setForceUpdate(force);
+    
+                    if(controller.acceptCascadedUpdate())
+                    {
+                        controller.setDimensionValues(true, _dimAttrRecIds);
+                    }
+    
+                    setRecIdsProcessed.add(referencingRecord.RecId);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkAutoCreateDimFinTag</Name>
+				<Source><![CDATA[
+    private void checkAutoCreateDimFinTag(FINDimAttributeSetup _attrSetup)
+    {
+        DimensionFinancialTag           financialTag;
+        DimensionValue                  dimValue;
+        DimensionAttribute              dimensionAttribute;
+        DimensionAttributeDirCategory   dirCategory;
+        ;
+    
+        if(_attrSetup.AutoCreate)
+        {
+            dimValue = callerRecord.(_attrSetup.RefFieldId);
+    
+            if(!dimValue)
+            {
+                throw error(strFmt("@DNR1723", tableId2name(callerRecord.TableId)));
+            }
+    
+            select firstonly Type from dimensionAttribute
+            where dimensionAttribute.RecId == _attrSetup.DimensionAttribute
+                join DirCategory from dirCategory
+                where dirCategory.DimensionAttribute == dimensionAttribute.RecId
+                    outer join financialTag
+                    where financialTag.FinancialTagCategory == dirCategory.DirCategory
+                    &&    financialTag.Value == dimValue;
+    
+            if(dimensionAttribute.Type == DimensionAttributeType::CustomList && !financialTag)
+            {
+                financialTag.FinancialTagCategory = dirCategory.DirCategory;
+                financialTag.Value = dimValue;
+                financialTag.Description = this.getDescription();
+                financialTag.insert();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createValueTrans</Name>
+				<Source><![CDATA[
+    private void createValueTrans()
+    {
+        FINDimAttributeSetup    attrSetup;
+        FINDimValueTrans        valueTrans;
+        SysDictClass            dictClass;
+        RecordInsertList        insertList;
+        SystemSequence          systemSequence;
+        QueryRun                queryRun;
+    
+        dictClass       = new SysDictClass(classIdGet(this));
+        insertList      = new RecordInsertList(tableNum(FINDimValueTrans));
+        systemSequence  = new SystemSequence();
+        systemSequence.suspendRecIds(tableNum(FINDimValueTrans));
+    
+        queryRun = new QueryRun(this.buildCreateValueTransQuery());
+
+        while(queryRun.next())
+        {
+            attrSetup = queryRun.get(tableNum(FINDimAttributeSetup));
+
+            this.checkAutoCreateDimFinTag(attrSetup);
+    
+            valueTrans.clear();
+            valueTrans.RecId                = systemSequence.reserveValues(1, tableNum(FINDimValueTrans));
+            valueTrans.Id                   = int642str(valueTrans.RecId);
+            valueTrans.DimensionAttribute   = attrSetup.DimensionAttribute;
+            valueTrans.RefTableId           = callerRecord.TableId;
+            valueTrans.RefRecId             = callerRecord.RecId;
+            [ valueTrans.DimensionValue, valueTrans.ValueType ] = this.getDimensionValueAndType(attrSetup, dictClass);
+
+            if (valueTrans.valueType == FINDimValueType::Reference && !valueTrans.DimensionValue)
+            {
+                valueTrans.DimensionValue = this.getManualDimensionValue(attrSetup.DimensionAttribute);
+                valueTrans.ValueType = FINDimValueType::Value;
+            }
+
+            insertList.add(valueTrans);
+        }
+    
+        insertList.insertDatabase();
+        systemSequence.removeRecIdSuspension(tableNum(FINDimValueTrans));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteRelatedRecords</Name>
+				<Source><![CDATA[
+    protected void deleteRelatedRecords()
+    {
+        FINDimValueTrans valueTrans;
+        ;
+    
+        delete_from valueTrans
+        where valueTrans.RefTableId == callerRecord.TableId
+        &&    valueTrans.RefRecId == callerRecord.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findCompany</Name>
+				<Source><![CDATA[
+    protected FINDimValueResult findCompany()
+    {
+        return FINDimValueResult::constructValue(curExt());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getAutoDerivedReference</Name>
+				<Source><![CDATA[
+    private DimensionValue getAutoDerivedReference(FINDimAttributeSetup _attrSetup)
+    {
+        FINDimAttributeSetup    attrSetup_autoDeriveTable;
+        SysDictTable            dictTable;
+        Common                  autoDerivedRecord;
+        DimensionValue          retValue;
+        ;
+    
+        select firstonly RefTableId from attrSetup_autoDeriveTable
+        where attrSetup_autoDeriveTable.DimensionAttribute == _attrSetup.DimensionAttribute
+        &&    attrSetup_autoDeriveTable.AutoCreate;
+    
+        dictTable = new SysDictTable(attrSetup_autoDeriveTable.RefTableId);
+    
+        if(dictTable && tableHasStaticMethod(dictTable, 'find'))
+        {
+            new ExecutePermission().assert();
+            autoDerivedRecord = dictTable.callStatic('find', callerRecord.(_attrSetup.RefFieldId));
+            CodeAccessPermission::revertAssert();
+    
+            if(autoDerivedRecord)
+            {
+                retValue = (select firstonly Id from FINDimValueTrans
+                            where FINDimValueTrans.DimensionAttribute   == _attrSetup.DimensionAttribute
+                            &&    FINDimValueTrans.RefTableId           == autoDerivedRecord.TableId
+                            &&    FINDimValueTrans.RefRecId             == autoDerivedRecord.RecId).Id;
+            }
+        }
+    
+        return retValue;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDescription</Name>
+				<Source><![CDATA[
+    protected abstract Description getDescription()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDimensionFieldId</Name>
+				<Source><![CDATA[
+    protected abstract FieldId getDimensionFieldId()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDimensionValueAndType</Name>
+				<Source><![CDATA[
+    protected container getDimensionValueAndType(FINDimAttributeSetup _attrSetup, SysDictClass _class)
+    {
+        FINDimValueResult   valueResult;
+        DimensionValue      retValue;
+        FINDimValueType     retType;
+        ;
+    
+        if(_attrSetup.RefMethodName)
+        {
+            // call the reference method
+            if(_class.hasObjectMethod(_attrSetup.RefMethodName))
+            {
+                valueResult = this.callMethod(_class, _attrSetup.RefMethodName);
+    
+                if(!valueResult)
+                {
+                    warning(strFmt("@DNR1179", _attrSetup.RefMethodName, _class.name()));
+                    throw error(strFmt("@DNR888", "@DNR772", "@SYS14926"), '',
+                                SysInfoAction_FormRun::newFormname(formStr(FINDimAttributeSetup)));
+                }
+    
+                if(_attrSetup.ForceToValueType)
+                {
+                    valueResult.convertToValueType(_attrSetup.DimensionAttribute);
+                }
+    
+                retType = valueResult.parmType();
+    
+                switch(retType)
+                {
+                    case FINDimValueType::Value:
+                        retValue = valueResult.parmValue();
+                        break;
+    
+                    case FINDimValueType::Reference:
+                        retValue = (select firstOnly Id from FINDimValueTrans
+                                    where FINDimValueTrans.DimensionAttribute == _attrSetup.DimensionAttribute
+                                    &&    FINDimValueTrans.RefTableId == valueResult.parmRefTableId()
+                                    &&    FINDimValueTrans.RefRecId == valueResult.parmRefRecId()).Id;
+                        break;
+                }
+            }
+            else
+            {
+                warning(strFmt("@SYS73696", _class.name(), _attrSetup.RefMethodName));
+                throw error(strFmt("@DNR888", "@DNR772", "@SYS14926"), '',
+                            SysInfoAction_FormRun::newFormname(formStr(FINDimAttributeSetup)));
+            }
+        }
+        else if(_attrSetup.AutoCreate) // use the value from the AutoCreate field
+        {
+            retValue = callerRecord.(_attrSetup.RefFieldId);
+        }
+    
+        if(!retValue && _attrSetup.RefFieldId) // try auto-deriving a reference
+        {
+            retValue = this.getAutoDerivedReference(_attrSetup);
+            retType = (retValue ? FINDimValueType::Reference : FINDimValueType::Value);
+        }
+    
+        if(!retValue && retType == FINDimValueType::Value) // see if the user put in a value manually
+        {
+            retValue = this.getManualDimensionValue(_attrSetup.DimensionAttribute);
+            retType = FINDimValueType::Value;
+        }
+    
+        return [ retValue, retType ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getManualDimensionValue</Name>
+				<Source><![CDATA[
+    private DimensionValue getManualDimensionValue(DimensionAttributeRecId _dimAttrRecId)
+    {
+        DimensionDefault                    oldDimension;
+        DimensionAttributeValueSetStorage   dimStorage;
+        ;
+    
+        oldDimension = callerRecord.(this.getDimensionFieldId());
+        dimStorage = DimensionAttributeValueSetStorage::find(oldDimension);
+    
+        return (dimStorage ? dimStorage.getDisplayValueByDimensionAttribute(_dimAttrRecId) : '');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getReferencingTables</Name>
+				<Source><![CDATA[
+    private Set getReferencingTables()
+    {
+        FINDimValueTrans    dimValueTransModified;
+        FINDimValueTrans    dimValueTransReferencing;
+        Set                 ret;
+        ;
+    
+        ret = new Set(Types::Integer);
+    
+        while select TableId from dimValueTransModified
+        group by TableId
+        where dimValueTransModified.RefTableId  == callerRecord.TableId
+        &&    dimValueTransModified.RefRecId    == callerRecord.RecId
+            join RefTableId from dimValueTransReferencing
+            group by RefTableId
+            where dimValueTransReferencing.ValueType            == FINDimValueType::Reference
+            &&    dimValueTransReferencing.DimensionValue       == dimValueTransModified.Id
+            &&    dimValueTransReferencing.DimensionAttribute   == dimValueTransModified.DimensionAttribute
+        {
+            ret.add(dimValueTransReferencing.RefTableId);
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isTableDimensionable</Name>
+				<Source><![CDATA[
+    private boolean isTableDimensionable()
+    {
+        return FINDimAttributeSetup::existTableId(callerRecord.TableId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new(Common _callerRecord)
+    {
+        callerRecord = _callerRecord;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>set2Range</Name>
+				<Source><![CDATA[
+    private str set2Range(Set _s)
+    {
+        str             range;
+        SetEnumerator   enumerator = _s.getEnumerator();
+        int64           value;
+        ;
+    
+        while(enumerator.moveNext())
+        {
+            if(range)
+            {
+                range += ',';
+            }
+    
+            value = enumerator.current();
+            range += int642str(value);
+        }
+    
+        return range;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDimensionValues</Name>
+				<Source><![CDATA[
+    private void setDimensionValues(boolean _cascadeUpdate, Set _modifiedDimAttrs = new Set(Types::Int64))
+    {
+        #OCCRetryCount
+    
+        FINDimValueTrans                    valueTrans;
+        DimensionValue                      dimValue;
+        DimensionAttribute                  dimAttribute;
+        DimensionAttributeValue             attrValue;
+        DimensionAttributeValueSetStorage   dimStorage;
+        DimensionDefault                    oldDimension, newDimension;
+        ;
+    
+        oldDimension = callerRecord.(this.getDimensionFieldId());
+        dimStorage = DimensionAttributeValueSetStorage::find(oldDimension);
+    
+        // compile modified dimension values
+        while select DimensionAttribute, DimensionValue, ValueType from valueTrans
+        where valueTrans.RefTableId == callerRecord.TableId
+        &&    valueTrans.RefRecId == callerRecord.RecId
+            join  dimAttribute
+            where dimAttribute.RecId == valueTrans.DimensionAttribute
+        {
+            if(_modifiedDimAttrs.empty() || _modifiedDimAttrs.in(valueTrans.DimensionAttribute))
+            {
+                dimValue = FINDimValueTrans::getDimensionValue(valueTrans.DimensionValue, valueTrans.ValueType);
+    
+                if(dimValue)
+                {
+                    attrValue = DimensionAttributeValue::findByDimensionAttributeAndValueNoError(dimAttribute, dimValue, false, true);
+    
+                    if(!attrValue)
+                    {
+                        warning(strFmt("@SYS342124", dimValue, dimAttribute.Name));
+                        throw error(strFmt("@SYS311723", dimValue));
+                    }
+    
+                    dimStorage.addItem(attrValue);
+                }
+                else
+                {
+                    dimStorage.removeDimensionAttribute(valueTrans.DimensionAttribute);
+                }
+            }
+        }
+    
+        newDimension = dimStorage.save();
+    
+        if(oldDimension == newDimension && force == false) // in case nothing changed we don't need to do anything
+        {
+            return;
+        }
+    
+        try
+        {
+            // update caller record
+            if (_cascadeUpdate)
+            {
+                callerRecord.reread(); // re-retrieve the record in order to prevent RecVersion mismatches
+            }
+            callerRecord.selectForUpdate(true); // only required for pessimistic concurrency controlled tables
+            callerRecord.(this.getDimensionFieldId()) = newDimension;
+            this.updateLedgerDimension();
+            callerRecord.doUpdate();
+    
+            // cascade the update to records that reference the caller record
+            if(_cascadeUpdate && (!_modifiedDimAttrs.empty() || force))
+            {
+                this.cascadeUpdate(_modifiedDimAttrs);
+            }
+        }
+        catch(Exception::Deadlock)
+        {
+            retry;
+        }
+        catch(Exception::UpdateConflict)
+        {
+            if(appl.ttsLevel() == 0)
+            {
+                if(xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::UpdateConflictNotRecovered;
+                }
+                else
+                {
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::UpdateConflict;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setEditableDimensionSet</Name>
+				<Source><![CDATA[
+    public static void setEditableDimensionSet(TableId _callerTableId, DimensionEntryControl _dimEntryCtrl)
+    {
+        DimensionEnumeration editableDimensionSet = FINDimValueController::getEditableDimAttrSetId(_callerTableId);
+
+        if (editableDimensionSet == int64Min())
+        {
+            _dimEntryCtrl.allowEdit(true);
+        }
+        else if(editableDimensionSet)
+        {
+            _dimEntryCtrl.parmEditableDimensionSet(editableDimensionSet);
+            _dimEntryCtrl.allowEdit(true);
+        }
+        else
+        {
+            _dimEntryCtrl.allowEdit(false);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateLedgerDimension</Name>
+				<Source><![CDATA[
+    protected void updateLedgerDimension()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateValueTrans</Name>
+				<Source><![CDATA[
+    private Set updateValueTrans()
+    {
+        FINDimAttributeSetup    attrSetup;
+        FINDimValueTrans        valueTrans;
+        SysDictClass            dictClass;
+        Set                     modifiedAttrs;
+    
+        SysGlobalCache          globalCache;
+        Map                     dimValueMap;
+        container               cacheKey;
+    
+        QueryRun                queryRun;
+
+        globalCache = classFactory.globalCache();
+        cacheKey    = [ sessionId(), callerRecord.TableId, callerRecord.RecId ];
+    
+        if(globalCache.isSet(classStr(FINDimValueController), cacheKey))
+        {
+            dimValueMap = Map::create(globalCache.get(classStr(FINDimValueController), cacheKey));
+            globalCache.remove(classStr(FINDimValueController), cacheKey);
+        }
+    
+        dictClass       = new SysDictClass(classIdGet(this));
+        modifiedAttrs   = new Set(Types::Int64);
+       
+        queryRun        = new QueryRun(this.buildUpdateValueTransQuery());
+
+        while(queryRun.next())
+        {
+            DimensionValue          dimensionValue;
+            FINDimValueType         valueType;
+
+            valueTrans  = queryRun.get(tableNum(FINDimValueTrans));
+            attrSetup   = queryRun.get(tableNum(FINDimAttributeSetup));
+
+            if (valueTrans.RecId)
+            {
+                [ dimensionValue, valueType ] = (dimValueMap && dimValueMap.exists(attrSetup.DimensionAttribute) ?
+                                                                             dimValueMap.lookup(attrSetup.DimensionAttribute) :
+                                                                             this.getDimensionValueAndType(attrSetup, dictClass));
+            }
+
+            //In case the reference record is deleted, then find the current dimension attribute value on the record
+            if (valueType == FINDimValueType::Reference && !dimensionValue)
+            {
+                dimensionValue = this.getManualDimensionValue(attrSetup.DimensionAttribute);
+                valueType = FINDimValueType::Value;
+            }
+    
+            if(dimensionValue != valueTrans.DimensionValue || valueType != valueTrans.ValueType)
+            {
+                valueTrans.selectForUpdate(true);
+                valueTrans.DimensionValue = dimensionValue;
+                valueTrans.ValueType = valueType;
+                valueTrans.update();
+    
+                modifiedAttrs.add(attrSetup.DimensionAttribute);
+            }
+        }
+    
+        return modifiedAttrs;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateDimensions</Name>
+				<Source><![CDATA[
+    private boolean validateDimensions()
+    {
+        FINDimAttributeSetup    attrSetup;
+        FINDimValueTrans        valueTrans;
+        FINDimValueType         valueType;
+        DimensionAttribute      dimAttribute;
+        DimensionValue          dimensionValue;
+        SysDictClass            dictClass;
+        SysDictTable            dictTable;
+        boolean                 ret;
+    
+        SysGlobalCache          globalCache;
+        Map                     dimValueMap;
+        container               cacheKey;
+        ;
+    
+        ret         = true;
+        dictClass   = new SysDictClass(classIdGet(this));
+        dictTable   = new SysDictTable(callerRecord.TableId);
+        dimValueMap = new Map(Types::Int64, Types::Container); // [ DimensionAttributeRecId, [ DimensionValue, FINDimValueType ]]
+    
+        while select Name from dimAttribute
+            join  attrSetup
+            where attrSetup.RefTableId == callerRecord.TableId
+            &&    attrSetup.DimensionAttribute == dimAttribute.RecId
+            &&   (callerRecord.RecId || attrSetup.ValidateValue != FieldControl::Optional)
+                outer join valueTrans
+                where valueTrans.DimensionAttribute == attrSetup.DimensionAttribute
+                &&    valueTrans.RefTableId == callerRecord.TableId
+                &&    valueTrans.RefRecId == callerRecord.RecId
+        {
+            [ dimensionValue, valueType ] = this.getDimensionValueAndType(attrSetup, dictClass);
+            dimValueMap.insert(attrSetup.DimensionAttribute, [ dimensionValue, valueType ]);
+    
+            if(attrSetup.ValidateValue != FieldControl::Optional &&
+             (!valueTrans || valueTrans.DimensionValue != dimensionValue || valueTrans.ValueType != valueType))
+            {
+                dimensionValue = FINDimValueTrans::getDimensionValue(dimensionValue, valueType);
+                ret = this.validateValue(attrSetup, dimAttribute.Name, dimensionValue, dictTable);
+            }
+        }
+    
+        if(ret && callerRecord.RecId)
+        {
+            // in case validation is successful and the record in question has a RecId, store all the dimension values and types in
+            // the global cache so we can re-use them in updateValueTrans, which is invoked from the caller record's update() method
+            globalCache = classFactory.globalCache();
+            cacheKey    = [ sessionId(), callerRecord.TableId, callerRecord.RecId ];
+            globalCache.set(classStr(FINDimValueController), cacheKey, dimValueMap.pack(), true);
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateValue</Name>
+				<Source><![CDATA[
+    private boolean validateValue(FINDimAttributeSetup  _attrSetup,
+                                  Name                  _attrName,
+                                  DimensionValue        _dimensionValue,
+                                  SysDictTable          _dictTable)
+    {
+        boolean ret = true;
+        ;
+    
+        switch(_attrSetup.ValidateValue)
+        {
+            case FieldControl::FillIn:
+                if(!_dimensionValue)
+                {
+                    ret = checkFailed(strFmt("@DNR878",
+                                             "@SYS318800",
+                                             _attrName,
+                                             _dictTable.label(),
+                                             _dictTable.name()));
+                }
+                break;
+    
+            case FieldControl::Table:
+                if(_dimensionValue != _attrSetup.DimensionValue)
+                {
+                    ret = checkFailed(strFmt("@DNR881",
+                                             "@SYS318800",
+                                             _attrName,
+                                             _attrSetup.DimensionValue,
+                                             _dictTable.label(),
+                                             _dictTable.name()));
+                }
+                break;
+    
+            case FieldControl::List:
+                if(!FINDimAttributeSetupControlValue::exist(_attrSetup.RecId, _dimensionValue))
+                {
+                    ret = checkFailed(strFmt("@DNR882",
+                                             "@SYS318800",
+                                             _attrName,
+                                             _dimensionValue,
+                                             _dictTable.label(),
+                                             _dictTable.name()));
+                }
+                break;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINDimValueController construct(Common _caller)
+    {
+        switch(_caller.TableId)
+        {
+            case tableNum(AssetBook):                   return new FINDimValueController_AssetBook(_caller);
+            case tableNum(AssetTable):                  return new FINDimValueController_AssetTable(_caller);
+            case tableNum(BOBObjectGroup):              return new FINDimValueController_BOBObjectGroup(_caller);
+            case tableNum(BOBObjectSubGroup):           return new FINDimValueController_BOBObjectSubGroup(_caller);
+            case tableNum(BOBObjectTable):              return new FINDimValueController_BOBObjectTable(_caller);
+            case tableNum(BOBRentalTrans):              return new FINDimValueController_BOBRentalTrans(_caller);
+            case tableNum(CompanyInfo):                 return new FINDimValueController_CompanyInfo(_caller);
+            case tableNum(CustTable):                   return new FINDimValueController_CustTable(_caller);
+            case tableNum(HcmWorker):                   return new FINDimValueController_HcmWorker(_caller);
+            case tableNum(InventItemGroup):             return new FINDimValueController_InventItemGroup(_caller);
+            case tableNum(InventJournalTable):          return new FINDimValueController_InventJournalTable(_caller);
+            case tableNum(InventJournalTrans):          return new FINDimValueController_InventJournalTrans(_caller);
+            case tableNum(InventLocation):              return new FINDimValueController_InventLocation(_caller);
+            case tableNum(InventSerial):                return new FINDimValueController_InventSerial(_caller);
+            case tableNum(InventTable):                 return new FINDimValueController_InventTable(_caller);
+            case tableNum(LBAContractTable):            return new FINDimValueController_LBAContractTable(_caller);
+            case tableNum(LedgerJournalTable):          return new FINDimValueController_LedgerJournalTable(_caller);
+            case tableNum(LedgerJournalTrans):          return new FINDimValueController_LedgerJournalTrans(_caller);
+            case tableNum(OMOperatingUnit):             return new FINDimValueController_OMOperatingUnit(_caller);
+            case tableNum(ProjGroup):                   return new FINDimValueController_ProjGroup(_caller);
+            case tableNum(ProjInvoiceEmpl):             return new FINDimValueController_ProjInvoiceEmpl(_caller);
+            case tableNum(ProjInvoiceItem):             return new FINDimValueController_ProjInvoiceItem(_caller);
+            case tableNum(ProjInvoiceRevenue):          return new FINDimValueController_ProjInvoiceRevenue(_caller);
+            case tableNum(ProjInvoiceTable):            return new FINDimValueController_ProjInvoiceTable(_caller);
+            case tableNum(ProjJournalTrans):            return new FINDimValueController_ProjJournalTrans(_caller);
+            case tableNum(ProjRevenueTrans):            return new FINDimValueController_ProjRevenueTrans(_caller);
+            case tableNum(ProjTable):                   return new FINDimValueController_ProjTable(_caller);
+            case tableNum(PurchLine):                   return new FINDimValueController_PurchLine(_caller);
+            case tableNum(PurchTable):                  return new FINDimValueController_PurchTable(_caller);
+            case tableNum(RORVenueTable):               return new FINDimValueController_RORVenueTable(_caller);
+            case tableNum(SalesLine):                   return new FINDimValueController_SalesLine(_caller);
+            case tableNum(SalesQuotationLine):          return new FINDimValueController_SalesQuotationLine(_caller);
+            case tableNum(SalesQuotationTable):         return new FINDimValueController_SalesQuotationTabl(_caller);
+            case tableNum(SalesTable):                  return new FINDimValueController_SalesTable(_caller);
+            case tableNum(smmBusRelTable):              return new FINDimValueController_smmBusRelTable(_caller);
+            case tableNum(VendTable):                   return new FINDimValueController_VendTable(_caller);
+            case tableNum(WPPExecutionGRoup):           return new FINDimValueController_WPPExecutionGroup(_caller);
+            case tableNum(WPPWorkOrderLine):            return new FINDimValueController_WPPWorkOrderLine(_caller);
+            case tableNum(WPPWorkOrderTable):           return new FINDimValueController_WPPWorkOrderTable(_caller);
+            case tableNum(WrkCtrTable):                 return new FINDimValueController_WrkCtrTable(_caller);
+            case tableNum(WPPResourceTable):            return new FINDimValueController_WPPResourceTable(_caller);
+            
+            default:
+                EventHandlerResult result = EventHandlerResult::newSingleResponse();
+                FINDimValueController::constructDelegate(_caller, result);
+                
+                if(result.hasResult())
+                {
+                    return result.result() as FINDimValueController;
+                }
+                else
+                {
+                    throw error(strFmt("@DNR926", classStr(FINDimValueController), tableId2name(_caller.TableId)));
+                }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>constructDelegate</Name>
+				<Source><![CDATA[
+    static delegate void constructDelegate(Common _caller, EventHandlerResult _eventHandlerResult) { }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>eventDelete</Name>
+				<Source><![CDATA[
+    public static void eventDelete(Common _record)
+    {
+        FINDimValueController controller = FINDimValueController::construct(_record);
+        ;
+    
+        if(controller.isTableDimensionable())
+        {
+            controller.deleteRelatedRecords();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>eventInsert</Name>
+				<Source><![CDATA[
+    public static void eventInsert(Common _record)
+    {
+        FINDimValueController controller = FINDimValueController::construct(_record);
+        ;
+    
+        if(controller.isTableDimensionable())
+        {
+            ttsBegin;
+    
+            controller.createValueTrans();
+            controller.setDimensionValues(false);
+    
+            ttsCommit; 
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>eventUpdateInternal</Name>
+				<Source><![CDATA[
+    private static void eventUpdateInternal(Common _record, boolean _force)
+    {
+        FINDimValueController   controller = FINDimValueController::construct(_record);
+        Set                     modifiedDimAttrs;
+    
+        if(controller.acceptUpdate() && controller.isTableDimensionable())
+        {
+            ttsBegin;
+    
+            controller.setForceUpdate(_force);
+            modifiedDimAttrs = controller.updateValueTrans();
+
+            if(!modifiedDimAttrs.empty() || _force)
+            {
+                controller.setDimensionValues(true, modifiedDimAttrs);
+            }
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>eventUpdate</Name>
+				<Source><![CDATA[
+    public static void eventUpdate(Common _record)
+    {
+        FINDimValueController::eventUpdateInternal(_record, false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>eventUpdateForced</Name>
+				<Source><![CDATA[
+    public static void eventUpdateForced(Common _record)
+    {
+        FINDimValueController::eventUpdateInternal(_record, true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>eventValidateWrite</Name>
+				<Source><![CDATA[
+    public static boolean eventValidateWrite(Common _record)
+    {
+        FINDimValueController controller;
+        boolean ret;
+        ;
+    
+        ret = true;
+        controller = FINDimValueController::construct(_record);
+    
+        if(controller.isTableDimensionable() && !controller.validateDimensions())
+        {
+            ret = checkFailed("@DNR891");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDimensionableTableIds</Name>
+				<Source><![CDATA[
+    public static Set getDimensionableTableIds()
+    {
+        Set ret = new Set(Types::Integer);
+        ;
+    
+        ret.add(tableNum(AssetBook));
+        ret.add(tableNum(AssetTable));
+        ret.add(tableNum(BOBObjectSubGroup));
+        ret.add(tableNum(BOBObjectGroup));
+        ret.add(tableNum(BOBObjectTable));
+        ret.add(tableNum(BOBRentalTrans));
+        ret.add(tableNum(CompanyInfo));
+        ret.add(tableNum(CustTable));
+        ret.add(tableNum(HcmWorker));
+        ret.add(tableNum(InventItemGroup));
+        ret.add(tableNum(InventJournalTable));
+        ret.add(tableNum(InventJournalTrans));
+        ret.add(tableNum(InventLocation));
+        ret.add(tableNum(InventSerial));
+        ret.add(tableNum(InventTable));
+        ret.add(tableNum(LBAContractTable));
+        ret.add(tableNum(LedgerJournalTable));
+        ret.add(tableNum(LedgerJournalTrans));
+        ret.add(tableNum(LedgerJournalTrans_Asset));
+        ret.add(tableNum(OMOperatingUnit));
+        ret.add(tableNum(ProjGroup));
+        ret.add(tableNum(ProjInvoiceEmpl));
+        ret.add(tableNum(ProjInvoiceItem));
+        ret.add(tableNum(ProjInvoiceRevenue));
+        ret.add(tableNum(ProjInvoiceTable));
+        ret.add(tableNum(ProjJournalTrans));
+        ret.add(tableNum(ProjRevenueTrans));
+        ret.add(tableNum(ProjTable));
+        ret.add(tableNum(PurchLine));
+        ret.add(tableNum(PurchTable));
+        ret.add(tableNum(RORVenueTable));
+        ret.add(tableNum(SalesLine));
+        ret.add(tableNum(SalesQuotationLine));
+        ret.add(tableNum(SalesQuotationTable));
+        ret.add(tableNum(SalesTable));
+        ret.add(tableNum(smmBusRelTable));
+        ret.add(tableNum(VendTable));
+        ret.add(tableNum(WPPExecutionGroup));
+        ret.add(tableNum(WPPWorkOrderLine));
+        ret.add(tableNum(WPPWorkOrderTable));
+        ret.add(tableNum(WrkCtrTable));
+        ret.add(tableNum(WPPResourceTable));
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getEditableDimAttrSetId</Name>
+				<Source><![CDATA[
+    public static DimensionEnumeration getEditableDimAttrSetId(TableId _tableId)
+    {
+        DimensionAttribute              dimAttr;
+        DimensionAttributeSetStorage    dimStorage;
+        FINDimAttributeSetup            attrSetup;
+        RecId                           ret = int64Min();
+        ;
+    
+        if(FINDimAttributeSetup::existTableId(_tableId))
+        {
+            dimStorage = new DimensionAttributeSetStorage();
+    
+            while select HashKey, RecId from dimAttr
+            where dimAttr.Type != DimensionAttributeType::DynamicAccount
+            &&    dimAttr.Type != DimensionAttributeType::MainAccount
+                outer join RecId, AllowEdit from attrSetup
+                where attrSetup.DimensionAttribute == dimAttr.RecId
+                &&    attrSetup.RefTableId == _tableId
+            {
+                if(!attrSetup || attrSetup.AllowEdit)
+                {
+                    dimStorage.addItem(dimAttr.RecId, dimAttr.HashKey, NoYes::Yes);
+                }
+            }
+    
+            ret = dimStorage.save();
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

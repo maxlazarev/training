@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRBOBObjectViewV2DataMigrationService</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class DNRBOBObjectViewV2DataMigrationService extends SysOperationServiceBase
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run(DNRBOBObjectViewV2DataMigrationContract _contract)
+    {
+        #OCCRetryCount
+
+        try
+        {
+            ttsbegin;
+
+            this.clearBOBObjectCurrentInfo();
+
+            GenericInt64 numOfRecordsCreated = this.populateBOBObjectCurrentInfo();
+
+            ttscommit;
+
+            info(strFmt("@DNR705", numOfRecordsCreated));
+        }
+        catch (Exception::UpdateConflict)
+        {
+            if (appl.ttsLevel() == 0)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::UpdateConflictNotRecovered;
+                }
+                else
+                {
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::UpdateConflict;
+            }
+        }
+        catch (Exception::DuplicateKeyException)
+        {
+            if (appl.ttsLevel() == 0)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::DuplicateKeyExceptionNotRecovered;
+                }
+                else
+                {
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::DuplicateKeyException;
+            }
+        }
+        catch (Exception::Deadlock)
+        {
+            if (xSession::currentRetryCount() >= #RetryNum)
+            {
+                throw Exception::Deadlock;
+            }
+
+            retry;
+        }
+        catch
+        {
+            throw error("@DNR:UnhandledExceptionOccurredPleaseTryAgainLater");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearBOBOBjectCurrentInfo</Name>
+				<Source><![CDATA[
+    protected void clearBOBOBjectCurrentInfo()
+    {
+        BOBObjectCurrentInfo objectCurrentInfo;
+        
+        delete_from objectCurrentInfo;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateBOBObjectCurrentInfo</Name>
+				<Source><![CDATA[
+    protected GenericInt64 populateBOBObjectCurrentInfo()
+    {
+        BOBObjectCurrentInfo        objectCurrentInfo;
+        BOBObjectTable              objectTable;
+        BOBRentalType               rentalType;
+        BOBCurrentLocationView      currentLocationView;
+        BOBObjectLocationLog        objectLocationLog;
+        LogisticsPostalAddress      logisticsPostalAddress;
+        BOBCurrentOwnershipView     currentOwnershipView;
+        BOBObjectOwnershipLog       objectOwnershipLog;
+        BOBCurrentAvailabilityView  currentAvailabilityView;
+        BOBObjectAvailabilityLog    objectAvailabilityLog;
+
+        // Step 1: Populate the table 'BOBObjectCurrentInfo' with all the business objects.
+
+        insert_recordset objectCurrentInfo (ObjectId)
+        select ObjectId from objectTable;
+
+        GenericInt64 numOfRecordsCreated = objectCurrentInfo.RowCount();
+
+        // Note: Business objects for which the category is 'Pending' do not have to be updated, since no logs exist for those business objects.
+
+        // Step 2: Update the location data.
+
+        update_recordset objectCurrentInfo
+        setting LocationFromDateTime    = objectLocationLog.FromDateTime,
+                PostalAddressRecId      = objectLocationLog.PostalAddress,
+                LocationLogRecId        = objectLocationLog.RecId
+            join TableId from currentLocationView
+            where currentLocationView.ObjectId == objectCurrentInfo.ObjectId
+                join RecId, FromDateTime, PostalAddress from objectLocationLog
+                where objectLocationLog.ObjectId        == currentLocationView.ObjectId
+                &&    objectLocationLog.FromDateTime    == currentLocationView.MaxOfFromDateTime
+                &&    objectLocationLog.PostalAddress
+                    join Street, StreetNumber, ZipCode, City, County, State, CountryRegionId, Address from logisticsPostalAddress
+                    where logisticsPostalAddress.RecId == objectLocationLog.PostalAddress
+                        exists join TableId from objectTable
+                        where objectTable.ObjectId  == objectCurrentInfo.ObjectId
+                        &&    objectTable.Category  != BOBObjectCategory::Pending;
+
+        // Step 3: Update the ownership data.
+
+        update_recordset objectCurrentInfo
+        setting OwnershipLogRecId   = objectOwnershipLog.RecId,
+                Depot               = objectOwnershipLog.Depot,
+                DepotStartDate      = objectOwnershipLog.DepotStartDate,
+                DepotEndDate        = objectOwnershipLog.DepotEndDate,
+                FinancialOwner      = objectOwnershipLog.FinancialOwner,
+                PhysicalOwner       = objectOwnershipLog.PhysicalOwner,
+                FirstOnRentDate     = objectOwnershipLog.FirstOnRentDate,
+                LastOnRentDate      = objectOwnershipLog.LastOnRentDate
+            join TableId from currentOwnershipView
+            where currentOwnershipView.ObjectId == objectCurrentInfo.ObjectId
+                join RecId, Depot, DepotStartDate, DepotEndDate, FinancialOwner, PhysicalOwner, FirstOnRentDate, LastOnRentDate from objectOwnershipLog
+                where objectOwnershipLog.ObjectId           == currentOwnershipView.ObjectId
+                &&    objectOwnershipLog.CreatedDateTime    == currentOwnershipView.MaxOfcreatedDateTime
+                    exists join TableId from objectTable
+                    where objectTable.ObjectId  == objectCurrentInfo.ObjectId
+                    &&    objectTable.Category  != BOBObjectCategory::Pending;
+
+        // Step 4: Update the availability data.
+
+        update_recordset objectCurrentInfo
+        setting AvailabilityLogRecId    = objectAvailabilityLog.RecId,
+                IsAvailable             = objectAvailabilityLog.IsAvailable,
+                DNRReasonCode           = objectAvailabilityLog.DNRReasonCode
+            join TableId from currentAvailabilityView
+            where currentAvailabilityView.ObjectId == objectCurrentInfo.ObjectId
+                join RecId, IsAvailable, DNRReasonCode from objectAvailabilityLog
+                where objectAvailabilityLog.ObjectId           == currentAvailabilityView.ObjectId
+                &&    objectAvailabilityLog.CreatedDateTime    == currentAvailabilityView.MaxOfCreatedDateTime
+                    exists join TableId from objectTable
+                    where objectTable.ObjectId  == objectCurrentInfo.ObjectId
+                    &&    objectTable.Category  != BOBObjectCategory::Pending;
+
+        return numOfRecordsCreated;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

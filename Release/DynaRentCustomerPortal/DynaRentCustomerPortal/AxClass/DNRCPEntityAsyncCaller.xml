@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRCPEntityAsyncCaller</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// The <c>DNRCPEntityAsyncCaller</c> class that calls force sync up to DualWrite in batch
+/// </summary>
+[DataContract]
+class DNRCPEntityAsyncCaller 
+{
+    CustAccount    custAccount;  
+    DataAreaId     dataAreaId;
+    DMFEntityName  entityName;
+    List           entityList;
+
+    #define.DualWriteLimit(100)
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>parmEntityName</Name>
+				<Source><![CDATA[
+    [DataMember]
+    public DMFEntityName parmEntityName(DMFEntityName _entityName = entityName)
+    {
+        entityName = _entityName;
+        return entityName;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDataAreaId</Name>
+				<Source><![CDATA[
+    [DataMember]
+    public DataAreaId parmDataAreaId(DataAreaId _dataAreaId = dataAreaId)
+    {
+        dataAreaId = _dataAreaId;
+        return dataAreaId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCustAccount</Name>
+				<Source><![CDATA[
+    [DataMember]
+    public CustAccount parmCustAccount(CustAccount _custAccount = custAccount)
+    {
+        custAccount = _custAccount;
+        return custAccount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>syncCDSCustomer</Name>
+				<Source><![CDATA[
+    public void syncCDSCustomer(DNRCPEntityAsyncCaller _entityAsyncCaller)
+    {
+        DMFTargetXML entityFields;
+        DMFEntity entity;
+
+        changecompany(_entityAsyncCaller.parmDataAreaId())
+        {
+            while select TargetEntity from entity
+                order by Tags, TargetEntity
+                where entity.Tags == literalStr(DNRCPDocument) || entity.Tags == literalStr(DNRCPInvoice)
+            {
+                this.updateEntity(tableName2Id(entity.TargetEntity), _entityAsyncCaller.parmCustAccount());
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addEntityToList</Name>
+				<Source><![CDATA[
+    public void addEntityToList(Common _entity)
+    {
+        if (entityList.elements() == #DualWriteLimit)
+        {
+            DualWriteSyncHelper::forceSyncRecordsToCDS(entityList);
+
+            entityList = new List(Types::Record);
+        }
+
+        entityList.addEnd(_entity);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateEntity</Name>
+				<Source><![CDATA[
+    public void updateEntity(TableId _entity, AccountNum _accountNum)
+    {
+        entityList = new List(Types::Record);
+        Common entity = new DictTable(_entity).makeRecord();
+  
+        while select entity
+            where entity.(fieldName2id(_entity, literalStr(DNRCPCustAccount))) == _accountNum
+        {
+            this.addEntityToList(entity);
+        }
+
+        DualWriteSyncHelper::forceSyncRecordsToCDS(entityList);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>scheduleUpdate</Name>
+				<Source><![CDATA[
+    public static void scheduleUpdate(DMFEntityName _entityName, Common _buffer)
+    {
+        DNRCPAsyncQueue asyncQueue;
+        BatchJob        batchJob;
+        RefRecId        refRecId   = _buffer.RecId;
+        RefTableId      refTableId = _buffer.TableId;
+
+        select firstonly RecId from asyncQueue
+           where asyncQueue.RefRecId == refRecId && asyncQueue.RefTableId == refTableId && asyncQueue.Queue == 0;
+
+        if (!asyncQueue.RecId)
+        {
+            insert_recordset asyncQueue (RefRecId, RefTableid, EntityName)
+                select firstonly refRecId, refTableId, _entityName from batchJob;
+      
+            select firstonly RecId from batchJob
+            where batchJob.Caption == strFmt('Dual-Write update %1', _buffer.DataAreaId)
+                 && batchJob.Status == BatchStatus::Waiting;
+
+            if (!batchJob.RecId)
+            {
+                SysOperationServiceController entityAsyncCaller = new SysOperationServiceController(classStr(DNRCPEntityAsyncCaller),
+                                                            methodStr(DNRCPEntityAsyncCaller, syncCDS),
+                                                            SysOperationExecutionMode::ReliableAsynchronous);
+
+                DNRCPEntityAsyncCaller entityAsyncCallerContact = entityAsyncCaller.getDataContractObject();
+                entityAsyncCallerContact.parmDataAreaId(_buffer.DataAreaId);
+                entityAsyncCaller.parmDialogCaption(strFmt('Dual-Write update %1', _buffer.DataAreaId));
+
+                entityAsyncCaller.run();
+            }
+        }
+
+        Common buffer = new DictTable(_buffer.TableId).makeRecord();
+        _buffer.data(buffer);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>syncCDS</Name>
+				<Source><![CDATA[
+    public void syncCDS(DNRCPEntityAsyncCaller _entityAsyncCaller)
+    {
+        DNRCPAsyncQueue asyncQueue;
+        TableId   tableId;
+        container conEntities;
+        int       conCount; 
+        DMFEntity dmfEntity;
+
+        entityList = new List(Types::Record);
+
+        int newQueue = new Random().nextInt();
+
+        update_recordset asyncQueue
+            setting Queue = newQueue
+                where asyncQueue.Queue == 0;
+
+        while select dmfEntity
+            group by Tags, TargetEntity
+            order by Tags, TargetEntity
+                exists join asyncQueue
+                where dmfEntity.TargetEntity == asyncQueue.EntityName
+
+        {
+            conEntities += dmfEntity.TargetEntity;
+        }
+
+        changecompany (_entityAsyncCaller.parmDataAreaId())
+        {
+            while (conCount < conLen(conEntities))
+            {
+                conCount++;
+
+                tableId = tableName2Id(conPeek(conEntities, conCount));
+
+                Common entity = new DictTable(tableId).makeRecord();
+
+                while select entity
+                    exists join asyncQueue
+                        where asyncQueue.RefRecId   == entity.RecId
+                        && asyncQueue.RefTableId == tableId
+                        && asyncQueue.Queue == newQueue
+                {
+                    this.addEntityToList(entity);
+
+                    delete_from asyncQueue where asyncQueue.RefRecId == entity.RecId && asyncQueue.RefTableId == tableId;
+                }
+
+                DualWriteSyncHelper::forceSyncRecordsToCDS(entityList);
+                entityList = new List(Types::Record);
+            }
+        }
+       
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

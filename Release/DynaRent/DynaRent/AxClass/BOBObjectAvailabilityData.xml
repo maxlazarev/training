@@ -1,0 +1,1233 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBObjectAvailabilityData</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBObjectAvailabilityData
+{
+    BOBTmpObjectAvailability            tmpData;
+    BOBTmpObjectAvailability_Graphical  tmpData_Graphical;
+    RORRentalLine                       callerRentalLine;
+    BOBObjectAvailabilitySettings       settings;
+    DNRWorkerDefaults                   workerDefaults;
+    DNRTmpIdList                        tmpIdList;
+
+    ROROnRentDateTime                   callerOnRentDateTime;
+    ROROffRentDateTime                  callerOffRentDateTime;
+    BOBPriority                         priority;
+    FromDateTime                        selectionFromDateTime;
+    ToDateTime                          selectionToDateTime;
+    Timezone                            userTimezone;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>applyFilter</Name>
+				<Source><![CDATA[
+    private void applyFilter(FormDataSource _businessObjectAttributes_ds)
+    {
+        DFMValueTrans   requestedAttrs, valueTrans;
+        DNRTmpIdValue   tmpIdValue;        
+
+        settings = BOBObjectAvailabilitySettings::findOrCreate();
+
+        if (settings.Prospect || settings.SalesId || settings.PurchId || settings.PurchOrderFormNum)
+        {
+            this.populateTmpIdList();
+
+            delete_from tmpData_Graphical
+                notExists join tmpIdList
+                where tmpIdList.RefRecId == tmpData_Graphical.ObjectTableRecId;
+        }
+
+        // Delete records that do not match the Attributes filter
+        if (settings.BusObjAttrs)
+        {
+            // BP Deviation documented
+            requestedAttrs.setTmp();
+            requestedAttrs.setTmpData(_businessObjectAttributes_ds.cursor());
+
+            select count(RecId) from requestedAttrs
+            where requestedAttrs.Value;
+
+            if (requestedAttrs.RecId)
+            {
+                // An extra temporary table to store the requestedAttrs,
+                // because an inMemory temporary table (requestedAttrs) cannot be joined to the valueTrans table
+                // DNRTmpIdValue is a TempDB table and can be joined to de valueTrans table
+                insert_recordset tmpIdValue (Num, StrValue)
+                select FieldId, Value from requestedAttrs
+                where requestedAttrs.Value;
+
+                while select tmpIdValue
+                {
+                    // Delete all objects that do not match the attributes filter
+                    delete_from tmpData_Graphical
+                        notExists join valueTrans
+                        where valueTrans.RefTableId == tableNum(BOBObjectTable)
+                        &&    valueTrans.RefRecId   == tmpData_Graphical.ObjectTableRecId
+                        &&    valueTrans.FieldId    == tmpIdValue.Num
+                        &&    valueTrans.Value      == tmpIdValue.StrValue;
+                }
+            }
+        }
+
+        // Delete the records that do not match the filter
+        if (settings.Street)
+        {
+            delete_from tmpData_Graphical
+            where tmpData_Graphical.Street != settings.Street;
+        }
+
+        if (settings.ZipCodeId)
+        {
+            delete_from tmpData_Graphical
+            where tmpData_Graphical.ZipCode != settings.ZipCodeId;
+        }
+
+        if (settings.City)
+        {
+            delete_from tmpData_Graphical
+            where tmpData_Graphical.City != settings.City;
+        }
+
+        if (settings.Address)
+        {
+            delete_from tmpData_Graphical
+            where tmpData_Graphical.Address != settings.Address;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildRentalTypeIdSet</Name>
+				<Source><![CDATA[
+    // returns a Set of rental type IDs that match the criteria in the filter settings
+    private Set buildRentalTypeIdSet()
+    {
+        #define.UnknownEnumValue(255)
+
+        BOBRentalType           rentalType;
+        QueryBuildDataSource    qbdsPostingPolicy;
+
+        Set ret = new Set(Types::String);
+
+        // build a query to select the appropriate rental type IDs
+        Query query = new Query();
+        QueryBuildDataSource qbdsRentalType = query.addDataSource(tableNum(BOBRentalType));
+        qbdsRentalType.addSelectionField(fieldNum(BOBRentalType, RentalTypeId));
+        qbdsRentalType.addRange(fieldNum(BOBRentalType, Classification)).value(SysQuery::value(#UnknownEnumValue));
+
+        if (settings.BulkBusinessObject) // add 'bulk' to the range in case enabled in the filter settings
+        {
+            qbdsRentalType.addRange(fieldNum(BOBRentalType, Classification)).value(SysQuery::value(BOBRentalTypeClassification::Bulk));
+        }
+
+        if (settings.SerializedBusinessObject) // add 'serialized' to the range in case enabled in the filter settings
+        {
+            qbdsRentalType.addRange(fieldNum(BOBRentalType, Classification)).value(SysQuery::value(BOBRentalTypeClassification::Serialized));
+        }
+
+        Range queryRangeExpr = strFmt('(%1 == %2.%3)', fieldStr(BOBPostingPolicy, RecId), qbdsRentalType.name(), fieldStr(BOBRentalType, PostingPolicyRecId));
+
+        if (settings.RentalTypeId) // select just the one specified rental type
+        {
+            qbdsRentalType.addRange(fieldNum(BOBRentalType, RentalTypeId)).value(settings.RentalTypeId);
+
+            qbdsPostingPolicy = qbdsRentalType.addDataSource(tableNum(BOBPostingPolicy));
+            qbdsPostingPolicy.joinMode(JoinMode::ExistsJoin);
+            qbdsPostingPolicy.relations(true);
+        }
+        else if (settings.ObjectSubGroupId) // select all rental types associated with all items belonging to the specified item sub group
+        {
+            qbdsRentalType.addRange(fieldNum(BOBRentalType, ObjectSubGroupId)).value(settings.ObjectSubGroupId);
+        }
+        else if (settings.ObjectGroupId) // select all rental types associated with all items belonging to the specified item group
+        {
+            qbdsRentalType.addRange(fieldNum(BOBRentalType, ObjectGroupId)).value(settings.ObjectGroupId);
+        }
+        else // no filter values -- select all rental types
+        {
+            qbdsPostingPolicy = qbdsRentalType.addDataSource(tableNum(BOBPostingPolicy));
+            qbdsPostingPolicy.joinMode(JoinMode::ExistsJoin);
+            qbdsPostingPolicy.relations(true);
+        }
+
+        qbdsPostingPolicy.addSelectionField(fieldNum(BOBPostingPolicy, TableId));
+        qbdsPostingPolicy.addRange(fieldNum(BOBPostingPolicy, IncludeInAvailabilityOverview)).value(SysQuery::value(NoYes::Yes));
+
+        // execute the query and load results into the Set
+        QueryRun queryRun = new QueryRun(query);
+
+        while(queryRun.next())
+        {
+            rentalType = queryRun.get(tableNum(BOBRentalType));
+            ret.add(rentalType.RentalTypeId);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRentalTrans</Name>
+				<Source><![CDATA[
+    public BOBRentalTrans getRentalTrans(BOBObjectTableRecId _objectTableRecId)
+    {
+        BOBRentalTrans  rentalTrans;
+        BOBObjectTable  objectTable;
+
+        // Select the first on in the future
+        select firstOnly FromDateTime, ToDateTime, InventTransOrigin, TransType from rentalTrans
+        order by FromDateTime asc
+        where rentalTrans.FromDateTime >= callerOffRentDateTime
+        &&   (rentalTrans.TransType    == BOBRentalTransType::Rental
+        ||    rentalTrans.TransType    == BOBRentalTransType::RentalQuotation)
+            exists join objectTable
+            where objectTable.ObjectId == rentalTrans.ObjectId
+            &&    objectTable.RecId    == _objectTableRecId;
+
+        if (!rentalTrans)
+        {
+            // Select the last one in the past
+            select firstOnly FromDateTime, ToDateTime, InventTransOrigin, TransType from rentalTrans
+            order by FromDateTime desc
+            where rentalTrans.ToDateTime <= callerOnRentDateTime
+            &&   (rentalTrans.TransType  == BOBRentalTransType::Rental
+            ||    rentalTrans.TransType  == BOBRentalTransType::RentalQuotation)
+            &&    rentalTrans.SubStatus  <  BOBRentalSubStatus::Returned
+                exists join objectTable
+                where objectTable.ObjectId == rentalTrans.ObjectId
+                &&    objectTable.RecId    == _objectTableRecId;
+        }
+
+        return rentalTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        workerDefaults  = DNRWorkerDefaults::findByUserId();
+        userTimezone    = DateTimeUtil::getUserPreferredTimeZone();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine parmCallerRentalLine(RORRentalLine _callerRentalLine = callerRentalLine)
+    {
+        callerRentalLine = _callerRentalLine;
+        return callerRentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTmpData</Name>
+				<Source><![CDATA[
+    public BOBTmpObjectAvailability parmTmpData(BOBTmpObjectAvailability _tmpData = tmpData)
+    {
+        tmpData = _tmpData;
+        return tmpData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTmpData_Graphical</Name>
+				<Source><![CDATA[
+    public BOBTmpObjectAvailability_Graphical parmTmpData_Graphical(BOBTmpObjectAvailability_Graphical _tmpData_Graphical = tmpData_Graphical)
+    {
+        tmpData_Graphical = _tmpData_Graphical;
+        return tmpData_Graphical;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateBusinessObjectAttributes</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInsertMethodInLoop", "valueTransFilter.setTmp(); has been set as a Tmp table" )] 
+
+    public DFMValueTrans populateBusinessObjectAttributes(BOBObjectAvailabilitySettings _settings)
+    {
+        DFMValueTrans           valueTransRequired, valueTransFilter;
+        DFMFieldGroupContents   fieldGroupContents;
+        BOBRentalType           rentalType;
+
+        // BP Deviation documented
+        valueTransFilter.setTmp();
+
+        rentalType = callerRentalLine ? BOBRentalType::find(callerRentalLine.BOBRentalTypeId) : BOBRentalType::find(_settings.RentalTypeId);
+
+        if (rentalType.BusObjAttrFldGrpId)
+        {
+            while select FieldId from fieldGroupContents
+            where fieldGroupContents.FieldGroupId == rentalType.BusObjAttrFldGrpId
+                outer join Value from valueTransRequired
+                where (callerRentalLine
+                &&     valueTransRequired.RefTableId == callerRentalLine.TableId
+                &&     valueTransRequired.RefRecId   == callerRentalLine.RecId)
+                ||    (!callerRentalLine
+                &&     valueTransRequired.RefTableId == rentalType.TableId
+                &&     valueTransRequired.RefRecId   == rentalType.RecId)
+                &&     valueTransRequired.FieldId    == fieldGroupContents.FieldId
+            {
+                valueTransFilter.clear();
+                valueTransFilter.FieldId = fieldGroupContents.FieldId;
+
+                if (callerRentalLine
+                ||  fieldGroupContents.FieldId == rentalType.BusObjAttributeField[1]
+                ||  fieldGroupContents.FieldId == rentalType.BusObjAttributeField[2]
+                ||  fieldGroupContents.FieldId == rentalType.BusObjAttributeField[3])
+                {
+                    valueTransFilter.Value = valueTransRequired.Value;
+                }
+
+                valueTransFilter.insert();
+            }
+        }
+
+        return valueTransFilter;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpData_BusinessObj</Name>
+				<Source><![CDATA[
+    public void populateTmpData_BusinessObj(FormDataSource _businessObjectAttributes_ds)
+    {
+        #TimeConstants
+
+        BOBObjectView                       objectView;
+        BOBRentalTrans                      rentalTrans;
+        LogisticsPostalAddress              postalAddress;
+        LogisticsEntityPostalAddressView    addressView;
+        InventLocation                      inventLocation;
+        InventTrans                         inventTrans;
+        InventTransOriginSalesLine          inventTransOriginSalesLine;
+        InventTransOriginPurchLine          inventTransOriginPurchLine;
+        InventTransOriginSalesQuotationLine inventTransOriginSalesQuotationLine;
+        SalesLine                           salesLine;
+        PurchLine                           purchLine;
+        SalesQuotationLine                  salesQuotationLine;
+        WPPWorkOrderLine                    workOrderLine;
+        SalesTable                          salesTable;
+        PurchTable                          purchTable;
+        SalesQuotationTable                 salesQuotationTable;
+        WPPWorkOrderTable                   workOrderTable;
+        CustTable                           custTable;
+        VendTable                           vendTable;
+        smmBusRelTable                      busRelTable;
+        DirPartyTable                       dirPartyTable;
+        StartDateTime                       viewStartDateTime;
+        EndDateTime                         viewEndDateTime;
+        BOBRentalType                       rentalType;
+        TransDateTime                       maxDateTime;
+
+        settings            = BOBObjectAvailabilitySettings::findOrCreate();
+        viewStartDateTime   = settings.StartDateTime;
+        viewEndDateTime     = settings.EndDateTime;
+        maxDateTime         = DateTimeUtil::maxValue();
+       
+        StartDate    viewStartDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(viewStartDateTime, userTimezone)); //Date in User Perferred TimeZone
+        EndDate      viewEndDate   = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(viewEndDateTime, userTimezone)); //Date in User Perferred TimeZone
+        
+        delete_from tmpData_Graphical;
+
+        this.insertTmpDataBusinessObjWithinDateInterval(viewStartDateTime, viewEndDateTime, viewStartDate, viewEndDate);
+
+        update_recordset tmpData_Graphical
+        setting ToDateTime = maxDateTime
+        where tmpData_Graphical.RefTableId == tableNum(BOBRentalTrans)
+            exists join rentalTrans
+            where rentalTrans.RecId == tmpData_Graphical.RefRecId
+            &&    rentalTrans.CertaintyTo == BOBDateTimeCertainty::Tentative;
+
+        this.insertTmpDataBusinessObjOutsideDateInterval(viewStartDate, viewEndDate);
+        
+        // delete records that don't meet the 'warehouse' filter setting
+        if (settings.InventLocationId)
+        {
+            delete_from tmpData_Graphical
+                notexists join objectView
+                where objectView.PostalAddressRecId
+                &&    objectView.ObjectId == tmpData_Graphical.ObjectId
+                    join TableId from addressView
+                    where addressView.PostalAddress == objectView.PostalAddressRecId
+                    &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                    &&    addressView.IsPrimary == NoYes::Yes
+                        join TableId from inventLocation
+                        where inventLocation.InventLocationId == settings.InventLocationId
+                        &&    inventLocation.RecId == addressView.Entity;
+        }
+
+        // for certain RentalTransTypes the dates should be filled differently
+        update_recordset tmpData_Graphical
+        setting ToDateTime = tmpData_Graphical.FromDateTime, FromDateTime = utcDateTimeNull()
+        where tmpData_Graphical.RentalTransType == BOBRentalTransType::SubRental
+        ||    tmpData_Graphical.RentalTransType == BOBRentalTransType::Asset
+        ||    tmpData_Graphical.RentalTransType == BOBRentalTransType::Purch;
+
+        // Update the customer name on work order related transactions
+        update_recordSet tmpData_Graphical
+        setting Party = workOrderTable.OrganizationParty
+        where tmpData_Graphical.RentalTransType == BOBRentalTransType::WPPWorkOrder
+            join TableId from rentalTrans
+            where rentalTrans.RecId == tmpData_Graphical.RefRecId
+                join TableId from workOrderLine
+                where workOrderLine.RecId == rentalTrans.WPPWorkOrderLineRecId
+                    join OrganizationParty from workOrderTable
+                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    &&    workOrderTable.CustVendAccountType == CustVendACType::Cust
+                    &&    workOrderTable.OrganizationParty;
+
+        // Update work order line related fields
+        update_recordSet tmpData_Graphical
+        setting OrderNumber = workOrderLine.WorkOrderId,
+                WPPTaskId = workOrderLine.TaskId,
+                WPPLineStatus = workOrderLine.Status
+        where tmpData_Graphical.RentalTransType == BOBRentalTransType::WPPWorkOrder
+            join TableId from rentalTrans
+            where rentalTrans.RecId == tmpData_Graphical.RefRecId
+                join WorkOrderId, TaskId, Status from workOrderLine
+                where workOrderLine.RecId == rentalTrans.WPPWorkOrderLineRecId;
+
+        // Update sales related fields
+        update_recordSet tmpData_Graphical
+        setting Party = custTable.Party,
+                OrderNumber = salesLine.SalesId,
+                RentalTypeIdRequested = salesLine.BOBRentalTypeIdRequested,
+                RORVenueCode = salesTable.RORVenueCode
+        where tmpData_Graphical.RentalTransType == BOBRentalTransType::Sales
+        ||    tmpData_Graphical.RentalTransType == BOBRentalTransType::Rental
+            join TableId from rentalTrans
+            where rentalTrans.RecId == tmpData_Graphical.RefRecId
+                join TableId from inventTrans
+                where inventTrans.InventTransOrigin == rentalTrans.InventTransOrigin
+                    join TableId from inventTransOriginSalesLine
+                    where inventTransOriginSalesLine.InventTransOrigin == inventTrans.InventTransOrigin
+                        join SalesId, BOBRentalTypeIdRequested from salesLine
+                        where salesLine.InventTransId == inventTransOriginSalesLine.SalesLineInventTransId
+                            join RORVenueCode from salesTable
+                            where salesTable.SalesId == salesLine.SalesId
+                                join Party from custTable
+                                where custTable.AccountNum == salesTable.CustAccount;
+
+        // Update quotation related info
+        update_recordSet tmpData_Graphical
+        setting Party = custTable.Party,
+                OrderNumber = salesQuotationLine.QuotationId,
+                RentalTypeIdRequested = salesQuotationLine.BOBRentalTypeIdRequested,
+                RORVenueCode = salesQuotationTable.RORVenueCode
+            where tmpData_Graphical.RentalTransType == BOBRentalTransType::SalesQuotation
+            ||    tmpData_Graphical.RentalTransType == BOBRentalTransType::RentalQuotation
+            join TableId from rentalTrans
+            where rentalTrans.RecId == tmpData_Graphical.RefRecId
+                join TableId from inventTrans
+                where inventTrans.InventTransOrigin == rentalTrans.InventTransOrigin
+                    join TableId from inventTransOriginSalesQuotationLine
+                    where inventTransOriginSalesQuotationLine.InventTransOrigin == inventTrans.InventTransOrigin
+                        join QuotationId, BOBRentalTypeIdRequested from salesQuotationLine
+                        where salesQuotationLine.InventTransId == inventTransOriginSalesQuotationLine.SalesQuotationLineInventTransId
+                            join RORVenueCode from salesQuotationTable
+                            where salesQuotationTable.QuotationId == salesQuotationLine.QuotationId
+                                join Party from custTable
+                                where custTable.AccountNum == salesQuotationTable.CustAccount;
+
+        // Update purchase related fields
+        update_recordSet tmpData_Graphical
+        setting Party = vendTable.Party,
+                OrderNumber = purchLine.PurchId,
+                RORVenueCode = purchTable.RORVenueCode
+        where tmpData_Graphical.RentalTransType == BOBRentalTransType::Purch
+        ||    tmpData_Graphical.RentalTransType == BOBRentalTransType::SubRental
+            join TableId from rentalTrans
+            where rentalTrans.RecId == tmpData_Graphical.RefRecId
+                join TableId from inventTrans
+                where inventTrans.InventTransOrigin == rentalTrans.InventTransOrigin
+                    join TableId from inventTransOriginPurchLine
+                    where inventTransOriginPurchLine.InventTransOrigin == inventTrans.InventTransOrigin
+                        join PurchId from purchLine
+                        where purchLine.InventTransId == inventTransOriginPurchLine.PurchLineInventTransId
+                            join RORVenueCode from purchTable
+                            where purchTable.PurchId == purchLine.PurchId
+                                join Party from vendTable
+                                where vendTable.AccountNum == purchTable.OrderAccount;
+
+        // Update sales quotation related fields
+        update_recordSet tmpData_Graphical
+        setting Party = busRelTable.Party,
+                OrderNumber = salesQuotationLine.QuotationId,
+                RentalTypeIdRequested = salesQuotationLine.BOBRentalTypeIdRequested,
+                RORVenueCode = salesQuotationTable.RORVenueCode
+        where tmpData_Graphical.RentalTransType == BOBRentalTransType::SalesQuotation
+        ||    tmpData_Graphical.RentalTransType == BOBRentalTransType::RentalQuotation
+            join TableId from rentalTrans
+            where rentalTrans.RecId == tmpData_Graphical.RefRecId
+                join TableId from inventTrans
+                where inventTrans.InventTransOrigin == rentalTrans.InventTransOrigin
+                    join TableId from inventTransOriginSalesQuotationLine
+                    where inventTransOriginSalesQuotationLine.InventTransOrigin == inventTrans.InventTransOrigin
+                        join QuotationId, BOBRentalTypeIdRequested from salesQuotationLine
+                        where salesQuotationLine.InventTransId == inventTransOriginSalesQuotationLine.SalesQuotationLineInventTransId
+                            join RORVenueCode from salesQuotationTable
+                            where salesQuotationTable.QuotationId == salesQuotationLine.QuotationId
+                                join Party from busRelTable
+                                where busRelTable.BusRelAccount == salesQuotationTable.BusRelAccount;
+
+        update_recordset tmpData_Graphical
+        setting CustName = dirPartyTable.Name
+        where tmpData_Graphical.Party
+            join Name from dirPartyTable
+            where dirPartyTable.RecId == tmpData_Graphical.Party;
+
+        // update rental type description
+        update_recordSet tmpData_Graphical
+        setting RentalTypeDescription = rentalType.Description
+        where tmpData_Graphical.RentalTypeId
+            join Description from rentalType
+            where rentalType.RentalTypeId == tmpData_Graphical.RentalTypeId;
+
+        // Update the address
+        update_recordSet tmpData_Graphical
+        setting Address = postalAddress.Address,
+                City    = postalAddress.City,
+                Street  = postalAddress.Street,
+                ZipCode = postalAddress.ZipCode
+            join TableId from objectView
+            where objectView.RecId == tmpData_Graphical.ObjectTableRecId
+                join Address, City, Street, ZipCode from postalAddress
+                where postalAddress.RecId == objectView.PostalAddressRecId;
+
+        // delete records that don't meet the remaining filter settings
+        this.applyFilter(_businessObjectAttributes_ds);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertTmpDataBusinessObjWithinDateInterval</Name>
+				<Source><![CDATA[
+    // insert all relevant business objects and their rental transactions within the specified date interval
+    protected void insertTmpDataBusinessObjWithinDateInterval(StartDateTime _viewStartDateTime, EndDateTime _viewEndDateTime, StartDate _viewStartDate, EndDate _viewEndDate)
+    {
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRBusinessObjectViewV2)))
+        {
+            this.insertTmpDataBusinessObjWithinDateIntervalV2(_viewStartDateTime, _viewEndDateTime, _viewStartDate, _viewEndDate);
+        }
+        else
+        {
+            BOBRentalTrans  rentalTrans;
+            BOBObjectView   objectView;
+            RefTableId      refTableId = tableNum(BOBRentalTrans);
+
+            insert_recordset tmpData_Graphical(ObjectId, AssetId, RentalSubStatus, RentalTypeId, InventLocationId, Qty, FromDateTime, ToDateTime, RentalTransType, RefTableId, RefRecId, ObjectTableRecId, FleetNumber, InventSerialId, ObjectCategory, FirstOnRentDate, LastOnRentDate, Depot, DepotStartDate, DepotEndDate)
+            select ObjectId, AssetId, SubStatus, RentalTypeId, InventLocationId, Qty, FromDateTime, ToDateTime, TransType, refTableId, RecId from rentalTrans
+            where   rentalTrans.Active == BOBRentalTransActive::Active
+            &&      rentalTrans.FromDateTime != rentalTrans.ToDateTime
+            &&    (!settings.RentalTypeId || rentalTrans.RentalTypeId == settings.RentalTypeId)
+            &&   (((rentalTrans.TransType == BOBRentalTransType::Rental         ||
+                    rentalTrans.TransType == BOBRentalTransType::WPPWorkOrder   ||
+                    rentalTrans.TransType == BOBRentalTransType::Sales          ||
+                    rentalTrans.TransType == BOBRentalTransType::SalesQuotation ||
+                    rentalTrans.TransType == BOBRentalTransType::RentalQuotation) && rentalTrans.FromDateTime < _viewEndDateTime && (rentalTrans.ToDateTime >= _viewStartDateTime || rentalTrans.CertaintyTo == BOBDateTimeCertainty::Tentative))
+                ||
+                  ((rentalTrans.TransType == BOBRentalTransType::SubRental      ||
+                    rentalTrans.TransType == BOBRentalTransType::Asset          ||
+                    rentalTrans.TransType == BOBRentalTransType::Purch) && rentalTrans.FromDateTime > _viewStartDateTime))
+                join RecId, FleetNumber, InventSerialId, Category, FirstOnRentDate, LastOnRentDate, Depot, DepotStartDate, DepotEndDate from objectView
+                where objectView.ObjectId == rentalTrans.ObjectId
+                &&    objectView.Category != BOBObjectCategory::Internal
+                &&    objectView.Category != BOBObjectCategory::Pending
+                &&    objectView.Category != BOBObjectCategory::Inventory
+                &&    objectView.Category != BOBObjectCategory::Component
+                &&   (objectView.Category == BOBObjectCategory::External || (objectView.FirstOnRentDate && objectView.FirstOnRentDate < _viewEndDate + 1 && (!objectView.LastOnRentDate || objectView.LastOnRentDate >= _viewStartDate)))
+                &&   (settings.RentalBusinessObject       ||  objectView.Category         != BOBObjectCategory::Rental)
+                &&   (settings.SubRentalBusinessObject    ||  objectView.Category         != BOBObjectCategory::SubRental)
+                &&   (settings.ExternalBusinessObject     ||  objectView.Category         != BOBObjectCategory::External)
+                &&  (!settings.ObjectGroupId              ||  objectView.ObjectGroupId    == settings.ObjectGroupId)
+                &&  (!settings.ObjectSubGroupId           ||  objectView.ObjectSubGroupId == settings.ObjectSubGroupId)
+                &&  (!settings.Depot                      || (objectView.Depot            == settings.Depot && objectView.DepotStartDate <= _viewEndDate && (!objectView.DepotEndDate || objectView.DepotEndDate >= _viewStartDate)))
+                &&  (!settings.CurrentCompany             || (objectView.PhysicalOwner    == curext()))
+                &&  (!settings.CurrentObjects             || (objectView.PhysicalOwner    == curext() && objectView.Category == BOBObjectCategory::Rental));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertTmpDataBusinessObjWithinDateIntervalV2</Name>
+				<Source><![CDATA[
+    private void insertTmpDataBusinessObjWithinDateIntervalV2(StartDateTime _viewStartDateTime, EndDateTime _viewEndDateTime, StartDate _viewStartDate, EndDate _viewEndDate)
+    {
+        BOBRentalTrans  rentalTrans;
+        BOBObjectViewV2 objectView;
+        RefTableId      refTableId = tableNum(BOBRentalTrans);
+
+        insert_recordset tmpData_Graphical(ObjectId, AssetId, RentalSubStatus, RentalTypeId, InventLocationId, Qty, FromDateTime, ToDateTime, RentalTransType, RefTableId, RefRecId, ObjectTableRecId, FleetNumber, InventSerialId, ObjectCategory, FirstOnRentDate, LastOnRentDate, Depot, DepotStartDate, DepotEndDate)
+            select ObjectId, AssetId, SubStatus, RentalTypeId, InventLocationId, Qty, FromDateTime, ToDateTime, TransType, refTableId, RecId from rentalTrans
+            where   rentalTrans.Active == BOBRentalTransActive::Active
+            &&      rentalTrans.FromDateTime != rentalTrans.ToDateTime
+            &&    (!settings.RentalTypeId || rentalTrans.RentalTypeId == settings.RentalTypeId)
+            &&   (((rentalTrans.TransType == BOBRentalTransType::Rental         ||
+                    rentalTrans.TransType == BOBRentalTransType::WPPWorkOrder   ||
+                    rentalTrans.TransType == BOBRentalTransType::Sales          ||
+                    rentalTrans.TransType == BOBRentalTransType::SalesQuotation ||
+                    rentalTrans.TransType == BOBRentalTransType::RentalQuotation) && rentalTrans.FromDateTime < _viewEndDateTime && (rentalTrans.ToDateTime >= _viewStartDateTime || rentalTrans.CertaintyTo == BOBDateTimeCertainty::Tentative))
+                ||
+                  ((rentalTrans.TransType == BOBRentalTransType::SubRental      ||
+                    rentalTrans.TransType == BOBRentalTransType::Asset          ||
+                    rentalTrans.TransType == BOBRentalTransType::Purch) && rentalTrans.FromDateTime > _viewStartDateTime))
+                join RecId, FleetNumber, InventSerialId, Category, FirstOnRentDate, LastOnRentDate, Depot, DepotStartDate, DepotEndDate from objectView
+                where objectView.ObjectId == rentalTrans.ObjectId
+                &&    objectView.Category != BOBObjectCategory::Internal
+                &&    objectView.Category != BOBObjectCategory::Pending
+                &&    objectView.Category != BOBObjectCategory::Inventory
+                &&    objectView.Category != BOBObjectCategory::Component
+                &&   (objectView.Category == BOBObjectCategory::External || (objectView.FirstOnRentDate && objectView.FirstOnRentDate < _viewEndDate + 1 && (!objectView.LastOnRentDate || objectView.LastOnRentDate >= _viewStartDate)))
+                &&   (settings.RentalBusinessObject       ||  objectView.Category         != BOBObjectCategory::Rental)
+                &&   (settings.SubRentalBusinessObject    ||  objectView.Category         != BOBObjectCategory::SubRental)
+                &&   (settings.ExternalBusinessObject     ||  objectView.Category         != BOBObjectCategory::External)
+                &&  (!settings.ObjectGroupId              ||  objectView.ObjectGroupId    == settings.ObjectGroupId)
+                &&  (!settings.ObjectSubGroupId           ||  objectView.ObjectSubGroupId == settings.ObjectSubGroupId)
+                &&  (!settings.Depot                      || (objectView.Depot            == settings.Depot && objectView.DepotStartDate <= _viewEndDate && (!objectView.DepotEndDate || objectView.DepotEndDate >= _viewStartDate)))
+                &&  (!settings.CurrentCompany             || (objectView.PhysicalOwner    == curext()))
+                &&  (!settings.CurrentObjects             || (objectView.PhysicalOwner    == curext() && objectView.Category == BOBObjectCategory::Rental));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertTmpDataBusinessObjOutsideDateInterval</Name>
+				<Source><![CDATA[
+    // insert all relevant business objects that do not have rental transactions within the specified date interval
+    protected void insertTmpDataBusinessObjOutsideDateInterval(StartDate _viewStartDate, EndDate _viewEndDate)
+    {
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRBusinessObjectViewV2)))
+        {
+            this.insertTmpDataBusinessObjOutsideDateIntervalV2(_viewStartDate, _viewEndDate);
+        }
+        else
+        {
+            BOBRentalTrans                      rentalTrans;
+            BOBObjectView                       objectView;
+            RefTableId                          refTableId = tableNum(BOBObjectTable);
+            BOBTmpObjectAvailability_Graphical  locTmpData_Graphical;
+
+            locTmpData_Graphical.linkPhysicalTableInstance(tmpData_Graphical);
+
+            insert_recordset tmpData_Graphical(ObjectId, FleetNumber, RentalTypeId, ObjectTableRecId, InventSerialId, ObjectCategory, FirstOnRentDate, LastOnRentDate, Depot, DepotStartDate, DepotEndDate)
+            select ObjectId, FleetNumber, RentalTypeId, RecId, InventSerialId, Category, FirstOnRentDate, LastOnRentDate, Depot, DepotStartDate, DepotEndDate from objectView
+            where objectView.Category != BOBObjectCategory::Internal
+            &&    objectView.Category != BOBObjectCategory::Pending
+            &&    objectView.Category != BOBObjectCategory::Inventory
+            &&    objectView.Category != BOBObjectCategory::Component
+            &&   (objectView.Category == BOBObjectCategory::External || (objectView.FirstOnRentDate && objectView.FirstOnRentDate < _viewEndDate + 1 && (!objectView.LastOnRentDate || objectView.LastOnRentDate >= _viewStartDate)))
+            &&   (settings.RentalBusinessObject       ||  objectView.Category         != BOBObjectCategory::Rental)
+            &&   (settings.SubRentalBusinessObject    ||  objectView.Category         != BOBObjectCategory::SubRental)
+            &&   (settings.ExternalBusinessObject     ||  objectView.Category         != BOBObjectCategory::External)
+            &&  (!settings.RentalTypeId               ||  objectView.RentalTypeId     == settings.RentalTypeId)
+            &&  (!settings.ObjectGroupId              ||  objectView.ObjectGroupId    == settings.ObjectGroupId)
+            &&  (!settings.ObjectSubGroupId           ||  objectView.ObjectSubGroupId == settings.ObjectSubGroupId)
+            &&  (!settings.Depot                      || (objectView.Depot            == settings.Depot && objectView.DepotStartDate <= _viewEndDate && (!objectView.DepotEndDate || objectView.DepotEndDate >= _viewStartDate)))
+            &&  (!settings.CurrentCompany             || (objectView.PhysicalOwner    == curext()))
+            &&  (!settings.CurrentObjects             || (objectView.PhysicalOwner    == curext() && objectView.Category == BOBObjectCategory::Rental))
+                notExists join locTmpData_Graphical
+                where locTmpData_Graphical.ObjectId == tmpData_Graphical.ObjectId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertTmpDataBusinessObjOutsideDateIntervalV2</Name>
+				<Source><![CDATA[
+    private void insertTmpDataBusinessObjOutsideDateIntervalV2(StartDate _viewStartDate, EndDate _viewEndDate)
+    {
+        BOBRentalTrans                      rentalTrans;
+        BOBObjectViewV2                     objectView;
+        RefTableId                          refTableId = tableNum(BOBObjectTable);
+        BOBTmpObjectAvailability_Graphical  locTmpData_Graphical;
+
+        locTmpData_Graphical.linkPhysicalTableInstance(tmpData_Graphical);
+
+        insert_recordset tmpData_Graphical(ObjectId, FleetNumber, RentalTypeId, ObjectTableRecId, InventSerialId, ObjectCategory, FirstOnRentDate, LastOnRentDate, Depot, DepotStartDate, DepotEndDate)
+        select ObjectId, FleetNumber, RentalTypeId, RecId, InventSerialId, Category, FirstOnRentDate, LastOnRentDate, Depot, DepotStartDate, DepotEndDate from objectView
+        where objectView.Category != BOBObjectCategory::Internal
+        &&    objectView.Category != BOBObjectCategory::Pending
+        &&    objectView.Category != BOBObjectCategory::Inventory
+        &&    objectView.Category != BOBObjectCategory::Component
+        &&   (objectView.Category == BOBObjectCategory::External || (objectView.FirstOnRentDate && objectView.FirstOnRentDate < _viewEndDate + 1 && (!objectView.LastOnRentDate || objectView.LastOnRentDate >= _viewStartDate)))
+        &&   (settings.RentalBusinessObject       ||  objectView.Category         != BOBObjectCategory::Rental)
+        &&   (settings.SubRentalBusinessObject    ||  objectView.Category         != BOBObjectCategory::SubRental)
+        &&   (settings.ExternalBusinessObject     ||  objectView.Category         != BOBObjectCategory::External)
+        &&  (!settings.RentalTypeId               ||  objectView.RentalTypeId     == settings.RentalTypeId)
+        &&  (!settings.ObjectGroupId              ||  objectView.ObjectGroupId    == settings.ObjectGroupId)
+        &&  (!settings.ObjectSubGroupId           ||  objectView.ObjectSubGroupId == settings.ObjectSubGroupId)
+        &&  (!settings.Depot                      || (objectView.Depot            == settings.Depot && objectView.DepotStartDate <= _viewEndDate && (!objectView.DepotEndDate || objectView.DepotEndDate >= _viewStartDate)))
+        &&  (!settings.CurrentCompany             || (objectView.PhysicalOwner    == curext()))
+        &&  (!settings.CurrentObjects             || (objectView.PhysicalOwner    == curext() && objectView.Category == BOBObjectCategory::Rental))
+            notExists join locTmpData_Graphical
+            where locTmpData_Graphical.ObjectId == tmpData_Graphical.ObjectId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpData_Grid</Name>
+				<Source><![CDATA[
+    public void populateTmpData_Grid(FormDataSource _businessObjectAttributes_ds)
+    {
+        BOBConditionPriorities                  conditionPriorities;
+        BOBRentalTrans                          rentalTrans;
+        DNRTmpIdValue                           tmpIdValue;
+        BOBTmpRentalTrans                       tmpRentalTrans;
+        BOBTmpAddressLocationType               tmpAddressLocationType;
+        InventLocation                          inventLocation;
+        InventTransOriginSalesLine              inventTransOriginSalesLine;
+        SalesLine                               salesLine;
+        SalesTable                              salesTable;
+        DFMValueTrans                           requestedAttrs, valueTrans;
+        LogisticsPostalAddress                  postalAddress;
+        LogisticsEntityPostalAddressView        logisticsEntityPostalAddressView;
+        BOBRentalType                           rentalType;
+        BOBCurrentLocationView                  currentLocationView;
+        BOBObjectLocationLog                    objectLocationLog;
+        BOBLocationType                         locationTypeCompany;
+        TransDateTime                           systemDateTime;
+        EcoResProduct                           ecoResProduct;
+        InventTable                             inventTable;
+
+        #define.tmpPlaceHolder(-1)
+        #DNRConstants
+
+        settings                = BOBObjectAvailabilitySettings::findOrCreate();
+        callerOnRentDateTime    = settings.StartDateTime;
+        callerOffRentDateTime   = settings.EndDateTime;
+        locationTypeCompany     = BOBLocationType::Company;
+        systemDateTime          = DateTimeUtil::getSystemDateTime();
+
+        delete_from tmpData;
+
+        this.insertTmpData_Grid(callerOnRentDateTime, callerOffRentDateTime);
+
+        if (settings.BusObjAttrs)
+        {
+            // BP Deviation documented
+            requestedAttrs.setTmp();
+            requestedAttrs.setTmpData(_businessObjectAttributes_ds.cursor());
+
+            select count(RecId) from requestedAttrs
+            where requestedAttrs.Value;
+
+            if (requestedAttrs.RecId)
+            {
+                // An extra temporary table to store the requestedAttrs,
+                // because an inMemory temporary table (requestedAttrs) cannot be joined to the valueTrans table
+                // DNRTmpIdValue is a TempDB table and can be joined to de valueTrans table
+                insert_recordset tmpIdValue (Num, StrValue)
+                    select FieldId, Value from requestedAttrs
+                    where requestedAttrs.Value;
+
+                while select tmpIdValue
+                {
+                    // Delete all objects that do not match the attributes filter
+                    delete_from tmpData
+                        notExists join valueTrans
+                        where valueTrans.RefTableId == tableNum(BOBObjectTable)
+                        &&    valueTrans.RefRecId   == tmpData.ObjectTableRecId
+                        &&    valueTrans.FieldId    == tmpIdValue.Num
+                        &&    valueTrans.Value      == tmpIdValue.StrValue;
+                }
+            }
+        }
+
+        // Update item and assignable, if the product belonging to the Rental Type is released in the current company
+        update_recordset tmpData
+            setting IsAssignable = NoYes::Yes 
+            where tmpData.PhysicalOwner == curExt();
+
+        update_recordset tmpData
+        setting ProductDisplayNumber = ecoResProduct.DisplayProductNumber
+            join DisplayProductNumber from ecoResProduct
+            where ecoResProduct.BOBRentalTypeId == tmpData.RentalTypeId
+            &&    ecoResProduct.BOBRentalTypeId == ecoResProduct.DisplayProductNumber;
+
+        // Update the address
+        update_recordSet tmpData
+        setting Address = postalAddress.Address,
+                City = postalAddress.City,
+                Street = postalAddress.Street,
+                ZipCode = postalAddress.ZipCode,
+                ObjectLocationPostalAddressRecId = postalAddress.RecId
+        join TableId from currentLocationView
+        where currentLocationView.ObjectId == tmpData.ObjectId
+            join TableId from objectLocationLog
+            where objectLocationLog.ObjectId == currentLocationView.ObjectId
+            &&    objectLocationLog.FromDateTime == currentLocationView.MaxOfFromDateTime
+                join Address, City, Street, ZipCode, RecId from postalAddress
+                where postalAddress.RecId == objectLocationLog.PostalAddress;
+
+        // Delete the records that do not match the address filter
+        if (settings.Street || settings.ZipCodeId || settings.City || settings.Address)
+        {
+            delete_from tmpData
+            where (settings.Street    && tmpData.Street  != settings.Street)
+            ||    (settings.ZipCodeId && tmpData.ZipCode != settings.ZipCodeId)
+            ||    (settings.City      && tmpData.City    != settings.City)
+            ||    (settings.Address   && tmpData.Address != settings.Address);
+        }
+
+        if (!settings.RentalTypeId && callerRentalLine)
+        {
+            // Show the records with same rental type of the callerRentalLine first (sort ascending)
+            update_recordSet tmpData
+            setting RentalTypeSorting = 1
+            where tmpData.RentalTypeId == callerRentalLine.BOBRentalTypeId;
+        }
+
+        // load relevent rental transactions into another temporary table, so we only have to query that table once.
+        insert_recordset tmpRentalTrans (ObjectId, FromDateTime, ToDateTime, TransType, CertaintyTo, Active, InventTransOrigin,  RentalTransRecId)
+            select ObjectId, FromDateTime, ToDateTime, TransType, CertaintyTo, Active, InventTransOrigin, RecId from rentalTrans
+            order by ObjectId, ToDateTime asc // important to order records (otherwise it orders by RecId)
+            where rentalTrans.ObjectId
+            &&    rentalTrans.Active       == BOBRentalTransActive::Active
+            &&    rentalTrans.FromDateTime <= callerOffRentDateTime
+            &&   (rentalTrans.ToDateTime   >= callerOnRentDateTime || rentalTrans.CertaintyTo  == BOBDateTimeCertainty::Tentative)
+            &&   (rentalTrans.TransType    == BOBRentalTransType::Rental || rentalTrans.TransType == BOBRentalTransType::RentalQuotation)
+            &&   rentalTrans.SubStatus     != BOBRentalSubStatus::Returned
+            &&   rentalTrans.SubStatus     != BOBRentalSubStatus::ReturnInspected
+            &&   rentalTrans.SubStatus     != BOBRentalSubStatus::Invoiced
+                exists join tmpData
+                where tmpData.ObjectId == rentalTrans.ObjectId;
+
+        // copy some stuff from the rental transactions to our temporary buffer (have to be separate statements unfortunately)
+        update_recordSet tmpData
+        setting RentalTransRecId = tmpRentalTrans.RentalTransRecId,
+                InventTransOrigin = tmpRentalTrans.InventTransOrigin
+            join RentalTransRecId, InventTransOrigin from tmpRentalTrans
+            where tmpRentalTrans.ObjectId == tmpData.ObjectId;
+
+        update_recordSet tmpData
+        setting ROROnRentDateTime = tmpRentalTrans.FromDateTime
+        where tmpData.RentalTransRecId
+            join FromDateTime from tmpRentalTrans
+            where tmpRentalTrans.RentalTransRecId == tmpData.RentalTransRecId;
+
+        update_recordSet tmpData
+        setting RORExpectedOffRentDateTime = tmpRentalTrans.ToDateTime
+        where tmpData.RentalTransRecId
+            join ToDateTime from tmpRentalTrans
+            where tmpRentalTrans.RentalTransRecId == tmpData.RentalTransRecId
+            &&    tmpRentalTrans.CertaintyTo == BOBDateTimeCertainty::Tentative;
+
+        update_recordSet tmpData
+        setting ROROffRentDateTime = tmpRentalTrans.ToDateTime
+        where tmpData.RentalTransRecId
+            join ToDateTime from tmpRentalTrans
+            where tmpRentalTrans.RentalTransRecId == tmpData.RentalTransRecId
+            &&   (tmpRentalTrans.CertaintyTo == BOBDateTimeCertainty::Firm || tmpRentalTrans.CertaintyTo == BOBDateTimeCertainty::Fixed);
+
+        update_recordSet tmpData
+        setting DeliveryName = salesTable.DeliveryName
+            join TableId from inventTransOriginSalesLine
+            where inventTransOriginSalesLine.InventTransOrigin == tmpData.InventTransOrigin
+                join TableId from salesLine
+                where salesLine.dataAreaId == inventTransOriginSalesLine.SalesLineDataAreaId
+                &&    salesLine.InventTransId == inventTransOriginSalesLine.SalesLineInventTransId
+                    join DeliveryName from salesTable
+                    where salesTable.SalesId == salesLine.SalesId;
+
+        // load warehouse addresses into a temporary table, so we only have to query the GAB once...
+        insert_recordset tmpAddressLocationType (LocationType, PostalAddressRecId, InventLocationId)
+            select locationTypeCompany, PostalAddress from logisticsEntityPostalAddressView
+            where logisticsEntityPostalAddressView.EntityType == LogisticsLocationEntityType::Warehouse
+            &&    logisticsEntityPostalAddressView.ValidFrom <= systemDateTime
+            &&   (!logisticsEntityPostalAddressView.ValidTo || logisticsEntityPostalAddressView.ValidTo >= systemDateTime)
+                join InventLocationId from inventLocation
+                where inventLocation.RecId == logisticsEntityPostalAddressView.Entity;
+
+        // ... well, maybe twice. If necessary, stamp the user depot indicator on the relevant warehouse addresses
+        if (workerDefaults.InventLocationId)
+        {
+            update_recordset tmpAddressLocationType
+            setting LocationType = BOBLocationType::User
+                exists join inventLocation
+                where inventLocation.InventLocationId == workerDefaults.InventLocationId
+                    join TableId from logisticsEntityPostalAddressView
+                    where logisticsEntityPostalAddressView.EntityType == LogisticsLocationEntityType::Warehouse
+                    &&    logisticsEntityPostalAddressView.Entity == inventLocation.RecId
+                    &&    logisticsEntityPostalAddressView.ValidFrom <= systemDateTime
+                    &&   (!logisticsEntityPostalAddressView.ValidTo || logisticsEntityPostalAddressView.ValidTo >= systemDateTime)
+                    &&    logisticsEntityPostalAddressView.PostalAddress == tmpAddressLocationType.PostalAddressRecId;
+        }
+
+        // in case a business object does NOT have a depot but its current address is attached to one of our warehouses,
+        // we stamp the appropriate warehouse on the record
+        update_recordSet tmpData
+        setting InventLocationId = tmpAddressLocationType.InventLocationId
+        where !tmpData.InventLocationId
+        &&     tmpData.ObjectLocationPostalAddressRecId
+            join InventLocationId from tmpAddressLocationType
+            where tmpAddressLocationType.PostalAddressRecId == tmpData.ObjectLocationPostalAddressRecId;
+
+        // pre-delivery
+        update_recordSet tmpData
+        setting StatusIcon = conditionPriorities.Image,
+                Priority = conditionPriorities.Priority
+            join Image, Priority from conditionPriorities
+            where conditionPriorities.SubStatusFrom == BOBRentalSubStatus::Picked
+            &&    conditionPriorities.SubStatusTo == BOBRentalSubStatus::Outbound
+                exists join rentalTrans
+                where rentalTrans.ObjectId      == tmpData.ObjectId
+                &&    rentalTrans.SubStatus     >= conditionPriorities.SubStatusFrom
+                &&    rentalTrans.SubStatus     <= conditionPriorities.SubStatusTo
+                &&    rentalTrans.Active        == BOBRentalTransActive::Active
+                &&    rentalTrans.FromDateTime  <= callerOffRentDateTime
+                &&   (rentalTrans.ToDateTime    >= callerOnRentDateTime || rentalTrans.CertaintyTo  == BOBDateTimeCertainty::Tentative)
+                &&   (rentalTrans.TransType     == BOBRentalTransType::Rental || rentalTrans.TransType == BOBRentalTransType::RentalQuotation);
+
+        // on-rent
+        update_recordSet tmpData
+        setting StatusIcon = conditionPriorities.Image,
+                Priority = conditionPriorities.Priority
+        where tmpData.Priority == 0
+            join Image, Priority from conditionPriorities
+            where conditionPriorities.SubStatusFrom == BOBRentalSubStatus::Delivered
+            &&    conditionPriorities.SubStatusTo == BOBRentalSubStatus::Inbound
+                exists join rentalTrans
+                where rentalTrans.ObjectId      == tmpData.ObjectId
+                &&    rentalTrans.SubStatus     >= conditionPriorities.SubStatusFrom
+                &&    rentalTrans.SubStatus     <= conditionPriorities.SubStatusTo
+                &&    rentalTrans.Active        == BOBRentalTransActive::Active
+                &&    rentalTrans.FromDateTime  <= callerOffRentDateTime
+                &&   (rentalTrans.ToDateTime    >= callerOnRentDateTime || rentalTrans.CertaintyTo  == BOBDateTimeCertainty::Tentative)
+                &&   (rentalTrans.TransType     == BOBRentalTransType::Rental || rentalTrans.TransType == BOBRentalTransType::RentalQuotation);
+
+        // reserved step 1
+        update_recordSet tmpData
+        setting Priority = #tmpPlaceHolder
+        where tmpData.Priority == 0
+            join TableId from conditionPriorities
+            where conditionPriorities.SubStatusFrom == BOBRentalSubStatus::Ordered
+            &&    conditionPriorities.SubStatusTo == BOBRentalSubStatus::Confirmed
+            &&    conditionPriorities.ObjectCategory == tmpData.ObjectCategory
+                exists join rentalTrans
+                where rentalTrans.ObjectId      == tmpData.ObjectId
+                &&    rentalTrans.SubStatus     >= conditionPriorities.SubStatusFrom
+                &&    rentalTrans.SubStatus     <= conditionPriorities.SubStatusTo
+                &&    rentalTrans.Active        == BOBRentalTransActive::Active
+                &&    rentalTrans.FromDateTime  <= callerOffRentDateTime
+                &&   (rentalTrans.ToDateTime    >= callerOnRentDateTime || rentalTrans.CertaintyTo  == BOBDateTimeCertainty::Tentative)
+                &&   (rentalTrans.TransType     == BOBRentalTransType::Rental || rentalTrans.TransType == BOBRentalTransType::RentalQuotation);
+
+        // reserved step 2
+        update_recordSet tmpData
+        setting Priority = conditionPriorities.Priority,
+                StatusIcon = conditionPriorities.Image
+        where tmpData.Priority == #tmpPlaceHolder
+            join Priority, Image from conditionPriorities
+            where conditionPriorities.IsAvailable == tmpData.ObjectAvailability
+            &&    conditionPriorities.ObjectCategory == tmpData.ObjectCategory
+            &&    conditionPriorities.SubStatusFrom == BOBRentalSubStatus::Ordered
+            &&    conditionPriorities.SubStatusTo == BOBRentalSubStatus::Confirmed
+                exists join tmpAddressLocationType
+                where tmpAddressLocationType.PostalAddressRecId == tmpData.ObjectLocationPostalAddressRecId
+                &&    tmpAddressLocationType.LocationType == conditionPriorities.LocationType;
+
+        // reserved step 3
+        update_recordSet tmpData
+        setting Priority = conditionPriorities.Priority,
+                StatusIcon = conditionPriorities.Image
+        where tmpData.Priority == #tmpPlaceHolder
+            join Priority, Image from conditionPriorities
+            where conditionPriorities.IsAvailable == tmpData.ObjectAvailability
+            &&    conditionPriorities.LocationType == BOBLocationType::Other
+            &&    conditionPriorities.ObjectCategory == tmpData.ObjectCategory
+            &&    conditionPriorities.SubStatusFrom == BOBRentalSubStatus::Ordered
+            &&    conditionPriorities.SubStatusTo == BOBRentalSubStatus::Confirmed;
+
+        // not rented step 1
+        update_recordSet tmpData
+        setting Priority = #tmpPlaceHolder
+        where tmpData.Priority == 0
+            join TableId from conditionPriorities
+            where conditionPriorities.SubStatusFrom == BOBRentalSubStatus::None
+            &&    conditionPriorities.SubStatusTo == BOBRentalSubStatus::None
+            &&    conditionPriorities.ObjectCategory == tmpData.ObjectCategory
+                notexists join rentalTrans
+                where rentalTrans.ObjectId      == tmpData.ObjectId
+                &&    rentalTrans.SubStatus     >= BOBRentalSubStatus::Ordered
+                &&    rentalTrans.SubStatus     <= BOBRentalSubStatus::Delivered
+                &&    rentalTrans.Active        == BOBRentalTransActive::Active
+                &&    rentalTrans.FromDateTime  <= callerOffRentDateTime
+                &&   (rentalTrans.ToDateTime    >= callerOnRentDateTime || rentalTrans.CertaintyTo  == BOBDateTimeCertainty::Tentative)
+                &&   (rentalTrans.TransType     == BOBRentalTransType::Rental || rentalTrans.TransType == BOBRentalTransType::RentalQuotation);
+
+        // not rented step 2
+        update_recordSet tmpData
+        setting Priority = conditionPriorities.Priority,
+                StatusIcon = conditionPriorities.Image
+        where tmpData.Priority == #tmpPlaceHolder
+            join Priority, Image from conditionPriorities
+            where conditionPriorities.IsAvailable == tmpData.ObjectAvailability
+            &&    conditionPriorities.ObjectCategory == tmpData.ObjectCategory
+            &&    conditionPriorities.SubStatusFrom == BOBRentalSubStatus::None
+            &&    conditionPriorities.SubStatusTo == BOBRentalSubStatus::None
+                exists join TableId from tmpAddressLocationType
+                where tmpAddressLocationType.PostalAddressRecId == tmpData.ObjectLocationPostalAddressRecId
+                &&    tmpAddressLocationType.LocationType == conditionPriorities.LocationType;
+
+        // not rented step 3
+        update_recordSet tmpData
+        setting Priority = conditionPriorities.Priority,
+                StatusIcon = conditionPriorities.Image
+        where tmpData.Priority == #tmpPlaceHolder
+            join Priority, Image from conditionPriorities
+            where conditionPriorities.IsAvailable == tmpData.ObjectAvailability
+            &&    conditionPriorities.LocationType == BOBLocationType::Other
+            &&    conditionPriorities.ObjectCategory == tmpData.ObjectCategory
+            &&    conditionPriorities.SubStatusFrom == BOBRentalSubStatus::None
+            &&    conditionPriorities.SubStatusTo == BOBRentalSubStatus::None;
+
+        delete_from tmpData
+        where tmpData.Priority == 0;
+
+        // update rental type description
+        update_recordSet tmpData
+        setting RentalTypeDescription = rentalType.Description
+        where tmpData.RentalTypeId
+            join Description from rentalType
+            where rentalType.RentalTypeId == tmpData.RentalTypeId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertTmpData_Grid</Name>
+				<Source><![CDATA[
+    protected void insertTmpData_Grid(ROROnRentDateTime _callerOnRentDateTime, ROROffRentDateTime _callerOffRentDateTime)
+    {
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRBusinessObjectViewV2)))
+        {
+            this.insertTmpData_GridV2(_callerOnRentDateTime, _callerOffRentDateTime);
+        }
+        else
+        {
+            BOBObjectView objectView;
+            StartDate callerOnRentDate  = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_callerOnRentDateTime, userTimezone));
+            EndDate callerOffRentDate   = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_callerOffRentDateTime, userTimezone));
+            container categories = this.insertTmpDataCategories();
+
+            insert_recordset tmpData (ObjectId, FleetNumber, InventSerialId, InventLocationId, LastOnRentDate, ObjectAvailability, ObjectCategory, ObjectTableRecId, PhysicalOwner, RentalTypeId, ObjectGroupId, ObjectSubGroupId)
+                select ObjectId, FleetNumber, InventSerialId, Depot, LastOnRentDate, IsAvailable, Category, RecId, PhysicalOwner, RentalTypeId, ObjectGroupId, ObjectSubGroupId from objectView
+                order by ObjectId asc
+                where objectView.InventSerialId
+                &&   objectView.Category in categories
+                &&   (objectView.FirstOnRentDate && objectView.FirstOnRentDate <= callerOnRentDate && (!objectView.LastOnRentDate || objectView.LastOnRentDate >= callerOffRentDate))
+                &&  (!settings.Available        ||  objectView.IsAvailable)
+                &&  (!settings.RentalTypeId     ||  objectView.RentalTypeId     == settings.RentalTypeId)
+                &&  (!settings.ObjectGroupId    ||  objectView.ObjectGroupId    == settings.ObjectGroupId)
+                &&  (!settings.ObjectSubGroupId ||  objectView.ObjectSubGroupId == settings.ObjectSubGroupId)
+                &&  (!settings.Depot            || (objectView.Depot            == settings.Depot && objectView.DepotStartDate <= callerOnRentDate && (!objectView.DepotEndDate || objectView.DepotEndDate       >= callerOffRentDate)))
+                &&  (!settings.CurrentCompany   || (objectView.PhysicalOwner == curext()))
+                &&  (!settings.CurrentObjects   || (objectView.PhysicalOwner == curext() && objectView.Category == BOBObjectCategory::Rental));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertTmpData_GridV2</Name>
+				<Source><![CDATA[
+    private void insertTmpData_GridV2(ROROnRentDateTime _callerOnRentDateTime, ROROffRentDateTime _callerOffRentDateTime)
+    {
+        BOBObjectViewV2 objectView;
+        StartDate callerOnRentDate  = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_callerOnRentDateTime, userTimezone));
+        EndDate callerOffRentDate   = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_callerOffRentDateTime, userTimezone));
+        container categories = this.insertTmpDataCategories();
+
+        insert_recordset tmpData (ObjectId, FleetNumber, InventSerialId, InventLocationId, LastOnRentDate, ObjectAvailability, ObjectCategory, ObjectTableRecId, PhysicalOwner, RentalTypeId, ObjectGroupId, ObjectSubGroupId)
+                select ObjectId, FleetNumber, InventSerialId, Depot, LastOnRentDate, IsAvailable, Category, RecId, PhysicalOwner, RentalTypeId, ObjectGroupId, ObjectSubGroupId from objectView
+                order by ObjectId asc
+                where objectView.InventSerialId
+                &&   objectView.Category in categories
+                &&   (objectView.FirstOnRentDate && objectView.FirstOnRentDate <= callerOnRentDate && (!objectView.LastOnRentDate || objectView.LastOnRentDate >= callerOffRentDate))
+                &&  (!settings.Available        ||  objectView.IsAvailable)
+                &&  (!settings.RentalTypeId     ||  objectView.RentalTypeId     == settings.RentalTypeId)
+                &&  (!settings.ObjectGroupId    ||  objectView.ObjectGroupId    == settings.ObjectGroupId)
+                &&  (!settings.ObjectSubGroupId ||  objectView.ObjectSubGroupId == settings.ObjectSubGroupId)
+                &&  (!settings.Depot            || (objectView.Depot            == settings.Depot && objectView.DepotStartDate <= callerOnRentDate && (!objectView.DepotEndDate || objectView.DepotEndDate       >= callerOffRentDate)))
+                &&  (!settings.CurrentCompany   || (objectView.PhysicalOwner == curext()))
+                &&  (!settings.CurrentObjects   || (objectView.PhysicalOwner == curext() && objectView.Category == BOBObjectCategory::Rental));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertTmpDataCategories</Name>
+				<Source><![CDATA[
+    protected container insertTmpDataCategories()
+    {
+        return [BOBObjectCategory::Rental, BOBObjectCategory::SubRental];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpData_RentalType</Name>
+				<Source><![CDATA[
+    public void populateTmpData_RentalType()
+    {
+        BOBRentalInventOnHand   onHand;
+        BOBTmpRentalSum         tmpRentalSum;
+        Set                     rentalTypeIdSet;
+        InventLocationId        inventLocationId;
+
+        settings            = BOBObjectAvailabilitySettings::findOrCreate();
+        rentalTypeIdSet     = this.buildRentalTypeIdSet();
+        inventLocationId    = settings.InventLocationId;
+        onHand              = new BOBRentalInventOnHand();
+
+        tmpRentalSum.linkPhysicalTableInstance(onHand.populateTmpRentalSum_DateTime(rentalTypeIdSet, inventLocationId, settings.StartDateTime, settings.EndDateTime));
+
+        delete_from tmpData_Graphical;
+
+        // insert transactions
+        insert_recordset tmpData_Graphical (RentalTypeId, InventLocationId, FromDateTime, ToDateTime, Qty)
+            select RentalTypeId, inventLocationId, FromDateTime, ToDateTime, Qty from tmpRentalSum
+            order by RentalTypeId, InventLocationId, FromDateTime, ToDateTime;        
+
+        update_recordSet tmpData_Graphical
+        setting RefRecId = tmpData_Graphical.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpIdList</Name>
+				<Source><![CDATA[
+    // This methods fills a temporary table with a reference to the RecId of the BOBObjectTable
+    // The records that exist in this table will act as a filter of the business objects that will
+    // be shown in the graphical interface
+    private void populateTmpIdList()
+    {
+        BOBObjectTable                      objectTable;
+        BOBRentalTrans                      rentalTrans;
+        WPPWorkOrderLine                    workOrderLine;
+        WPPWorkOrderTable                   workOrderTable;
+        InventTransOriginSalesLine          inventTransOriginSalesLine;
+        InventTransOriginSalesQuotationLine inventTransOriginSalesQuotationLine;
+        InventTransOriginPurchLine          inventTransOriginPurchLine;
+        SalesLine                           salesLine;
+        SalesQuotationLine                  salesQuotationLine;
+        PurchLine                           purchLine;
+        SalesTable                          salesTable;
+        SalesQuotationTable                 salesQuotationTable;
+        PurchTable                          purchTable;
+        CustTable                           custTable;
+        VendTable                           vendTable;
+        smmBusRelTable                      smmBusRelTable;
+
+        delete_from tmpIdList;
+
+        settings = BOBObjectAvailabilitySettings::findOrCreate();
+
+        if (!settings.PurchId && !settings.SalesId && (settings.Prospect || settings.PurchOrderFormNum))
+        {
+            // Work orders for customers/Vendors
+            insert_recordset tmpIdList (RefRecId)
+            select RecId from objectTable
+                exists join rentalTrans
+                where rentalTrans.ObjectId == objectTable.ObjectId
+                    join workOrderLine
+                    where workOrderLine.RecId == rentalTrans.WPPWorkOrderLineRecId
+                        join workOrderTable
+                        where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                        &&    workOrderTable.CustVendAccountType
+                        &&   (!settings.PurchOrderFormNum || workOrderTable.CustVendRef == settings.PurchOrderFormNum)
+                            join smmBusRelTable
+                            where smmBusRelTable.Party == workOrderTable.OrganizationParty
+                            &&   (!settings.Prospect || smmBusRelTable.BusRelAccount == settings.Prospect);
+        }
+
+        if (!settings.PurchId && !settings.SalesId && settings.Prospect)
+        {
+            // Rental and sales quotations
+            insert_recordset tmpIdList (RefRecId)
+            select RecId from objectTable
+                exists join rentalTrans
+                where rentalTrans.ObjectId == objectTable.ObjectId
+                    join inventTransOriginSalesQuotationLine
+                    where inventTransOriginSalesQuotationLine.InventTransOrigin == rentalTrans.InventTransOrigin
+                        join salesQuotationLine
+                        where salesQuotationLine.InventTransId == inventTransOriginSalesQuotationLine.SalesQuotationLineInventTransId
+                            join salesQuotationTable
+                            where salesQuotationTable.QuotationId == salesQuotationLine.QuotationId
+                                join custTable
+                                where custTable.AccountNum == salesQuotationTable.CustAccount
+                                    join smmBusRelTable
+                                    where smmBusRelTable.Party == custTable.Party
+                                    &&    smmBusRelTable.BusRelAccount == settings.Prospect;
+        }
+
+        if (!settings.PurchId && (settings.Prospect || settings.SalesId || settings.PurchOrderFormNum))
+        {
+            // Rental and Sales orders
+            insert_recordset tmpIdList (RefRecId)
+            select RecId from objectTable
+                exists join rentalTrans
+                where rentalTrans.ObjectId == objectTable.ObjectId
+                    join inventTransOriginSalesLine
+                    where inventTransOriginSalesLine.InventTransOrigin == rentalTrans.InventTransOrigin
+                        join salesLine
+                        where salesLine.InventTransId == inventTransOriginSalesLine.SalesLineInventTransId
+                            join salesTable
+                            where salesTable.SalesId == salesLine.SalesId
+                            &&   (!settings.SalesId || salesTable.SalesId == settings.SalesId)
+                            &&   (!settings.PurchOrderFormNum || salesTable.PurchOrderFormNum == settings.PurchOrderFormNum)
+                                join custTable
+                                where custTable.AccountNum == salesTable.CustAccount
+                                    join smmBusRelTable
+                                    where smmBusRelTable.Party == custTable.Party
+                                    &&   (!settings.Prospect || smmBusRelTable.BusRelAccount == settings.Prospect);
+        }
+
+        if (!settings.SalesId && (settings.Prospect || settings.PurchId))
+        {
+            // Sub rental and purchase orders
+            insert_recordset tmpIdList (RefRecId)
+            select RecId from objectTable
+                exists join rentalTrans
+                where rentalTrans.ObjectId == objectTable.ObjectId
+                    join inventTransOriginPurchLine
+                    where inventTransOriginPurchLine.InventTransOrigin == rentalTrans.InventTransOrigin
+                        join purchline
+                        where purchline.InventTransId == inventTransOriginPurchLine.PurchLineInventTransId
+                            join purchTable
+                            where purchTable.PurchId == purchline.PurchId
+                            &&   (!settings.PurchId || purchTable.PurchId == settings.PurchId)
+                                join vendTable
+                                where vendTable.AccountNum == purchTable.OrderAccount
+                                    join smmBusRelTable
+                                    where smmBusRelTable.Party == vendTable.Party
+                                    &&   (!settings.Prospect || smmBusRelTable.BusRelAccount == settings.Prospect);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRWmsOrderTransType_OutputClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(WmsOrderTransType_Output))]
+public final class DNRWmsOrderTransType_OutputClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>finishPickingLine</Name>
+				<Source><![CDATA[
+    public void finishPickingLine(
+        WMSPickPalletId     _wmsPickPalletId,
+        InventDim           _inventDimPicked,
+        HcmWorkerRecId      _worker,
+        WMSExpeditionTime   _time,
+        boolean             _startRoute,
+        boolean             _checkRoute)
+    {
+        // *** Repeated code
+        if (!this.doesStatusAllowPicking())
+        {
+            throw error(strFmt("@SYS329320",wmsOrderTrans.InventTransId,wmsOrderTrans.ExpeditionStatus));
+        }
+
+        if (!this.pdsValidateCatchWeight())
+        {
+            //already have the info log message!
+            throw Exception::Error;
+        }
+
+        this.RORUpdateSerialNumber(wmsOrderTrans.inventTransId, wmsOrderTrans.inventTransType, _inventDimPicked);
+        this.RORUpdateItemId(wmsOrderTrans.inventTransId, wmsOrderTrans.inventTransType);
+
+        next finishPickingLine(_wmsPickPalletId, _inventDimPicked, _worker, _time, _startRoute, _checkRoute);
+
+        if(wmsOrderTrans.Qty)
+        {
+            InventTransOrigin inventTransOrigin = InventTransOrigin::findByInventTransId(wmsOrderTrans.inventTransId);
+            if (inventTransOrigin.ReferenceCategory == InventTransType::Sales)
+            {
+                SalesLine salesLine = InventTransOriginSalesLine::salesLine(inventTransOrigin.RecId);
+                salesLine.RORUpdateSerialNumber(_inventDimPicked);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustUpdateReservationsWithoutDimensionCheck</Name>
+				<Source><![CDATA[
+    protected boolean mustUpdateReservationsWithoutDimensionCheck(
+        InventDim           _inventDimNew,
+        InventDim           _inventDimOld,
+        InventMovement      _inventMovement)
+    {
+        boolean ret = next mustUpdateReservationsWithoutDimensionCheck(_inventDimNew, _inventDimOld, _inventMovement);
+
+        ret = (ret
+               || (wmsOrderTrans.inventTransType == InventTransType::Sales && 
+                   SalesLine::findInventTransId(wmsOrderTrans.inventTransId).RORTradeType != RORTradeType::SalesPurch)
+               || (wmsOrderTrans.inventTransType == InventTransType::TransferOrderShip && 
+                   InventTransferLine::findTransIdShip(wmsOrderTrans.inventTransId).RORTradeType != RORTradeType::SalesPurch));
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateItemId</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private void RORUpdateItemId(InventTransId    _inventTransId, InventTransType  _inventTransType)
+    {
+        if (_inventTransType == InventTransType::Sales)
+        {
+            SalesLine salesLine = SalesLine::findInventTransId(_inventTransId, true);
+    
+            if (salesLine && salesLine.ItemId != wmsOrderTrans.itemId)
+            {
+                wmsOrderTrans.itemId = salesLine.ItemId;
+                wmsOrderTrans.modifiedField(fieldNum(wmsOrderTrans, ItemId));
+    
+                wmsOrder.selectForUpdate(true);
+                wmsOrder.itemId = wmsOrderTrans.itemId;
+                wmsOrder.modifiedField(fieldNum(wmsOrder, ItemId));
+                wmsOrder.update();
+    
+                this.inventMovement().inventTable();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateSerialNumber</Name>
+				<Source><![CDATA[
+    private void RORUpdateSerialNumber(InventTransId _inventTransId, InventTransType _inventTransType, InventDim _inventDim)
+    {
+        if (_inventTransType == InventTransType::Sales)
+        {
+            SalesLine salesLine = SalesLine::findInventTransId(_inventTransId, true);
+    
+            if (salesLine && salesLine.RORTradeType != RORTradeType::SalesPurch)
+            {
+                BOBRentalType rentalType = BOBRentalType::find(salesLine.BOBRentalTypeId());
+    
+                if (rentalType &&  rentalType.Classification == BOBRentalTypeClassification::Serialized)
+                {
+                    BOBObjectAssignmentEngine objectAssignmentEngine;
+                    InventSerialId salesLineInventSerialId = salesLine.inventDim().inventSerialId;
+
+                    if(salesLineInventSerialId != _inventDim.inventSerialId)
+                    {
+                        // First unassign the object
+                        if (salesLineInventSerialId)
+                        {
+                            objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine);
+                            objectAssignmentEngine.runOperation();
+                        }
+    
+                        // Re-assign the new object
+                        if (_inventDim.inventSerialId)
+                        {
+                            objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, _inventDim.inventSerialId);
+                            objectAssignmentEngine.runOperation();
+                        }
+                    }
+                    else
+                    {
+                        objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, _inventDim.inventSerialId);
+                        objectAssignmentEngine.validate();
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBBusinessObjectTotals</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBBusinessObjectTotals
+{
+    BOBObjectTable      objectTable;
+    BOBTmpObjectTotals  objectTotals;
+    TransDate           startLastYear, endLastYear, startThisYear;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>calculate</Name>
+				<Source><![CDATA[
+    public void calculate()
+    {
+        if (objectTable)
+        {
+            startLastYear = str2DateDMY(strFmt("01-01-%1", year(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone())) -1 ));
+            endLastYear   = str2DateDMY(strFmt("31-12-%1", year(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone())) -1 ));
+            startThisYear = str2DateDMY(strFmt("01-01-%1", year(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))));
+    
+            objectTotals.ObjectTableRecId = objectTable.RecId;
+            objectTotals.CurrencyCode = Ledger::accountingCurrency();
+    
+            this.calculateSpareParts();
+            this.calculateLabour();
+            this.calculateOthers();
+            this.calculateAssetValues();
+    
+            objectTotals.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateAssetValues</Name>
+				<Source><![CDATA[
+    private void calculateAssetValues()
+    {
+        AssetBook       assetBook;
+        AssetBookTable  assetBookTable;
+        AssetId         assetId = objectTable.assetId();
+
+        if (assetId)
+        {
+            changecompany(objectTable.objectView().FinancialOwner)
+            {
+                select firstOnly BookId from assetBook
+                where assetBook.AssetId == assetId
+                    exists join assetBookTable
+                    where assetBookTable.BookId == assetBook.BookId
+                    &&    assetBookTable.CurrentOperationsTax == CurrentOperationsTax::Current;
+    
+                if (assetBook.BookId)
+                {
+                    // All years
+                    AssetSumCalc_Trans assetSumTrans = AssetSumCalc_Trans::newAssetYear(assetId, assetBook.BookId, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), AssetYear::All);
+                    objectTotals.AssetAcquisitionValue = assetSumTrans.acquisitionValue();
+                    objectTotals.AssetNetBookValue = assetSumTrans.netBookValue();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateLabour</Name>
+				<Source><![CDATA[
+    private void calculateLabour()
+    {
+        WPPWorkOrderTable   workOrderTable;
+        WPPWorkOrderLine    workOrderLine;
+        ProjEmplTrans       projEmplTrans;
+        ProjLineProperty    projLineProperty;
+        AmountCur           costAmount, salesAmount;
+        RecId               currentRecId;
+        ProjTable           projTable;
+        ProjGroup           projGroup;
+        ;
+    
+        while select RecId from projGroup
+        where projGroup.WPPWorkOrderType == WPPWorkOrderType::Damage
+        ||    projGroup.WPPWorkOrderType == WPPWorkOrderType::Maintenance
+            join RecId from projTable
+            where projTable.ProjGroupId == projGroup.ProjGroupId
+                join projEmplTrans
+                order by RecId
+                where projEmplTrans.ProjId == projTable.ProjId
+                &&    projEmplTrans.TransDate >= startLastYear
+                    join RecId from workOrderLine
+                    where workOrderLine.ProjId == projEmplTrans.ProjId
+                        join RecId from workOrderTable
+                        where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        && workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                            outer join ToBeInvoiced from projLineProperty
+                            where projLineProperty.LinePropertyId == projEmplTrans.LinePropertyId
+        {
+            if (!currentRecId || currentRecId != projEmplTrans.RecId)
+            {
+                if (projEmplTrans.TransDate >= startThisYear)
+                {
+                    costAmount = CurrencyExchangeHelper::amountCur2MST(projEmplTrans.psaIndirectCostTotal(), projEmplTrans.CurrencyId);
+                    objectTotals.LabourCostPriceThisYear += costAmount;
+                    objectTotals.TotalCostPriceThisYear += costAmount;
+    
+                    if (!projLineProperty || projLineProperty.ToBeInvoiced)
+                    {
+                        salesAmount = CurrencyExchangeHelper::amountCur2MST(projEmplTrans.psaIndirectSalesTotal(), projEmplTrans.CurrencyId);
+                        objectTotals.LabourSalesPriceThisYear += salesAmount;
+                        objectTotals.TotalSalesPriceThisYear += salesAmount;
+                    }
+                }
+                else
+                {
+                    costAmount = CurrencyExchangeHelper::amountCur2MST(projEmplTrans.psaIndirectCostTotal(), projEmplTrans.CurrencyId);
+                    objectTotals.LabourCostPriceLastYear += costAmount;
+                    objectTotals.TotalCostPriceLastYear += costAmount;
+    
+                    if (!projLineProperty || projLineProperty.ToBeInvoiced)
+                    {
+                        salesAmount = CurrencyExchangeHelper::amountCur2MST(projEmplTrans.psaIndirectSalesTotal(), projEmplTrans.CurrencyId);
+                        objectTotals.LabourSalesPriceLastYear += salesAmount;
+                        objectTotals.TotalSalesPriceLastYear += salesAmount;
+                    }
+                }
+    
+                currentRecId = projEmplTrans.RecId;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateOthers</Name>
+				<Source><![CDATA[
+    private void calculateOthers()
+    {
+        WPPWorkOrderTable   workOrderTable;
+        WPPWorkOrderLine    workOrderLine;
+        ProjCostTrans       projCostTrans;
+        ProjRevenueTrans    projRevenueTrans;
+        ProjLineProperty    projLineProperty;
+        AmountCur           costAmount, salesAmount;
+        RecId               currentRecId;
+        ProjTable           projTable;
+        ProjGroup           projGroup;
+        ;
+        // Expenses
+        while select RecId from projGroup
+        where projGroup.WPPWorkOrderType == WPPWorkOrderType::Damage
+        ||    projGroup.WPPWorkOrderType == WPPWorkOrderType::Maintenance
+            join RecId from projTable
+            where projTable.ProjGroupId == projGroup.ProjGroupId
+                join TransDate, TotalCostAmountCur, TotalSalesAmountCur, CurrencyId, RecId from projCostTrans
+                order by RecId
+                where projCostTrans.ProjId == projTable.ProjId
+                &&    projCostTrans.TransDate >= startLastYear
+                    join RecId from workOrderLine
+                    where workOrderLine.ProjId == projCostTrans.ProjId
+                        join RecId from workOrderTable
+                        where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        && workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                            outer join ToBeInvoiced from projLineProperty
+                            where projLineProperty.LinePropertyId == projCostTrans.LinePropertyId
+        {
+            if (!currentRecId || currentRecId != projCostTrans.RecId)
+            {
+                if (projCostTrans.TransDate >= startThisYear)
+                {
+                    costAmount = CurrencyExchangeHelper::amountCur2MST(projCostTrans.TotalCostAmountCur, projCostTrans.CurrencyId);
+                    objectTotals.OthersCostPriceThisYear += costAmount;
+                    objectTotals.TotalCostPriceThisYear += costAmount;
+    
+                    if (!projLineProperty || projLineProperty.ToBeInvoiced)
+                    {
+                        salesAmount = CurrencyExchangeHelper::amountCur2MST(projCostTrans.TotalSalesAmountCur, projCostTrans.CurrencyId);
+                        objectTotals.OthersSalesPriceThisYear += salesAmount;
+                        objectTotals.TotalSalesPriceThisYear += salesAmount;
+                    }
+                }
+                else
+                {
+                    costAmount = CurrencyExchangeHelper::amountCur2MST(projCostTrans.TotalCostAmountCur, projCostTrans.CurrencyId);
+                    objectTotals.OthersCostPriceLastYear += costAmount;
+                    objectTotals.TotalCostPriceLastYear += costAmount;
+    
+                    if (!projLineProperty || projLineProperty.ToBeInvoiced)
+                    {
+                        salesAmount = CurrencyExchangeHelper::amountCur2MST(projCostTrans.TotalSalesAmountCur, projCostTrans.CurrencyId);
+                        objectTotals.OthersSalesPriceLastYear += salesAmount;
+                        objectTotals.TotalSalesPriceLastYear += salesAmount;
+                    }
+                }
+    
+                currentRecId = projCostTrans.RecId;
+            }
+        }
+    
+        currentRecId = 0;
+    
+        // Revenue/Fee
+        while select RecId from projGroup
+        where projGroup.WPPWorkOrderType == WPPWorkOrderType::Damage
+        ||    projGroup.WPPWorkOrderType == WPPWorkOrderType::Maintenance
+            join RecId from projTable
+            where projTable.ProjGroupId == projGroup.ProjGroupId
+                join TransDate, TotalSalesAmountCur, CurrencyId, RecId from projRevenueTrans
+                order by RecId
+                where projRevenueTrans.ProjId == projTable.ProjId
+                &&    projRevenueTrans.TransDate >= startLastYear
+                    join RecId from workOrderLine
+                    where workOrderLine.ProjId == projRevenueTrans.ProjId
+                        join RecId from workOrderTable
+                        where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        && workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                            outer join ToBeInvoiced from projLineProperty
+                            where projLineProperty.LinePropertyId == projRevenueTrans.LinePropertyId
+        {
+            if (!currentRecId || currentRecId != projRevenueTrans.RecId)
+            {
+                if (projRevenueTrans.TransDate >= startThisYear)
+                {
+                    if (projLineProperty.ToBeInvoiced)
+                    {
+                        salesAmount = CurrencyExchangeHelper::amountCur2MST(projRevenueTrans.TotalSalesAmountCur, projRevenueTrans.CurrencyId);
+                        objectTotals.OthersSalesPriceThisYear += salesAmount;
+                        objectTotals.TotalSalesPriceThisYear += salesAmount;
+                    }
+                }
+                else
+                {
+                    if (projLineProperty.ToBeInvoiced)
+                    {
+                        salesAmount = CurrencyExchangeHelper::amountCur2MST(projRevenueTrans.TotalSalesAmountCur, projRevenueTrans.CurrencyId);
+                        objectTotals.OthersSalesPriceLastYear += salesAmount;
+                        objectTotals.TotalSalesPriceLastYear += salesAmount;
+                    }
+                }
+    
+                currentRecId = projRevenueTrans.RecId;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateSpareParts</Name>
+				<Source><![CDATA[
+    private void calculateSpareParts()
+    {
+        WPPWorkOrderTable   workOrderTable;
+        WPPWorkOrderLine    workOrderLine;
+        ProjItemTrans       projItemTrans;
+        ProjLineProperty    projLineProperty;
+        AmountCur           costAmount, salesAmount/*, purchAmount*/;
+        RecId               currentRecId;
+        ProjTable           projTable;
+        ProjGroup           projGroup;
+        //SalesLine           salesLine;
+        //PurchLine           purchLine;
+        ;
+    
+        while select RecId from projGroup
+        where projGroup.WPPWorkOrderType == WPPWorkOrderType::Damage
+        ||    projGroup.WPPWorkOrderType == WPPWorkOrderType::Maintenance
+            join RecId from projTable
+            where projTable.ProjGroupId == projGroup.ProjGroupId
+                join TransDate, TotalCostAmountCur, TotalSalesAmountCur, CurrencyId, RecId from projItemTrans
+                order by RecId
+                where projItemTrans.ProjId == projTable.ProjId
+                &&    projItemTrans.TransDate >= startLastYear
+                    join RecId from workOrderLine
+                    where workOrderLine.ProjId == projItemTrans.ProjId
+                        join RecId from workOrderTable
+                        where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                        && workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                            outer join ToBeInvoiced from projLineProperty
+                            where projLineProperty.LinePropertyId == projItemTrans.LinePropertyId
+        {
+            if (!currentRecId || currentRecId != projItemTrans.RecId)
+            {
+                if (projItemTrans.TransDate >= startThisYear)
+                {
+                    costAmount = CurrencyExchangeHelper::amountCur2MST(projItemTrans.TotalCostAmountCur, projItemTrans.CurrencyId);
+                    objectTotals.SparePartsCostPriceThisYear += costAmount;
+                    objectTotals.TotalCostPriceThisYear += costAmount;
+    
+                    if (!projLineProperty || projLineProperty.ToBeInvoiced)
+                    {
+                        salesAmount = CurrencyExchangeHelper::amountCur2MST(projItemTrans.TotalSalesAmountCur, projItemTrans.CurrencyId);
+                        objectTotals.SparePartsSalesPriceThisYear += salesAmount;
+                        objectTotals.TotalSalesPriceThisYear += salesAmount;
+                    }
+                }
+                else
+                {
+                    costAmount = CurrencyExchangeHelper::amountCur2MST(projItemTrans.TotalCostAmountCur, projItemTrans.CurrencyId);
+                    objectTotals.SparePartsCostPriceLastYear += costAmount;
+                    objectTotals.TotalCostPriceLastYear += costAmount;
+    
+                    if (!projLineProperty || projLineProperty.ToBeInvoiced)
+                    {
+                        salesAmount = CurrencyExchangeHelper::amountCur2MST(projItemTrans.TotalSalesAmountCur, projItemTrans.CurrencyId);
+                        objectTotals.SparePartsSalesPriceLastYear += salesAmount;
+                        objectTotals.TotalSalesPriceLastYear += salesAmount;
+                    }
+                }
+    
+                currentRecId = projItemTrans.RecId;
+            }
+        }
+    
+        //The above code should have the sales and purchase components included
+        /*while select RecId from projGroup
+        where projGroup.WPPWorkOrderType == WPPWorkOrderType::Damage
+        ||    projGroup.WPPWorkOrderType == WPPWorkOrderType::Maintenance
+            join RecId from projTable
+            where projTable.ProjGroupId == projGroup.ProjGroupId
+                join salesLine
+                order by RecId
+                where salesLine.ProjId       == projTable.ProjId
+                &&    salesLine.SalesType    == SalesType::Sales
+                &&    salesLine.ConfirmedDlv >= startLastYear
+        {
+            if (!currentRecId || currentRecId != projItemTrans.RecId)
+            {
+                if (salesLine.ConfirmedDlv >= startThisYear)
+                {
+                    salesAmount = salesLine.lineAmountMST();
+                    objectTotals.SparePartsSalesPriceThisYear += salesAmount;
+                    objectTotals.TotalSalesPriceThisYear += salesAmount;
+                }
+                else
+                {
+                    salesAmount = salesLine.lineAmountMST();
+                    objectTotals.SparePartsSalesPriceLastYear += salesAmount;
+                    objectTotals.TotalSalesPriceLastYear += salesAmount;
+                }
+                currentRecId = projItemTrans.RecId;
+            }
+        }
+    
+        while select RecId from projGroup
+        where projGroup.WPPWorkOrderType == WPPWorkOrderType::Damage
+        ||    projGroup.WPPWorkOrderType == WPPWorkOrderType::Maintenance
+            join RecId from projTable
+            where projTable.ProjGroupId == projGroup.ProjGroupId
+                join ConfirmedDlv from purchLine
+                order by RecId
+                where purchLine.ProjId       == projTable.ProjId
+                &&    purchLine.PurchaseType == PurchaseType::Purch
+                &&    purchLine.ConfirmedDlv >= startLastYear
+        {
+            if (!currentRecId || currentRecId != projItemTrans.RecId)
+            {
+                if (purchLine.ConfirmedDlv >= startThisYear)
+                {
+                    purchAmount = purchLine.lineAmountMST();
+                    objectTotals.SparePartsCostPriceThisYear += purchAmount;
+                    objectTotals.TotalCostPriceThisYear += purchAmount;
+                }
+                else
+                {
+                    purchAmount = purchLine.lineAmountMST();
+                    objectTotals.SparePartsCostPriceLastYear += purchAmount;
+                    objectTotals.TotalCostPriceLastYear += purchAmount;
+                }
+                currentRecId = projItemTrans.RecId;
+            }
+        }*/
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmObjectTable</Name>
+				<Source><![CDATA[
+    public BOBObjectTable parmObjectTable(BOBObjectTable _objectTable = objectTable)
+    {
+        objectTable = _objectTable;
+        return objectTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tmpObjectTotals</Name>
+				<Source><![CDATA[
+    public BOBTmpObjectTotals tmpObjectTotals()
+    {
+        return objectTotals;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    static BOBBusinessObjectTotals construct(Common _callerCommon)
+    {
+        BOBBusinessObjectTotals objectTotals;
+        ;
+    
+        switch (_callerCommon.TableId)
+        {
+            case tableNum(BOBObjectTable) :
+                objectTotals = new BOBBusinessObjectTotals();
+                objectTotals.parmObjectTable(_callerCommon);
+                return objectTotals;
+        }
+        throw(error(strFmt("@SYS19306", funcName())));
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

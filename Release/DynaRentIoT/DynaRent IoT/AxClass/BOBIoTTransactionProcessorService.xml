@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBIoTTransactionProcessorService</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// The class <c>BOBIoTTransactionProcessorService</c> contains the logic for processing IoT transactions.
+/// </summary>
+class BOBIoTTransactionProcessorService
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Executes the logic of the class
+    /// </summary>
+    /// <param name = "_contract">The datacontract associated with the controller class</param>
+    public void run(BOBIoTTransactionProcessorContract _contract)
+    {
+        #OCCRetryCount
+        ttsbegin;
+
+        try
+        {
+            switch (_contract.parmTransactionProcessingType())
+            {
+                case BOBIoTTransactionProcessingType::MeterReading:
+                    this.processMeterReadings();
+                    break;
+
+                case BOBIoTTransactionProcessingType::ObjectLocationChange:
+                    this.processObjectLocationChanges();
+                    break;
+
+                case BOBIoTTransactionProcessingType::UnauthorizedUsage:
+                    this.processUnauthorizedUsage();
+                    break;
+
+                case BOBIoTTransactionProcessingType::UpdateObjectLocation:
+                    this.updateObjectLocations();
+                    break;
+            }
+        }
+        catch (Exception::Error)
+        {
+            exceptionTextFallThrough();
+        }
+        catch (Exception::Deadlock)
+        {
+            retry;
+        }
+        catch (Exception::UpdateConflict)
+        {
+            if (appl.ttsLevel() == 0)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::UpdateConflictNotRecovered;
+                }
+                else
+                {
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::UpdateConflict;
+            }
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processMeterReadings</Name>
+				<Source><![CDATA[
+    private void processMeterReadings()
+    {
+        BOBIoTDeviceTrans deviceTrans;
+        BOBIoTDeviceTable deviceTable;
+        BOBMeterTable meterTable;
+
+        while select deviceTrans
+        where deviceTrans.MeterValue
+        &&    deviceTrans.IsMeterValueProcessed == NoYes::No
+            join deviceTable
+            where deviceTable.RecId == deviceTrans.DeviceTableRecId
+                exists join meterTable
+                where meterTable.MeterId == deviceTable.MeterId
+        {
+            BOBIoTProcessMeterReadings meterReadingsProcessor = BOBIoTProcessMeterReadings::construct(deviceTable, deviceTrans);
+            meterReadingsProcessor.processMeterReading();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processObjectLocationChanges</Name>
+				<Source><![CDATA[
+    private void processObjectLocationChanges()
+    {
+        BOBIoTDeviceTrans deviceTrans;
+
+        while select deviceTrans
+        where deviceTrans.IsObjectLocationChanged == NoYes::Yes
+        &&    deviceTrans.IsObjectLocationChangedProcessed == NoYes::No
+        {
+            BOBIoTProcessObjectLocationChanged objectLocationChangeProcessor = BOBIoTProcessObjectLocationChanged::construct(deviceTrans);
+            objectLocationChangeProcessor.processObjectLocationChange();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processUnauthorizedUsage</Name>
+				<Source><![CDATA[
+    private void processUnauthorizedUsage()
+    {
+        BOBIoTDeviceTrans deviceTrans;
+        BOBIoTDeviceTable deviceTable;
+        BOBRentalTrans rentalTrans;
+        SalesLine salesLine;
+        InventTransOrigin inventTransOrigin;
+        InventTrans inventTrans;
+
+        while select deviceTrans
+        where deviceTrans.IsUnauthorizedUsage == NoYes::Yes
+        &&    deviceTrans.IsUnauthorizedUsageProcessed == NoYes::No
+            join TableId from deviceTable
+            where deviceTable.RecId == deviceTrans.DeviceTableRecId
+                join salesLine
+                    exists join inventTransOrigin
+                    where inventTransOrigin.InventTransId == salesLine.InventTransId
+                        join TableId from inventTrans
+                        where inventTrans.InventTransOrigin == inventTransOrigin.RecId
+                            join TableId from rentalTrans
+                            where rentalTrans.FromDateTime <= deviceTrans.MessageDateTime
+                            &&    rentalTrans.ToDateTime >= deviceTrans.MessageDateTime
+                            &&    rentalTrans.TransType == BOBRentalTransType::Rental
+                            &&    rentalTrans.SubStatus >= BOBRentalSubStatus::Delivered
+                            &&    rentalTrans.SubStatus < BOBRentalSubStatus::Returned
+                            &&    rentalTrans.InventTransOrigin == inventTrans.InventTransOrigin
+                            &&    rentalTrans.ObjectId == deviceTable.ObjectId
+        {
+            BOBIoTProcessUnauthorizedUsage unauthorizedUsageProcessor = BOBIoTProcessUnauthorizedUsage::construct(deviceTrans, salesLine);
+            unauthorizedUsageProcessor.processUnauthorizedUsage();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateObjectLocations</Name>
+				<Source><![CDATA[
+    private void updateObjectLocations()
+    {
+        BOBObjectTable objectTable;
+
+        while select objectTable
+        where objectTable.MustUpdateObjectLocation
+        {
+            BOBIoTUpdateObjectLocation updateObjectLocationProcessor = BOBIoTUpdateObjectLocation::construct(objectTable);
+            updateObjectLocationProcessor.updateObjectLocation();
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

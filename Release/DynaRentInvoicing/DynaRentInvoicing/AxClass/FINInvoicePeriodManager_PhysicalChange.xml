@@ -1,0 +1,583 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoicePeriodManager_PhysicalChange</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[FINInvoicePeriodManagerAttribute(FINInvoicePeriodAction::PhysicalChange)]
+class FINInvoicePeriodManager_PhysicalChange extends FINInvoicePeriodManager
+{
+    // Map( FINInvoicePeriodPhysicalChange::Qty; [1.00] )
+    Map changesMap = new Map(Types::Enum, Types::Container);
+    boolean qtyFlag;
+    boolean startDateTimeFlag;
+    boolean endDateTimeFlag;
+    Qty deltaQty;
+    TransDateTime startDateTime;
+    TransDateTime endDateTime;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setChanges</Name>
+				<Source><![CDATA[
+    public void setChanges(Map _changesMap)
+    {
+        changesMap = _changesMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>readChanges</Name>
+				<Source><![CDATA[
+    protected void readChanges()
+    {
+        MapEnumerator enumerator = changesMap.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            switch (enumerator.currentKey())
+            {
+                case FINInvoicePeriodPhysicalChange::Qty :
+                    //
+                    [deltaQty] = enumerator.currentValue();
+                    qtyFlag = (deltaQty == 0 ? false : true);
+                    break;
+
+                case FINInvoicePeriodPhysicalChange::StartDateTime :
+                    [startDateTime] = enumerator.currentValue();
+                    startDateTimeFlag = true;
+                    break;
+
+                case FINInvoicePeriodPhysicalChange::EndDateTime :
+                    [endDateTime] = enumerator.currentValue();
+                    endDateTimeFlag = true;
+                    if (!endDateTime)
+                    {
+                        // No off-rent dateTime actually means that a rental last until undefined future, maxDate.
+                        endDateTime = DateTimeUtil::maxValue();
+                    }
+                    break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if (changesMap && !changesMap.empty())
+        {
+            this.readChanges();
+            
+            if (startDateTimeFlag
+            &&  endDateTimeFlag)            
+            {
+                if (!this.validateStartEndDateTimeInput())
+                {
+                    throw error("@SYS18447");
+                }
+            }
+
+            if (endDateTimeFlag)
+            {
+                if (this.validateProcessEndDateTime())
+                {
+                    //  off-rent can be applied to delivered record that is not returned yet
+                    this.processDelivered();
+                }
+                else
+                {
+                    throw error("@SYS18447");
+                }
+            }
+
+            if (startDateTimeFlag)
+            {
+                if (!this.validateProcessStartDateTime())
+                {
+                    throw error("@SYS18447");
+                }
+            }
+
+            // all changes can be applied to not delivered records
+            this.processUndelivered();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateStartEndDateTimeInput</Name>
+				<Source><![CDATA[
+    protected boolean validateStartEndDateTimeInput()
+    {
+        boolean retVal = true;
+        
+        // Check if within valid period
+        if (endDateTime < startDateTime)
+        {
+            retVal = checkFailed ("@SYS329134");
+        }
+        
+        return retVal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateProcessEndDateTime</Name>
+				<Source><![CDATA[
+    protected boolean validateProcessEndDateTime()
+    {
+        boolean retVal = true;
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+
+        // Don't execute this check if both start and end date are modified together.
+        if (!startDateTimeFlag)
+        {
+            // Ensure that requested end date isn't before the start date                   
+            select firstonly DeliveryDateTime from invPeriodQtyPhysical
+            order by DeliveryDateTime asc
+            where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+            &&    invPeriodQtyPhysical.RefRecId   == invoicePeriodHost.RecId;
+
+            // Check if within valid period
+            if (endDateTime <  invPeriodQtyPhysical.DeliveryDateTime)
+            {
+                retVal = checkFailed ("@DNR451");
+            }
+        }
+
+        if (!FINRentalInvoiceProfile::find(invoicePeriodHost.InvoiceProfileId).AllowChangeDateForInvoicedPeriods)
+        {
+            // Ensure that no previously-invoiced periods exist after the desired end date/time
+            FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+
+            select firstonly RecId from invPeriodQtyPhysical
+            order by ReturnDateTime desc
+            where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+            &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+                exists join invPeriodQtyFinancial
+                where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+                &&    invPeriodQtyFinancial.InvoiceId
+                &&    invPeriodQtyFinancial.PeriodEndDateTime > endDateTime;
+
+            if (invPeriodQtyPhysical.RecId)
+            {
+                retVal = checkFailed("@DNR7313");                
+            }
+        }
+
+        if (retVal)
+        {
+            retVal = this.canModifySubrentalStartEnd(endDateTime);
+        }        
+
+        return retVal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateProcessStartDateTime</Name>
+				<Source><![CDATA[
+    protected boolean validateProcessStartDateTime()
+    {
+        boolean retVal = true;
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+
+        // Don't execute this check if both start and end date are modified together.
+        if (!endDateTimeFlag)
+        {
+            INVPeriodEndDateTime periodEndDateTimeLocal;
+        
+            // Ensure that requested start date isn't after the final end date of the period
+            if (endDateTime)
+            {
+                periodEndDateTimeLocal = endDateTime;
+            }
+            else
+            {
+                select firstOnly ReturnDateTime from invPeriodQtyPhysical
+                order ReturnDateTime desc
+                where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+                &&    invPeriodQtyPhysical.RefRecId   == invoicePeriodHost.RecId;
+
+                periodEndDateTimeLocal = (invPeriodQtyPhysical.ReturnDateTime == DateTimeUtil::minValue() ? DateTimeUtil::maxValue() : invPeriodQtyPhysical.ReturnDateTime);
+            }
+
+            // Check if within valid period
+            if (periodEndDateTimeLocal
+            &&  startDateTime > periodEndDateTimeLocal)
+            {
+                retVal = checkFailed ("@DNR440");
+            }
+        }
+
+        if (!FINRentalInvoiceProfile::find(invoicePeriodHost.InvoiceProfileId).AllowChangeDateForInvoicedPeriods)
+        {
+            // Ensure that no previously-invoiced periods exist after the desired start date/time
+            FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+
+            select firstonly RecId from invPeriodQtyPhysical
+            order by ReturnDateTime desc
+            where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+            &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+                exists join invPeriodQtyFinancial
+                where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+                &&    invPeriodQtyFinancial.InvoiceId
+                &&    invPeriodQtyFinancial.PeriodEndDateTime < startDateTime;
+
+            if (invPeriodQtyPhysical.RecId)
+            {
+                retVal = checkFailed("@DNR7314");
+            }
+        }        
+
+        if (retVal)
+        {
+            retVal = this.canModifySubrentalStartEnd(startDateTime);
+        }
+
+        return retVal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canModifySubrentalStartEnd</Name>
+				<Source><![CDATA[
+    protected boolean canModifySubrentalStartEnd(INVPeriodStartDateTime    _periodStartDateTime)
+    {
+        RORSubrentalSynchroniser    subrentalSynchroniser;
+
+        boolean retVal = true;
+        ;
+
+        if (invoicePeriodHost.InventTransId)
+        {
+            switch (invoicePeriodHost.TableId)
+            {
+                case tableNum(PurchLine) :
+                    subrentalSynchroniser = RORSubrentalSynchroniser::construct(tableNum(PurchLine));
+                    break;
+                case tableNum(SalesLine) :
+                    subrentalSynchroniser = RORSubrentalSynchroniser::construct(tableNum(SalesLine));
+                    break;
+                default:
+                // do nothing
+            }
+
+            if (subrentalSynchroniser)
+            {
+                if (startDateTimeFlag)
+                {
+                    retVal = subrentalSynchroniser.validateModifySubrentalStart(invoicePeriodHost.InventTransId, _periodStartDateTime);
+                }
+                else if (endDateTimeFlag)
+                {
+                    retVal = subrentalSynchroniser.validateModifySubrentalEnd(invoicePeriodHost.InventTransId, _periodStartDateTime);
+                }
+            }
+        }
+
+        return retVal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processDelivered</Name>
+				<Source><![CDATA[
+    protected void processDelivered()
+    {
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+                    
+        ttsbegin;
+
+        TransDateTime maxDateTime = DateTimeUtil::maxValue();
+        // 0. EndDateTime moved backward if already invoiced
+        TransDateTime previousEndDateTime;
+
+        select firstonly ReturnDateTime from invPeriodQtyPhysical
+        order by ReturnDateTime desc
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented
+        &&    invPeriodQtyPhysical.ReturnDateTime != maxDateTime
+        &&    invPeriodQtyPhysical.ReturnDateTime > endDateTime
+        &&    invPeriodQtyPhysical.DeliveryDateTime < endDateTime
+            exists join invPeriodQtyFinancial
+            where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+            &&    invPeriodQtyFinancial.InvoiceId
+            &&    invPeriodQtyFinancial.PeriodStartDateTime < endDateTime;
+
+        previousEndDateTime = invPeriodQtyPhysical.ReturnDateTime;
+
+        if (previousEndDateTime)
+        {
+            FINInvoicePeriodQtyFinancial::markUnMarkDateTimeForCredit(FINInvoiceTransPeriodStatus::PendingCredit, endDateTime, previousEndDateTime, invoicePeriodHost);
+
+            delete_from invPeriodQtyFinancial
+            where !invPeriodQtyFinancial.InvoiceId
+            &&    invPeriodQtyFinancial.PeriodStartDateTime >= endDateTime
+                exists join invPeriodQtyPhysical
+                where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+                &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+                &&    invPeriodQtyPhysical.RecId == invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+                &&    invPeriodQtyPhysical.QtyRented;
+        }
+
+        // 1. EndDateTime moved forward
+        update_recordset invPeriodQtyPhysical
+        setting ReturnDateTime = endDateTime
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented
+        &&    !invPeriodQtyPhysical.IsReturned
+        &&    (invPeriodQtyPhysical.ReturnDateTime == maxDateTime || invPeriodQtyPhysical.ReturnDateTime < endDateTime)
+        &&    invPeriodQtyPhysical.DeliveryDateTime < endDateTime;
+
+        Set invPeriodQtyPhysicalSet = new Set(Types::Int64);
+
+        while select forupdate invPeriodQtyFinancial
+        order by PeriodStartDateTime desc
+        where !invPeriodQtyFinancial.InvoiceId
+            exists join invPeriodQtyPhysical
+            where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+            &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+            &&    invPeriodQtyPhysical.RecId == invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+            &&    invPeriodQtyPhysical.QtyRented
+            &&    !invPeriodQtyPhysical.IsReturned
+            &&    (invPeriodQtyPhysical.ReturnDateTime == maxDateTime || invPeriodQtyPhysical.ReturnDateTime <= endDateTime)
+            &&    invPeriodQtyPhysical.DeliveryDateTime < endDateTime
+        {
+            if (invPeriodQtyPhysicalSet.in(invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId))
+            {
+                continue;
+            }
+
+            invPeriodQtyPhysicalSet.add(invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId);
+            invPeriodQtyFinancial.PeriodEndDateTime = endDateTime;
+            invPeriodQtyFinancial.update();
+        }
+ 
+        // create a new record if return note was not posted and everything until old endDateTime was invoiced
+        while select invPeriodQtyPhysical
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented
+        &&    !invPeriodQtyPhysical.IsReturned
+        &&    invPeriodQtyPhysical.DeliveryDateTime < endDateTime
+            notexists join invPeriodQtyFinancial
+            where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+            &&    !invPeriodQtyFinancial.InvoiceId
+        {
+            FINInvoicePeriodQtyFinancial invPeriodQtyFinancialNew;
+            FINInvoicePeriodQtyFinancial invPeriodQtyFinancialInvoiced;
+            
+            select firstonly PeriodEndDateTime from invPeriodQtyFinancialInvoiced
+            order by PeriodEndDateTime desc
+            where invPeriodQtyFinancialInvoiced.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId;
+                        
+            invPeriodQtyFinancialNew.initFromInvoicePeriodQtyPhysical(invPeriodQtyPhysical);
+
+            if (invPeriodQtyFinancialInvoiced)
+            {
+                invPeriodQtyFinancialNew.PeriodStartDateTime = invPeriodQtyFinancialInvoiced.PeriodEndDateTime;
+            }
+
+            if (invPeriodQtyFinancialNew.PeriodStartDateTime < invPeriodQtyFinancialNew.PeriodEndDateTime)
+            {
+                invPeriodQtyFinancialNew.insert();
+            }
+        }
+
+        // 2. EndDateTime moved backward (those invoiced were marked as pendingCredit and now looks like if they were not invoiced)        
+        update_recordset invPeriodQtyPhysical
+        setting ReturnDateTime = endDateTime
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented
+        &&    !invPeriodQtyPhysical.IsReturned
+        &&    invPeriodQtyPhysical.ReturnDateTime != maxDateTime
+        &&    invPeriodQtyPhysical.ReturnDateTime > endDateTime
+        &&    invPeriodQtyPhysical.DeliveryDateTime < endDateTime
+            exists join invPeriodQtyFinancial
+            where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+            &&    !invPeriodQtyFinancial.InvoiceId
+            &&    invPeriodQtyFinancial.PeriodStartDateTime <= endDateTime;
+
+        invPeriodQtyPhysicalSet = new Set(Types::Int64);
+
+        while select forupdate invPeriodQtyFinancial
+        order by PeriodStartDateTime desc
+        where !invPeriodQtyFinancial.InvoiceId
+        &&    invPeriodQtyFinancial.PeriodStartDateTime < endDateTime
+            exists join invPeriodQtyPhysical
+            where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+            &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+            &&    invPeriodQtyPhysical.RecId == invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+            &&    invPeriodQtyPhysical.QtyRented
+            &&    !invPeriodQtyPhysical.IsReturned
+            &&    invPeriodQtyPhysical.ReturnDateTime == endDateTime
+            &&    invPeriodQtyPhysical.DeliveryDateTime < endDateTime
+        {
+            if (invPeriodQtyPhysicalSet.in(invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId))
+            {
+                continue;
+            }
+
+            invPeriodQtyPhysicalSet.add(invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId);
+            invPeriodQtyFinancial.PeriodEndDateTime = endDateTime;
+            invPeriodQtyFinancial.update();
+        }
+
+        delete_from invPeriodQtyFinancial
+        where !invPeriodQtyFinancial.InvoiceId
+        &&    invPeriodQtyFinancial.PeriodStartDateTime >= endDateTime
+            exists join invPeriodQtyPhysical
+            where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+            &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+            &&    invPeriodQtyPhysical.RecId == invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+            &&    invPeriodQtyPhysical.QtyRented
+            &&    !invPeriodQtyPhysical.IsReturned;
+
+        // 3. EndDateTime equal DeliveryDateTime - nothing to invoice
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancialOther;
+
+        update_recordset invPeriodQtyPhysical
+        setting ReturnDateTime = endDateTime
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented
+        &&    !invPeriodQtyPhysical.IsReturned
+        &&    invPeriodQtyPhysical.ReturnDateTime != maxDateTime
+        &&    invPeriodQtyPhysical.ReturnDateTime > endDateTime
+        &&    invPeriodQtyPhysical.DeliveryDateTime == endDateTime
+            notexists join invPeriodQtyFinancial
+            where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+            &&    invPeriodQtyFinancial.InvoiceId;
+
+        delete_from invPeriodQtyFinancial
+        where !invPeriodQtyFinancial.InvoiceId
+            exists join invPeriodQtyPhysical
+            where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+            &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+            &&    invPeriodQtyPhysical.RecId == invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+            &&    invPeriodQtyPhysical.QtyRented
+            &&    !invPeriodQtyPhysical.IsReturned
+            &&    invPeriodQtyPhysical.DeliveryDateTime == endDateTime
+                notexists join invPeriodQtyFinancialOther
+                where invPeriodQtyFinancialOther.InvPeriodQtyPhysicalRecId == invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+                &&    invPeriodQtyFinancialOther.RecId != invPeriodQtyFinancial.RecId;
+                      
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processUndelivered</Name>
+				<Source><![CDATA[
+    protected void processUndelivered()
+    {
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+                    
+        ttsbegin;
+
+        select forupdate invPeriodQtyPhysical
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    !invPeriodQtyPhysical.QtyRented;
+
+        if (qtyFlag)
+        {
+            if (deltaQty > 0 && !invPeriodQtyPhysical)
+            {
+                RORRentalDateTimes rentalDateTimes;
+                // Use dates from RentalDateTimes as a based. The record will be updated later in this method if (startDateTimeFlag || endDateTimeFlag)
+                select firstonly rentalDateTimes
+                where rentalDateTimes.RefTableId == invoicePeriodHost.TableId
+                &&    rentalDateTimes.RefRecId == invoicePeriodHost.RecId;
+
+                invPeriodQtyPhysical.initFromInvoicePeriodHost(invoicePeriodHost);
+                invPeriodQtyPhysical.initFromRentalDateTimes(rentalDateTimes);
+                invPeriodQtyPhysical.insert();
+
+                invPeriodQtyFinancial.initFromInvoicePeriodQtyPhysical(invPeriodQtyPhysical);
+                invPeriodQtyFinancial.insert();
+            }
+            else if (deltaQty < 0 && invPeriodQtyPhysical && this.mustDeleteUndeliveredPeriod())
+            {
+                delete_from invPeriodQtyFinancial where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId;
+                invPeriodQtyPhysical.delete();
+            }
+        }
+        if (invPeriodQtyPhysical && (startDateTimeFlag || endDateTimeFlag))
+        {
+            invPeriodQtyPhysical.setDeliveryReturnDateTime(startDateTimeFlag, startDateTime, endDateTimeFlag, endDateTime);
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkIsFullyDelivered</Name>
+				<Source><![CDATA[
+    protected boolean checkIsFullyDelivered(Qty _deltaQty)
+    {
+        boolean ret = false;
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+
+        select sum(QtyRented) from invPeriodQtyPhysical
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented;
+
+        if ((invoicePeriodHost.RentQty - invPeriodQtyPhysical.QtyRented + _deltaQty) <= 0)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustDeleteUndeliveredPeriod</Name>
+				<Source><![CDATA[
+    protected boolean mustDeleteUndeliveredPeriod()
+    {
+        boolean ret = false;
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+
+        select sum(QtyRented) from invPeriodQtyPhysical
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented;
+
+        // RentQty is showing current quantity (after update) so we don't need to compare it with deltaQty
+        if ((invoicePeriodHost.RentQty - invPeriodQtyPhysical.QtyRented) <= 0)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

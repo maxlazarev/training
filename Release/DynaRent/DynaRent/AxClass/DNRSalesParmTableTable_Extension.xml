@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesParmTableTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(SalesParmTable))]
+public final class DNRSalesParmTableTable_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>validateField</Name>
+				<Source><![CDATA[
+    public boolean validateField(FieldId _fieldIdToCheck)
+    {
+        boolean ret = next validateField(_fieldIdToCheck);
+
+        if (ret)
+        {
+            switch(_fieldIdToCheck)
+            {
+                case fieldNum(SalesParmTable, TransDate),
+                    fieldNum(SalesParmTable, BOBTransTime) :
+                ret = ret && this.BOBCheckTransDateTime();
+                    break;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    public void modifiedField(FieldId _fieldId)
+    {
+        next modifiedField(_fieldId);
+
+        switch (_fieldId)
+        {
+            case fieldNum(SalesParmTable, Transdate):
+            case fieldNum(SalesParmTable, DocumentDate):
+                this.INVRoundInvoiceDateTime();
+                this.INVSetInvoiceDateTime();
+                break;
+
+            case fieldNum(SalesParmTable, BOBTransTime) :
+                this.INVSetInvoiceDateTime();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVCanRoundInvoiceDateTime</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private boolean INVCanRoundInvoiceDateTime()
+    {
+        SalesParmLine salesParmLine;
+        SalesTable salesTable = this.salesTable();
+
+        if (FINRentalInvoiceProfile::find(salesTable.INVInvoiceProfileId).InvoiceStartEndBasis == INVInvoiceStartEndBasis::DeliveryReturn
+        &&  salesTable.SalesType == SalesType::RORRental)
+        {
+            SalesLine       salesLine;
+            EcoResProduct   ecoResProduct;
+            InventTable     inventTable;
+            BOBRentalType   rentalType;
+
+            select firstonly RecId from salesParmLine
+            where salesParmLine.ParmId      == this.ParmId
+            &&    salesParmLine.TableRefId  == this.TableRefId
+                exists join salesLine
+                where salesLine.InventTransId == salesParmLine.InventTransId
+                    join TableId from inventTable
+                    where inventTable.ItemId == salesLine.ItemId
+                        join TableId from ecoResProduct
+                        where ecoResProduct.RecId == inventTable.Product
+                            join TableId from rentalType
+                            where rentalType.RentalTypeId   == ecoResProduct.BOBRentalTypeId
+                            &&    rentalType.Classification == BOBRentalTypeClassification::Bulk;
+        }
+    
+        return (salesParmLine.RecId != 0);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVRoundInvoiceDateTime</Name>
+				<Source><![CDATA[
+    private void INVRoundInvoiceDateTime()
+    {
+        RORRentalDateTimes  rentalDateTimes;
+        TransDateTime       onRentWithTimeZone;
+        SalesParmUpdate     salesParmUpdate = this.salesParmUpdate();
+        ;
+    
+        if ((salesParmUpdate.DocumentStatus == DocumentStatus::PackingSlip || salesParmUpdate.DocumentStatus == DocumentStatus::RORReturnNote)
+        && this.INVCanRoundInvoiceDateTime())
+        {
+            ttsBegin;
+    
+            rentalDateTimes = this.salesTable().RORRentalDateTimesHost::rentalDateTimes();
+    
+            if (rentalDateTimes)
+            {
+                if (salesParmUpdate.DocumentStatus == DocumentStatus::PackingSlip)
+                {
+                    onRentWithTimeZone = DateTimeUtil::applyTimeZoneOffset(rentalDateTimes.getOnRentDateTime(), DateTimeUtil::getUserPreferredTimeZone());
+    
+                    if (this.TransDate != DateTimeUtil::date(onRentWithTimeZone))
+                    {
+                        this.BOBTransTime = 0;
+                    }
+                }
+                else
+                {
+                    this.BOBTransTime = 0;
+                }
+            }
+    
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetInvoiceDateTime</Name>
+				<Source><![CDATA[
+    private void INVSetInvoiceDateTime()
+    {
+        SalesParmLine   salesParmLine;
+        SalesLine       salesLine;
+        SalesParmUpdate salesParmUpdate = this.salesParmUpdate();
+        ;
+    
+        if (salesParmUpdate.DocumentStatus == DocumentStatus::PackingSlip
+        || salesParmUpdate.DocumentStatus == DocumentStatus::RORReturnNote)
+        {
+            ttsBegin;
+    
+            while select forUpdate salesParmLine
+            where salesParmLine.ParmId == this.ParmId
+            && salesParmLine.TableRefId == this.TableRefId
+                join salesLine
+                where salesLine.InventTransId == salesParmLine.InventTransId
+            {
+                salesParmLine.INVSetInvoiceDateTime(null, salesLine, false, DateTimeUtil::newDateTime(this.Transdate, this.BOBTransTime, DateTimeUtil::getUserPreferredTimeZone()));
+                salesParmLine.update();
+            }
+    
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBCheckTransDateTime</Name>
+				<Source><![CDATA[
+    private boolean BOBCheckTransDateTime()
+    {
+        boolean ret = true;
+        SalesParmUpdate             salesParmUpdate = this.salesParmUpdate();
+        SalesParmLine               salesParmLine;
+        SalesLine                   salesLine;
+        RORRentalDateTimes          rentalDateTimes;
+        FINRentalInvoiceProfile     invoiceProfile; 
+    
+        if (salesParmUpdate.DocumentStatus == DocumentStatus::RORReturnNote
+        ||  salesParmUpdate.DocumentStatus == DocumentStatus::PackingSlip)
+        {
+            TransDateTime postingTransDateTime = DateTimeUtil::newDateTime(this.Transdate, this.BOBTransTime, DateTimeUtil::getUserPreferredTimeZone());
+    
+            while select RecId from salesParmLine
+            where salesParmLine.ParmId == this.ParmId
+            && salesParmLine.TableRefId == this.TableRefId
+                join LineNum, SalesId from salesLine
+                where salesLine.InventTransId == salesParmLine.InventTransId
+                    join TableId from invoiceProfile
+                    where invoiceProfile.InvoiceProfileId     == salesLine.INVInvoiceProfileId
+                    &&    invoiceProfile.InvoiceStartEndBasis == INVInvoiceStartEndBasis::DeliveryReturn
+                        join rentalDateTimes
+                        where rentalDateTimes.RefTableId == salesLine.TableId
+                        &&    rentalDateTimes.RefRecId   == salesLine.RecId
+            {
+                if (rentalDateTimes.getOnRentDateTime() > postingTransDateTime)
+                {
+                    ret = checkFailed(strFmt("@DNR7111",
+                        salesLine.LineNum,
+                        salesLine.SalesId,
+                        "@DNR90",
+                        DateTimeUtil::applyTimeZoneOffset(rentalDateTimes.getOnRentDateTime(), DateTimeUtil::getUserPreferredTimeZone())));
+                }
+    
+                if (rentalDateTimes.getOffRentDateTime(false) && rentalDateTimes.getOffRentDateTime(false) < postingTransDateTime)
+                {
+                    ret = checkFailed(strFmt("@DNR7111",
+                        salesLine.LineNum,
+                        salesLine.SalesId,
+                        "@DNR114",
+                        DateTimeUtil::applyTimeZoneOffset(rentalDateTimes.getOffRentDateTime(false) , DateTimeUtil::getUserPreferredTimeZone())));
+                }
+            }
+        }
+    
+        if (!ret)
+        {
+            error("@DNR7110");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

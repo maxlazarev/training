@@ -1,0 +1,672 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>BOBTmpRentalSum</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class BOBTmpRentalSum extends FormRun
+{
+    BOBRentalInventOnHand   onHand;
+    int                     colorRed;
+    Map                     qtyNotDeliveredCache;
+    Map                     qtyNotReturnedCache;
+
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        onHand = new BOBRentalInventOnHand();
+        colorRed = WinAPI::RGB2int(255,0,0);
+    
+        super();
+    
+        element.initFromCaller(element.args().record());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromCaller</Name>
+				<Source><![CDATA[
+    private void initFromCaller(Common _caller)
+    {
+        #define.lookAheadDays(14)
+        #DNRConstants
+    
+        SalesLine           salesLine;
+        PurchLine           purchLine;
+        SalesQuotationLine  salesQuotationLine;
+        SalesParmLine       salesParmLine;
+        BOBObjectTable      objectTable;
+        InventTransferLine  inventTransferLine;
+    
+        void setRentalDateTimes(RORRentalDateTimes _rentalDateTimes)
+        {
+            FromDateTime adjFromDateTime = DateTimeUtil::applyTimeZoneOffset(_rentalDateTimes.OnRentDateTime, DateTimeUtil::getUserPreferredTimeZone());
+            ToDateTime adjToDateTime = DateTimeUtil::DNRIsDateTimePopulated(_rentalDateTimes.OffRentDateTime) ? _rentalDateTimes.OffRentDateTime : _rentalDateTimes.ExpectedOffRentDateTime;
+            adjToDateTime = DateTimeUtil::applyTimeZoneOffset(adjToDateTime, DateTimeUtil::getUserPreferredTimeZone());
+    
+            ctrlFilterFromDate.dateValue(DateTimeUtil::date(adjFromDateTime));
+            ctrlFilterToDate.dateValue(DateTimeUtil::date(adjToDateTime));
+        }
+        ;
+    
+        switch(_caller.TableId)
+        {
+            case tableNum(SalesLine):
+                salesLine = _caller;
+    
+                ctrlFilterRentalTypeId.text(salesLine.BOBRentalTypeId());
+                ctrlFilterInventLocationId.text(salesLine.inventDim().InventLocationId);
+    
+                if(salesLine.RORTradeType == RORTradeType::SalesPurch)
+                {
+                    ctrlFilterFromDate.dateValue(salesLine.ReceiptDateConfirmed ? salesLine.ReceiptDateConfirmed : salesLine.ReceiptDateRequested);
+                    ctrlFilterToDate.dateValue(ctrlFilterFromDate.dateValue() + #lookAheadDays);
+                }
+                else
+                {
+                    setRentalDateTimes(salesLine.RORRentalDateTimes());
+                }
+                break;
+    
+            case tableNum(SalesQuotationLine):
+                salesQuotationLine = _caller;
+    
+                ctrlFilterRentalTypeId.text(salesQuotationLine.BOBRentalTypeId());
+                ctrlFilterInventLocationId.text(salesQuotationLine.inventDim().InventLocationId);
+    
+                if(salesQuotationLine.RORTradeType == RORTradeType::SalesPurch)
+                {
+                    ctrlFilterFromDate.dateValue(salesQuotationLine.ReceiptDateRequested ? salesQuotationLine.ReceiptDateRequested : salesQuotationLine.ConfirmedDlv);
+                    ctrlFilterToDate.dateValue(ctrlFilterFromDate.dateValue() + #lookAheadDays);
+                }
+                else
+                {
+                    setRentalDateTimes(salesQuotationLine.RORRentalDateTimes());
+                }
+                break;
+    
+            case tableNum(SalesParmLine):
+                salesParmLine = _caller;
+                element.initFromCaller(salesParmLine.salesLine());
+                return;
+    
+            case tableNum(PurchLine):
+                purchLine = _caller;
+    
+                ctrlFilterRentalTypeId.text(purchLine.BOBRentalTypeId);
+                ctrlFilterInventLocationId.text(purchLine.inventDim().InventLocationId);
+    
+                if(purchLine.RORTradeType == RORTradeType::SalesPurch)
+                {
+                    ctrlFilterFromDate.dateValue(purchLine.ConfirmedDlv ? purchLine.ConfirmedDlv : purchLine.DeliveryDate);
+                    ctrlFilterToDate.dateValue(ctrlFilterFromDate.dateValue() + #lookAheadDays);
+                }
+                else
+                {
+                    setRentalDateTimes(purchLine.RORRentalDateTimes());
+                }
+                break;
+    
+            case tableNum(InventTransferLine):
+                inventTransferLine = _caller;
+    
+                ctrlFilterRentalTypeId.text(inventTransferLine.BOBRentalTypeId);
+                ctrlFilterInventLocationId.text(inventTransferLine.inventDim().InventLocationId);
+                ctrlFilterFromDate.dateValue(inventTransferLine.ShipDate);
+                ctrlFilterToDate.dateValue(inventTransferLine.ReceiveDate);
+                break;
+    
+            case tableNum(BOBObjectTable):
+                objectTable = _caller;
+    
+                ctrlFilterRentalTypeId.text(objectTable.RentalTypeId);
+                ctrlFilterInventLocationId.text(DNRUserDefaults::find().InventLocationId);
+                ctrlFilterFromDate.dateValue(DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                ctrlFilterToDate.dateValue(ctrlFilterFromDate.dateValue() + #lookAheadDays);
+                break;
+    
+            default:
+                // no initialization required
+                return;
+        }
+    
+        ctrlFilterNegativeQtyOnly.value(element.args().menuItemName() != menuitemDisplayStr(BOBRentalInventOnHand));
+    
+        if(ctrlFilterRentalTypeId.text() && ctrlFilterFromDate.dateValue())
+        {
+            element.refreshData();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>refreshData</Name>
+				<Source><![CDATA[
+    public void refreshData()
+    {
+        if(ctrlFilterRentalTypeId.text())
+        {
+            // re-init the data source to display a fresh set of temporary data
+            // this is the only way we can get this to work correctly
+            TmpRentalSum_ds.init();
+        }
+        else
+        {
+            error(strFmt("@DNR7115", "@DNR4420"));
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="">
+			<DataSource>
+				<Name>TmpRentalSum</Name>
+				<Methods>
+					<Method>
+						<Name>displayAdjustedRentalQty</Name>
+						<Source><![CDATA[
+        // Displays the 'adjusted' rental quantity. 
+        [SysClientCacheDataMethod(true)]
+        display BOBRentalQty displayAdjustedRentalQty(BOBTmpRentalSum _tmpRentalSum)
+        {
+            return (_tmpRentalSum.Qty);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayQtyNotYetReturned</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display BOBRentalQty displayQtyNotYetReturned(BOBTmpRentalSum _tmpRentalSum)
+        {
+            #DNRConstants
+        
+            container       keyCon = [ _tmpRentalSum.RentalTypeId, _tmpRentalSum.InventLocationId, _tmpRentalSum.TransDate ];
+            BOBRentalQty    ret;
+            ToDateTime      filterToDateTime;
+            ;
+        
+            if(qtyNotReturnedCache.exists(keyCon))
+            {
+                ret = qtyNotReturnedCache.lookup(keyCon);
+            }
+            else
+            {
+                filterToDateTime = DateTimeUtil::newDateTime(_tmpRentalSum.TransDate, #INVTimeMax, DateTimeUtil::getUserPreferredTimeZone());
+        
+                ret = (select sum(Qty) from BOBRentalTrans
+                       where BOBRentalTrans.RentalTypeId        == _tmpRentalSum.RentalTypeId
+                       &&    BOBRentalTrans.InventLocationId    == _tmpRentalSum.InventLocationId
+                       &&    BOBRentalTrans.TransType           == BOBRentalTransType::Rental
+                       &&    BOBRentalTrans.SubStatus           <  BOBRentalSubStatus::Returned
+                       &&    BOBRentalTrans.SubStatus           >= BOBRentalSubStatus::Delivered
+                       &&    BOBRentalTrans.Active              == BOBRentalTransActive::Active
+                       &&    BOBRentalTrans.ToDateTime          <= filterToDateTime
+                       &&    BOBRentalTrans.CertaintyTo         == BOBDateTimeCertainty::Firm).Qty;
+        
+                qtyNotReturnedCache.insert(keyCon, ret);
+            }
+        
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayQtyNotYetDelivered</Name>
+						<Source><![CDATA[
+        [SysClientCacheDataMethodAttribute(true)]
+        display BOBRentalQty displayQtyNotYetDelivered(BOBTmpRentalSum _tmpRentalSum)
+        {
+            #DNRConstants
+        
+            container       keyCon = [ _tmpRentalSum.RentalTypeId, _tmpRentalSum.InventLocationId, _tmpRentalSum.TransDate ];
+            BOBRentalQty    ret;
+            FromDateTime    filterFromDateTime;
+            ToDateTime      filterToDateTime;
+            ;
+        
+            if(qtyNotDeliveredCache.exists(keyCon))
+            {
+                ret = qtyNotDeliveredCache.lookup(keyCon);
+            }
+            else
+            {
+                filterFromDateTime  = DateTimeUtil::newDateTime(_tmpRentalSum.TransDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+                filterToDateTime    = DateTimeUtil::newDateTime(_tmpRentalSum.TransDate, #INVTimeMax, DateTimeUtil::getUserPreferredTimeZone());
+        
+                ret = (select sum(Qty) from BOBRentalTrans
+                       where BOBRentalTrans.RentalTypeId     == _tmpRentalSum.RentalTypeId
+                       &&    BOBRentalTrans.InventLocationId == _tmpRentalSum.InventLocationId
+                       &&    BOBRentalTrans.TransType == BOBRentalTransType::Rental
+                       &&    BOBRentalTrans.SubStatus < BOBRentalSubStatus::Delivered
+                       &&    BOBRentalTrans.Active == BOBRentalTransActive::Active
+                       &&   (BOBRentalTrans.ToDateTime > filterFromDateTime || BOBRentalTrans.CertaintyTo == BOBDateTimeCertainty::Tentative)
+                       &&    BOBRentalTrans.FromDateTime <= filterToDateTime).Qty;
+        
+                qtyNotDeliveredCache.insert(keyCon, ret);
+            }
+        
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>displayOption</Name>
+						<Source><![CDATA[
+        public void displayOption(Common _record, FormRowDisplayOption _options)
+        {
+            BOBTmpRentalSum currentRecord = _record;
+            ;
+        
+            if(currentRecord.Qty < 0)
+            {
+                _options.backColor(colorRed);
+                _options.affectedElementsByControl(displayAdjustedRentalQty.id());
+            }
+        
+            super(_record, _options);
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>init</Name>
+						<Source><![CDATA[
+        public void init()
+        {
+            // (re-)initialize caches
+            qtyNotDeliveredCache = new Map(Types::Container, Types::Real);
+            qtyNotReturnedCache = new Map(Types::Container, Types::Real);
+        
+            super();
+            
+            onHand.parmShowNegativeQtyOnly(ctrlFilterNegativeQtyOnly.checked());
+            TmpRentalSum.linkPhysicalTableInstance(onHand.populateTmpRentalSum_Date(ctrlFilterRentalTypeId.text(),
+                                                                                    ctrlFilterInventLocationId.text(),
+                                                                                    ctrlFilterFromDate.dateValue(),
+                                                                                    ctrlFilterToDate.dateValue()));
+            QueryBuildDataSource qbds = this.queryBuildDataSource();
+            qbds.addSortField(fieldNum(BOBTmpRentalSum, LineNum));
+            qbds.addSortField(fieldNum(BOBTmpRentalSum, InventLocationId));
+        
+            this.executeQuery();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+				<Fields />
+			</DataSource>
+		</DataSources>
+		<DataControls xmlns="">
+			<Control>
+				<Name>ButtonRefreshData</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+
+            element.refreshData();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources>
+		<AxFormDataSource xmlns="">
+			<Name>TmpRentalSum</Name>
+			<Table>BOBTmpRentalSum</Table>
+			<Fields>
+				<AxFormDataSourceField>
+					<DataField>dataAreaId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>DateName</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>FromDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>InventLocationId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>LineNum</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>Qty</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RecId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>RentalTypeId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TableId</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>ToDateTime</DataField>
+				</AxFormDataSourceField>
+				<AxFormDataSourceField>
+					<DataField>TransDate</DataField>
+				</AxFormDataSourceField>
+			</Fields>
+			<ReferencedDataSources />
+			<AllowCreate>No</AllowCreate>
+			<AllowDelete>No</AllowDelete>
+			<AllowEdit>No</AllowEdit>
+			<DataSourceLinks />
+			<DerivedDataSources />
+		</AxFormDataSource>
+	</DataSources>
+	<Design>
+		<Caption xmlns="">@DNR5790</Caption>
+		<Pattern xmlns="">SimpleList</Pattern>
+		<PatternVersion xmlns="">1.1</PatternVersion>
+		<ShowDeleteButton xmlns="">No</ShowDeleteButton>
+		<ShowNewButton xmlns="">No</ShowNewButton>
+		<Style xmlns="">SimpleList</Style>
+		<ViewEditMode xmlns="">View</ViewEditMode>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormActionPaneControl">
+				<Name>ActionPane</Name>
+				<ElementPosition>429496729</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Type>ActionPane</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormButtonGroupControl">
+						<Name>ButtonGroup</Name>
+						<Type>ButtonGroup</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>ButtonRefreshData</Name>
+								<Type>Button</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>@SYS67314</Text>
+							</AxFormControl>
+						</Controls>
+					</AxFormControl>
+				</Controls>
+				<AlignChild>No</AlignChild>
+				<AlignChildren>No</AlignChildren>
+				<ArrangeMethod>Vertical</ArrangeMethod>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormGroupControl">
+				<Name>CustomFilterGroup</Name>
+				<ElementPosition>1288490187</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Pattern>CustomAndQuickFilters</Pattern>
+				<PatternVersion>1.1</PatternVersion>
+				<Type>Group</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl>
+						<Name>QuickFilterControl</Name>
+						<Visible>No</Visible>
+						<FormControlExtension>
+							<Name>QuickFilterControl</Name>
+							<ExtensionComponents />
+							<ExtensionProperties>
+								<AxFormControlExtensionProperty>
+									<Name>targetControlName</Name>
+									<Type>String</Type>
+									<TypeName>str</TypeName>
+									<Value>Grid</Value>
+								</AxFormControlExtensionProperty>
+								<AxFormControlExtensionProperty>
+									<Name>defaultColumnName</Name>
+									<Type>String</Type>
+									<TypeName>str</TypeName>
+								</AxFormControlExtensionProperty>
+								<AxFormControlExtensionProperty>
+									<Name>placeholderText</Name>
+									<Type>String</Type>
+								</AxFormControlExtensionProperty>
+							</ExtensionProperties>
+						</FormControlExtension>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>ctrlFilterRentalTypeId</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>536870910</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>BOBRentalTypeId</ExtendedDataType>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>ctrlFilterInventLocationId</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>805306365</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>InventLocationId</ExtendedDataType>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormDateControl">
+						<Name>ctrlFilterFromDate</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>1073741820</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>Date</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>FromDate</ExtendedDataType>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormDateControl">
+						<Name>ctrlFilterToDate</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>1342177275</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>Date</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>ToDate</ExtendedDataType>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCheckBoxControl">
+						<Name>ctrlFilterNegativeQtyOnly</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>1610612730</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<Type>CheckBox</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<FormControlExtension
+							i:nil="true" />
+						<Label>@DNR7116</Label>
+					</AxFormControl>
+				</Controls>
+				<AlignChild>No</AlignChild>
+				<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+				<FrameType>None</FrameType>
+				<Style>CustomFilter</Style>
+				<ViewEditMode>Edit</ViewEditMode>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormGridControl">
+				<Name>Grid</Name>
+				<ElementPosition>1431655764</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Type>Grid</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>TmpRentalSum_RentalTypeId</Name>
+						<ElementPosition>477218588</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataField>RentalTypeId</DataField>
+						<DataSource>TmpRentalSum</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>TmpRentalSum_InventLocationId</Name>
+						<ElementPosition>715827882</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataField>InventLocationId</DataField>
+						<DataSource>TmpRentalSum</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormDateControl">
+						<Name>TmpRentalSum_TransDate</Name>
+						<ElementPosition>954437176</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>Date</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataField>TransDate</DataField>
+						<DataSource>TmpRentalSum</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>TmpRentalSum_DateName</Name>
+						<ElementPosition>1193046470</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>String</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataField>DateName</DataField>
+						<DataSource>TmpRentalSum</DataSource>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormRealControl">
+						<Name>TmpRentalSum_Qty</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ConfigurationKey>DNRDeletedObjects10</ConfigurationKey>
+						<ElementPosition>1431655764</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>Real</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<Visible>No</Visible>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataMethod>displayAdjustedRentalQty</DataMethod>
+						<DataSource>TmpRentalSum</DataSource>
+						<NoOfDecimals>-1</NoOfDecimals>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormRealControl">
+						<Name>displayAdjustedRentalQty</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<ElementPosition>1431655764</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>Real</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataMethod>displayAdjustedRentalQty</DataMethod>
+						<DataSource>TmpRentalSum</DataSource>
+						<NoOfDecimals>-1</NoOfDecimals>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormRealControl">
+						<Name>displayQtyNotYetDelivered</Name>
+						<ElementPosition>1670265058</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>Real</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataMethod>displayQtyNotYetDelivered</DataMethod>
+						<DataSource>TmpRentalSum</DataSource>
+						<Label>@DNR8246</Label>
+						<NoOfDecimals>-1</NoOfDecimals>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormRealControl">
+						<Name>displayQtyNotYetReturned</Name>
+						<ElementPosition>1908874352</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>Real</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<DataMethod>displayQtyNotYetReturned</DataMethod>
+						<DataSource>TmpRentalSum</DataSource>
+						<Label>@DNR8245</Label>
+						<NoOfDecimals>-1</NoOfDecimals>
+					</AxFormControl>
+				</Controls>
+				<AlternateRowShading>No</AlternateRowShading>
+				<DataSource>TmpRentalSum</DataSource>
+				<MultiSelect>No</MultiSelect>
+				<ShowRowLabels>No</ShowRowLabels>
+				<Style>Tabular</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

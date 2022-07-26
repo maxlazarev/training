@@ -1,0 +1,471 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINMDAEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINMDAEngine implements FINIVoucherProcessorGenericEngine
+{
+    List                    resultList;
+    GeneralJournalEntry     generalJournalEntry;
+    LedgerVoucherTransList  transactionCollection;
+    RefRecId                subledgerTransferId;
+    SourceDocument          sourceDocument;
+    FINMDAModelId           allocationModelId;
+    CompanyInfo             companyInfo;
+    Map                     postingRuleToCountMap;
+    FINMDAPostingRuleFrom   fixedPostingRuleFrom;
+    #define.engineId('MDA')
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINMDAEngine construct()
+    {
+        FINMDAEngine mdaEngine = new FINMDAEngine();
+        
+        return mdaEngine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInput</Name>
+				<Source><![CDATA[
+    public void setInput(GeneralJournalEntry _generalJournalEntry, LedgerVoucherTransList _transactionCollection, RefRecId  _subledgerTransferId, SourceDocument _sourceDocument)
+    {
+        this.initialize();
+
+        generalJournalEntry     = _generalJournalEntry;
+        transactionCollection   = _transactionCollection;
+        subledgerTransferId     = _subledgerTransferId;
+        sourceDocument          = _sourceDocument;
+
+        if (!generalJournalEntry && subledgerTransferId)
+        {
+            select firstonly generalJournalEntry
+                where generalJournalEntry.TransferId == subledgerTransferId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initialize</Name>
+				<Source><![CDATA[
+    public void initialize()
+    {
+        resultList              = new List(Types::Record);
+        postingRuleToCountMap   = new Map(Types::String, Types::Integer);
+        companyInfo             = CompanyInfo::find();
+        allocationModelId       = RORParameters::find().FINAutoMDAModelId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    public void process()
+    {
+        if (transactionCollection && transactionCollection.elements())
+        {
+            transactionCollection.first();
+        
+            do
+            {
+                LedgerVoucherTransObject ledgerVoucherTransObject = transactionCollection.item();
+            
+                FINTmpVoucherProcessorEngineParm parm;
+                parm.initFromLedgerVoucherTransObject(LedgerVoucherTransObject);
+                this.processSingleTrans(parm);
+            }
+            while (transactionCollection.next());
+        }
+        else if (subledgerTransferId)
+        {
+            GeneralJournalAccountEntry          generalJournalAccountEntry;
+            SubLedgerJournalAccountEntryView    subLedgerJournalAccountEntryView;
+            SourceDocumentHeader                sourceDocumentHeader = sourceDocument.parmSourceDocumentHeader();
+                        
+            while select generalJournalAccountEntry
+                exists join subLedgerJournalAccountEntryView
+                where subLedgerJournalAccountEntryView.TransferId == subledgerTransferId
+                &&    subLedgerJournalAccountEntryView.SourceDocumentHeader == sourceDocumentHeader.RecId
+                &&    subLedgerJournalAccountEntryView.GeneralJournalAccountEntry == generalJournalAccountEntry.RecId
+            {
+                FINTmpVoucherProcessorEngineParm    parm;
+
+                parm.initFromGeneralJournalAccountEntry(generalJournalAccountEntry);
+
+                this.processSingleTrans(parm);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmFixedPostingRuleFrom</Name>
+				<Source><![CDATA[
+    public FINMDAPostingRuleFrom parmFixedPostingRuleFrom(FINMDAPostingRuleFrom _fixedPostingRuleFrom = fixedPostingRuleFrom)
+    {
+        fixedPostingRuleFrom = _fixedPostingRuleFrom;
+
+        return fixedPostingRuleFrom;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustReverseOrigTrans</Name>
+				<Source><![CDATA[
+    protected boolean mustReverseOrigTrans(FINMDAPostingRuleFrom _postingRuleFrom)
+    {
+        boolean                     mustReverseOrigTrans;
+        FINMDAPostingRuleTo         postingRuleTo;
+
+        select firstOnly RecId from postingRuleTo
+                    where postingRuleTo.PostingRuleFrom == _postingRuleFrom.RecId
+                    &&    postingRuleTo.LedgerDimension
+                    &&    postingRuleTo.PostingLayer    == _postingRuleFrom.PostingLayer;
+
+        // if allocation is only in different layer then don't reverse original transaction
+        mustReverseOrigTrans = (postingRuleTo.RecId);
+
+        return mustReverseOrigTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSingleTrans</Name>
+				<Source><![CDATA[
+    public void processSingleTrans(FINTmpVoucherProcessorEngineParm _tmpGeneralJournalAccountEntry)
+    {
+        FINMDAPostingRuleFrom       postingRuleFrom;
+        Counter                     postingRuleToCount;
+        RecId                       postingRuleRecIdToSkip;
+        boolean                     mustReverseOrigTrans;
+
+        if (allocationModelId)
+        {
+            postingRuleFrom = fixedPostingRuleFrom ? fixedPostingRuleFrom :
+                FINMDAPostingRuleFrom::findBestMatch(
+                    MainAccount::findByMainAccountId(LedgerDimensionFacade::getMainAccountFromLedgerDimension(_tmpGeneralJournalAccountEntry.LedgerDimension).MainAccountId).RecId,
+                    LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(_tmpGeneralJournalAccountEntry.LedgerDimension),
+                    generalJournalEntry.PostingLayer,
+                    _tmpGeneralJournalAccountEntry.PostingType,
+                    allocationModelId);
+        }
+
+        if (postingRuleFrom)
+        {
+            postingRuleToCount = FINMDAPostingRuleTo::getPostingRuleToCount(postingRuleFrom);
+            postingRuleToCountMap.insert(allocationModelId, postingRuleToCount);
+            postingRuleRecIdToSkip = FINMDAPostingRuleTo::getPostingRuleRecIdToSkip(postingRuleFrom);
+                    
+            if (!postingRuleRecIdToSkip)
+            {
+                mustReverseOrigTrans = this.mustReverseOrigTrans(postingRuleFrom);
+            }
+        }
+
+        if (mustReverseOrigTrans)
+        {
+            this.reverseSingleTrans(_tmpGeneralJournalAccountEntry);
+        }
+
+        this.reallocateSingleTrans(_tmpGeneralJournalAccountEntry, postingRuleFrom, postingRuleToCount, postingRuleRecIdToSkip);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reverseSingleTrans</Name>
+				<Source><![CDATA[
+    public void reverseSingleTrans(FINTmpVoucherProcessorEngineParm _tmpGeneralJournalAccountEntry)
+    {
+        FINTmpLedgerJournalGeneratorParm tmpLedgerJournalTrans;
+        tmpLedgerJournalTrans.initLedgerJournalGeneratorParm(
+            _tmpGeneralJournalAccountEntry.DataAreaId,
+            _tmpGeneralJournalAccountEntry.LedgerDimension,
+            _tmpGeneralJournalAccountEntry.Quantity,
+            - _tmpGeneralJournalAccountEntry.TransactionCurrencyAmount,
+            _tmpGeneralJournalAccountEntry.TransactionCurrencyCode,
+            LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(_tmpGeneralJournalAccountEntry.LedgerDimension),
+            generalJournalEntry.PostingLayer,
+            generalJournalEntry.AccountingDate,
+            LedgerTransType::FINMDAReversal);
+        resultList.addEnd(tmpLedgerJournalTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reallocateSingleTrans</Name>
+				<Source><![CDATA[
+    protected void reallocateSingleTrans(
+        FINTmpVoucherProcessorEngineParm    _tmpGeneralJournalAccountEntry,
+        FINMDAPostingRuleFrom               _postingRuleFrom,
+        Counter                             _postingRuleToCount,
+        RecId                               _postingRuleRecIdToSkip)
+    {
+        #define.QtyDecimals(2) // rounding for qty split
+    
+        FINMDAPostingRuleTo         postingRuleTo;
+        LedgerInterCompany          ledgerInterCompany;
+        RecId                       accountNum;
+        DimensionDefault            mergedDimension, allocationDimension;
+            
+        Qty                         partQty, totalQty;
+        AmountCur                   partAmountCur, totalAmountCur;
+        AmountMST                   partAmountMST, totalAmountMST;
+        AmountMSTSecondary          partAmountMST2nd, totalAmountMST2nd;
+    
+        LedgerJournalTrans          dummyJournalTrans;
+        RecId                       ledgerDimension;
+        DimensionMerge              dimensionMerge;
+            
+        while select postingRuleTo
+        where postingRuleTo.PostingRuleFrom     == _postingRuleFrom.RecId
+        &&    postingRuleTo.RecId               != _postingRuleRecIdToSkip
+            outer join firstonly ledgerInterCompany
+            where ledgerInterCompany.DestinationCompany == postingRuleTo.CompanyId
+            &&    ledgerInterCompany.OriginatingCompany == _postingRuleFrom.DataAreaId
+        {
+            // to avoid rounding issues, add the remainder to the last record in the loop
+            if (_postingRuleToCount == 1 && postingRuleTo.AllocatePct > 0) // this is the last record in the loop
+            {
+                if (_postingRuleRecIdToSkip)
+                {
+                    partQty             = -totalQty;
+                    partAmountCur       = -totalAmountCur;
+                    partAmountMST       = -totalAmountMST;
+                    partAmountMST2nd    = -totalAmountMST2nd;
+                }
+                else
+                {
+                    partQty             = _tmpGeneralJournalAccountEntry.Quantity - totalQty;
+                    partAmountCur       = _tmpGeneralJournalAccountEntry.TransactionCurrencyAmount - totalAmountCur;
+                    partAmountMST       = _tmpGeneralJournalAccountEntry.AccountingCurrencyAmount - totalAmountMST;
+                    partAmountMST2nd    = _tmpGeneralJournalAccountEntry.ReportingCurrencyAmount - totalAmountMST2nd;
+                }
+            }
+            else
+            {
+                partQty             = decRound(_tmpGeneralJournalAccountEntry.Quantity * postingRuleTo.AllocatePct / 100, #QtyDecimals);
+                partAmountCur       = CurrencyExchangeHelper::amount(_tmpGeneralJournalAccountEntry.TransactionCurrencyAmount * postingRuleTo.AllocatePct / 100, _tmpGeneralJournalAccountEntry.TransactionCurrencyCode);
+                partAmountMST       = CurrencyExchangeHelper::amount(_tmpGeneralJournalAccountEntry.AccountingCurrencyAmount * postingRuleTo.AllocatePct / 100);
+                partAmountMST2nd    = CurrencyExchangeHelper::amount(_tmpGeneralJournalAccountEntry.ReportingCurrencyAmount * postingRuleTo.AllocatePct / 100, Ledger::reportingCurrency(CompanyInfo::find().RecId));
+            }
+    
+            if (!partAmountCur && !partAmountMST)
+            {
+                continue;
+            }
+    
+            accountNum = this.getAccountNumTo(_tmpGeneralJournalAccountEntry, postingRuleTo, ledgerInterCompany, partAmountMST);
+    
+            // 1. get dimension from allocation rule
+            dummyJournalTrans.DefaultDimension = postingRuleTo.DefaultDimension;
+            dimensionMerge = DimensionMerge::newFromTable(dummyJournalTrans, dummyJournalTrans.companyInfo().RecId);
+            
+            // 2. merge it with original dimension from transaction
+            mergedDimension = dimensionMerge.merge(LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(_tmpGeneralJournalAccountEntry.LedgerDimension), 0);
+            
+            // 3. Create ledgerDimension to discard dimension segments that shouldn't be used for that kind of account/tramsaction
+            ledgerDimension = LedgerDimensionFacade::serviceCreateLedgerDimension(accountNum, mergedDimension);
+            allocationDimension = LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(ledgerDimension);
+                            
+            if (postingRuleTo.CompanyId == curExt())
+            {
+                FINTmpLedgerJournalGeneratorParm  tmpLedgerJournalTrans;
+                tmpLedgerJournalTrans.initLedgerJournalGeneratorParm(
+                _postingRuleFrom.DataAreaId,
+                ledgerDimension,
+                partQty,
+                partAmountCur,
+                _tmpGeneralJournalAccountEntry.TransactionCurrencyCode,
+                allocationDimension,
+                postingRuleTo.PostingLayer,
+                generalJournalEntry.AccountingDate,
+                LedgerTransType::FINMDA);
+                resultList.addEnd(tmpLedgerJournalTrans);
+            }
+            // intercompany allocation
+            else
+            {
+                if (!xDataArea::exist(postingRuleTo.CompanyId))
+                {
+                    throw error(strfmt("@SYS10666", postingRuleTo.CompanyId));
+                }
+    
+                changeCompany(postingRuleTo.CompanyId)
+                {
+                    // Check only dimension accountNum will not be posted directly so we don't need to validate it for IC
+                    if (!LedgerAllocationRules::validateDimension(postingRuleTo.DefaultDimension, true))
+                    {
+                        throw error("@SYS106317");
+                    }
+                }
+    
+                this.createICTmpLedgerJournalTrans(_tmpGeneralJournalAccountEntry,
+                    postingRuleTo.CompanyId,
+                    accountNum,
+                    postingRuleTo.LedgerDimension,
+                    partQty,
+                    partAmountCur,
+                    mergedDimension);
+            }
+                                            
+            totalQty            += partQty;
+            totalAmountCur      += partAmountCur;
+            totalAmountMST      += partAmountMST;
+            totalAmountMST2nd   += partAmountMST2nd;
+    
+            _postingRuleToCount --;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createICTmpLedgerJournalTrans</Name>
+				<Source><![CDATA[
+    protected void createICTmpLedgerJournalTrans(FINTmpVoucherProcessorEngineParm _tmpGeneralJournalAccountEntry,
+        CompanyId           _company,
+        RecId               _ledgerDimension,
+        RecId               _offsetLedgerDimension,
+        Qty                 _qty,
+        AmountCur           _amountCur,
+        DimensionDefault    _dimension)
+    {
+        RecId offsetLedgerDimension;
+
+        changeCompany(_company)
+        {
+            offsetLedgerDimension = LedgerDimensionFacade::serviceCreateLedgerDimension(_offsetLedgerDimension, _dimension);
+        }
+
+        FINTmpLedgerJournalGeneratorParm  tmpLedgerJournalTrans;
+        tmpLedgerJournalTrans.initLedgerJournalGeneratorParm(
+                _company,
+                offsetLedgerDimension,
+                _qty,
+                _amountCur,
+                _tmpGeneralJournalAccountEntry.TransactionCurrencyCode,
+                _dimension,
+                generalJournalEntry.PostingLayer,
+                generalJournalEntry.AccountingDate,
+                LedgerTransType::FINMDA);
+        resultList.addEnd(tmpLedgerJournalTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getAccountNumTo</Name>
+				<Source><![CDATA[
+    protected LedgerDimensionDefaultAccount getAccountNumTo(
+        FINTmpVoucherProcessorEngineParm    _tmpGeneralJournalAccountEntry,
+        FINMDAPostingRuleTo                 _postingRuleTo,
+        LedgerInterCompany                  _ledgerIC,
+        AmountMST                           _amountMST)
+    {
+        LedgerDimensionDefaultAccount   accountNum;
+        MainAccountNum                  mainAccountNum;
+        ;
+    
+        if (_postingRuleTo.CompanyId == curExt())
+        {
+            accountNum = (_postingRuleTo.LedgerDimension ? _postingRuleTo.LedgerDimension : _tmpGeneralJournalAccountEntry.LedgerDimension);
+        }
+        else // intercompany allocation
+        {
+            accountNum = (_amountMST >= 0 ? _ledgerIC.DestinationDebitLedgerDimension : _ledgerIC.DestinationCreditLedgerDimension);
+    
+            if (!accountNum)
+            {
+                throw error(strfmt("@SYS21636", _postingRuleTo.CompanyId));
+            }
+        }
+
+        mainAccountNum = LedgerDimensionFacade::getMainAccountFromLedgerDimension(accountNum).MainAccountId;
+    
+        if (!MainAccount::checkAllowPosting(mainAccountNum))
+        {
+            accountNum = LedgerSystemAccounts::defaultAccount(LedgerPostingType::ErrorAccount);
+        }
+    
+        return accountNum;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmAllocationModelId</Name>
+				<Source><![CDATA[
+    public FINMDAModelId parmAllocationModelId(FINMDAModelId _allocationModelId = allocationModelId)
+    {
+        allocationModelId = _allocationModelId;
+        return allocationModelId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPostingRuleToCount</Name>
+				<Source><![CDATA[
+    public Counter getPostingRuleToCount(FINMDAModelId _modelId)
+    {
+        return (postingRuleToCountMap.exists(_modelId) ? postingRuleToCountMap.lookup(_modelId) : 0);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getResult</Name>
+				<Source><![CDATA[
+    public List getResult()
+    {
+        return resultList;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>engineId</Name>
+				<Source><![CDATA[
+    public  Num engineId()
+    {
+        return #engineId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public Description description()
+    {
+        return "@DNR:MDAEngineDescr";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>publisher</Name>
+				<Source><![CDATA[
+    public Name publisher()
+    {
+        return "@DNR:ToIncreasePublisher";
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

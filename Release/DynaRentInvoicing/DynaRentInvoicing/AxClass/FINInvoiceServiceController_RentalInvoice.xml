@@ -1,0 +1,1077 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoiceServiceController_RentalInvoice</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINInvoiceServiceController_RentalInvoice extends FINInvoiceServiceController
+{
+    boolean expectedPeriodsCreated;
+    RORParameters rorParameters;
+    SalesTable parmSalesTable;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>cleanUpPreviousCalcParm</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2021. This method is obsolete')]
+    protected void cleanUpPreviousCalcParm(RecId _recIdUpperRange = 0)
+    {
+        Counter retryCount;
+
+        try
+        {
+            FINInvoiceCalculatorParm parmDelete;
+            FINInvoiceCalculatorParm invoiceCalcParm;
+            SalesParmLine salesParmLine;
+            SalesLine salesLine;
+
+            while select RecId from invoiceCalcParm
+            where invoiceCalcParm.ParmId == parmId
+            &&    invoiceCalcParm.ParmLineTableId == tableNum(SalesParmLine)
+                join TableId from salesLine
+                where salesLine.RecId == invoiceCalcParm.OrderLineRecId
+                &&  ( !parmSalesTable || Salesline.SalesId == parmSalesTable.SalesId)
+                notexists join salesParmLine
+                where salesParmLine.RecId == invoiceCalcParm.ParmLineRecId
+            {
+                // delete one record at a time to reduce blocking issues.
+                delete_from parmDelete where parmDelete.RecId == invoiceCalcParm.RecId;
+            }
+        }
+        catch (Exception::Deadlock)
+        {
+            if (!retryCount)
+            {
+                retryCount += 1;
+                retry;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanUpOrphanCalcParmAsync</Name>
+				<Source><![CDATA[
+    public static void cleanUpOrphanCalcParmAsync(container _parameter)
+    {
+        ParmId parmId;
+        Counter retryCount;
+        SalesLine salesLine;
+        SalesParmLine salesParmLine;
+        FINInvoiceCalculatorParm parmDelete;
+        FINInvoiceCalculatorParm invoiceCalcParm;
+
+        [parmId] = _parameter;
+
+        try
+        {
+            while select RecId from invoiceCalcParm
+            where invoiceCalcParm.ParmId == parmId
+            &&    invoiceCalcParm.ParmLineTableId == tableNum(SalesParmLine)
+                join TableId from salesLine
+                where salesLine.RecId == invoiceCalcParm.OrderLineRecId
+                notexists join salesParmLine
+                where salesParmLine.RecId == invoiceCalcParm.ParmLineRecId
+                &&    salesParmLine.ParmId == ParmId
+            {
+                // delete one record at a time to reduce blocking issues.
+                delete_from parmDelete where parmDelete.RecId == invoiceCalcParm.RecId;
+            }
+        }
+        catch (Exception::Deadlock)
+        {
+            if (!retryCount)
+            {
+                retryCount += 1;
+                retry;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINInvoiceServiceController_RentalInvoice construct(SalesParmUpdate _parmUpdate)
+    {
+        FINInvoiceServiceController_RentalInvoice controller = new FINInvoiceServiceController_RentalInvoice();
+        controller.setParmUpdate(_parmUpdate);
+        return controller;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        rorParameters = RORParameters::find();
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalizeInvoiceRunData</Name>
+				<Source><![CDATA[
+    protected void journalizeInvoiceRunData()
+    {
+        if (parmId)
+        {
+            Counter retryCount;
+            try
+            {
+                FINCustInvoiceRun custInvoiceRun = FINCustInvoiceRun::find(parmId);
+
+                if (!custInvoiceRun)
+                {
+                    custInvoiceRun.ParmId = parmId;
+                    custInvoiceRun.WorkCalendarPacked = FINInvoiceServiceController::getWorkCalendar().pack();
+                    custInvoiceRun.insert();
+                }
+            }
+            catch (Exception::DuplicateKeyException)
+            {
+                if (!retryCount)
+                {
+                    // We will have one record per invoice in this table, during batch execution there is a possibility that
+                    // multiple threads might try to create the same record, to avoid this we retry it once to find the last created record
+                    retryCount += 1;
+                    retry;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildWorkCalendar</Name>
+				<Source><![CDATA[
+    protected void buildWorkCalendar()
+    {
+        // build a map of all invoice profiles so we don't have to select them from the database during the next step
+        FINRentalInvoiceProfile     invoiceProfile;
+        SalesLine                   salesLine;
+        SalesParmLine               salesParmLine;
+        FINInvoicePeriodAmendment   invoicePeriodAmendment;
+        // build a map of all relevant calendars and whether or not they need hourly invoicing
+        Map                         calendarMap = new Map(Types::String, Types::Enum);
+        boolean                     includeOpenCalendar;                
+ 
+        while select INVInvoiceProfileId, DNRCalendarId from salesLine
+        where salesLine.RORTradeType != RORTradeType::SalesPurch
+        &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+            join TableId from salesParmLine
+            where salesParmLine.ParmId == parmId
+            &&    salesParmLine.SalesLineRecId == salesLine.RecId
+                outer join StrValue from invoicePeriodAmendment
+                where invoicePeriodAmendment.RefTableId == salesLine.TableId
+                &&    invoicePeriodAmendment.RefRecId == salesLine.RecId
+                &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+                    outer join RecId, MonthlyPeriod, IsHourlyInvoicing from invoiceProfile
+                    where invoiceProfile.InvoiceProfileId == salesLine.INVInvoiceProfileId
+        {
+            boolean mustPopulateTimes = ((invoiceProfile.RecId && invoiceProfile.IsHourlyInvoicing) ? true : false);
+ 
+            if (calendarMap.exists(salesLine.DNRCalendarId))
+            {
+                mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(salesLine.DNRCalendarId));
+            }
+ 
+            calendarMap.insert(salesLine.DNRCalendarId, mustPopulateTimes);
+
+            if (invoicePeriodAmendment.StrValue)
+            {
+                if (calendarMap.exists(invoicePeriodAmendment.StrValue))
+                {
+                    mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(invoicePeriodAmendment.StrValue));
+                }
+ 
+                calendarMap.insert(invoicePeriodAmendment.StrValue, mustPopulateTimes);
+            }
+
+            if (!includeOpenCalendar && invoiceProfile.MonthlyPeriod == INVMonthlyPeriod::LinkedToDate)
+            {
+                includeOpenCalendar = true;
+            }
+        }        
+
+        if (includeOpenCalendar && !calendarMap.exists(rorParameters.RentalActiveCalendar))
+        {
+            // This is used in calendar period calculaiton for equal monthly billing
+            calendarMap.insert(rorParameters.RentalActiveCalendar, false);
+        }
+
+        // build a work calendar cache with all the necessary working dates/times for this invoice run
+        FromDate invoiceFromDate;
+        ToDate invoiceToDate;
+        [ invoiceFromDate, invoiceToDate ] = this.calculateInvoiceDateRange();
+ 
+        // In order to make the full period invoicing work
+        // we load extra calendar days before and after on/off rent dates
+        invoiceFromDate = invoiceFromDate - 90;
+        invoiceToDate   = invoiceToDate + 90;
+
+        workCalendar = new FINWorkCalendar();
+        workCalendar.populate(calendarMap, invoiceFromDate, invoiceToDate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateInvoiceDateRange</Name>
+				<Source><![CDATA[
+    protected container calculateInvoiceDateRange()
+    {
+        SalesParmLine salesParmLine;
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+         
+        select firstonly minof(DeliveryDateTime) from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId == tableNum(SalesLine)
+            join TableId from salesParmLine
+            where salesParmLine.ParmId == parmId
+            &&    salesParmLine.RORTradeType != RORTradeType::SalesPurch
+            &&    salesParmLine.SalesLineRecId == invoicePeriodQtyPhysical.RefRecId
+            &&    (!parmSalesTable || salesParmLine.OrigSalesId == parmSalesTable.SalesId)
+                join TableId from invoicePeriodQtyFinancial
+                where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+                &&    !invoicePeriodQtyFinancial.InvoiceId;
+ 
+        SalesParmUpdate parmUpdateLocal = parmUpdate as SalesParmUpdate;
+        // Populate calendar cache for 1 day before invoicePeriodQtyPhysical.DeliveryDateTime in GMT so we don't need to worry about time zones.
+        FromDate invoiceMinDate = DateTimeUtil::date(invoicePeriodQtyPhysical.DeliveryDateTime) - 1;
+        TransDateTime maxDateTime = DateTimeUtil::maxValue();
+
+        select firstonly maxof(ReturnDateTime) from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId == tableNum(SalesLine)
+        &&    invoicePeriodQtyPhysical.ReturnDateTime != maxDateTime
+            join TableId from salesParmLine
+            where salesParmLine.ParmId == parmId
+            &&    salesParmLine.RORTradeType != RORTradeType::SalesPurch
+            &&    salesParmLine.SalesLineRecId == invoicePeriodQtyPhysical.RefRecId
+            &&    (!parmSalesTable || salesParmLine.OrigSalesId == parmSalesTable.SalesId)
+                join TableId from invoicePeriodQtyFinancial
+                where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+                &&    !invoicePeriodQtyFinancial.InvoiceId;
+
+        TransDateTime endDateTime = max(parmUpdateLocal.INVCalculationDateTime, invoicePeriodQtyPhysical.ReturnDateTime);
+        
+        if (calcEstimation)
+        {
+            RORRentalDateTimes rentalDateTimes;
+            SalesLine salesLine;
+            TransDateTime minDateTime = DateTimeUtil::minValue();
+
+            select maxof(ExpectedOffRentDateTime) from rentalDateTimes
+            where rentalDateTimes.OffRentDateTime == maxDateTime || rentalDateTimes.OffRentDateTime == minDateTime
+                join TableId from salesLine
+                where salesLine.TableId == rentalDateTimes.RefTableId
+                &&    salesLine.RecId == rentalDateTimes.RefRecId
+                &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+                    join TableId from salesParmLine
+                    where salesParmLine.ParmId == parmId
+                    &&    salesParmLine.RORTradeType != RORTradeType::SalesPurch
+                    &&    salesParmLine.SalesLineRecId == salesLine.RecId;
+
+            endDateTime = rentalDateTimes.ExpectedOffRentDateTime;
+
+            select maxof(OffRentDateTime) from rentalDateTimes
+            where rentalDateTimes.OffRentDateTime != maxDateTime
+                join TableId from salesLine
+                where salesLine.TableId == rentalDateTimes.RefTableId
+                &&    salesLine.RecId == rentalDateTimes.RefRecId
+                &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+                    join TableId from salesParmLine
+                    where salesParmLine.ParmId == parmId
+                    &&    salesParmLine.RORTradeType != RORTradeType::SalesPurch
+                    &&    salesParmLine.SalesLineRecId == salesLine.RecId;
+
+            endDateTime = max(endDateTime, rentalDateTimes.OffRentDateTime);
+            endDateTime = DateTimeUtil::newDateTime(endMth(DateTimeUtil::date(endDateTime)), 0);
+        }
+
+        // For monthly invoice profile we may need to know all open days for a specific month even if it is beyond calculation point.
+        ToDate invoiceMaxDate = max(DateTimeUtil::date(endDateTime) + 1, endMth(DateTimeUtil::date(parmUpdateLocal.INVCalculationDateTime)));
+        invoiceMinDate = str2DateDMY(strFmt("1-%1-%2", mthOfYr(invoiceMinDate), year(invoiceMinDate)));
+
+        return [ invoiceMinDate, invoiceMaxDate ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performPreCalculationForExchange</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "update happend in the method executeFullReturn()")]
+    protected void performPreCalculationForExchange()
+    {
+        SalesParmLine               salesParmLine;
+        SalesLine                   salesLine;
+        FINInvoiceCalculatorParm    invoiceCalculatorParm;
+                
+        FINInvoiceServiceController::setPreviouslyInvoicedNumOfPeriodsForExchange(new Map(Types::Int64, Types::Container));
+
+        select firstonly RecId from salesParmLine
+        where salesParmLine.ParmId == parmId
+            exists join salesLine
+            where salesLine.RecId == salesParmLine.SalesLineRecId
+            &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+            &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+            &&    salesLine.RORRecIdExchanged || salesLine.DNRisTechnicalExchange;
+
+        if (salesParmLine)
+        {
+            SalesParmUpdate     salesParmUpdate = parmUpdate as SalesParmUpdate;
+            FINInvoicingOptions invoicingOptions = FINInvoicingOptions::createFromSalesParmUpdate(salesParmUpdate);
+            SalesTable          salesTable;
+            SalesLine           salesLineParent;
+
+            // Perform pre-calculations for the newest replacement lines
+            while select forupdate salesParmLine
+            where salesParmLine.ParmId == parmId
+                join salesLine
+                where salesLine.RecId == salesParmLine.SalesLineRecId
+                &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                &&    !salesLine.RORRecIdExchanged
+                    join TableId from salesLineParent
+                    where salesLineParent.SalesId == salesLine.SalesId
+                    &&    salesLineParent.RORRecIdExchanged == salesLine.RecId
+                    &&    salesLineParent.RORAmendmentExchangeType == RORAmendmentExchangeType::Technical
+                        join FINForceUntilCalculationDateTime, FINForceFromCalculationDateTime from salesTable
+                        where salesTable.SalesId == salesLine.SalesId
+                        &&    (!parmSalesTable || salesTable.SalesId == parmSalesTable.SalesId)
+                        &&    (!salesTable.ProjId || rorParameters.RentalProjectInvoicing)
+                            outer join invoiceCalculatorParm
+                            where invoiceCalculatorParm.ParmId           == parmId
+                            &&    invoiceCalculatorParm.OrderLineTableId == salesLine.TableId
+                            &&    invoiceCalculatorParm.OrderLineRecId   == salesLine.RecId
+            {
+                invoiceCalculatorParm.ParmUpdatePacked = buf2Con(parmUpdate);
+                invoiceCalculatorParm.HeaderForceUntilCalculationDateTime = salesTable.FINForceUntilCalculationDateTime;
+                invoiceCalculatorParm.HeaderForceFromCalculationDateTime = salesTable.FINForceFromCalculationDateTime;
+
+                FINPeriodSpecificationManager periodSpecificationManager = FINPeriodSpecificationManager::construct();
+                FINInvoiceCalculator invoiceCalculator = FINInvoiceCalculator::construct(salesLine, salesParmLine, invoiceCalculatorParm);
+                invoiceCalculatorParm = invoiceCalculator.getInvoiceCalculatorParm();
+                
+                periodSpecificationManager.setCalcEstimation(calcEstimation);
+                periodSpecificationManager.setCreditJourRefRecId(creditJourRefRecId);
+                periodSpecificationManager.populateNumOfPeriods(invoiceCalculatorParm, salesLine, invoicingOptions);
+            }
+
+            // Perform pre-calculations for the lines that have been technically exchanged
+            while select forupdate salesParmLine
+            where salesParmLine.ParmId == parmId
+                join salesLine
+                where salesLine.RecId == salesParmLine.SalesLineRecId
+                &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                &&    salesLine.RORRecIdExchanged 
+                &&    salesLine.RORAmendmentExchangeType == RORAmendmentExchangeType::Technical
+                    join FINForceUntilCalculationDateTime, FINForceFromCalculationDateTime from salesTable
+                    where salesTable.SalesId == salesLine.SalesId
+                    &&    (!parmSalesTable || salesTable.SalesId == parmSalesTable.SalesId)
+                    &&    (!salesTable.ProjId || rorParameters.RentalProjectInvoicing)
+                        outer join invoiceCalculatorParm
+                        where invoiceCalculatorParm.ParmId           == parmId
+                        &&    invoiceCalculatorParm.OrderLineTableId == salesLine.TableId
+                        &&    invoiceCalculatorParm.OrderLineRecId   == salesLine.RecId
+            {
+                invoiceCalculatorParm.ParmUpdatePacked = buf2Con(parmUpdate);
+                invoiceCalculatorParm.HeaderForceUntilCalculationDateTime = salesTable.FINForceUntilCalculationDateTime;
+                invoiceCalculatorParm.HeaderForceFromCalculationDateTime = salesTable.FINForceFromCalculationDateTime;
+
+                FINPeriodSpecificationManager periodSpecificationManager = FINPeriodSpecificationManager::construct();
+                FINInvoiceCalculator invoiceCalculator = FINInvoiceCalculator::construct(salesLine, salesParmLine, invoiceCalculatorParm);
+                invoiceCalculatorParm = invoiceCalculator.getInvoiceCalculatorParm();
+                
+                periodSpecificationManager.setCalcEstimation(calcEstimation);
+                periodSpecificationManager.setCreditJourRefRecId(creditJourRefRecId);
+                periodSpecificationManager.populateNumOfPeriods(invoiceCalculatorParm, salesLine, invoicingOptions);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>performInvoiceCalculation</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "update happend in the method modifyParmLine()"),
+     SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void performInvoiceCalculation()
+    {
+        SalesParmLine               salesParmLine;
+        SalesLine                   salesLine;
+        SalesTable                  salesTable;
+        FINInvoiceCalculatorParm    invoiceCalculatorParm;
+        RecordInsertList            calcParmInsertList = new RecordInsertList(tableNum(FINInvoiceCalculatorParm), true, true, true, true, true);
+
+        if (!postInvoiceProposal)
+        {
+            this.performPreCalculationForExchange();
+        }
+
+        Set parmLineSet = new Set(Types::Int64);
+
+        while select salesParmLine
+        where salesParmLine.ParmId == parmId
+            join salesLine
+            where salesLine.RecId == salesParmLine.SalesLineRecId
+            &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                join FINForceUntilCalculationDateTime, FINForceFromCalculationDateTime from salesTable
+                where salesTable.SalesId == SalesLine.SalesId
+                &&    (!parmSalesTable || salesTable.SalesId == parmSalesTable.SalesId)
+                // For TransferToProject allow ProjId
+                &&    (!salesTable.ProjId || rorParameters.RentalProjectInvoicing)
+                    outer join invoiceCalculatorParm
+                    where invoiceCalculatorParm.ParmId              == parmId
+                    &&    invoiceCalculatorParm.OrderLineTableId    == salesLine.TableId
+                    &&    invoiceCalculatorParm.OrderLineRecId      == salesLine.RecId
+        {
+            if (parmLineSet.in(salesParmLine.RecId))
+            {
+                continue;
+            }
+
+            parmLineSet.add(salesParmLine.RecId);
+            invoiceCalculatorParm.ParmUpdatePacked = buf2Con(parmUpdate);
+            invoiceCalculatorParm.IsEstimation = calcEstimation;
+            invoiceCalculatorParm.CreditJourRefRecId = creditJourRefRecId;
+            invoiceCalculatorParm.PostInvoiceProposal = postInvoiceProposal;
+            invoiceCalculatorParm.ProformaJourRefRecId = proformaInvoiceJourRecId;
+            invoiceCalculatorParm.HeaderForceUntilCalculationDateTime = salesTable.FINForceUntilCalculationDateTime;
+            invoiceCalculatorParm.HeaderForceFromCalculationDateTime = salesTable.FINForceFromCalculationDateTime;
+
+            FINInvoiceCalculatorParm invoiceCalculatorParmCopy;
+
+            buf2Buf(invoiceCalculatorParm, invoiceCalculatorParmCopy);
+
+
+            if (postInvoiceProposal)
+            {
+                FINInvoiceProposalCalculculationManager invoiceProposalCalculculationManager = FINInvoiceProposalCalculculationManager::constructProposalPost(salesLine, salesParmLine, invoiceCalculatorParmCopy);
+                invoiceProposalCalculculationManager.run();
+                invoiceCalculatorParmCopy = invoiceProposalCalculculationManager.getInvoiceCalculatorParm();
+            }
+            else
+            {
+                FINInvoiceCalculator invoiceCalculator = FINInvoiceCalculator::construct(salesLine, salesParmLine, invoiceCalculatorParmCopy);
+                invoiceCalculator.run();
+                invoiceCalculatorParmCopy = invoiceCalculator.getInvoiceCalculatorParm();
+            }
+            
+            if (invoiceCalculatorParm.RecId)
+            {
+                FINInvoiceCalculatorParm calcParmDel;
+                
+                // delete the record to avoid any Unique key violations
+                delete_from calcParmDel where calcParmDel.RecId == invoiceCalculatorParm.RecId;
+            }
+
+            calcParmInsertList.add(invoiceCalculatorParmCopy);
+        }
+
+        calcParmInsertList.insertDatabase();
+        
+        SalesParmUpdate salesParmUpdate = parmUpdate;
+        if (salesParmUpdate.SpecQty == SalesUpdate::PackingSlip && rorParameters.RentalProjectInvoicing)
+        {
+            // Line was already transferred to hour journal
+            delete_from salesParmLine
+            where salesParmLine.ParmId == parmId
+                exists join salesLine
+                where salesLine.RecId == salesParmLine.SalesLineRecId
+                &&    salesLine.RORTradeType == RORTradeType::SalesPurch
+                &&    !salesLine.RemainSalesFinancial
+                    join salesTable
+                    where salesTable.SalesId == salesLine.SalesId
+                    &&    (!parmSalesTable || salesTable.SalesId == parmSalesTable.SalesId)
+                    &&    salesTable.ProjId;
+        }
+            
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if (dataSourceRecordMapPacked)
+        {
+            Map map = Map::create(dataSourceRecordMapPacked);
+            MapEnumerator mapEnumerator = map.getEnumerator();
+
+            while (mapEnumerator.moveNext())
+            {
+                parmSalesTable = mapEnumerator.currentValue();
+                this.processOrder();
+            }
+        }
+        else
+        {
+            super();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifyParmLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void modifyParmLine()
+    {
+        SalesParmLine salesParmLine;
+        SalesLine salesLine;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+        SalesParmUpdate salesParmUpdate = parmUpdate as SalesParmUpdate;
+        Periods chargedPeriods;
+
+        expectedPeriodsCreated = false;
+
+        if (salesParmUpdate.SpecQty == SalesUpdate::All)
+        {
+            while select forupdate salesParmLine
+            where SalesParmLine.ParmId == parmId
+            &&    (!parmSalesTable || salesParmLine.OrigSalesId == parmSalesTable.SalesId)
+                join RentalCalcPacked, CreditCalcPacked, TransportCalcPacked, InvoiceAmount from invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmLineTableId  == salesParmLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId    == salesParmLine.RecId
+                &&    invoiceCalculatorParm.ParmId           == salesParmLine.ParmId
+            {
+                // Because of partial deliveries we need to check qty when SpecQty = All
+                FINRentalJournalizer journalizedData = new FINRentalJournalizer();
+                if (invoiceCalculatorParm.RentalCalcPacked)
+                {
+                    journalizedData.unpack(invoiceCalculatorParm.RentalCalcPacked);
+                }
+                Qty qty = journalizedData.getInvoicedQty();
+                chargedPeriods = journalizedData.getChargedPeriods();
+
+                if (!qty)
+                {
+                    // If only "Credited" checkbox is marked in an invoicing form then use this qty
+                    FINCreditJournalizer journalizedCreditData = new FINCreditJournalizer();
+                    if (invoiceCalculatorParm.CreditCalcPacked)
+                    {
+                        journalizedCreditData.unpack(invoiceCalculatorParm.CreditCalcPacked);
+                    }
+                    qty = journalizedCreditData.getInvoicedQty();
+                }
+
+                if (!qty)
+                {
+                    // If fully invoiced and return not posted yet then use qty 1 to be able to invoice return amount.
+                    FINTransportPriceJournalizer journalizedTransportData = new FINTransportPriceJournalizer();
+                    if (invoiceCalculatorParm.TransportCalcPacked)
+                    {
+                        journalizedTransportData.unpack(invoiceCalculatorParm.TransportCalcPacked);
+                    }
+                    
+                    if (journalizedTransportData.getReturnAmount())
+                    {
+                        qty = 1;
+                    }
+                }
+
+                salesParmLine.DeliverNow = qty;
+                salesParmLine.INVInvoicePeriods = chargedPeriods;
+                salesParmLine.FINLineAmount = invoiceCalculatorParm.InvoiceAmount;
+                salesParmLine.LineAmount = 0;
+                salesParmLine.update();
+            }
+        }
+        else
+        {
+            update_recordset salesParmLine
+            setting FINLineAmount = invoiceCalculatorParm.InvoiceAmount,
+                    LineAmount = 0,
+                    INVInvoicePeriods = invoiceCalculatorParm.ChargedPeriods
+            where salesParmLine.ParmId == parmId
+            &&    (!parmSalesTable || salesParmLine.OrigSalesId == parmSalesTable.SalesId)
+                join InvoiceAmount, ChargedPeriods from invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmLineTableId  == salesParmLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId    == salesParmLine.RecId
+                &&    invoiceCalculatorParm.ParmId           == salesParmLine.ParmId;
+        }
+
+        update_recordset salesParmLine
+        setting FINLineAmount = salesParmLine.LineAmount
+        where salesParmLine.ParmId == parmId
+        &&    salesParmLine.RORTradeType == RORTradeType::SalesPurch
+            exists join salesLine
+            where salesLine.RecId == salesParmLine.SalesLineRecId
+            &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId);
+                             
+        delete_from salesParmLine
+        where salesParmLine.ParmId == parmId
+            exists join salesLine
+            where salesLine.RecId == salesParmLine.SalesLineRecId
+            &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+            &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                notexists join invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmLineTableId  == salesParmLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId    == salesParmLine.RecId
+                &&    invoiceCalculatorParm.ParmId == salesParmLine.ParmId
+                &&    invoiceCalculatorParm.MustBeInvoiced;
+
+        if (salesParmUpdate.SpecQty == SalesUpdate::PackingSlip && rorParameters.RentalProjectInvoicing)
+        {
+            // if SpecQty == SalesUpdate::PackingSlip then mayJournalTransBePosted is not called during reselection
+            SalesTable salesTable;
+            Map isRentalProjectInvoicingMap = new Map(Types::String, Types::Enum);
+
+            while select forupdate salesParmLine
+            where salesParmLine.ParmId == parmId
+                join salesLine
+                where salesLine.RecId == salesParmLine.SalesLineRecId
+                &&    salesLine.SalesType == SalesType::RORRental
+                &&    salesLine.RORTradeType == RORTradeType::SalesPurch
+                    join salesTable
+                    where salesTable.SalesId == salesLine.SalesId
+                    &&    (!parmSalesTable || salesTable.SalesId == parmSalesTable.SalesId)
+            {
+                // Allow to invoice service item
+                boolean isStocked = salesLine.isStocked();
+                boolean hasProjCategoryId = InventTable::find(salesLine.ItemId).RORProjCategoryIdRental != '';
+                // Can delete stocked items and service items without categoryId.
+                boolean noCheck = (!isStocked && hasProjCategoryId);
+
+                if (!isRentalProjectInvoicingMap.exists(salesTable.SalesId))
+                {
+                    isRentalProjectInvoicingMap.insert(salesTable.SalesId, (!noCheck && salesTable.FINRentalProjectInvoicing()) ? NoYes::Yes : NoYes::No);
+                }
+
+                if (isRentalProjectInvoicingMap.lookup(salesTable.SalesId) == NoYes::Yes)
+                {
+                    salesParmLine.delete();
+                }
+            }
+        }
+
+        boolean isProformaActive = rorParameters.FINIsRentalProformaActive;
+
+        if (isProformaActive && postInvoiceProposal)
+        {
+            this.discardNotInInvoiceProforma();
+        }
+        else if (isProformaActive)
+        {
+            this.discardProforma();
+        }
+        this.discardChildLine();
+        this.discardFuelLine(salesParmUpdate);
+        this.discardFuelLineParent(salesParmUpdate.ParmId, salesParmUpdate.INVCalculationDateTime, true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>discardProforma</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void discardProforma()
+    {
+        // Remove sales lines that are already part of active invoice proposal.
+        
+        SalesParmLine salesParmLine;
+        SalesLine salesLine;
+        FINCustInvoiceTransProForma custInvoiceTransProforma;
+        FINCustInvoiceJourProForma custInvoiceJourProforma;
+
+        delete_from salesParmLine
+        where salesParmLine.ParmId == parmId
+            exists join salesLine
+            where salesLine.RecId == salesParmLine.SalesLineRecId
+            &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+            &&    salesLine.RORTradeType == RORTradeType::SalesPurch
+                join custInvoiceTransProforma
+                where custInvoiceTransProforma.InventTransId  == salesLine.InventTransId
+                    join custInvoiceJourProforma
+                    where custInvoiceJourProforma.InvoiceId == custInvoiceTransProforma.InvoiceId
+                    && custInvoiceJourProforma.InvoiceDate == custInvoiceTransProforma.InvoiceDate
+                    && custInvoiceJourProforma.NumberSequenceGroup == custInvoiceTransProforma.NumberSequenceGroup
+                    && custInvoiceJourProforma.SalesId == custInvoiceTransProforma.SalesId
+                    && custInvoiceJourProforma.IsProFormaInvoiceActive;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>discardNotInInvoiceProforma</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void discardNotInInvoiceProforma()
+    {
+        // Remove sales lines that are not part of active invoice proposal when posting the proposal.
+        SalesParmLine salesParmLine;
+        SalesLine salesLine;
+        FINCustInvoiceTransProForma custInvoiceTransProforma;
+        FINCustInvoiceJourProForma custInvoiceJourProforma;
+
+        delete_from salesParmLine
+        where salesParmLine.ParmId == parmId
+            exists join salesLine
+            where salesLine.RecId == salesParmLine.SalesLineRecId
+            &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+            &&    salesLine.RORTradeType == RORTradeType::SalesPurch
+                notexists join custInvoiceTransProforma
+                where custInvoiceTransProforma.InventTransId  == salesLine.InventTransId
+                    join TableId from custInvoiceJourProforma
+                    where custInvoiceJourProforma.InvoiceId == custInvoiceTransProforma.InvoiceId
+                    && custInvoiceJourProforma.InvoiceDate == custInvoiceTransProforma.InvoiceDate
+                    && custInvoiceJourProforma.NumberSequenceGroup == custInvoiceTransProforma.NumberSequenceGroup
+                    && custInvoiceJourProforma.SalesId == custInvoiceTransProforma.SalesId
+                    && custInvoiceJourProforma.IsProFormaInvoiceActive
+                    && (!proformaInvoiceJourRecId || custInvoiceJourProforma.RecId == proformaInvoiceJourRecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createExpectedPeriods</Name>
+				<Source><![CDATA[
+    protected void createExpectedPeriods()
+    {
+        SalesParmLine salesParmLine;
+        SalesLine salesLine;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+        if (expectedPeriodsCreated)
+        {
+            return;
+        }
+
+        while select salesParmLine
+        where salesParmLine.ParmId == parmId
+            join salesLine
+            where salesLine.RecId == salesParmLine.SalesLineRecId
+            &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+            &&    salesLine.RORTradeType != RORTradeType::SalesPurch
+                exists join invoiceCalculatorParm
+                where invoiceCalculatorParm.ParmLineTableId  == salesParmLine.TableId
+                &&    invoiceCalculatorParm.ParmLineRecId    == salesParmLine.RecId
+                &&    invoiceCalculatorParm.ParmId           == salesParmLine.ParmId
+                &&    invoiceCalculatorParm.MustBeInvoiced
+        {
+            FINInvoicePeriodManager_Invoice::createExpectedPeriods(parmId, salesLine, salesParmLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>discardChildLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void discardChildLine()
+    {
+        SalesParmLine salesParmLine;
+        SalesLine salesLine, salesLineParent;
+        FINRentalInvoiceProfile invoiceProfile;
+        Map invoicedParent = new Map(Types::Int64, Types::Enum);
+        Map childParentDelete = new Map(Types::Int64, Types::Enum);
+        boolean mustDeleteParmLine;
+        DNRTmpIdList tmpIdList;
+        RecordInsertList recordInsertList = new RecordInsertList(tableNum(DNRTmpIdList), false, false, false, false, false, tmpIdList);
+               
+        ttsBegin;
+        delete_from tmpIdList;
+
+        while select TableId, RecId from salesParmLine
+        where salesParmLine.ParmId == parmId
+            join RORTradeType, RORParentLineRecId, SalesQty from salesLine
+            where salesLine.SalesId == salesParmLine.OrigSalesId
+            &&    salesLine.RORParentLineRecId
+            &&    salesLine.InventTransId == salesParmLine.InventTransId
+            &&    (!parmSalesTable || salesLine.SalesId == parmSalesTable.SalesId)
+                join salesLineParent
+                where salesLineParent.RecId == salesLine.RORParentLineRecId
+                    join InvoiceChildLinesAfterParent from invoiceProfile
+                    where invoiceProfile.InvoiceProfileId == salesLineParent.INVInvoiceProfileId
+        {
+            if (!invoiceProfile.InvoiceChildLinesAfterParent
+            ||  (salesLine.RORTradeType == RORTradeType::SalesPurch && salesLine.SalesQty < 0))
+            {
+                continue;
+            }
+
+            // Check parent only once
+            if (childParentDelete.exists(salesLine.RORParentLineRecId))
+            {
+                if (childParentDelete.lookup(salesLine.RORParentLineRecId))
+                {
+                    tmpIdList.RefRecId = salesParmLine.RecId;
+                    recordInsertList.add(tmpIdList);
+                    mustDeleteParmLine = true;
+                }
+            }
+            else
+            {
+                if (!invoicedParent.exists(salesLine.RORParentLineRecId))
+                {
+                    boolean parentIsFullyInvoiced = !salesLineParent.RORRentalLine::FINExistUninvoicedCreditedForLine();
+                    invoicedParent.insert(salesLine.RORParentLineRecId, (parentIsFullyInvoiced
+                                                                     || (salesLine.RORTradeType == RORTradeType::SalesPurch && salesLineParent.RORRentalLine::FINExistsJournalizedPeriod())));
+                }
+
+                // Do not check if parent was invoiced before.
+                if (invoicedParent.lookup(salesLine.RORParentLineRecId))
+                {
+                    childParentDelete.insert(salesLine.RORParentLineRecId, NoYes::No);
+                }
+                else
+                {
+                    SalesParmLine               salesParmLineParent;
+                    FINInvoiceCalculatorParm    invoiceCalculatorParm, invoiceCalculatorParmParent;
+                    
+                    select firstonly RecId from salesParmLineParent
+                    where salesParmLineParent.SalesLineRecId == salesLineParent.RecId
+                    &&    salesParmLineParent.ParmId == parmId
+                        exists join invoiceCalculatorParmParent
+                        where invoiceCalculatorParmParent.ParmLineTableId  == salesParmLineParent.TableId
+                        &&    invoiceCalculatorParmParent.ParmLineRecId    == salesParmLineParent.RecId
+                        &&    invoiceCalculatorParmParent.ParmId == salesParmLineParent.ParmId
+                        &&    invoiceCalculatorParmParent.MustBeInvoiced;
+
+                    select firstonly CreditCalcPacked from invoiceCalculatorParm
+                    where invoiceCalculatorParm.ParmLineTableId == salesParmLine.TableId
+                    &&    invoiceCalculatorParm.ParmLineRecId   == salesParmLine.RecId
+                    &&    invoiceCalculatorParm.ParmId == parmId
+                    &&    invoiceCalculatorParm.MustBeInvoiced;
+
+                    Set chargedValuesSet = new Set(Types::Container);
+
+                    if (invoiceCalculatorParm.CreditCalcPacked)
+                    {
+                        FINCreditJournalizer creditJournalizer = new FINCreditJournalizer();
+                        creditJournalizer.unpack(invoiceCalculatorParm.CreditCalcPacked);
+                        chargedValuesSet = creditJournalizer.getChargedValues();
+                    }
+
+                    childParentDelete.insert(salesLine.RORParentLineRecId, (!salesParmLineParent.RecId && chargedValuesSet.empty() ? NoYes::Yes : NoYes::No));
+                }
+
+                if (childParentDelete.lookup(salesLine.RORParentLineRecId))
+                {
+                    tmpIdList.RefRecId = salesParmLine.RecId;
+                    recordInsertList.add(tmpIdList);
+                    mustDeleteParmLine = true;
+                }
+            }
+        }
+
+        recordInsertList.insertDatabase();
+        ttsCommit;
+
+        if (mustDeleteParmLine)
+        {
+            delete_from salesParmLine
+                exists join tmpIdList
+                where tmpIdList.RefRecId == salesParmLine.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>discardFuelLineParent</Name>
+				<Source><![CDATA[
+    //Prevent a rental line’s final invoice from being posted when its fuel has not yet been invoiced
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public boolean discardFuelLineParent(ParmId _parmId, INVCalculationDateTime _calculationDateTime, boolean _deleteParmLines = false)
+    {
+        SalesLine           machineSalesLine;
+        SalesLine           fuelSalesLine;
+        SalesParmLine       machineSalesParmLine;
+        SalesParmLine       fuelSalesParmLine;
+        SalesParmLine       salesParmLine;
+        SalesParmTable      salesParmTable;
+        SalesLine           salesLine;
+        RORRentalDateTimes  rentalDates;
+        boolean             ret = true;
+        SetEnumerator       setEnumerator;
+        DNRTmpIdList        tmpIdList;
+        RecordInsertList    recordInsertList = new RecordInsertList(tableNum(DNRTmpIdList), false, false, false, false, false, tmpIdList);
+        ;
+
+        if (!rorParameters.ItemIdFuel)
+        {
+            return ret;
+        }
+
+        ttsBegin;
+        delete_from tmpIdList;
+
+        // select posting machines lines that have fuel lines but not posted this time nor before
+        // Only SalesId and InventTransId are needed, also in the machineSalesLine.RORRentalDates()
+        while select SalesId, InventTransId, RORKitComponentType, RecId from machineSalesLine
+        where machineSalesLine.RORTradeType == RORTradeType::Rental
+        &&    (!parmSalesTable || machineSalesLine.SalesId == parmSalesTable.SalesId)
+            join OffRentDateTime from rentalDates
+            where rentalDates.RefTableId          == machineSalesLine.TableId
+            &&    rentalDates.RefRecId            == machineSalesLine.RecId
+            &&    rentalDates.OffRentDateTime
+            &&    rentalDates.OffRentDateTime <= _calculationDateTime
+                join FINLineAmount from machineSalesParmLine
+                where machineSalesParmLine.InventTransId == machineSalesLine.InventTransId
+                &&    machineSalesParmLine.ParmId        == _parmId
+                &&    machineSalesParmLine.OrigSalesId   == machineSalesLine.SalesId
+                    join TableId from fuelSalesLine
+                    where fuelSalesLine.ItemId              == rorParameters.ItemIdFuel
+                    &&    fuelSalesLine.RORParentLineRecId  == machineSalesLine.RecId
+                    &&    fuelSalesLine.SalesId             == machineSalesLine.SalesId
+                    &&    fuelSalesLine.RemainSalesPhysical
+                        notexists join fuelSalesParmLine
+                        where fuelSalesParmLine.InventTransId == fuelSalesLine.InventTransId
+                        &&    fuelSalesParmLine.ParmId        == _parmId
+                        &&    fuelSalesParmLine.OrigSalesId   == fuelSalesLine.SalesId
+        {
+            if (!DateTimeUtil::date(rentalDates.OffRentDateTime)
+            || (machineSalesParmLine.FINLineAmount <= 0 && machineSalesLine.RORKitComponentType != RORKitComponentType::Kit))
+            {
+                continue;
+            }
+
+            switch (rorParameters.FuelPostingControl)
+            {
+                case RORFuelPostingControl::Error :
+                    error(strfmt("@DNR2436", machineSalesLine.InventTransId));
+                    ret = false;
+                    tmpIdList.RefRecId = machineSalesLine.RecId;
+                    recordInsertList.add(tmpIdList);
+                    break;
+
+                case RORFuelPostingControl::Warning :
+                    warning(strfmt("@DNR2436", machineSalesLine.InventTransId));
+                    break;
+
+                default :
+                    // do nothing
+                    break;
+            }
+        }
+
+        recordInsertList.insertDatabase();
+        ttsCommit;
+
+        if (_deleteParmLines)
+        {
+            delete_from salesParmLine
+            where salesParmLine.ParmId == _parmId
+            &&    (!parmSalesTable || salesParmLine.OrigSalesId == parmSalesTable.SalesId)
+                exists join salesLine
+                where salesLine.InventTransId == salesParmLine.InventTransId
+                &&    salesLine.SalesId == salesParmLine.OrigSalesId
+                    exists join tmpIdList
+                    where (tmpIdList.RefRecId == salesLine.RecId || tmpIdList.RefRecId == salesLine.RORParentLineRecId);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>discardFuelLine</Name>
+				<Source><![CDATA[
+    // The fuel line cannot be invoiced earlier than the final invoice.
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void discardFuelLine(SalesParmUpdate _salesParmUpdate)
+    {
+        SalesLine           machineSalesLine;
+        SalesParmLine       machineSalesParmLine;
+        SalesLine           fuelSalesLine;
+        SalesParmLine       fuelSalesParmLine;
+        RORRentalDateTimes  rentalDates;
+        boolean             ret = true;
+        boolean             hasParmLine;
+        boolean             showError = true;
+        DNRTmpIdList        tmpIdList;
+        RecordInsertList    recordInsertList = new RecordInsertList(tableNum(DNRTmpIdList), false, false, false, false, false, tmpIdList);
+        
+        if (rorParameters.NotInvoiceFuelBeforeFinalInvoice)
+        {
+            ttsBegin;
+            delete_from tmpIdList;
+
+            while select RORParentLineRecId from fuelSalesLine
+            where fuelSalesLine.ItemId == rorParameters.ItemIdFuel
+            &&    fuelSalesLine.RORParentLineRecId
+            &&    (fuelSalesLine.RemainSalesFinancial || fuelSalesLine.RemainSalesPhysical)
+            &&    (!parmSalesTable || fuelSalesLine.SalesId == parmSalesTable.SalesId)
+                join RecId from fuelSalesParmLine
+                where fuelSalesParmLine.InventTransId == fuelSalesLine.InventTransId
+                &&    fuelSalesParmLine.ParmId        == _salesParmUpdate.ParmId
+                &&    fuelSalesParmLine.OrigSalesId   == fuelSalesLine.SalesId
+                    join machineSalesLine
+                    where machineSalesLine.RecId == fuelSalesLine.RORParentLineRecId
+            {
+                this.createExpectedPeriods();
+                expectedPeriodsCreated = true;
+                ret = true;
+
+                hasParmLine = (SalesParmLine::RORParentParmLine(_salesParmUpdate.ParmId, machineSalesLine).RecId);
+                       
+                if (!hasParmLine
+                &&  FINInvoicePeriodQtyFinancial::existForCharging(machineSalesLine.TableId, machineSalesLine.RecId, machineSalesLine.RORRentalLine::FINTimeZoneOrder())
+                &&  machineSalesLine.discPercent() < 100)
+                {
+                    ret = showError ? checkFailed("@DNR8199") : false;
+                }
+
+                if (ret && hasParmLine)
+                {
+                    select firstOnly RecId from rentalDates
+                    where rentalDates.RefTableId == machineSalesLine.TableId
+                    &&    rentalDates.RefRecId == machineSalesLine.RecId
+                    &&  (!rentalDates.OffRentDateTime || (rentalDates.OffRentDateTime > _salesParmUpdate.INVCalculationDateTime));
+
+                    if (rentalDates)
+                    {
+                        ret = showError ? checkFailed("@DNR8199") : false;
+                    }
+                }
+
+                if (!ret)
+                {
+                    tmpIdList.RefRecId = fuelSalesParmLine.RecId;
+                    recordInsertList.add(tmpIdList);
+                }
+            }
+
+            recordInsertList.insertDatabase();
+            ttsCommit;
+        }
+
+        // delete fuel line from salesParmLine
+        delete_from fuelSalesParmLine
+            exists join tmpIdList
+            where tmpIdList.RefRecId == fuelSalesParmLine.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustJournalizeRentalTotalsDuringConfirmation</Name>
+				<Source><![CDATA[
+    public static boolean mustJournalizeRentalTotalsDuringConfirmation()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

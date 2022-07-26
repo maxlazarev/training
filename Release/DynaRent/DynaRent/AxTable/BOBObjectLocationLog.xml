@@ -1,0 +1,503 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBObjectLocationLog</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class BOBObjectLocationLog extends common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>displayOrigin</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display BOBRefOrigin displayOrigin()
+    {
+        AssetTable          assetTable;
+        ProjTable           projTable;
+        SalesTable          salesTable;
+        PurchTable          purchTable;
+        InventJournalTable  inventJournalTable;
+        WPPWorkOrderLine    workOrderLine;
+        CustInvoiceTable    custInvoiceTable;
+        InventTransferLine  inventTransferLine;
+        BOBRefOrigin        ret;
+        ;
+    
+        switch(this.RefTableIdOrigin)
+        {
+            case tableNum(AssetTable):
+                select firstOnly AssetId from assetTable
+                where assetTable.RecId == this.RefRecIdOrigin;
+                ret = strFmt("%1 %2", "@SYS25653", assetTable.AssetId);
+                break;
+    
+            case tableNum(ProjTable):
+                projTable = ProjTable::findRecId(this.RefRecIdOrigin);
+                ret = strFmt("%1 %2", "@SYS80304", projTable.ProjId);
+                break;
+    
+            case tableNum(SalesTable):
+                salesTable = SalesTable::findRecId(this.RefRecIdOrigin);
+                ret = strFmt("%1 %2", salesTable.SalesType, salesTable.SalesId);
+                break;
+    
+            case tableNum(PurchTable):
+                purchTable = PurchTable::findRecId(this.RefRecIdOrigin);
+                ret = strFmt("%1 %2", purchTable.PurchaseType, purchTable.PurchId);
+                break;
+    
+            case tableNum(InventJournalTable):
+                select firstonly JournalId from inventJournalTable
+                where inventJournalTable.RecId == this.RefRecIdOrigin;
+                ret = strFmt("%1 %2", "@SYS6140", inventJournalTable.JournalId);
+                break;
+    
+            case tableNum(WPPWorkOrderLine):
+                workOrderLine = WPPWorkOrderLine::findRecId(this.RefRecIdOrigin);
+                ret = strFmt("%1 %2 %3", "@DNR6467", workOrderLine.WorkOrderId, workOrderLine.LineNumber);
+                break;
+    
+            case tableNum(CustInvoiceTable):
+                custInvoiceTable = CustInvoiceTable::findRecId(this.RefRecIdOrigin);
+                ret = strFmt("%1 %2", "@SYS23028", custInvoiceTable.InvoiceId);
+                break;
+    
+            case tableNum(InventTransferLine):
+                inventTransferLine = InventTransferLine::findRecId(this.RefRecIdOrigin);
+                ret = strFmt("%1 %2 %3", "@SYS78550", inventTransferLine.TransferId, inventTransferLine.LineNum);
+                break;
+    
+            case 0:
+                ret = "@SYS50228";
+                break;
+    
+            default:
+                ret = "@SYS319550";
+                break;
+        }
+    
+        if (!this.existOrigin())
+        {
+            return strFmt("%1", "@DNR8590");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>existOrigin</Name>
+				<Source><![CDATA[
+    public boolean existOrigin()
+    {
+        #define.RecId('RecId')
+    
+        Query                   query = new query();
+        QueryBuildDataSource    dataSource;
+        FieldId                 recIdFieldId;
+        ;
+    
+        if (!this.RefTableIdOrigin)
+        {
+            return false;
+        }
+    
+        recIdFieldId = fieldName2id(this.RefTableIdOrigin, #RecId);
+    
+        dataSource = query.addDataSource(this.RefTableIdOrigin);
+        dataSource.firstOnly(true);
+        dataSource.addSelectionField(recIdFieldId);
+        dataSource.addRange(recIdFieldId).value(SysQuery::value(this.RefRecIdOrigin));
+    
+        return QueryRun::getQueryRowCount(query, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeLocation</Name>
+				<Source><![CDATA[
+    public static void changeLocation(BOBObjectId                   _objectId,
+                                      LogisticsPostalAddressRecId   _newAddress,
+                                      TransDateTime                 _fromDateTime,
+                                      Common                        _origin = null,
+                                      boolean                       _allowUpdateRecord = false)
+    {
+        BOBObjectLocationLog locationLog;
+        Counter retryCount = 3;
+    
+        if (!BOBObjectTable::existObjectId(_objectId))
+        {
+            throw error(strFmt("@SYS24602", "@DNR5863", _objectId));
+        }
+        if (_newAddress && !LogisticsPostalAddress::findRecId(_newAddress).RecId)
+        {
+            throw error(strFmt("@SYS24602", "@SYS22223", _newAddress));
+        }
+        if (!_fromDateTime)
+        {
+            throw error(error::missingParameter(null));
+        }
+    
+        if (_allowUpdateRecord)
+        {
+            select forUpdate locationLog
+            where locationLog.ObjectId      == _objectId
+            &&    locationLog.FromDateTime  == _fromDateTime;
+        }
+    
+        locationLog.ObjectId            = _objectId;
+        locationLog.FromDateTime        = _fromDateTime;
+        locationLog.PostalAddress       = _newAddress;
+        locationLog.RefTableIdOrigin    = _origin.TableId;
+        locationLog.RefRecIdOrigin      = _origin.RecId;
+    
+        try
+        {
+            ttsbegin;
+
+            if (_allowUpdateRecord && locationLog)
+            {
+                locationLog.update();
+            }
+            else
+            {
+                locationLog.insert();
+            }
+
+            if (isConfigurationkeyEnabled(configurationKeyNum(DNRBusinessObjectViewV2)))
+            {
+                BOBObjectCurrentInfo::updateLocationData(locationLog);
+            }
+
+            ttscommit;
+        }
+        catch(Exception::DuplicateKeyException)
+        {
+            if(xSession::currentRetryCount() >= retryCount)
+            {
+                throw Exception::DuplicateKeyExceptionNotRecovered;
+            }
+            else
+            {
+                locationLog.FromDateTime = DateTimeUtil::addSeconds(locationLog.FromDateTime, 1);
+                retry;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR7578</DeveloperDocumentation>
+	<Label>@DNR5891</Label>
+	<TableGroup>Transaction</TableGroup>
+	<TitleField1>ObjectId</TitleField1>
+	<TitleField2>FromDateTime</TitleField2>
+	<CacheLookup>NotInTTS</CacheLookup>
+	<CreatedBy>Yes</CreatedBy>
+	<CreatedDateTime>Yes</CreatedDateTime>
+	<SaveDataPerCompany>No</SaveDataPerCompany>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>FromDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ObjectId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PostalAddress</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RefRecIdOrigin</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RefTableIdOrigin</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Log</Name>
+			<Label>@SYS2515</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>createdBy</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>createdDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Overview</Name>
+			<Label>@SYS50012</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ObjectId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>FromDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Reference</Name>
+			<Label>@SYS112248</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>displayOrigin</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>References</Name>
+			<Label>@SYS14018</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>RefTableIdOrigin</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RefRecIdOrigin</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PostalAddress</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>FromDateTime</Name>
+			<ExtendedDataType>FromDateTime</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ObjectId</Name>
+			<ExtendedDataType>BOBObjectId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>PostalAddress</Name>
+			<ExtendedDataType>LogisticsPostalAddressRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>RefRecIdOrigin</Name>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>RefTableIdOrigin</Name>
+			<ExtendedDataType>RefTableId</ExtendedDataType>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>LocationIdx</Name>
+			<AlternateKey>Yes</AlternateKey>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>ObjectId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>FromDateTime</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation>
+			<Name>AssetTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>AssetTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableIdOrigin</Name>
+					<Field>RefTableIdOrigin</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecIdOrigin</Name>
+					<Field>RefRecIdOrigin</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>BOBObjectTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>BOBObjectTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ObjectId</Name>
+					<Field>ObjectId</Field>
+					<RelatedField>ObjectId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>ObjectIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>InventJournalTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>InventJournalTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableIdOrigin</Name>
+					<Field>RefTableIdOrigin</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecIdOrigin</Name>
+					<Field>RefRecIdOrigin</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>LogisticsPostalAddress</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>LogisticsPostalAddress</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>LogisticPostalAddress</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>PostalAddress</Name>
+					<Field>PostalAddress</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>ProjTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>ProjTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableIdOrigin</Name>
+					<Field>RefTableIdOrigin</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecIdOrigin</Name>
+					<Field>RefRecIdOrigin</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>PurchTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>PurchTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableIdOrigin</Name>
+					<Field>RefTableIdOrigin</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecIdOrigin</Name>
+					<Field>RefRecIdOrigin</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>SalesTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>SalesTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableIdOrigin</Name>
+					<Field>RefTableIdOrigin</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecIdOrigin</Name>
+					<Field>RefRecIdOrigin</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>WPPWorkOrderLine</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>WPPWorkOrderLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableIdOrigin</Name>
+					<Field>RefTableIdOrigin</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecIdOrigin</Name>
+					<Field>RefRecIdOrigin</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

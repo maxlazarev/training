@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRASSplitEngine_Purch</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class DNRASSplitEngine_Purch extends DNRASSplitEngine
+{
+    PurchLine callerPurchLine;
+    LineNumber lastLineNumber;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createSplitLineAsync</Name>
+				<Source><![CDATA[
+    private static container createSplitLineAsync(container _params, System.Threading.CancellationToken _cancellationToken)
+    {
+        PurchLine purchLineLocal = con2Buf(conPeek(_params, 1));
+        Qty qty = conPeek(_params, 2);
+        LineNum lineNum = conpeek(_params, 3);
+
+        ttsbegin;
+
+        DNRASSplitEngine splitEngine = DNRASSplitEngine::construct(purchLineLocal, qty);
+        PurchLine newRentalLine = splitEngine.createSplitRentalLine(qty, lineNum);
+
+        ttscommit;
+
+        return [newRentalLine.InventTransId];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSplitRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine createSplitRentalLine(Qty _splitQty, LineNumber _lineNum = 0, SalesLineCreationSequenceNumber _lineCreationSequenceNumber = 0, RORLineParent _parentLineRecId = 0)
+    {
+        ttsbegin;
+
+        PurchLine splitRentalLine = this.initSplitRentalLine(_splitQty);
+        splitRentalLine.LineNumber = _lineNum ? _lineNum : PurchLine::lastLineNum(callerPurchLine.PurchId) + 1;
+        splitRentalLine.RORParentLineRecId = _parentLineRecId ? _parentLineRecId : splitRentalLine.RORParentLineRecId;
+
+        splitRentalLine.createLine(true);
+
+        if (splitRentalLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            RORRentalDateTimes rentalDateTimes = callerPurchLine.RORRentalDateTimesHost::rentalDateTimes();
+            RORRentalDateTimes rentalDateTimesNew = splitRentalLine.RORRentalDateTimesHost::rentalDateTimes(true);
+
+            rentalDateTimesNew.initFromRentalDateTimes(rentalDateTimes);
+            rentalDateTimesNew.doUpdate();
+
+            FINInvoicePeriodAmendment::copyAmendments(callerPurchLine, splitRentalLine);
+        }
+
+        DNRAdditionalNoteTable::copyNotes(callerPurchLine, splitRentalLine);
+
+        List splitLines = splitLinesMap.exists(callerPurchLine.RecId) ?
+                          splitLinesMap.lookup(callerPurchLine.RecId) :
+                          new List(Types::String);
+
+        splitLines.addEnd(splitRentalLine.InventTransId);
+        splitLinesMap.insert(callerPurchLine.RecId, splitLines);
+
+        ttscommit;
+
+        return splitRentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSplitRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine initSplitRentalLine(Qty _splitQty)
+    {
+        PurchLine splitPurchLine;
+            
+        splitPurchLine.data(callerPurchLine);
+
+        // The 'split' functionality is only supported until (and including) the 'confirmed' status, so we are only concerned with the below quantities.
+        splitPurchLine.PurchQty = _splitQty;
+        splitPurchLine.QtyOrdered = splitPurchLine.calcQtyOrdered();
+        splitPurchLine.RemainPurchPhysical = splitPurchLine.PurchQty;
+        splitPurchLine.RemainInventPhysical = splitPurchLine.QtyOrdered;
+
+        splitPurchLine.RORRentalGrossAmount = splitPurchLine.PurchPrice * splitPurchLine.PurchQty;
+        splitPurchLine.LineAmount = splitPurchLine.calcLineAmount(splitPurchLine.PurchQty);
+        splitPurchLine.RORDeliveryGrossAmount = (callerPurchLine.RORDeliveryGrossAmount / callerPurchLine.PurchQty) * splitPurchLine.PurchQty;
+        splitPurchLine.RORDeliveryNetAmount = splitPurchLine.RORDeliveryGrossAmount - ((splitPurchLine.RORDeliveryGrossAmount / 100) * splitPurchLine.RORDeliveryPercentage);
+        splitPurchLine.RORReturnGrossAmount = (callerPurchLine.RORReturnGrossAmount / callerPurchLine.PurchQty) * splitPurchLine.PurchQty;
+        splitPurchLine.RORReturnNetAmount = splitPurchLine.RORReturnGrossAmount - ((splitPurchLine.RORReturnGrossAmount / 100) * splitPurchLine.RORReturnPercentage);
+
+        splitPurchLine.RecId = 0;
+        splitPurchLine.InventTransId = '';
+        splitPurchLine.LineNumber = PurchLine::lastLineNum(splitPurchLine.PurchId) + 1;
+
+        splitPurchLine.RORInsurancePctModified();
+
+        return splitPurchLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalLineOrig</Name>
+				<Source><![CDATA[
+    public void updateRentalLineOrig(Qty _splitQty)
+    {
+        ttsbegin;
+
+        PurchLine purchLine;
+
+        select firstonly forupdate purchLine
+        where purchLine.RecId == callerPurchLine.RecId;
+
+        PurchQty purchQtyBeforeUpdate = purchLine.PurchQty;
+        
+        // The 'split' functionality is only supported until (and including) the 'confirmed' status, so we are only concerned with the below quantities.
+        purchLine.PurchQty = _splitQty;
+        purchLine.QtyOrdered = purchLine.calcQtyOrdered();
+        purchLine.RemainPurchPhysical = purchLine.PurchQty;
+        purchLine.RemainInventPhysical = purchLine.QtyOrdered;
+
+        purchLine.RORRentalGrossAmount = purchLine.PurchPrice * purchLine.PurchQty;
+        purchLine.LineAmount = purchLine.calcLineAmount(purchLine.PurchQty);
+        purchLine.RORDeliveryGrossAmount = (purchLine.RORDeliveryGrossAmount / purchQtyBeforeUpdate) * purchLine.PurchQty;
+        purchLine.RORDeliveryNetAmount = purchLine.RORDeliveryGrossAmount - ((purchLine.RORDeliveryGrossAmount / 100) * purchLine.RORDeliveryPercentage);
+        purchLine.RORReturnGrossAmount = (purchLine.RORReturnGrossAmount / purchQtyBeforeUpdate) * purchLine.PurchQty;
+        purchLine.RORReturnNetAmount = purchLine.RORReturnGrossAmount - ((purchLine.RORReturnGrossAmount / 100) * purchLine.RORReturnPercentage);
+
+        purchLine.RORInsurancePctModified();
+
+        purchLine.update();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getChildLines</Name>
+				<Source><![CDATA[
+    protected Set getChildLines(RORRentalLine _parentLine)
+    {
+        Set ret = new Set(Types::Record);
+        PurchLine parentLine = _parentLine;
+        PurchLine childLine;
+
+        while select childLine
+        where childLine.PurchId == parentLine.PurchId
+        &&    childLine.RORParentLineRecId == parentLine.RecId
+        {
+            ret.add(childLine);
+
+            if (childLine.PurchQty)
+            {
+                qtyMap.insert(childLine.RecId, childLine.PurchQty);
+            }
+
+            if (childLine.RORHasChildren(false, false))
+            {
+                ret = Set::union(ret, this.getChildLines(childLine));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>restoreParentRecIdReferences</Name>
+				<Source><![CDATA[
+    protected void restoreParentRecIdReferences()
+    {
+        PurchLine childLine, parentLine;
+        MapEnumerator mapEnumerator = splitLinesMap.getEnumerator();
+
+        while (mapEnumerator.moveNext())
+        {
+            RefRecId childLineRecId = mapEnumerator.currentKey();
+
+            select firstonly childLine
+            where childLine.RecId == childLineRecId
+                join RecId from parentLine
+                where parentLine.RecId == childLine.RORParentLineRecId;
+
+            if (parentLine.RecId && splitLinesMap.exists(parentLine.RecId))
+            {
+                List splitLines = mapEnumerator.currentValue();
+                ListEnumerator splitLinesEnumerator = splitLines.getEnumerator();
+
+                List splitLinesParent = splitLinesMap.lookup(parentLine.RecId);
+                ListEnumerator splitLinesParentEnumerator = splitLinesParent.getEnumerator();
+
+                // Note: The lists 'splitLines' and 'splitLinesParent' have the same length
+                while (splitLinesEnumerator.moveNext() && splitLinesParentEnumerator.moveNext())
+                {
+                    InventTransId inventTransId = splitLinesEnumerator.current();
+                    InventTransId inventTransIdParent = splitLinesParentEnumerator.current();
+
+                    this.updateParentReference(inventTransId, inventTransIdParent);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateParentReference</Name>
+				<Source><![CDATA[
+    protected void updateParentReference(InventTransId _inventTransId, InventTransId _inventTransIdParent)
+    {
+        ttsbegin;
+
+        PurchLine purchLine = PurchLine::findInventTransId(_inventTransId, true);
+        purchLine.RORParentLineRecId = PurchLine::findInventTransId(_inventTransIdParent).RecId;
+        purchLine.update();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setActiveRentalLine</Name>
+				<Source><![CDATA[
+    protected void setActiveRentalLine(RORRentalLine _rentalLine)
+    {
+        callerPurchLine = _rentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    protected boolean validate()
+    {
+        return callerPurchLine.DNRASMaySplitLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitEngineClassId</Name>
+				<Source><![CDATA[
+    protected ClassId getSplitEngineClassId()
+    {
+        return classNum(DNRASSplitEngine_Purch);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitMethod</Name>
+				<Source><![CDATA[
+    protected MethodName getSplitMethod()
+    {
+        return staticMethodStr(DNRASSplitEngine_Purch, createSplitLineAsync);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitParameters</Name>
+				<Source><![CDATA[
+    protected container getSplitParameters(RORRentalLine _rentalLine, Qty _splitQty, Counter _splitLineCounter)
+    {
+        LineNumber newLineNumber = lastLineNumber ? 
+                                   lastLineNumber + 1 :
+                                   PurchLine::lastLineNum(callerPurchLine.PurchId) + _splitLineCounter;
+        
+        lastLineNumber = newLineNumber;
+
+        return [buf2Con(callerPurchLine), _splitQty, newLineNumber];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustReconfirmSplitLines</Name>
+				<Source><![CDATA[
+    public static boolean mustReconfirmSplitLines(PurchLine _purchLine)
+    {
+        return (_purchLine.BOBRentalSubStatus == BOBRentalSubStatus::Confirmed);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>confirmSplitLines</Name>
+				<Source><![CDATA[
+    public void confirmSplitLines()
+    {
+        ttsbegin;
+
+        if (!splitLinesMap.empty())
+        {
+            List confirmList = new List(Types::Record);
+            MapEnumerator splitLinesMapEnumerator = splitLinesMap.getEnumerator();
+            PurchTable purchTable;
+            PurchLine purchLine;
+
+            while (splitLinesMapEnumerator.moveNext())
+            {
+                if (!purchTable)
+                {
+                    select firstonly purchLine
+                    where purchLine.RecId == splitLinesMapEnumerator.currentKey()
+                        join purchTable
+                        where purchTable.PurchId == purchLine.PurchId;
+                }
+                else
+                {
+                    select firstonly purchLine
+                    where purchLine.RecId == splitLinesMapEnumerator.currentKey();
+                }
+
+                if (purchLine.RecId)
+                {
+                    confirmList.addEnd(purchLine);
+                }
+
+                List splitLines = splitLinesMapEnumerator.currentValue();
+                ListEnumerator splitLinesEnumerator = splitLines.getEnumerator();
+
+                while (splitLinesEnumerator.moveNext())
+                {
+                    InventTransId inventTransId = splitLinesEnumerator.current();
+                    purchLine = PurchLine::findInventTransId(inventTransId);
+
+                    confirmList.addEnd(purchLine);
+                }
+            }
+
+            // The disposable context is being used in /Classes/DNRASPurchFormletterParmDataPurchOrderClass_Extension/Methods/mayJournalTransBePosted
+            using (DNRPrimitiveDisposableContext context = new DNRPrimitiveDisposableContext())
+            {
+                context.DNRparmBoolean(true);
+
+                PurchFormLetter purchFormLetter = PurchFormLetter::construct(DocumentStatus::PurchaseOrder);
+                purchFormLetter.parmLineList(confirmList.pack());
+                purchFormLetter.createFromLines(true);
+                purchFormLetter.update(purchTable, '');
+            }
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

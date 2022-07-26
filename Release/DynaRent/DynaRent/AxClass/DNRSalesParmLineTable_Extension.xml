@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesParmLineTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(SalesParmLine))]
+public final class DNRSalesParmLineTable_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initFromSalesLine</Name>
+				<Source><![CDATA[
+    void  initFromSalesLine(SalesLine  _salesLine, SalesTable  _salesTable)
+    {
+        next initFromSalesLine(_salesLine, _salesTable);
+        this.RORTradeType               = _salesLine.RORTradeType;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>instantiateSalesQuantity</Name>
+				<Source><![CDATA[
+    protected SalesQuantity instantiateSalesQuantity(DocumentStatus _documentStatus)
+    {
+        SalesQuantity ret = next instantiateSalesQuantity(_documentStatus);
+
+        if (ret && _documentStatus == DocumentStatus::RORSubStatus)
+        {
+            // Set substatus based on current posting substatus to get correct quantity when changing DeliverNow on salesParmLine (partial bulk qty posting).
+            this.RORSetSubstatusFromSalesParmLine(ret);
+        }
+
+        return ret; 
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORSetSubstatusFromSalesParmLine</Name>
+				<Source><![CDATA[
+    // extension methods
+    private void RORSetSubstatusFromSalesParmLine(SalesQuantity _salesQuantity)
+    {
+        SalesParmTable salesParmTable = this.salesParmTable();
+                
+        if (_salesQuantity.RORparmRentalSubStatus() == BOBRentalSubStatus::None
+        &&  salesParmTable.BOBRentalSubStatus != BOBRentalSubStatus::None)
+        {
+            _salesQuantity.RORparmRentalSubStatus(salesParmTable.BOBRentalSubStatus);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDisplayAvailRentalQtyImage</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display ResourceId BOBDisplayAvailRentalQtyImage()
+    {
+        #ResAppl
+        boolean ok = new BOBRentalInventOnHand().displayIssueCheck(this.salesLine(), this.InventNow);
+        return (ok ? #ImageBlank2 : #ImageWarning);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDisplayQtyToPickInSalesUnit</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display BOBRentalQtyAvailPhysical BOBDisplayQtyToPickInSalesUnit()
+    {
+        SalesLine                   salesLine;
+        InventDim                   inventDim;
+        SalesQty                    qtyToPickInSalesUnit;
+        BOBRentalQtyAvailPhysical   availableQty;
+        EcoResProduct               ecoResProduct;
+        InventTable                 inventTable;
+        InventTableModule           inventTableModule;
+        RORRentalDateTimes          rentalDateTimes;
+        ItemId itemIdWarranty = RAGParameters::find().ItemIdWarranty;
+    
+        salesLine = this.salesLine();
+    
+        if(salesLine.isStocked()
+        && salesLine.RORTradeType != RORTradeType::SalesPurch
+        && salesLine.ItemId != itemIdWarranty)
+        {
+            select firstOnly BOBRentalTypeId from ecoResProduct
+                join Product from inventTable
+                where inventTable.ItemId == salesLine.ItemId
+                &&    inventTable.Product == ecoResProduct.RecId
+                    join InventLocationId from inventDim
+                    where inventDim.inventDimId == salesLine.inventDimId
+                        join UnitId from inventTableModule
+                        where inventTableModule.ItemId == salesLine.ItemId
+                        &&    inventTableModule.ModuleType == ModuleInventPurchSales::Invent
+                            join OnRentDateTime from rentalDateTimes
+                            where rentalDateTimes.RefTableId == salesLine.TableId
+                            &&    rentalDateTimes.RefRecId == salesLine.RecId;
+    
+            availableQty = new BOBRentalInventOnHand().availPhysicalQty(ecoResProduct.BOBRentalTypeId,
+                                                                        inventDim.InventLocationId,
+                                                                        rentalDateTimes.OnRentDateTime);
+    
+            qtyToPickInSalesUnit = UnitOfMeasureConverter::convert(availableQty,
+                                                                   UnitOfMeasure::unitOfMeasureIdBySymbol(inventTableModule.UnitId),
+                                                                   UnitOfMeasure::unitOfMeasureIdBySymbol(salesLine.SalesUnit),
+                                                                   NoYes::Yes,
+                                                                   inventTable.Product);
+        }
+    
+        return qtyToPickInSalesUnit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBValidatePartialDelivery</Name>
+				<Source><![CDATA[
+    public boolean BOBValidatePartialDelivery()
+    {
+        boolean         ret = true;
+        SalesLine       salesLine = this.salesLine();
+        BOBRentalType   rentalType = BOBRentalType::findFromItemId(salesLine.ItemId);
+    
+        if(salesLine.QtyOrdered != this.InventNow
+        && salesLine.BOBSellFixedAsset
+        && rentalType
+        && rentalType.Classification == BOBRentalTypeClassification::Bulk)
+        {
+            ret = checkFailed("@DNR8645");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetInvoiceDateTime</Name>
+				<Source><![CDATA[
+    public void INVSetInvoiceDateTime(
+        FormLetterContract      _formLetterContract,
+        SalesLine               _salesLine = null,
+        boolean                 _checkHasOffRent = false,
+        TransDateTime           _forceTransDateTime = DateTimeUtil::minValue(),
+        SalesFormletterParmData _parmData = null)
+    {
+        SalesLine salesLineLocal = _salesLine ? _salesLine : this.salesLine();
+    
+        // If no off-rent then can only use posted date/time
+        if (FINRentalInvoiceProfile::find(salesLineLocal.INVInvoiceProfileId).InvoiceStartEndBasis == INVInvoiceStartEndBasis::DeliveryReturn/* || (_checkHasOffRent && !dateTime)*/)
+        {
+            if (_formLetterContract)
+            {
+                // during invoice posting
+                SalesParmUpdate salesParmUpdate = _formLetterContract.parmParmUpdate() as SalesParmUpdate;
+                if (!_formLetterContract.parmTransDate())
+                {
+                    _formLetterContract.parmTransDate(DateTimeUtil::date(DateTimeUtil::getSystemDateTime()));
+                }
+                // DateTime in data base always store in GMT time
+    
+                if (salesParmUpdate)
+                {
+                    // TODO: Method is defined in Dynarent module
+                    //this.INVInvoiceDateTime = salesParmUpdate.INVCalculationDateTime(_formLetterContract.parmTransDate(), _formLetterContract.RORTransTime());
+                }
+                else
+                {
+                    this.INVInvoiceDateTime = DateTimeUtil::newDateTime(_formLetterContract.parmTransDate(), _formLetterContract.RORTransTime());
+                }
+            }
+            else
+            {
+                // during packing slip / return note posting
+                if (_forceTransDateTime)
+                {
+                    this.INVInvoiceDateTime = _forceTransDateTime;
+                }
+                else if (this.salesParmTable())
+                {
+                    this.INVInvoiceDateTime = DateTimeUtil::newDateTime(this.salesParmTable().Transdate, this.salesParmTable().BOBTransTime, DateTimeUtil::getUserPreferredTimeZone());
+                }
+                else
+                {
+                    SalesParmTable dummySalesParmTable;
+
+                    _parmData.INVGetTransDateTime(dummySalesParmTable, this.salesTable(), (_salesLine && _salesLine.RORTradeType != RORTradeType::SalesPurch) ? _salesLine : null);
+                    this.INVInvoiceDateTime = DateTimeUtil::newDateTime(dummySalesParmTable.Transdate, dummySalesParmTable.BOBTransTime, DateTimeUtil::getUserPreferredTimeZone());
+                }
+            }
+        }
+        else if (FINRentalInvoiceProfile::find(salesLineLocal.INVInvoiceProfileId).InvoiceStartEndBasis == INVInvoiceStartEndBasis::OrderDates)
+        {
+            RORRentalDateTimes rentalDateTimes = salesLineLocal.RORRentalDateTimesHost::rentalDateTimes();
+            RORRentalDateTime dateTime;
+
+            if (_checkHasOffRent)
+            {
+                dateTime = rentalDateTimes.(RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingEnd()));
+            }
+            else
+            {
+                dateTime = rentalDateTimes.(RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingStart()));
+            }
+    
+            this.INVInvoiceDateTime = dateTime;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVHasChildParmLine</Name>
+				<Source><![CDATA[
+    public static boolean INVHasChildParmLine(ParmId _parmId, SalesId _salesId, RecId _parentRecId)
+    {
+        SalesParmLine   salesParmLineChild;
+        SalesLine       salesLineChild;
+    
+        if (_parmId && _parentRecId)
+        {
+            select firstonly RecId from salesParmLineChild
+            where salesParmLineChild.ParmId             == _parmId
+            && salesParmLineChild.OrigSalesId           == _salesId
+                exists join salesLineChild
+                where salesLineChild.InventTransId      == salesParmLineChild.InventTransId
+                && salesLineChild.RORParentLineRecId    == _parentRecId;
+        }
+    
+        return salesParmLineChild.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORParentParmLine</Name>
+				<Source><![CDATA[
+    public static SalesParmLine RORParentParmLine(ParmId _parmId, salesLine _salesLineParent)
+    {
+        SalesParmLine salesParmLineParent;
+    
+        if (_parmId && _salesLineParent)
+        {
+            select firstonly salesParmLineParent
+             where salesParmLineParent.ParmId           == _parmId
+                && salesParmLineParent.OrigSalesId      == _salesLineParent.SalesId
+                && salesParmLineParent.itemId           == _salesLineParent.ItemId
+                && salesParmLineParent.LineNum          == _salesLineParent.LineNum
+                && salesParmLineParent.InventTransId    == _salesLineParent.InventTransId
+                && salesParmLineParent.SalesLineRecId   == _salesLineParent.RecId
+                && (_salesLineParent.RORKitComponentType == RORKitComponentType::Kit || salesParmLineParent.LineAmount != 0);
+        }
+    
+        return salesParmLineParent;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

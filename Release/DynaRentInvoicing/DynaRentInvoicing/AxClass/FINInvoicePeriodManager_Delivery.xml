@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoicePeriodManager_Delivery</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[FINInvoicePeriodManagerAttribute(FINInvoicePeriodAction::Delivery)]
+class FINInvoicePeriodManager_Delivery extends FINInvoicePeriodManager
+{
+    Qty deliveryQty;
+    TransDateTime deliveryDateTime;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setDeliveryDetails</Name>
+				<Source><![CDATA[
+    public void setDeliveryDetails(TransDateTime _deliveryDateTime, Qty _deliveryQty)
+    {
+        deliveryDateTime = _deliveryDateTime;
+        deliveryQty = _deliveryQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if (!deliveryQty)
+        {
+            // don't do anything
+            return;
+        }
+
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+
+        // TODO: validation preventing invalid overdelivery (controlled by setup) will be programmed in posting classes.
+        select sum(QtyRented) from invPeriodQtyPhysical
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented;
+
+        Qty qtyAgreed = invoicePeriodHost.RentQty;
+        Qty previouslyDelivered = invPeriodQtyPhysical.QtyRented;
+        Qty deliveryRemainder = (qtyAgreed - previouslyDelivered);
+        Qty deliveryComparision = (deliveryQty - deliveryRemainder);
+            
+        if (deliveryComparision == 0)
+        {
+            // full delivery
+            this.executeFullDelivery(deliveryQty);
+        }
+        else if (deliveryComparision < 0)
+        {
+            // partial delivery
+            this.executePartialDelivery(deliveryQty);
+        }
+        else if (deliveryComparision > 0)
+        {
+            // overdelivery
+            this.executeOverDelivery(deliveryQty, deliveryComparision);
+        }
+
+        //This is to create records for BI purpose, running it in Async mode for performance purpose
+        runAsync(classNum(FINInvoicePeriodManager_Delivery),
+                    staticMethodStr(FINInvoicePeriodManager_Delivery, syncContractTiersAsync),
+                    buf2Con(invoicePeriodHost));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>syncContractTiersAsync</Name>
+				<Source><![CDATA[
+    protected static void syncContractTiersAsync(container _params, System.Threading.CancellationToken _cancellationToken)
+    {
+        Common hostRecord = con2Buf(_params);
+        FINRAGContractLineTier::syncContractLineTiers(hostRecord);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeFullDelivery</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void executeFullDelivery(Qty _deliveryQty)
+    {
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        
+        select forupdate invPeriodQtyPhysical
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    !invPeriodQtyPhysical.QtyRented;
+
+        if (invPeriodQtyPhysical)
+        {
+            invPeriodQtyPhysical.QtyRented = deliveryQty;
+            invPeriodQtyPhysical.DeliveryDateTime = deliveryDateTime;
+            invPeriodQtyPhysical.update();
+
+            FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+
+            update_recordset invoicePeriodQtyFinancial
+            setting PeriodStartDateTime = invPeriodQtyPhysical.DeliveryDateTime
+            where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+            && invoicePeriodQtyFinancial.PeriodStartDateTime != invPeriodQtyPhysical.DeliveryDateTime;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executePartialDelivery</Name>
+				<Source><![CDATA[
+    protected void executePartialDelivery(Qty _deliveryQty)
+    {
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        RORRentalDateTimes rentalDateTimes;
+                
+        select firstonly rentalDateTimes
+        where rentalDateTimes.RefTableId == invoicePeriodHost.TableId
+        &&    rentalDateTimes.RefRecId == invoicePeriodHost.RecId;
+
+        invPeriodQtyPhysical.initFromInvoicePeriodHost(invoicePeriodHost);
+        invPeriodQtyPhysical.initFromRentalDateTimes(rentalDateTimes);
+        invPeriodQtyPhysical.QtyRented = deliveryQty;
+        invPeriodQtyPhysical.DeliveryDateTime = deliveryDateTime;
+        invPeriodQtyPhysical.insert();
+
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+
+        invPeriodQtyFinancial.initFromInvoicePeriodQtyPhysical(invPeriodQtyPhysical);
+        invPeriodQtyFinancial.PeriodStartDateTime = invPeriodQtyPhysical.DeliveryDateTime;
+        invPeriodQtyFinancial.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeOverDelivery</Name>
+				<Source><![CDATA[
+    protected void executeOverDelivery(Qty _deliveryQty, Qty _overdelivery)
+    {
+        this.executeFullDelivery(_deliveryQty - _overdelivery);
+        this.executePartialDelivery(_overdelivery);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,458 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesLineTable1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(SalesLine))]
+public final class DNRSalesLineTable1_Extension
+{
+    // chain-of-command wrapper method
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    public void modifiedField(FieldId _fieldId)
+    {
+        next modifiedField(_fieldId);
+
+        this.FINModifiedField(_fieldId);        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void  update(boolean  _dropInvent,
+                        Common   _childBuffer,
+                        boolean  _updateOrderLineOfDeliverySchedule,
+                        boolean  _mcrAutoallocate,
+                        boolean  _cameFromCreate,
+                        boolean  _promptSuppItem
+                        )
+    {
+        SalesLine salesLineOrig = this.orig();
+        boolean updateTotals, isRentalTotalsConfigKeyEnabled;
+
+        isRentalTotalsConfigKeyEnabled = isConfigurationkeyEnabled(configurationKeyNum(DNRRentalTotals));
+
+        if (isRentalTotalsConfigKeyEnabled)
+        {
+            updateTotals = this.FINRecalculateOrderTotals(DataEntityDatabaseOperation::Update); 
+        }
+
+        next update(_dropInvent, _childBuffer, _updateOrderLineOfDeliverySchedule, _mcrAutoallocate, _cameFromCreate, _promptSuppItem);
+
+        if (this.RORTradeType           != RORTradeType::SalesPurch
+        && (this.INVInvoiceProfileId    != salesLineOrig.INVInvoiceProfileId
+        ||  this.RORPriceTimeUnit       != salesLineOrig.RORPriceTimeUnit))
+        {
+            FINRentalInvoiceProfile invoiceProfile = FINRentalInvoiceProfile::find(this.INVInvoiceProfileId);
+            
+            if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::RangeCalendar
+            && ((!this.dataSource() || !salesLineOrig.RecId || Box::yesNoCancel("@DNR:RangeTierRecalculation", DialogButton::Yes))))
+            {
+                FINPriceTierRangeRecalculate priceTierRangeRecalculate = new FINPriceTierRangeRecalculate();
+                priceTierRangeRecalculate.parmIsManualRecalculation(true);
+                priceTierRangeRecalculate.run(this);
+            }
+        }
+
+        if (isRentalTotalsConfigKeyEnabled && updateTotals)
+        {
+            SalesTable  salesTableLocal = this.salesTable();
+
+            if (!salesTableLocal.FINRecalculateRentalTotals)
+            {
+                salesTableLocal.FINUpdateRecalculateRentalTotals(updateTotals);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINModifiedField</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private void FINModifiedField(FieldId _fieldId)
+    {
+        switch (_fieldId)
+        {
+            case fieldNum(SalesLine, ItemId),
+                fieldNum(SalesLine, RORTradeType):
+                this.FINSetCostPrice();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetCostPrice</Name>
+				<Source><![CDATA[
+    private void FINSetCostPrice()
+    {
+        if (this.SalesType == SalesType::RORRental
+        &&  this.RORTradeType == RORTradeType::SalesPurch
+        &&  this.ItemId
+        &&  this.salesTable().FINRentalProjectInvoicing())
+        {
+            this.CostPrice = this.inventTable().costPcsPrice(this.InventDimId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINIsManualCalculationEngineEnabled</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is no longer used", false)]
+    public boolean FINIsManualCalculationEngineEnabled()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORDisplayCurrentNetPrice</Name>
+				<Source><![CDATA[
+    [SysClientCacheDataMethodAttribute(true)]
+    display FINCurrentNetPrice RORDisplayCurrentNetPrice()
+    {  
+        return this.RORRentalLine::RORCurrentNetPrice();       
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINisCalculationEngineEnabled</Name>
+				<Source><![CDATA[
+    public boolean FINisCalculationEngineEnabled(FINRentalAccountType _rentalAccountType)
+    {
+        boolean ret = true;
+
+        if (FINInvoiceCalculatorEngineSetup::isEngineActive(_rentalAccountType))
+        {
+            UnitOfMeasure rateCode = UnitOfMeasure::find(this.RORPriceTimeUnit);
+            
+            if (rateCode)
+            {
+                switch (_rentalAccountType)
+                {
+                    case FINRentalAccountType::Consumption:
+                        ret = rateCode.FINInvoiceConsumptionEngine;
+                        break;
+
+                    case FINRentalAccountType::CostPrice:
+                        ret = rateCode.FINInvoiceCostPriceEngine;
+                        break;
+
+                    case FINRentalAccountType::Price:
+                    case FINRentalAccountType::Discount:
+                    case FINRentalAccountType::Insurance:
+                        ret = rateCode.FINInvoiceRentalEngine;
+                        break;
+
+                    case FINRentalAccountType::Manual:
+                        ret = rateCode.FINInvoiceManualEngine;
+                        break;
+
+                    case FINRentalAccountType::ProjectHours:
+                        ret = rateCode.FINInvoiceProjectEngine;
+                        break;
+                    
+                    case FINRentalAccountType::DeliveryTransport:
+                    case FINRentalAccountType::ReturnTransport:
+                        ret = rateCode.FINInvoiceTransportEngine;
+                        break;
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCheckRentalHoursRegistered</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is no longer used. Rental hour registration functionality does not exists anymore.", false)]
+    public static boolean  FINCheckRentalHoursRegistered(SalesLine _salesLineParent)
+    {       
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINIsUnregisterdHourOrderLine</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is no longer used. Rental hour registration functionality does not exists anymore.", false)]
+    public static boolean FINIsUnregisterdHourOrderLine(SalesLine _salesLine)
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetTierMultiplierOnCreation_post</Name>
+				<Source><![CDATA[
+    // event handler methods
+    
+    [PostHandlerFor(tableStr(SalesLine), tableMethodStr(SalesLine, INVSetTierMultiplierOnCreation))]
+    public static void INVSetTierMultiplierOnCreation_post(XppPrePostArgs _args)
+    {
+        SalesLine salesLine = _args.getThis();
+
+        if (salesLine && INVInvoicePeriodHost::canCalcMuliplierOnCreation(salesLine.TableId, salesLine.RecId, false))
+        {
+            SalesLine salesLineLocal;
+            salesLineLocal.data(salesLine.data());
+            INVRateMultiplierTier rateMultiplier = FINPeriodSpecificationManager::getTierMultiplierOnCreation(salesLineLocal);
+            
+            // Avoid division by 0.
+            if (salesLine.INVRateMultiplierTier && rateMultiplier && salesLine.INVRateMultiplierTier != rateMultiplier)
+            {
+                salesLine.RORRentalGrossAmount = CurrencyExchangeHelper::amount(salesLine.RORRentalGrossAmount / salesLine.INVRateMultiplierTier * rateMultiplier, salesLine.CurrencyCode);
+                salesLine.LineAmount = CurrencyExchangeHelper::amount(salesLine.LineAmount / salesLine.INVRateMultiplierTier * rateMultiplier, salesLine.CurrencyCode);
+                salesLine.INVRateMultiplierTier = rateMultiplier;
+                salesLine.RORRentalLine::rentalPricesModified();
+            }
+            else if (!salesLine.INVRateMultiplierTier || !rateMultiplier)
+            {
+                salesLine.RORRentalGrossAmount = 0;
+                salesLine.LineAmount = 0;
+                salesLine.INVRateMultiplierTier = rateMultiplier;
+                salesLine.RORRentalLine::rentalPricesModified();
+            }
+        }        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVSetTierMultiplierRateOnCreation_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(tableStr(SalesLine), tableMethodStr(SalesLine, INVSetTierMultiplierRateOnCreation))]
+    public static void INVSetTierMultiplierRateOnCreation_post(XppPrePostArgs _args)
+    {
+        SalesLine salesLine = _args.getThis();
+        SalesLine salesLineOrig = salesLine.orig();
+        boolean forceCalculation;
+        boolean invoiceProfileOnCreation = FINRentalInvoiceProfile::find(salesLine.INVInvoiceProfileId).PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating;
+        boolean invoiceProfileOrigOnCreation = FINRentalInvoiceProfile::find(salesLineOrig.INVInvoiceProfileId).PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating;
+
+        if ((salesLine.INVInvoiceProfileId != salesLineOrig.INVInvoiceProfileId
+        ||   salesLine.DNRCalendarId != salesLineOrig.DNRCalendarId)
+        && (invoiceProfileOnCreation || invoiceProfileOrigOnCreation))
+        {
+            forceCalculation = true;
+        }
+        
+        if (salesLine 
+        && (forceCalculation || INVInvoicePeriodHost::canCalcMuliplierOnCreation(salesLine.TableId, salesLine.RecId, false)))
+        {
+            ttsbegin;
+
+            salesLine.selectForUpdate(true);
+
+            SalesLine salesLineLocal;
+            salesLineLocal.data(salesLine.data());
+            INVRateMultiplierTier rateMultiplier = 1;
+            
+            // Set calculated multiplier on line level only if current invoice profile requires that.
+            if (invoiceProfileOnCreation)
+            {
+                rateMultiplier = FINPeriodSpecificationManager::getTierMultiplierOnCreation(salesLineLocal);
+            }
+
+            if (rateMultiplier && salesLine.INVRateMultiplierTier != rateMultiplier)
+            {
+                salesLine.RORRentalGrossAmount = CurrencyExchangeHelper::amount(salesLine.RORRentalGrossAmount / salesLine.INVRateMultiplierTier * rateMultiplier, salesLine.CurrencyCode);
+                salesLine.LineAmount = CurrencyExchangeHelper::amount(salesLine.LineAmount / salesLine.INVRateMultiplierTier * rateMultiplier, salesLine.CurrencyCode);
+                salesLine.INVRateMultiplierTier = rateMultiplier;
+                salesLine.RORRentalLine::rentalPricesModified();
+            }
+
+            NoYes isPriceTierMultiplierCalculated = invoiceProfileOnCreation;
+            FINInvoicePeriodQtyPhysical::updateInvoicePeriodMultiplier(salesLine.TableId, salesLine.RecId, isPriceTierMultiplierCalculated);
+ 
+            salesLine.update();
+           
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRSetMultiplierFromSalesQuotation_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(tableStr(SalesLine), tableMethodStr(SalesLine, DNRSetMultiplierFromSalesQuotation))]
+    public static void DNRSetMultiplierFromSalesQuotation_post(XppPrePostArgs _args)
+    {
+        SalesLine salesLine = _args.getThis();
+        boolean invoiceProfileOnCreation = FINRentalInvoiceProfile::find(salesLine.INVInvoiceProfileId).PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating;
+
+        FINInvoicePeriodQtyPhysical::updateInvoicePeriodMultiplier(salesLine.TableId, salesLine.RecId, invoiceProfileOnCreation);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINValidateActiveInvoiceProposal</Name>
+				<Source><![CDATA[
+    public boolean FINValidateActiveInvoiceProposal(boolean _showWarningActiveInvoiceProposal = false)
+    {
+        INVPeriodStartDateTime          periodStartDateTime;
+        INVPeriodEndDateTime            periodEndDateTime;
+        INVPeriodExpectedEndDateTime    periodExpectedEndDateTime;
+
+        [periodStartDateTime, periodEndDateTime, periodExpectedEndDateTime] = this.RORRentalDateTimes().getRentalPeriodDateTimes();
+
+        CustInvoiceId invoiceIdProposal = FINInvoicePeriodManager_FinancialChange::getActiveInvoiceProposal(this.InventTransId, periodStartDateTime, periodEndDateTime).InvoiceId;
+
+        if (invoiceIdProposal)
+        {
+            return _showWarningActiveInvoiceProposal ? checkFailed(strFmt("@DNR:InvoiceProrosalExistsForCurrentLine", invoiceIdProposal)) : false;
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>delete</Name>
+				<Source><![CDATA[
+    // chain-of-command wrapper method
+
+    void delete(Common childBuffer, boolean updateOrderLineOfDeliverySchedule)
+    {
+        next delete(childBuffer, updateOrderLineOfDeliverySchedule);
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRRentalTotals))
+        &&  this.FINRecalculateOrderTotals(DataEntityDatabaseOperation::Delete))
+        {
+            SalesTable salesTableLocal = this.salesTable();
+
+            if (!salesTableLocal.FINRecalculateRentalTotals)
+            {
+                salesTableLocal.FINUpdateRecalculateRentalTotals(true);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insert</Name>
+				<Source><![CDATA[
+    // chain-of-command wrapper method
+
+    public void insert(boolean _dropInvent, boolean _findMarkup, Common _childBuffer, boolean _skipCreditLimitCheck, boolean _skipWHSProcesses, InventRefTransId _interCompanyInventTransId)
+    {
+        next insert(_dropInvent, _findMarkup, _childBuffer, _skipCreditLimitCheck, _skipWHSProcesses, _interCompanyInventTransId);
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRRentalTotals))
+        &&  this.FINRecalculateOrderTotals(DataEntityDatabaseOperation::Insert))
+        {
+            SalesTable salesTableLocal = this.salesTable();
+
+            if (!salesTableLocal.FINRecalculateRentalTotals)
+            {
+                salesTableLocal.FINUpdateRecalculateRentalTotals(true);
+            }
+        }
+
+        if (this.dataSource())
+        {
+            FINRAGContractLineTier::syncContractLineTiers(this);
+        }
+        else
+        {
+            RORRentalDateTimes rentalDateTimes = RORRentalDateTimes::findReference(this.TableId, this.RecId);
+
+            runAsync(classNum(SalesLineType),
+                    staticMethodStr(SalesLineType, FINSyncContractLineTiersAsync),
+                    [buf2Con(this), buf2Con(rentalDateTimes)]);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINRecalculateOrderTotals</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public boolean FINRecalculateOrderTotals(DataEntityDatabaseOperation _dbOperation)
+    {
+        boolean ret;
+
+        if (this.SalesType == SalesType::RORRental)
+        {
+            switch (_dbOperation)
+            {
+                case DataEntityDatabaseOperation::Insert:
+                case DataEntityDatabaseOperation::Delete:
+                    ret = true;
+                    break;
+                case DataEntityDatabaseOperation::Update:
+                    SalesLine  salesLineOrig = this.orig();
+
+                    if (this.RORRentalGrossAmount           != salesLineOrig.RORRentalGrossAmount
+                    ||  this.LinePercent                    != salesLineOrig.LinePercent
+                    ||  this.lineDisc                       != salesLineOrig.lineDisc
+                    ||  this.LineAmount                     != salesLineOrig.LineAmount
+                    ||  this.SalesPrice                     != salesLineOrig.SalesPrice
+                    ||  this.TaxItemGroup                   != salesLineOrig.TaxItemGroup
+                    ||  this.TaxGroup                       != salesLineOrig.TaxGroup
+                    ||  this.INVInvoiceProfileId            != salesLineOrig.INVInvoiceProfileId
+                    ||  this.DNRCalendarId                  != salesLineOrig.DNRCalendarId
+                    ||  this.RORPriceTimeUnit               != salesLineOrig.RORPriceTimeUnit
+                    ||  this.RORInsuranceGrossAmount        != salesLineOrig.RORInsuranceGrossAmount
+                    ||  this.RORInsuranceGrossPercentage    != salesLineOrig.RORInsuranceGrossPercentage
+                    ||  this.RORInsuranceNetAmount          != salesLineOrig.RORInsuranceNetAmount
+                    ||  this.RORInsuranceNetPercentage      != salesLineOrig.RORInsuranceNetPercentage
+                    ||  this.RORDeliveryGrossAmount         != salesLineOrig.RORDeliveryGrossAmount
+                    ||  this.RORDeliveryPercentage          != salesLineOrig.RORDeliveryPercentage
+                    ||  this.RORDeliveryNetAmount           != salesLineOrig.RORDeliveryNetAmount
+                    ||  this.RORReturnGrossAmount           != salesLineOrig.RORReturnGrossAmount
+                    ||  this.RORReturnPercentage            != salesLineOrig.RORReturnPercentage
+                    ||  this.RORReturnNetAmount             != salesLineOrig.RORReturnNetAmount)
+                    {
+                        ret = true;
+                    }
+                    break;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromProjectQuotationLine</Name>
+				<Source><![CDATA[
+    protected void initFromProjectQuotationLine(SalesQuotationLine _salesQuotationLine, SalesTable _salesTable, smmActivityNumber _activityNumber)
+    {
+        this.DNRSourceSalesQuoteLineRecId = _salesQuotationLine.RecId;
+
+        next initFromProjectQuotationLine(_salesQuotationLine, _salesTable, _activityNumber);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

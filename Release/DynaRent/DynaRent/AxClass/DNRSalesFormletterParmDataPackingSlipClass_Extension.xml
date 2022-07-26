@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesFormletterParmDataPackingSlipClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesFormletterParmDataPackingSlip))]
+public final class DNRSalesFormletterParmDataPackingSlipClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>interCompanyParmLineQty</Name>
+				<Source><![CDATA[
+    protected Qty interCompanyParmLineQty(Common _common, boolean _isInventQty)
+    {
+        SalesLine               salesLine  = _common as SalesLine;
+        VendPackingSlipTrans    vendPackingSlipTrans;
+        VendPackingSlipJour     vendPackingSlipJour;
+        VendPackingSlipVersion  vendPackingSlipVersion;
+        Qty                     inventQty;
+        UnitOfMeasureRecId      toUnitOfMeasureRecId;
+        UnitOfMeasureRecId      fromUnitOfMeasureRecId;
+
+        Qty ret = next interCompanyParmLineQty(_common, _isInventQty);
+        
+        if (!interCompanyCompanyId)
+        {
+            select firstonly forceplaceholders InventQty, Qty, ItemId, PurchUnit from vendPackingSlipTrans
+                   where vendPackingSlipTrans.InventTransId              == salesLine.InventRefTransId
+                    &&   vendPackingSlipTrans.VendPackingSlipJour        == this.parmRelatedJournal().RecId
+            exists join vendPackingSlipJour
+               where vendPackingSlipJour.RecId == vendPackingSlipTrans.VendPackingSlipJour
+                   exists join vendPackingSlipVersion
+                        where vendPackingSlipVersion.VendPackingSlipJour == vendPackingSlipJour.RecId
+                           && vendPackingSlipVersion.ParmId              == interCompanyParmId;
+
+            inventQty = vendPackingSlipTrans.InventQty;
+
+            // Supplementary items have no link between each other in rental intercompany process
+            if (salesTableOrig.SalesType == salesType::RORRental
+            &&  !inventQty && !salesLine.InterCompanyInventTransId)
+            {
+                ret = salesLine.RemainSalesPhysical;
+    
+                if (_isInventQty)
+                {
+                    fromUnitOfMeasureRecId = UnitOfMeasure::unitOfMeasureIdBySymbol(salesLine.inventTable().inventUnitId());
+                    if (fromUnitOfMeasureRecId != toUnitOfMeasureRecId)
+                    {
+                        ret = UnitOfMeasureConverter::convert(
+                            ret,
+                            fromUnitOfMeasureRecId,
+                            toUnitOfMeasureRecId,
+                            NoYes::Yes,
+                            InventTable::itemProduct(salesLine.ItemId));
+                    }
+                }
+                // force to return calculated qty
+                _isInventQty = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mayJournalTransBePosted</Name>
+				<Source><![CDATA[
+    protected boolean mayJournalTransBePosted(Common _salesLine)
+    {
+        boolean ret = next mayJournalTransBePosted(_salesLine);
+        ret = this.DNRmayJournalTransBePosted(ret, _salesLine);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRmayJournalTransBePosted</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private boolean DNRmayJournalTransBePosted(boolean _ret, SalesLine _salesLine)
+    {
+        SalesLine   parentLine;
+        // Never show Fuel in packing slip posting screen
+        boolean     isFuelLine  = (_salesLine.ItemId == RORParameters::find().ItemIdFuel);
+        boolean     ret         = (_ret
+                                && (!isFuelLine
+                                    || this.RORparmPostFuelLine()
+                                    // Fuel may be delivered if it is on a sales order or not related to a parent rental line
+                                    || !_salesLine.RORParentLineRecId
+                                    || _salesLine.salesTable().SalesType != SalesType::RORRental
+                                    )
+                                && _salesLine.RORmaySubStatusBeUpdated(this.INVParmFormLetterContract().RORparmRentalSubStatus())
+                                );
+    
+    
+        if (!this.parmProforma())
+        {
+            // Only execute the checks when it is not called from the Work order table
+            if (!this.INVParmFormLetterContract().WPPparmWorkOrderId())
+            {
+                // Check whether the current line is not linked to a work order
+                // and where the task is of type Delivery
+                ret = ret && !WPPWorkOrderTable::excludeOrderLine(_salesLine.TableId, _salesLine.RecId, WPPTaskType::Delivery);
+    
+                if ((!isFuelLine && _salesLine.RORParentLineRecId)
+                ||  ( isFuelLine && !this.RORparmPostFuelLine()))
+                {
+                    // Find the parent line
+                    parentLine = SalesLine::findRecId(_salesLine.RORParentLineRecId);
+    
+                    while (ret && parentLine)
+                    {
+                        // Check whether the parent line is not linked to a work order
+                        // and whether the task is of type Delivery
+                        ret = !WPPWorkOrderTable::excludeOrderLine(parentLine.TableId, parentLine.RecId, WPPTaskType::Delivery);
+    
+                        // Saves a db round trip
+                        if (ret)
+                        {
+                            parentLine = SalesLine::findRecId(parentLine.RORParentLineRecId);
+                        }
+                    }
+                }
+            }
+        }    
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

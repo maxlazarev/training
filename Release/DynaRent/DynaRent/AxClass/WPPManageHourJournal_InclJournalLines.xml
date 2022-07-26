@@ -1,0 +1,714 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPManageHourJournal_InclJournalLines</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPManageHourJournal_InclJournalLines extends WPPManageHourJournal
+{
+    WPPParameters   parameters;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createActivity</Name>
+				<Source><![CDATA[
+    private smmActivityNumber createActivity()
+    {
+        Hierarchy                   hierarchy;
+        HierarchyLinkTable          hierarchyLinkTable;
+        smmActivities               smmActivities;
+        ProjActivity                projActivity;
+        smmActivityParentLinkTable  smmActivityParentLinkTable;
+        HierarchyTreeTable          hierarchyTreeTable;
+        ElementNumber               rootElementNumber;
+    
+        #Characters
+    
+        // Create hierarchy
+        hierarchy = Hierarchy::findByNameType(projTable.ProjId, HierarchyType::Project, NoYes::No);
+    
+        if (!hierarchy)
+        {
+            hierarchy.clear();
+            hierarchy.HierarchyId = NumberSeq::newGetNum(CompanyInfo::numRefHierarchyId()).num();
+            hierarchy.Name = projTable.ProjId;
+            hierarchy.Description = strLTrim(projTable.Name);
+            hierarchy.HierarchyType = HierarchyType::Project;
+            hierarchy.insert();
+        }
+    
+        select firstOnly hierarchyLinkTable
+        where hierarchyLinkTable.HierarchyId == hierarchy.HierarchyId
+        &&    hierarchyLinkTable.RefTableId == tableNum(ProjTable)
+        &&    hierarchyLinkTable.RefRecId   == projTable.RecId;
+    
+        if (!hierarchyLinkTable)
+        {
+            // Create hierarchyLinkTable
+            hierarchyLinkTable.clear();
+            hierarchyLinkTable.HierarchyId = hierarchy.HierarchyId;
+            hierarchyLinkTable.RefTableId = tableNum(ProjTable);
+            hierarchyLinkTable.RefRecId = projTable.RecId;
+            hierarchyLinkTable.insert();
+        }
+    
+        HierarchyTreeTable::insertRoot(hierarchy.HierarchyId, projTable.ProjId);
+    
+        rootElementNumber = HierarchyTreeTable::findRootElementNumber(hierarchy.HierarchyId);
+    
+        // Create smmActivities
+        select firstOnly smmActivities
+        where smmActivities.Purpose == workOrderLine.TaskId;
+    
+        if (!smmActivities)
+        {
+            smmActivities.clear();
+            smmActivities.ActivityNumber = NumberSeq::newGetNum(smmParameters::numRefActivityNumber()).num();
+            smmActivities.Category = smmActivityCategory::Task;
+            smmActivities.KeepSynchronized = NoYes::No;
+            smmActivities.Purpose = workOrderLine.TaskId;
+            smmActivities.insert();
+        }
+    
+        // Create smmActivityParentLink
+        smmActivityParentLinkTable = smmActivityParentLinkTable::findByActivityAndParent(smmActivities.ActivityNumber, smmActivityParentType::Project, projTable.RecId, tableNum(ProjTable));
+    
+        if (!smmActivityParentLinkTable)
+        {
+            smmActivityParentLinkTable.clear();
+            smmActivityParentLinkTable.ActivityNumber = smmActivities.ActivityNumber;
+            smmActivityParentLinkTable.PrimaryLink = NoYes::Yes;
+            smmActivityParentLinkTable.ParentType = smmActivityParentType::Project;
+            smmActivityParentLinkTable.RefTableId = tableNum(ProjTable);
+            smmActivityParentLinkTable.RefRecId = projTable.RecId;
+            smmActivityParentLinkTable.insert();
+        }
+    
+        // Create hierarcyTreeTable
+        hierarchyTreeTable.clear();
+        hierarchyTreeTable.HierarchyId = hierarchy.HierarchyId;
+        hierarchyTreeTable.ElementNumber = NumberSeq::newGetNum(CompanyInfo::numRefElementNumber()).num();
+        hierarchyTreeTable.Name = workOrderLine.TaskId;
+        hierarchyTreeTable.ElementNodeType = ElementNodeType::Activity;
+        hierarchyTreeTable.RefRecId = smmActivities.RecId;
+        hierarchyTreeTable.ParentElementNumber = rootElementNumber;
+        hierarchyTreeTable.SiblingNumber = HierarchyTreeTable::nextSiblingNum(hierarchyTreeTable.HierarchyId, hierarchyTreeTable.ParentElementNumber);
+        hierarchyTreeTable.Path = hierarchyTreeTable.ParentElementNumber + #sharp;
+        hierarchyTreeTable.insert();
+    
+        // Create activity
+        projActivity = ProjActivity::find(smmActivities.ActivityNumber);
+    
+        if (!projActivity)
+        {
+            projActivity.clear();
+            projActivity.initFromSmmActivities(smmActivities);
+            projActivity.insert();
+        }
+    
+        return projActivity.ActivityNumber;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createHourJournalLines</Name>
+				<Source><![CDATA[
+    protected boolean createHourJournalLines(WPPWorkOrderLineResource _resourcePlanning)
+    {
+        DNRCalendarDate         calendar;
+        DNRCalendarDateLine     workCalendarDateLine;
+        DNRCalendarId           calendarId;
+        boolean                 ret, reinitialize, dateLineUsed;
+        TransDate               curDate;
+        TransDateTime           curDateTime;
+        FromDateTime            fromDateTimeFound, minFromDateTimeFound;
+        ToDateTime              toDateTimeFound, maxDateTimeFound;
+        container               fromToDateTimeContainer;
+        FromTime                startTimeOnFromDate;
+        ToTime                  endTimeOnEndDate;
+        WPPBreakQty             breakQty;
+        TransDateTime           minValue;
+        LineAmount              overTimeLineAmount;
+        container               recIdContainer;
+        Map                     dateRecIdMap;
+    
+        #Timeconstants
+    
+        ret           = false;
+        minValue      = DateTimeUtil::minValue();
+        dateRecIdMap  = new Map(Types::Date, Types::Container);
+    
+        for (curDate = fromDate; curDate <= toDate; curDate++)
+        {
+            curDateTime = DateTimeUtil::newDateTime(curDate, 0);
+    
+            if (workOrderTable.OrderTableId == tableNum(SalesLine))
+            {
+                calendarId = SalesLine::findRecId(workOrderTable.OrderRecId).DNRCalendarId;
+            }
+            else
+            {
+                calendarId = WPPResourceCalendarResource::findActiveForResource(_resourcePlanning.ResourceId, curDateTime).CalendarId;
+            }
+    
+            calendar             = this.getCalendar(calendarId, curDate);
+            fromDateTimeFound    = minValue;
+            toDateTimeFound      = minValue;
+            minFromDateTimeFound = minValue;
+            maxDateTimeFound     = minValue;
+            breakQty             = 0;
+            reinitialize         = true;
+    
+            // Skip closed days
+            if (calendar.WorkTimeControl != WorkTimeControl::Closed)
+            {
+                // Add normal hours
+                while select workCalendarDateLine
+                where workCalendarDateLine.CalendarId  == calendar.CalendarId
+                &&    workCalendarDateLine.TransDate   == curDate
+                &&    workCalendarDateLine.Effectivity == 100
+                {
+                    fromToDateTimeContainer = this.getStartTimeEndTime(_resourcePlanning, curDate, workCalendarDateLine);
+                    if (fromToDateTimeContainer)
+                    {
+                        [fromDateTimeFound, toDateTimeFound]  = fromToDateTimeContainer;
+    
+                        if (workCalendarDateLine.PropertyId == parameters.BreakPropertyId)
+                        {
+                            breakQty += (workCalendarDateLine.ToTime - workCalendarDateLine.FromTime) / #SecondsPerHour;
+                        }
+                    }
+    
+                    if (reinitialize && fromDateTimeFound)
+                    {
+                        minFromDateTimeFound = fromDateTimeFound;
+                        reinitialize = false;
+    
+                        // Set the first start time on the start date
+                        // later this is used to retrieve the overtime hours on the start date
+                        if (curDate == fromDate)
+                        {
+                            startTimeOnFromDate = DateTimeUtil::time(minFromDateTimeFound);
+                        }
+                    }
+                    else
+                    {
+                        minFromDateTimeFound = min(fromDateTimeFound, minFromDateTimeFound);
+                    }
+    
+                    maxDateTimeFound = max(toDateTimeFound, maxDateTimeFound);
+    
+                    // Set the last end time on the end date
+                    // later this is used to retrieve the overtime hours on the end date
+                    if (curDate == toDate)
+                    {
+                        endTimeOnEndDate = DateTimeUtil::time(maxDateTimeFound);
+                    }
+    
+                    recIdContainer += workCalendarDateLine.RecId;
+                }
+    
+                // When one journal line is added then don't show the info
+                ret = this.initJournalLine(_resourcePlanning, minFromDateTimeFound, maxDateTimeFound, curDate, breakQty) || ret;
+                dateRecIdMap.insert(curDate, recIdContainer);
+    
+                if (curDate == fromDate)
+                {
+                    reinitialize            = true;
+                    fromToDateTimeContainer = conNull();
+                    fromDateTimeFound       = minValue;
+                    toDateTimeFound         = minValue;
+                    minFromDateTimeFound    = minValue;
+                    maxDateTimeFound        = minValue;
+    
+                    // Add overtime hours if necessary
+                    // First on the start date before the actual start time of the normal working hours, then....
+                    while select workCalendarDateLine
+                    order by CalendarId, TransDate, FromTime
+                    where workCalendarDateLine.CalendarId == calendar.CalendarId
+                    &&    workCalendarDateLine.TransDate  == fromDate
+                    {
+                        if (!recIdContainer
+                        &&  !dateRecIdMap.empty()
+                        &&   dateRecIdMap.exists(fromDate))
+                        {
+                            recIdContainer = dateRecIdMap.lookup(fromDate);
+                        }
+    
+                        dateLineUsed = recIdContainer && conFind(recIdContainer, workCalendarDateLine.RecId);
+    
+                        if (dateLineUsed)
+                        {
+                            // Step out as soon as the first Normal line is hit
+                            break;
+                        }
+                        else
+                        {
+                            overTimeLineAmount = this.getOverTimeLineAmount(workCalendarDateLine.PropertyId);
+    
+                            if (overTimeLineAmount)
+                            {
+                                fromToDateTimeContainer = this.getStartTimeEndTime(_resourcePlanning, fromDate, workCalendarDateLine);
+                                if (fromToDateTimeContainer)
+                                {
+                                    [fromDateTimeFound, toDateTimeFound]  = fromToDateTimeContainer;
+                                }
+    
+                                if (reinitialize && fromDateTimeFound)
+                                {
+                                    minFromDateTimeFound = fromDateTimeFound;
+                                    reinitialize = false;
+                                }
+                                else
+                                {
+                                    minFromDateTimeFound = min(fromDateTimeFound, minFromDateTimeFound);
+                                }
+    
+                                maxDateTimeFound = max(toDateTimeFound, maxDateTimeFound);
+                            }
+                        }
+                    }
+    
+                    // When one journal line is added then don't show the info
+                    ret = this.initJournalLine(_resourcePlanning, minFromDateTimeFound, maxDateTimeFound, fromDate, 0) || ret;
+                }
+    
+                if (curDate == toDate)
+                {
+                    reinitialize            = true;
+                    fromToDateTimeContainer = conNull();
+                    fromDateTimeFound       = minValue;
+                    toDateTimeFound         = minValue;
+                    minFromDateTimeFound    = minValue;
+                    maxDateTimeFound        = minValue;
+    
+                    // ....on the end date
+                    // after the actual end time of the normal working hours
+                    while select reverse workCalendarDateLine
+                    order by CalendarId, TransDate, FromTime
+                    where workCalendarDateLine.CalendarId == calendar.CalendarId
+                    &&    workCalendarDateLine.TransDate  == toDate
+                    {
+                        if (!recIdContainer
+                        &&  !dateRecIdMap.empty()
+                        &&   dateRecIdMap.exists(fromDate))
+                        {
+                            recIdContainer = dateRecIdMap.lookup(fromDate);
+                        }
+    
+                        dateLineUsed = recIdContainer && conFind(recIdContainer, workCalendarDateLine.RecId);
+    
+                        if (dateLineUsed)
+                        {
+                            // Step out as soon as the first Normal line is hit
+                            break;
+                        }
+                        else
+                        {
+                            overTimeLineAmount = this.getOverTimeLineAmount(workCalendarDateLine.PropertyId);
+    
+                            if (overTimeLineAmount)
+                            {
+                                fromToDateTimeContainer = this.getStartTimeEndTime(_resourcePlanning, toDate, workCalendarDateLine);
+                                if (fromToDateTimeContainer)
+                                {
+                                    [fromDateTimeFound, toDateTimeFound]  = fromToDateTimeContainer;
+                                }
+    
+                                if (reinitialize && fromDateTimeFound)
+                                {
+                                    minFromDateTimeFound = fromDateTimeFound;
+                                    reinitialize = false;
+                                }
+                                else
+                                {
+                                    minFromDateTimeFound = min(fromDateTimeFound, minFromDateTimeFound);
+                                }
+    
+                                maxDateTimeFound = max(toDateTimeFound, maxDateTimeFound);
+                            }
+                        }
+                    }
+    
+                    // When one journal line is added then don't show the info
+                    ret = this.initJournalLine(_resourcePlanning, minFromDateTimeFound, maxDateTimeFound, toDate, 0) || ret;
+                }
+            }
+        }
+    
+        if (!ret)
+        {
+            info(strFmt("@DNR2910", _resourcePlanning.ResourceId, workOrderLine.TaskId));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createLines</Name>
+				<Source><![CDATA[
+    public void createLines(QueryRun _queryRun)
+    {
+        WPPWorkOrderLineResource resourcePlanning;
+    
+        ttsBegin;
+        while (_queryRun.next())
+        {
+            if (_queryRun.changed(tableNum(WPPWorkOrderLineResource)))
+            {
+                resourcePlanning    = _queryRun.get(tableNum(WPPWorkOrderLineResource));
+                fromDateTime        = resourcePlanning.ActualFromDateTime ? resourcePlanning.ActualFromDateTime : resourcePlanning.PlannedFromDateTime;
+                toDateTime          = resourcePlanning.ActualToDateTime   ? resourcePlanning.ActualToDateTime   : resourcePlanning.PlannedToDateTime;
+                fromDate            = DateTimeUtil::date(fromDateTime);
+                toDate              = DateTimeUtil::date(toDateTime);
+    
+                // Create hour journal lines
+                if (this.createHourJournalLines(resourcePlanning))
+                {
+                    resourcePlanning.update();
+                }
+            }
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createWorkOrderLineJournalTransLink</Name>
+				<Source><![CDATA[
+    private void createWorkOrderLineJournalTransLink(ProjJournalTrans _projJournalTrans)
+    {
+        WPPWorkOrderLineHourTransLink   workOrderLineHourTransLink;
+    
+        if (!WPPWorkOrderLineHourTransLink::existReference(_projJournalTrans.TableId, _projJournalTrans.RecId))
+        {
+            workOrderLineHourTransLink.WorkOrderLineRecId = workOrderLine.RecId;
+            workOrderLineHourTransLink.initFromProjJournalTrans(_projJournalTrans);
+            workOrderLineHourTransLink.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOverTimeLineAmount</Name>
+				<Source><![CDATA[
+    private LineAmount getOverTimeLineAmount(PropertyId _propertyId)
+    {
+        SalesLine       salesLine;
+        InventTable     inventTable;
+        EcoResProduct   ecoResProduct;
+        BOBRentalType   rentalType;
+        LineAmount      lineAmount;
+        SalesId         salesId;
+    
+        if (workOrderTable.OrderTableId == tableNum(SalesLine))
+        {
+            salesId = SalesLine::findRecId(workOrderTable.OrderRecId).SalesId;
+    
+            select firstOnly salesLine
+            where salesLine.SalesId          == salesId
+            &&    salesLine.RORRootLineRecId == workOrderTable.OrderRecId
+            &&    salesLine.ItemId           == _propertyId
+                exists join inventTable
+                where inventTable.ItemId == salesLine.ItemId
+                    join TableId from ecoResProduct
+                    where ecoResProduct.RecId == inventTable.Product
+                        join TableId from rentalType
+                        where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId;
+    
+            lineAmount = SalesLine::ROREditLineAmount(salesLine, false, 0);
+        }
+    
+        return lineAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProjJournalTable</Name>
+				<Source><![CDATA[
+    protected void getProjJournalTable()
+    {
+        WPPWorkOrderLineProjJournalLink workOrderLineProjJournalLink;
+        WPPWorkOrderLineHourTransLink   workOrderLineHourTransLink;
+        ProjJournalTrans                projJournalTrans;
+        WPPWorkOrderLine                workOrderLineFind;
+    
+        if (parameters.SeparateProjectPerWorkOrderLine)
+        {
+            workOrderLineProjJournalLink = WPPWorkOrderLineProjJournalLink::findNotPosted(workOrderLine.RecId);
+    
+            if (workOrderLineProjJournalLink)
+            {
+                projJournalTable = ProjJournalTable::find(workOrderLineProjJournalLink.ProjJournalId);
+            }
+        }
+        else
+        {
+            // When one journal is already created for the work order line, then use that one
+            select firstOnly projJournalTable
+            where !projJournalTable.Posted
+                exists join projJournalTrans
+                where projJournalTrans.JournalId == projJournalTable.JournalId
+                    join TableId from workOrderLineHourTransLink
+                    where workOrderLineHourTransLink.RefTableId == projJournalTrans.TableId
+                    &&    workOrderLineHourTransLink.RefRecId   == projJournalTrans.RecId
+                        join TableId from workOrderLineFind
+                        where workOrderLineFind.RecId       == workOrderLineHourTransLink.WorkOrderLineRecId
+                        &&    workOrderLineFind.WorkOrderId == workOrderLine.WorkOrderId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getStartTimeEndTime</Name>
+				<Source><![CDATA[
+    public container getStartTimeEndTime(WPPWorkOrderLineResource   _workOrderLineResource,
+                                         TransDate                  _curDate,
+                                         DNRCalendarDateLine        _workCalendarDateLine)
+    {
+        FromDateTime            fromTime;
+        ToDateTime              toTime;
+        FromDateTime            calendarDateLineFromDateTime;
+        ToDateTime              calendarDateLineToDateTime;
+        FromDate                plannedFromDate;
+        ToDate                  plannedToDate;
+        container               timeCon;
+        WPPPlannedFromDateTime  plannedFromDateTime;
+        WPPPlannedToDateTime    plannedToDateTime;
+    
+        calendarDateLineFromDateTime = DateTimeUtil::newDateTime(_workCalendarDateLine.TransDate, _workCalendarDateLine.FromTime);
+        calendarDateLineToDateTime   = DateTimeUtil::newDateTime(_workCalendarDateLine.TransDate, _workCalendarDateLine.ToTime);
+        plannedFromDate              = DateTimeUtil::date(_workOrderLineResource.PlannedFromDateTime);
+        plannedToDate                = DateTimeUtil::date(_workOrderLineResource.PlannedToDateTime);
+        plannedFromDateTime          = DateTimeUtil::applyTimeZoneOffset(_workOrderLineResource.PlannedFromDateTime, DateTimeUtil::getUserPreferredTimeZone());
+        plannedToDateTime            = DateTimeUtil::applyTimeZoneOffset(_workOrderLineResource.PlannedToDateTime, DateTimeUtil::getUserPreferredTimeZone());
+    
+        // When the planned from date is the current date from the for-loop
+        // only create journal lines from the from time on the resource planning table
+        if (plannedFromDate == _curDate)
+        {
+            // Make a difference between whether the task is planned for just one day or....
+            if (plannedFromDate == plannedToDate)
+            {
+                if (plannedFromDateTime >= calendarDateLineFromDateTime
+                &&  plannedFromDateTime <= calendarDateLineToDateTime)
+                {
+                    fromTime = plannedFromDateTime > calendarDateLineFromDateTime ? plannedFromDateTime : calendarDateLineFromDateTime;
+                    toTime   = plannedToDateTime   < calendarDateLineToDateTime   ? plannedToDateTime   : calendarDateLineToDateTime;
+                }
+                else
+                if (plannedToDateTime >= calendarDateLineToDateTime)
+                {
+                    fromTime = plannedFromDateTime > calendarDateLineFromDateTime ? plannedFromDateTime : calendarDateLineFromDateTime;
+                    toTime   = calendarDateLineToDateTime;
+                }
+                else
+                if (plannedToDateTime >= calendarDateLineFromDateTime
+                &&  plannedToDateTime <= calendarDateLineToDateTime)
+                {
+                    fromTime = calendarDateLineFromDateTime;
+                    toTime   = plannedToDateTime;
+                }
+            }
+            // ...multiple days
+            else if (plannedFromDateTime >= calendarDateLineFromDateTime
+                &&  plannedFromDateTime <= calendarDateLineToDateTime)
+            {
+                fromTime = plannedFromDateTime > calendarDateLineFromDateTime ? plannedFromDateTime : calendarDateLineFromDateTime;
+                toTime   = calendarDateLineToDateTime;
+            }
+        }
+        // When the planned to date is the current date from the for-loop
+        // only create journal lines until the to time on the resource planning table
+        else
+        if (DateTimeUtil::date(plannedToDateTime) == _curDate)
+        {
+            if (plannedToDateTime >= calendarDateLineFromDateTime
+            &&  plannedToDateTime <= calendarDateLineToDateTime)
+            {
+                fromTime = plannedFromDateTime > calendarDateLineFromDateTime ? plannedFromDateTime : calendarDateLineFromDateTime;
+                toTime   = plannedToDateTime   < calendarDateLineToDateTime   ? plannedToDateTime   : calendarDateLineToDateTime;
+            }
+            else
+            if (plannedToDateTime > calendarDateLineToDateTime)
+            {
+                fromTime = plannedToDateTime < calendarDateLineFromDateTime ? plannedToDateTime : calendarDateLineFromDateTime;
+                toTime   = calendarDateLineToDateTime;
+            }
+        }
+        // Else just take the from time and to time form the work calendar
+        else
+        {
+            fromTime = calendarDateLineFromDateTime;
+            toTime   = calendarDateLineToDateTime;
+        }
+    
+        if (fromTime < toTime)
+        {
+            timeCon = [fromTime, toTime];
+        }
+        else
+        {
+            conIns(timeCon, 1, DateTimeUtil::minValue());
+            conIns(timeCon, 2, DateTimeUtil::minValue());
+        }
+    
+        return timeCon;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initJournalLine</Name>
+				<Source><![CDATA[
+    public boolean initJournalLine(WPPWorkOrderLineResource    _resourcePlanning,
+                                   FromDateTime                _minFromDateTimeFound,
+                                   ToDateTime                  _maxDateTimeFound,
+                                   TransDate                   _curDate,
+                                   WPPBreakQty                 _breakQty)
+    {
+        ProjJournalTrans    projJournalTrans;
+        ProjJournalTrans    projJournalTransLineNum;
+        boolean             ret;
+    
+        #TimeConstants
+    
+        if (_minFromDateTimeFound || _maxDateTimeFound)
+        {
+            projJournalTrans.clear();
+            projJournalTrans.initFromProjJournalTable(projJournalTable);
+    
+            // When related to the sales line then always pick the Default hour journal worker
+            // and ofcourse when no worker is setup on the work center then also use the Default hour journal worker
+            if (workOrderTable.OrderTableId == tableNum(SalesLine))
+            {
+                projJournalTrans.Resource = (select RecId from ResourceView
+                                             where ResourceView.Worker == parameters.DefaultHourJourWorker).RecId;
+            }
+            
+    
+            projJournalTrans.WPPResourceId  = _resourcePlanning.ResourceId;
+            projJournalTrans.ProjId         = projJournalTable.ProjId;
+            projJournalTrans.TransDate      = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+            projJournalTrans.CategoryId     = (workOrderLine.ProjCategoryIdDefault ? workOrderLine.ProjCategoryIdDefault : projJournalTrans.WPPDefaultProjCategory(workOrderLine.TaskId, workOrderLine.RecId));
+            if (!projJournalTrans.CategoryId)
+            {
+                projJournalTrans.CategoryId = this.getProjCategory(_resourcePlanning.ResourceId);
+            }
+            if (!projJournalTrans.CategoryId)
+            {
+                projJournalTrans.CategoryId = ProjParameters::find().EmplCategory;
+            }
+            projJournalTrans.LinePropertyId = ProjLinePropertySetup::findLinePropertyId(projJournalTrans.ProjId, projJournalTrans.CategoryId);
+            projJournalTrans.JournalId      = projJournalTable.JournalId;
+
+            select maxof(LineNum) from projJournalTransLineNum
+            where projJournalTransLineNum.JournalId == projJournalTrans.JournalId;
+
+            projJournalTrans.LineNum        = (projJournalTransLineNum.LineNum + 1);
+            
+            projJournalTrans.CurrencyId     = CompanyInfoHelper::standardCurrency();
+            projJournalTrans.ProjTransDate  = _curDate;
+            projJournalTrans.CurrencyId     = projTable.currencyId();
+            projJournalTrans.TransId        = ProjParameters::newTransId();
+            projJournalTrans.TaxItemGroupId = ProjCategory::find(projJournalTrans.CategoryId).TaxItemGroupId;
+            projJournalTrans.FromTime       = DateTimeUtil::time(_minFromDateTimeFound);
+            projJournalTrans.ToTime         = DateTimeUtil::time(_maxDateTimeFound) ? DateTimeUtil::time(_maxDateTimeFound) : #SecondsPerDay; // When to time = 0 then change it to 24. 24 Is different than 0
+            projJournalTrans.WPPBreakQty    = _breakQty;
+            projJournalTrans.Qty            = (projJournalTrans.ToTime - projJournalTrans.FromTime) / #SecondsPerHour - projJournalTrans.WPPBreakQty;
+            projJournalTrans.ActivityNumber = this.createActivity();
+            projJournalTrans.setPeriodDate();
+            projJournalTrans.initFromProjTable(projTable);
+
+            projJournalTrans.DNRSetWorker();
+    
+            if (projJournalTrans.validateWrite())
+            {
+                ret = projJournalTrans.insertFromCode() ? true : false;
+                this.updateResourcePlanningTable(_resourcePlanning, projJournalTrans);
+                projJournalTrans.INVRefTableId = workOrderTable.OrderTableId;
+                if (projJournalTrans.INVRefTableId == tableNum(PurchLine) && projJournalTrans.RORBothRentalSubRental == RORBothRentalSubRental::Rental)
+                {
+                    projJournalTrans.RORBothRentalSubRental = RORBothRentalSubRental::SubRental;
+                }
+                if (projJournalTrans.INVRefTableId == tableNum(SalesLine) && projJournalTrans.RORBothRentalSubRental == RORBothRentalSubRental::SubRental)
+                {
+                    projJournalTrans.RORBothRentalSubRental = RORBothRentalSubRental::Rental;
+                }
+                projJournalTrans.INVRefRecId = workOrderTable.OrderRecId;
+                    
+                // Set the hour cost and sales price, to set it in the DynaRent way
+                // a link is required to the work order line
+                projJournalTrans.setHourCostPrice();
+                projJournalTrans.setHourSalesPrice();
+                projJournalTrans.update();
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(Args _args)
+    {
+        super(_args);
+    
+        runDialog = true; // will be set to false if necessary in the Run()
+        parameters = WPPParameters::find();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        QueryRun    queryRun;
+        boolean     createLines;
+    
+        createLines = false;
+    
+        this.getProjJournalTable();
+    
+        if (!projJournalTable)
+        {
+            createLines = this.createHourJournal();
+            runDialog   = false;
+    
+            this.parmCanContinue(createLines);
+    
+            super();
+        }
+        else
+        {
+            this.parmCanContinue(true);
+    
+            createLines = skipCheckCreateLines ||
+                            !(select firstOnly RecId from ProjJournalTrans
+                              where ProjJournalTrans.JournalId == projJournalTable.JournalId).RecId;
+        }
+    
+        if (createLines)
+        {
+            queryRun = new QueryRun(this.createQuery());
+            this.createLines(queryRun);           
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

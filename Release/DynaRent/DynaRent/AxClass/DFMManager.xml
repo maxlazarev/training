@@ -1,0 +1,878 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DFMManager</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class DFMManager extends RunBase
+{
+    Map             fieldIdValueMap;
+    RefRecId        callerRecId;
+    RefTableId      callerTableId;
+    LanguageId      languageId;
+    DFMCollectionId mainCollectionId;
+    Timezone        userTimezone;
+    int             dateTimeSequence;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(Common _callerRecord)
+    {
+        super();
+
+        callerRecId         = _callerRecord.RecId;
+        callerTableId       = _callerRecord.TableId;
+        fieldIdValueMap     = new Map(Types::String, Types::String); // DFMFieldId, DFMValue
+        languageId          = new Session().interfaceLanguage(); // retrieve language here so we can reuse it later and prevent additional round-trips
+        userTimezone        = DateTimeUtil::getUserPreferredTimeZone();
+        dateTimeSequence    = 321;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        #OCCRetryCount
+
+        if(this.validate())
+        {
+            try
+            {
+                ttsBegin;
+
+                this.updateDynamicValues();
+
+                ttsCommit;
+            }
+            catch (Exception::Deadlock)
+            {
+                retry;
+            }
+            catch (Exception::UpdateConflict)
+            {
+                if (appl.ttsLevel() == 0)
+                {
+                    if (xSession::currentRetryCount() >= #RetryNum)
+                    {
+                        throw Exception::UpdateConflictNotRecovered;
+                    }
+                    else
+                    {
+                        retry;
+                    }
+                }
+                else
+                {
+                    throw Exception::UpdateConflict;
+                }
+            }
+        }
+        else
+        {
+            throw error("@SYS18738");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        DialogRunbase dialog = super();
+        dialog.caption("@DFM13");
+        this.buildDynamicControls(dialog);
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        return (super() && this.validate());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildDynamicControls</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    private void buildDynamicControls(DialogRunbase _dialog)
+    {
+        DialogGroup             dialogGroup;
+        FormControlName         groupName;
+
+        SysDictClass            sysDictClass;
+        Common                  relatedRecord;
+        boolean                 allowEdit;
+        
+        DFMCollectionId         collectionId;
+        DFMTableRelation        tableRelation;
+        DFMFieldGroupCollection fieldGroupCollection;
+        DFMCollectionContents   collectionContents;
+        DFMFieldGroup           fieldGroup;
+        DFMFieldGroupContents   fieldGroupContents;
+        DFMFieldTable           fieldTable;
+        DFMValueTrans           valueTrans;
+        ;
+        
+        sysDictClass = new SysDictClass(classIdGet(this));
+        new ExecutePermission().assert();
+        
+        while select tableRelation
+        where tableRelation.RefTableId == callerTableId
+        {
+            relatedRecord = this.selectRelatedRecord(sysDictClass, tableRelation.Relation);
+            collectionId = this.getCollectionId(relatedRecord);
+            allowEdit = false;
+            
+            // add a tab page for each table reference
+            // the tab page that shows the caller record's dynamic fields should be the first one and the only one that's editable
+            DialogTabPage dialogTabPage = _dialog.addTabPage(tableId2PName(relatedRecord.TableId));
+            
+            if(relatedRecord.TableId == callerTableId && relatedRecord.RecId == callerRecId)
+            {
+                FormBuildTabControl tabCtrl = _dialog.dialogForm().tab();
+                FormBuildTabPageControl tabPageCtrl = dialogTabPage.control();
+
+                tabCtrl.moveControl(tabPageCtrl.id());
+                tabPageCtrl.fastTabExpanded(FastTabExpanded::Always);
+
+                mainCollectionId = collectionId;
+                allowEdit = (SecurityRights::construct().tableAccessRight(tableId2name(callerTableId)) >= AccessRight::Edit);
+            }
+            
+            // add controls to tab page
+            while select Columns from fieldGroupCollection
+            where fieldGroupCollection.CollectionId == collectionId
+                join  collectionContents
+                where collectionContents.CollectionId == fieldGroupCollection.CollectionId
+                    join  fieldGroup
+                    where fieldGroup.GroupId == collectionContents.FieldGroupId
+                        join  fieldGroupContents
+                        where fieldGroupContents.FieldGroupId == fieldGroup.GroupId
+                            join  fieldTable
+                            where fieldTable.FieldId == fieldGroupContents.FieldId
+                                outer join valueTrans
+                                where valueTrans.RefTableId == relatedRecord.TableId
+                                &&    valueTrans.RefRecId == relatedRecord.RecId
+                                &&    valueTrans.FieldId == fieldTable.FieldId
+            {
+                dialogTabPage.columns(fieldGroupCollection.Columns);
+                groupName = strFmt('%1/%2/%3', relatedRecord.TableId, relatedRecord.RecId, fieldGroup.GroupId);
+                
+                if(!dialogGroup || dialogGroup.name() != groupName)
+                {
+                    dialogGroup = _dialog.addGroup(fieldGroup.languageName(languageId), null, groupName);
+                    dialogGroup.hideIfEmpty(false);
+                }
+                
+                this.createDynamicField(_dialog, dialogGroup, fieldTable, valueTrans.Value, allowEdit, relatedRecord.TableId, relatedRecord.RecId);
+            }
+        }
+        
+        CodeAccessPermission::revertAssert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>selectRelatedRecord</Name>
+				<Source><![CDATA[
+    private Common selectRelatedRecord(SysDictClass _sysDictClass, MethodName _methodName)
+    {
+        Common ret;
+        ExecutePermission perm;
+        ;
+        
+        // select the related record
+        if(_sysDictClass.hasObjectMethod(_methodName))
+        {
+            perm = new ExecutePermission();
+            perm.assert();
+            
+            // BP deviation documented - DynaRent
+            ret = _sysDictClass.callObject(_methodName, this);
+        }
+        else
+        {
+            throw error(strFmt("@SYS73696", _sysDictClass.name(), _methodName));
+        }
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCollectionId</Name>
+				<Source><![CDATA[
+    private DFMCollectionId getCollectionId(Common _relatedRecord)
+    {
+        DFMCollectionQuery      collectionQuery;
+        SysQueryRun             queryRun;
+        QueryBuildDataSource    qbds;
+        DFMCollectionId         ret;
+        ;
+        
+        if(_relatedRecord)
+        {
+            while select collectionQuery
+            where collectionQuery.RefTableId == _relatedRecord.TableId
+            {
+                if(collectionQuery.Query)
+                {
+                    queryRun = new SysQueryRun(collectionQuery.query);
+                    
+                    qbds = queryRun.query().dataSourceTable(collectionQuery.RefTableId);
+                    qbds.addSelectionField(fieldNum(Common, RecId));
+                    qbds.firstOnly(true);
+                    
+                    SysQuery::findOrCreateRange(qbds, fieldNum(Common, RecId)).value(int642str(_relatedRecord.RecId));
+                    
+                    queryRun.next();
+                    
+                    if(queryRun.get(_relatedRecord.TableId).RecId != 0)
+                    {
+                        ret = collectionQuery.CollectionId;
+                        break;
+                    }
+                }
+                else
+                {
+                    ret = collectionQuery.CollectionId;
+                    break;
+                }
+            }
+        }
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createDynamicField</Name>
+				<Source><![CDATA[
+    private void createDynamicField(DialogRunbase _dialog, DialogGroup _groupCtrl, DFMFieldTable _fieldTable, DFMValue _fieldValue, boolean _allowEdit, TableId _relatedTableId, RecId _relatedRecId)
+    {
+        DialogField             dialogField;
+        ExtendedDataTypeName    edtName;
+        //The control name is extended as FieldId_<LinkedTableId> to allow showing same field multiple times on form.
+        String255               fldIdCallerTableIdRecIdId  = strFmt("%1_%2_%3", _fieldTable.FieldId, _relatedTableId, _relatedRecId); 
+        ;
+        
+        switch(_fieldTable.Type)
+        {
+            case DFMFieldType::String:
+                
+                switch(_fieldTable.LookupType)
+                {
+                    case DFMLookupType::Email:
+                        edtName = extendedTypeStr(Email);
+                        break;
+                        
+                    case DFMLookupType::URL:
+                        edtName = extendedTypeStr(URL);
+                        break;
+                        
+                    default:
+                        edtName = extendedTypeStr(DFMValue);
+                        break;
+                }
+
+                dialogField = _dialog.addFieldValue(edtName, _fieldValue, _fieldTable.languageName(languageId));
+                dialogField.displayLength(_fieldTable.Width ? _fieldTable.Width : DFMFieldTable::standardFieldWidth());
+                dialogField.displayHeight(_fieldTable.Height ? _fieldTable.Height : 1);
+                dialogField.multiLine(_fieldTable.Height > 1);
+                dialogField.lookupButton(_fieldTable.Height == 1 || DFMFieldLookupValue::exist(_fieldTable.FieldId) ? FormLookupButton::Always : FormLookupButton::Never);
+                dialogField.registerOverrideMethod(methodStr(FormStringControl, lookup), methodStr(DFMManager, dynamicCtrlLookup), this);
+                dialogField.registerOverrideMethod(methodStr(FormStringControl, modified), methodStr(DFMManager, dynamicCtrlModified), this);
+
+                FormBuildStringControl strCtrl = dialogField.control();
+                strCtrl.name(fldIdCallerTableIdRecIdId);
+                strCtrl.lookupOnly(_fieldTable.LookupValuesOnly);
+
+                if(_allowEdit)
+                {
+                    strCtrl.replaceOnLookup(_fieldTable.Height <= 1);
+                    strCtrl.mandatory(_fieldTable.IsMandatory);
+                }
+                else
+                {
+                    strCtrl.allowEdit(false);
+                }
+
+                fieldIdValueMap.insert(fldIdCallerTableIdRecIdId, _fieldValue);
+                break;
+
+            case DFMFieldType::Integer:
+                dialogField = _dialog.addFieldValue(extendedTypeStr(Integer), str2Int(_fieldValue), _fieldTable.languageName(languageId));
+                dialogField.displayLength(_fieldTable.Width ? _fieldTable.Width : DFMFieldTable::standardFieldWidth());
+                dialogField.registerOverrideMethod(methodStr(FormStringControl, modified), methodStr(DFMManager, dynamicCtrlModified), this);
+
+                FormBuildIntControl intCtrl = dialogField.control();
+                intCtrl.name(fldIdCallerTableIdRecIdId);
+
+                if(_allowEdit)
+                {
+                    intCtrl.mandatory(_fieldTable.IsMandatory);
+                }
+                else
+                {
+                    intCtrl.allowEdit(false);
+                }
+
+                fieldIdValueMap.insert(fldIdCallerTableIdRecIdId, _fieldValue);
+                break;
+
+            case DFMFieldType::Real:
+                dialogField = _dialog.addFieldValue(extendedTypeStr(LineNum), str2Num(_fieldValue), _fieldTable.languageName(languageId)); // LineNum has enough decimals
+                dialogField.displayLength(_fieldTable.Width ? _fieldTable.Width : DFMFieldTable::standardFieldWidth());
+                dialogField.registerOverrideMethod(methodStr(FormStringControl, modified), methodStr(DFMManager, dynamicCtrlModified), this);
+
+                FormBuildRealControl realCtrl = dialogField.control();
+                realCtrl.name(fldIdCallerTableIdRecIdId);
+                realCtrl.noOfDecimals(_fieldTable.NoOfDecimals, AutoMode::Fixed);
+
+                if(_allowEdit)
+                {
+                    realCtrl.mandatory(_fieldTable.IsMandatory);
+                }
+                else
+                {
+                    realCtrl.allowEdit(false);
+                }
+                
+                fieldIdValueMap.insert(fldIdCallerTableIdRecIdId, _fieldValue);
+                break;
+
+            case DFMFieldType::Date:
+                TransDate dateValue = dateNull();
+
+                if(_fieldValue)
+                {
+                    str dateStr = strReplace(_fieldValue, '\\', '-');
+                    dateValue   = str2DateDMY(dateStr);
+                }
+                
+                dialogField = _dialog.addFieldValue(extendedTypeStr(TransDate), dateValue, _fieldTable.languageName(languageId));
+                dialogField.registerOverrideMethod(methodStr(FormStringControl, modified), methodStr(DFMManager, dynamicCtrlModified), this);
+                
+                FormBuildDateControl dateCtrl = dialogField.control();
+                dateCtrl.name(fldIdCallerTableIdRecIdId);
+                
+                if(_allowEdit)
+                {
+                    dateCtrl.mandatory(_fieldTable.IsMandatory);
+                }
+                else
+                {
+                    dateCtrl.allowEdit(false);
+                }
+
+                fieldIdValueMap.insert(fldIdCallerTableIdRecIdId, _fieldValue);
+                break;
+
+            case DFMFieldType::DateTime:
+                TransDateTime dateTimeValue = utcDateTimeNull();
+
+                if(_fieldValue)
+                {
+                    dateTimeValue = str2Datetime(_fieldValue, dateTimeSequence);
+                    dateTimeValue = DateTimeUtil::applyTimeZoneOffset(dateTimeValue, userTimezone);
+                }
+
+                dialogField = _dialog.addFieldValue(extendedTypeStr(TransDateTime), dateTimeValue, _fieldTable.languageName(languageId));
+                dialogField.registerOverrideMethod(methodStr(FormDateTimeControl, modified), methodStr(DFMManager, dynamicCtrlModified), this);
+
+                FormBuildDateTimeControl dateTimeCtrl = dialogField.control();
+                dateTimeCtrl.name(fldIdCallerTableIdRecIdId);
+
+                if(_allowEdit)
+                {
+                    dateTimeCtrl.mandatory(_fieldTable.IsMandatory);
+                }
+                else
+                {
+                    dateTimeCtrl.allowEdit(false);
+                }
+
+                fieldIdValueMap.insert(fldIdCallerTableIdRecIdId, _fieldValue);
+                break;
+                
+            case DFMFieldType::CheckBox:
+                dialogField = _dialog.addFieldValue(extendedTypeStr(NoYesId), str2Int(_fieldValue), _fieldTable.languageName(languageId));
+                dialogField.registerOverrideMethod(methodStr(FormStringControl, modified), methodStr(DFMManager, dynamicCtrlModified), this);
+
+                FormBuildCheckBoxControl checkCtrl = dialogField.control();
+                checkCtrl.name(fldIdCallerTableIdRecIdId);
+                checkCtrl.allowEdit(_allowEdit);
+
+                fieldIdValueMap.insert(fldIdCallerTableIdRecIdId, _fieldValue);
+                break;
+                
+            default:
+                // do nothing
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateDynamicValues</Name>
+				<Source><![CDATA[
+    private void updateDynamicValues()
+    {
+        RecordInsertList insertList = new RecordInsertList(tableNum(DFMValueTrans));
+        MapEnumerator enumerator = fieldIdValueMap.getEnumerator();
+        DFMValueTrans valueTrans;
+
+        while(enumerator.moveNext())
+        {
+            container  fldCon           = str2con(enumerator.currentKey(), '_');
+            DFMFieldId fieldId          = conPeek(fldCon, 1);  //The key value format is fieldId_callerRecordTableId
+            TableId    callerTableIdCur = conPeek(fldCon, 2);
+            RecId      callerRecIdCur   = conPeek(fldCon, 3);
+            DFMValue   newValue         = enumerator.currentValue();
+
+            if(newValue)
+            {
+                valueTrans = DFMValueTrans::find(callerTableIdCur, callerRecIdCur, fieldId, true);
+                
+                if(valueTrans)
+                {
+                    if(valueTrans.Value != newValue)
+                    {
+                        valueTrans.Value = newValue;
+                        valueTrans.update();
+                    }
+                }
+                else
+                {
+                    valueTrans.RefTableId = callerTableIdCur;
+                    valueTrans.RefRecId = callerRecIdCur;
+                    valueTrans.FieldId = fieldId;
+                    valueTrans.Value = newValue;
+
+                    insertList.add(valueTrans);
+                }
+            }
+            else
+            {
+                delete_from valueTrans
+                where valueTrans.RefTableId == callerTableIdCur
+                &&    valueTrans.RefRecId == callerRecIdCur
+                &&    valueTrans.FieldId == fieldId;
+            }
+        }
+
+        insertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean                 ret = true;
+        
+        DFMCollectionQuery      collectionQuery;
+        DFMFieldGroupCollection fieldGroupCollection;
+        DFMCollectionContents   collectionContents;
+        DFMFieldGroupContents   fieldGroupContents;
+        DFMFieldTable           fieldTable;
+        ;
+
+        // check whether all mandatory fields have been completed
+        while select fieldTable
+        where fieldTable.IsMandatory
+            exists join fieldGroupContents
+            where fieldGroupContents.FieldId == fieldTable.FieldId
+                join TableId from collectionContents
+                where collectionContents.FieldGroupId == fieldGroupContents.FieldGroupId
+                &&    collectionContents.CollectionId == mainCollectionId
+                    join TableId from collectionQuery
+                    where collectionQuery.CollectionId == collectionContents.CollectionId
+                    &&    collectionQuery.EnforceMandatoryFields == NoYes::Yes
+        {
+            String255 fldIdCallerTableRecIdId = strFmt("%1_%2_%3", fieldTable.FieldId, callerTableId, callerRecId); //Only values linked to caller record are allowed from editing
+            DFMValue dynamicValue = (fieldIdValueMap.exists(fldIdCallerTableRecIdId) ? fieldIdValueMap.lookup(fldIdCallerTableRecIdId) : '');
+
+            if(!dynamicValue)
+            {
+                ret = checkFailed(strFmt("@DNR4370", fieldTable.languageName(languageId)));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dynamicCtrlLookup</Name>
+				<Source><![CDATA[
+    public void dynamicCtrlLookup(FormControl _callerControl)
+    {
+        switch(classIdGet(_callerControl))
+        {
+            case classNum(FormStringControl):
+                FormStringControl stringControl = _callerControl;
+                stringControl.performTypeLookup(stringControl.extendedDataType());
+                break;
+
+            case classNum(FormDateControl):
+                FormDateControl dateControl = _callerControl;
+                dateControl.performTypeLookup(extendedTypeNum(TransDate));
+                break;
+
+            default:
+                // do nothing
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dynamicCtrlModified</Name>
+				<Source><![CDATA[
+    public boolean dynamicCtrlModified(FormControl _callerControl)
+    {
+        DFMValue   dynamicValue;
+        ;
+
+        switch(classIdGet(_callerControl))
+        {
+            case classNum(FormStringControl):
+                FormStringControl strControl = _callerControl;
+                fieldIdValueMap.insert(strControl.name(), strControl.text());
+                break;
+
+            case classNum(FormIntControl):
+                FormIntControl intControl = _callerControl;
+                dynamicValue = (intControl.value() == 0 ? '' : int2str(intControl.value()));
+                fieldIdValueMap.insert(intControl.name(), dynamicValue);
+                break;
+
+            case classNum(FormRealControl):
+                FormRealControl realControl = _callerControl;
+                dynamicValue = (realControl.realValue() == 0 ? '' : num2str(realControl.realValue(), 0, 16, 1, 0));
+                fieldIdValueMap.insert(realControl.name(), dynamicValue);
+                break;
+
+            case classNum(FormDateControl):
+                FormDateControl dateControl = _callerControl;
+                dynamicValue = (dateControl.dateValue() == dateNull() ? '' : strReplace(date2strXpp(dateControl.dateValue()), '\\', '-'));
+                fieldIdValueMap.insert(dateControl.name(), dynamicValue);
+                break;
+
+            case classNum(FormDateTimeControl):
+                FormDateTimeControl dateTimeControl = _callerControl;
+                TransDateTime transDateTime = dateTimeControl.dateTimeValue();
+                dynamicValue = '';
+
+                if(transDateTime >= 1900-01-02T00:00:00) // only persist values where both the date and the time have been specified
+                {
+                    transDateTime = DateTimeUtil::removeTimeZoneOffset(transDateTime, userTimezone);
+                    dynamicValue = DateTimeUtil::toFormattedStr(transDateTime,
+                                                                dateTimeSequence,
+                                                                DateDay::Digits2,
+                                                                DateSeparator::Hyphen,
+                                                                DateMonth::Digits2,
+                                                                DateSeparator::Hyphen,
+                                                                DateYear::Digits4,
+                                                                TimeSeparator::Colon,
+                                                                TimeSeparator::Colon);
+                }
+
+                fieldIdValueMap.insert(dateTimeControl.name(), dynamicValue);
+                break;
+
+            case classNum(FormCheckBoxControl):
+                FormCheckBoxControl boxControl = _callerControl;
+                dynamicValue = (boxControl.value() == 0 ? '' : int2str(boxControl.value()));
+                fieldIdValueMap.insert(boxControl.name(), dynamicValue);
+                break;
+
+            default:
+                // do nothing
+                break;
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static DFMManager construct(Common _caller)
+    {
+        switch(_caller.TableId)
+        {
+            case tableNum(BOBObjectTable):      return new DFMManager_BOBObjectTable(_caller);
+            case tableNum(BOBObjectView):       return new DFMManager_BOBObjectTable(_caller.objectTable());
+            case tableNum(BOBParameters):       return new DFMManager_BOBParameters(_caller);
+            case tableNum(BOBRentalType):       return new DFMManager_BOBRentalType(_caller);
+            case tableNum(CustTable):           return new DFMManager_CustTable(_caller);
+            case tableNum(InventTable):         return new DFMManager_InventTable(_caller);
+            case tableNum(PurchTable):          return new DFMManager_PurchTable(_caller);
+            case tableNum(SalesLine):           return new DFMManager_SalesLine(_caller);
+            case tableNum(SalesPool):           return new DFMManager_SalesPool(_caller);
+            case tableNum(SalesQuotationLine):  return new DFMManager_SalesQuotationLine(_caller);
+            case tableNum(SalesQuotationTable): return new DFMManager_SalesQuotationTable(_caller);
+            case tableNum(SalesTable):          return new DFMManager_SalesTable(_caller);
+            case tableNum(VendTable):           return new DFMManager_VendTable(_caller);
+            case tableNum(WPPResourceTable):    return new DFMManager_WPPResourceTable(_caller);
+            default:                            
+                EventHandlerResult result = EventHandlerResult::newSingleResponse();
+                
+                DFMManager::constructDelegate(_caller, result);
+
+                if (result.hasResult())
+                {
+                    return result.result() as DFMManager;
+                }
+                else
+                {
+                    throw error(strFmt("@DFM17", classStr(DFMManager), tableId2Name(_caller.TableId)));
+                }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>constructDelegate</Name>
+				<Source><![CDATA[
+    static delegate void constructDelegate(Common _caller, EventHandlerResult _eventHandlerResult)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        if(!_args || !_args.dataset())
+        {
+            throw error(Error::missingRecord("@DFM13"));
+        }
+        if(!_args.record().RecId)
+        {
+            throw error("@DFM20");
+        }
+
+        DFMManager manager = DFMManager::construct(_args.record());
+
+        if(manager.prompt())
+        {
+            manager.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lookupTableRelations</Name>
+				<Source><![CDATA[
+    public static void lookupTableRelations(TableId _callerTableId, FormStringControl _strCtrl)
+    {
+        ListEnumerator  enumerator;
+        TmpTableName    tmpData;
+        DictClass       dictClass;
+        boolean         subClassFound = false;
+        
+        #define.find('find')
+        #define.newMethod('new')
+        ;
+        
+        // get the correct DFMManager subclass 
+        enumerator = new DictClass(classNum(DFMManager)).extendedBy().getEnumerator();
+        
+        while(enumerator.moveNext() && !subClassFound)
+        {
+            ClassId classId = enumerator.current();
+            dictClass = new DictClass(classId);
+            
+            if(dictClass && strStartsWith(dictClass.name(), classStr(DFMManager))) 
+            {
+                DictMethod dictMethod = new DictMethod(UtilElementType::ClassInstanceMethod, classId, #newMethod);
+
+                if(dictMethod && dictMethod.parameterId(1) == _callerTableId) // the first and only parameter to the 'new' method should be the table type
+                {
+                    subClassFound = true;
+                }
+            }
+        }
+
+        // get all the find* methods on the relevant DFMManager subclass
+        if(dictClass)
+        {
+            for(int i = 1; i <= dictClass.objectMethodCnt(); i ++)
+            {
+                MethodName methodName = dictClass.objectMethod(i);
+
+                if(strStartsWith(methodName, #find))
+                {
+                    DictMethod dictMethod = new DictMethod(UtilElementType::ClassInstanceMethod, dictClass.id(), methodName);
+                        
+                    if(dictMethod)
+                    {
+                        tmpData.clear();
+                        tmpData.TableName = methodName;
+                        tmpData.DFMTableLabel = tableId2PName(dictMethod.returnId());
+                        tmpData.insert();
+                    }
+                }
+            }
+        }
+
+        // show lookup
+        SysTableLookup lookup = SysTableLookup::newParameters(tableNum(TmpTableName), _strCtrl);
+        lookup.parmTmpBuffer(tmpData);
+        lookup.addLookupfield(fieldNum(TmpTableName, TableName), true);
+        lookup.addLookupField(fieldNum(TmpTableName, DFMTableLabel));
+        lookup.performFormLookup();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lookupFormNames</Name>
+				<Source><![CDATA[
+    public static void lookupFormNames(FormStringControl _ctrl)
+    {
+        System.Collections.Specialized.StringEnumerator strEnum = Microsoft.Dynamics.Ax.Xpp.MetadataSupport::FormNames();
+        SysMetaFormNameLookup tmpData;
+        RecordInsertList insertList = new RecordInsertList(tableNum(SysMetaFormNameLookup), true, true, true, true, true, tmpData);
+
+        delete_from tmpData; // we get unique index violations from existing records if we don't first clear them first
+
+        while(strEnum.MoveNext())
+        {
+            tmpData.Name = strEnum.get_Current();
+            insertList.add(tmpData);
+        }
+
+        insertList.insertDatabase();
+
+        SysTableLookup lookup = SysTableLookup::newParameters(tableNum(SysMetaFormNameLookup), _ctrl);
+        lookup.parmTmpBuffer(tmpData);
+        lookup.addLookupfield(fieldNum(SysMetaFormNameLookup, Name), true);
+        lookup.performFormLookup();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateFormName</Name>
+				<Source><![CDATA[
+    public static boolean validateFormName(FormName _formName)
+    {
+        Microsoft.Dynamics.AX.Metadata.MetaModel.AxForm form;
+        boolean ret = true;
+
+        if(_formName)
+        {
+            form = Microsoft.Dynamics.Ax.Xpp.MetadataSupport::GetForm(_formName);
+
+            if(!form)
+            {
+                ret = checkFailed(strFmt("@DFM122", _formName));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpTableSetupData</Name>
+				<Source><![CDATA[
+    public static TmpTableName populateTmpTableSetupData()
+    {
+        ListEnumerator  enumerator;
+        TmpTableName    tmpBuffer;
+
+        #define.newMethod('new')
+        ;
+        
+        enumerator = new DictClass(classNum(DFMManager)).extendedBy().getEnumerator();
+        
+        while(enumerator.moveNext())
+        {
+            ClassId classId = enumerator.current();
+            ClassName className = classId2Name(classId);
+            
+            if(className && strStartsWith(className, classStr(DFMManager)) && !DFMManager::isObsoleteClass(className))
+            {
+                DictMethod dictMethod = new DictMethod(UtilElementType::ClassInstanceMethod, classId, #newMethod);
+
+                if(dictMethod)
+                {
+                    // the first and only parameter to the 'new' method should be the table type
+                    TableName tableName = tableId2Name(dictMethod.parameterId(1));
+
+                    if(tableName)
+                    {
+                        DictTable dictTable = new DictTable(tableName2id(tableName));
+                        
+                        if(dictTable)
+                        {
+                            tmpBuffer.clear();
+                            tmpBuffer.RefTableId = dictTable.id();
+                            tmpBuffer.TableName = dictTable.name();
+                            tmpBuffer.DFMTableLabel = dictTable.label();
+                            tmpBuffer.insert();
+                        }
+                    }
+                }
+            }
+        }
+        
+        return tmpBuffer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isObsoleteClass</Name>
+				<Source><![CDATA[
+    public static boolean isObsoleteClass(ClassName _className)
+    {
+        boolean ret = false;
+
+        if (_className == classStr(DFMManager_WrkCtrTable))
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

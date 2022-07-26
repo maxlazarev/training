@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPProjJournalTransCheck_Validate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPProjJournalTransCheck_Validate extends WPPProjJournalTransCheck
+{
+    Set processedRecords;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkEmployment</Name>
+				<Source><![CDATA[
+    private boolean checkEmployment(ProjJournalTrans    _projJournalTrans,
+                                    HcmWorker           _worker)
+    {
+        boolean         ok = true;
+        HcmEmployment   employment;
+    
+        employment = HcmEmployment::findByWorkerLegalEntity(workerRecId,
+                                                            CompanyInfo::current(),
+                                                            DateTimeUtil::newDateTime(_projJournalTrans.ProjTransDate, 0),
+                                                            DateTimeUtil::newDateTime(_projJournalTrans.ProjTransDate, 0));
+    
+        if (!employment)
+        {
+            ok = checkFailed(strFmt("@DNR6656",
+                                    HcmWorker::find(workerRecId).name(),
+                                    _projJournalTrans.ProjTransDate));
+        }
+    
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkHours</Name>
+				<Source><![CDATA[
+    private boolean checkHours(ProjJournalTrans     _projJournalTrans,
+                               ProjJournalTrans     _projJournalTransPrev)
+    {
+        boolean             ok = true;
+        ProjJournalTrans    projJournalTransCheck;
+    
+        #TimeConstants
+    
+        if (_projJournalTransPrev.Resource == _projJournalTrans.Resource)
+        {
+            if (_projJournalTransPrev.ToTime
+            &&  _projJournalTransPrev.ToTime         < _projJournalTrans.FromTime
+            &&  _projJournalTransPrev.ProjTransDate == _projJournalTrans.ProjTransDate)
+            {
+                projJournalTransCheck = null;
+                // If not start time for previous or end time current is 24:00, check if these are part of a shift
+                // on another day.
+                if (_projJournalTransPrev.FromTime == 0 || _projJournalTrans.ToTime == #secondsPerDay)
+                {
+                    if (_projJournalTransPrev.FromTime == 0)
+                    {
+                        // Check if previous hours are still part of a shift of the day before;
+                        select firstonly RecId from projJournalTransCheck
+                        where projJournalTransCheck.Resource        == _projJournalTransPrev.Resource
+                        &&    projJournalTransCheck.ProjTransDate == _projJournalTransPrev.ProjTransDate - 1
+                        &&    projJournalTransCheck.ToTime        == #secondsPerday;
+                    }
+                    else
+                    {
+                        // Check if next hours are still part of this shift
+                        select firstonly RecId from projJournalTransCheck
+                        where projJournalTransCheck.Resource        == _projJournalTransPrev.Resource
+                        &&    projJournalTransCheck.ProjTransDate == _projJournalTransPrev.ProjTransDate + 1
+                        &&    projJournalTransCheck.FromTime      == 0;
+                    }
+                }
+    
+                if (!projJournalTransCheck.RecId)
+                {
+                    ok = checkFailed(strFmt("@DNR3673",
+                                            _projJournalTrans.ProjTransDate,
+                                            HcmWorker::find(_projJournalTrans.Worker).name(),
+                                            time2str(_projJournalTransPrev.ToTime, TimeSeparator::Colon, TimeFormat::Auto),
+                                            time2str(_projJournalTrans.FromTime, TimeSeparator::Colon, TimeFormat::Auto),
+                                            _projJournalTransPrev.JournalId,
+                                            _projJournalTransPrev.LineNum,
+                                            _projJournalTrans.JournalId,
+                                            _projJournalTrans.LineNum));
+                }
+            }
+    
+            if (_projJournalTransPrev.ToTime
+            &&  _projJournalTransPrev.ToTime         > _projJournalTrans.FromTime
+            &&  _projJournalTransPrev.ProjTransDate == _projJournalTrans.ProjTransDate)
+            {
+                ok = checkFailed(strFmt("@DNR3674",
+                                        _projJournalTrans.ProjTransDate,
+                                        ResourceFacade::getName(_projJournalTrans.Resource),
+                                        time2str(_projJournalTransPrev.ToTime, TimeSeparator::Colon, TimeFormat::Auto),
+                                        time2str(_projJournalTrans.FromTime, TimeSeparator::Colon, TimeFormat::Auto),
+                                        _projJournalTrans.JournalId,
+                                        _projJournalTrans.LineNum,
+                                        _projJournalTransPrev.JournalId,
+                                        _projJournalTransPrev.LineNum));
+            }
+        }
+    
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkStartEndTime</Name>
+				<Source><![CDATA[
+    private boolean checkStartEndTime(ProjJournalTrans  _projJournalTrans)
+    {
+        boolean     ok = true;
+    
+        if (!_projJournalTrans.FromTime
+        &&  !_projJournalTrans.ToTime)
+        {
+            ok = checkFailed(strFmt("@DNR3661",
+                                    ResourceFacade::getName(_projJournalTrans.Resource),
+                                    _projJournalTrans.ProjTransDate,
+                                    _projJournalTrans.JournalId,
+                                    _projJournalTrans.LineNum));
+        }
+    
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+    
+        processedRecords = new Set(Types::Int64);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        this.getResourceRecId();
+        this.runChecksAndUpdate();
+    
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getResourceRecId</Name>
+				<Source><![CDATA[
+    protected void getResourceRecId()
+    {
+        ResourceView    resourceView;
+        HcmWorker       workerTable;
+
+        select firstonly RecId from workerTable
+        where workerTable.PersonnelNumber == worker
+            join RecId from ResourceView
+            where ResourceView.Worker == workerTable.RecId;
+
+        ResourceRecId = ResourceView.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runChecksAndUpdate</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    private void runChecksAndUpdate()
+    {
+        boolean                 ok;
+        ProjJournalTrans        projJournalTrans,
+                                projJournalTransPrev,
+                                projJournalTransFromDataSource;
+        ProjJournalTable        projJournalTable;
+        HcmWorker               hcmWorker;
+        ProjEmplTrans           projEmplTrans;
+        ProjEmplTransSale       projEmplTransSale;
+        UserId                  checkedBy = curUserId();
+        Date                    checkedOn = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+        ResourceView            resourceView;
+    
+        #TimeConstants
+    
+        ttsBegin;
+        // Operand types are compatible with the operator
+        for (projJournalTransFromDataSource = formDataSource.getFirst(true) ? formDataSource.getFirst(true) : callerProjJournalTrans;
+             projJournalTransFromDataSource;
+             projJournalTransFromDataSource = formDataSource.getNext())
+        {
+            this.parmWorker(HcmWorker::find(projJournalTrans.Worker).PersonnelNumber);
+    
+            while select forupdate projJournalTrans
+            order by Resource, ProjTransDate, FromTime asc
+            where projJournalTrans.Resource        == resourceRecId
+            &&    projJournalTrans.ProjTransDate >= fromDate
+            &&    projJournalTrans.ProjTransDate <= toDate
+                join TableId from projJournalTable
+                where projJournalTable.JournalId   == projJournalTrans.JournalId
+                &&    projJournalTable.JournalType == ProjJournalType::Hour
+                    join resourceView
+                    where ResourceView.RecId == projJournalTrans.Resource
+                        join hcmWorker
+                        where hcmWorker.RecId == resourceView.Worker
+            {
+                if (processedRecords.in(projJournalTrans.RecId))
+                {
+                    continue;
+                }
+    
+                ok = true;
+    
+                //Exclude checks for corrected transactions
+                select firstonly RecId from projEmplTrans
+                where projEmplTrans.TransId        == projJournalTrans.TransId
+                    exists join projEmplTransSale
+                    where projEmplTransSale.TransId     == projEmplTrans.TransId
+                    &&    projEmplTransSale.TransStatus == ProjTransStatus::Adjusted;
+    
+                if (!projEmplTrans.RecId)
+                {
+                    ok = this.checkStartEndTime(projJournalTrans)                && ok;
+                    ok = this.checkEmployment(projJournalTrans, hcmWorker)       && ok;
+                    ok = this.checkHours(projJournalTrans, projJournalTransPrev) && ok;
+    
+                    projJournalTransPrev.data(projJournalTrans);
+                    if (projJournalTransPrev.ToTime
+                    &&  projJournalTransPrev.ToTime == #secondsPerDay)
+                    {
+                        projJournalTransPrev.ToTime         = 0;
+                        projJournalTransPrev.ProjTransDate += 1;
+                    }
+                }
+    
+                if (ok)
+                {
+                    projJournalTrans.WPPCheckedBy = checkedBy;
+                    projJournalTrans.WPPCheckDate = checkedOn;
+                    projJournalTrans.update();
+                }
+    
+                processedRecords.add(projJournalTrans.RecId);
+            }
+        }
+    
+        if (ok)
+        {
+            ttsCommit;
+        }
+        else
+        {
+            ttsAbort;
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

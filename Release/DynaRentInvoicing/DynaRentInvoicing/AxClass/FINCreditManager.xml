@@ -1,0 +1,865 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCreditManager</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class FINCreditManager
+{    
+    public FINCreditLine        callerCreditParmLine;
+    FINCreditLine               creditParmLine;
+    FINCreditLineDetails        creditParmLineDetails;
+
+    FINCreditForm               creditFormClass;
+
+    Map                         periodsPerOrderLine;
+    Set                         origPeriodsSet;
+    Map                         specificationPerPeriod;
+    Set                         origPeriodSpec;
+    Set                         amendmentLogRecIds;
+    Set                         createdSalesPurchLines;
+    Map                         creditedPeriodsMap;
+    
+    Set                         creditedCustVendInvoiceTrans;
+    Map                         origAmendmentRecords;
+        
+    boolean                     reInvoiceAll;
+    TransDateTime               calculationDateTime;
+    DNRAdditionalNote           externalNote;
+    boolean                     isProforma;
+
+    FormRun                     formRun;
+
+    boolean                     creditPostingPrepared;
+    VersioningDocumentState     newDocumentState;
+    boolean                     hasNewDocumentState;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>canProcessCredit</Name>
+				<Source><![CDATA[
+    protected boolean canProcessCredit(RefTableId _refTableId, RefRecId _refRecId, FINCreditLineDetails _creditLineDetails)
+    {
+        boolean ret;
+        FINCreditPendingChangesReference creditPendingChangesReference;
+
+        switch (_creditLineDetails.CreditType)
+        {
+            case FINCreditType::Days :
+            case FINCreditType::RentalMode :
+                FINInvoicePeriodAmendment invoicePeriodAmendment;
+
+                select RecId from invoicePeriodAmendment
+                where invoicePeriodAmendment.RefTableId == _refTableId
+                &&    invoicePeriodAmendment.RefRecId == _refRecId
+                &&    (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed)
+                    exists join creditPendingChangesReference
+                    where creditPendingChangesReference.RefTableId == invoicePeriodAmendment.TableId
+                    &&    creditPendingChangesReference.RefRecId == invoicePeriodAmendment.RecId
+                    &&    creditPendingChangesReference.CreditParmLineDetailsRecId == _creditLineDetails.RecId;
+
+                if (!invoicePeriodAmendment.RecId)
+                {
+                    ret = true;
+                }
+                break;
+
+            case FINCreditType::Amount :
+            case FINCreditType::Insurance :
+            case FINCreditType::Delivery :
+            case FINCreditType::Return :
+                FINManualPriceComponent manualPriceComponent;
+
+                select RecId from manualPriceComponent
+                where manualPriceComponent.TransTableId == _refTableId
+                &&    manualPriceComponent.TransRecId == _refRecId
+                    exists join creditPendingChangesReference
+                    where creditPendingChangesReference.RefTableId == manualPriceComponent.TableId
+                    &&    creditPendingChangesReference.RefRecId == manualPriceComponent.RecId
+                    &&    creditPendingChangesReference.CreditParmLineDetailsRecId == _creditLineDetails.RecId;
+
+                if (!manualPriceComponent.RecId)
+                {
+                    ret = true;
+                }
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>creditParmLine</Name>
+				<Source><![CDATA[
+    public FINCreditLine creditParmLine()
+    {
+        return creditParmLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCalculationDateTime</Name>
+				<Source><![CDATA[
+    public INVCalculationDateTime parmCalculationDateTime(TransDateTime _calculationDateTime = calculationDateTime)
+    {
+        calculationDateTime = _calculationDateTime;
+        return calculationDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmNewDocumentState</Name>
+				<Source><![CDATA[
+    public VersioningDocumentState parmNewDocumentState(VersioningDocumentState _newDocumentState = newDocumentState)
+    {
+        if (!prmIsDefault(_newDocumentState))
+        {
+            newDocumentState = _newDocumentState;
+            hasNewDocumentState = true;
+        }
+
+        return newDocumentState;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculationDateTime</Name>
+				<Source><![CDATA[
+    public INVCalculationDateTime calculationDateTime()
+    {
+        return calculationDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>closeForm</Name>
+				<Source><![CDATA[
+    public void closeForm()
+    {
+        //don't do anything
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>creditedPeriodsMap</Name>
+				<Source><![CDATA[
+    protected map creditedPeriodsMap()
+    {
+        return creditedPeriodsMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canConfirmCredit</Name>
+				<Source><![CDATA[
+    public boolean canConfirmCredit()
+    {
+        boolean ret = true;
+
+        if (this.isInDraftState())
+        {
+            ret = checkFailed(strFmt("Only record with state %1 can be confirmed.", VersioningDocumentState::Approved));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canSaveForApproval</Name>
+				<Source><![CDATA[
+    public boolean canSaveForApproval()
+    {
+        boolean ret = true;
+
+        if (this.isInDraftState())
+        {
+            ret = checkFailed(strFmt("Only record with state %1 can be saved for approval.", VersioningDocumentState::Draft));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isInDraftState</Name>
+				<Source><![CDATA[
+    protected boolean isInDraftState()
+    {
+        return (callerCreditParmLine && callerCreditParmLine.DocumentState != VersioningDocumentState::Draft);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isInApprovedState</Name>
+				<Source><![CDATA[
+    protected boolean isInApprovedState()
+    {
+        return (callerCreditParmLine 
+            && (callerCreditParmLine.DocumentState != VersioningDocumentState::Draft || this.amountMustBeApproved()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>amountMustBeApproved</Name>
+				<Source><![CDATA[
+    public boolean amountMustBeApproved()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>formRun</Name>
+				<Source><![CDATA[
+    public FormRun formRun(FormRun _formRun = formRun)
+    {
+        formRun = _formRun;
+        return formRun;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getExternalNote</Name>
+				<Source><![CDATA[
+    protected abstract void getExternalNote()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromCreditParmLine</Name>
+				<Source><![CDATA[
+    public void initFromCreditParmLine(FINCreditLine _creditParmLine)
+    {
+        callerCreditParmLine = _creditParmLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmExternalNote</Name>
+				<Source><![CDATA[
+    public DNRAdditionalNote parmExternalNote(DNRAdditionalNote _externalNote = externalNote)
+    {
+        externalNote = _externalNote;
+        return externalNote;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmIsProforma</Name>
+				<Source><![CDATA[
+    public boolean parmIsProforma(boolean _isProforma = isProforma)
+    {
+        isProforma = _isProforma;
+        return isProforma;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmReInvoiceAll</Name>
+				<Source><![CDATA[
+    public boolean parmReInvoiceAll(boolean _reInvoiceAll = reInvoiceAll)
+    {
+        reInvoiceAll = _reInvoiceAll;
+        return reInvoiceAll;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>restoreOrig</Name>
+				<Source><![CDATA[
+    public void restoreOrig()
+    {
+        this.restoreOrigRecords();        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>restoreOrigRecords</Name>
+				<Source><![CDATA[
+    abstract public void restoreOrigRecords()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runPost</Name>
+				<Source><![CDATA[
+    public void runPost()
+    {
+        if (this.validateRunPost())
+        {
+            ttsbegin;
+
+            periodsPerOrderLine = new Map(Types::Int64, Types::Class);
+            specificationPerPeriod = new Map(Types::Int64, Types::Class);
+
+            creditedCustVendInvoiceTrans = new Set(Types::Int64);
+            origAmendmentRecords = new Map(Types::Int64, Types::Record);
+            
+            // Save original order line values
+            this.saveOrigRecords();
+    
+            // Update rental line values based on creditParmLineDetails
+            this.updateRentalLine();
+    
+            // Create credit non-rental lines
+            this.updateSalesPurchLines();
+    
+            // order line will be updated in that method which should also set correct status and rental status of line.
+            this.saveAmendmentLog();
+    
+            // Retrieve the external note, has to be done before the posting otherwise the FINParm table records are deleted
+            this.getExternalNote();
+             
+            // calculate totals
+            this.calculateCreditAmount();
+          
+            // Set DocumentStatus for workflow process
+            this.setNewDocumentState();
+
+            ttscommit;                       
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setNewDocumentState</Name>
+				<Source><![CDATA[
+    public void setNewDocumentState()
+    {
+        if (hasNewDocumentState && callerCreditParmLine)
+        {
+            ttsbegin;
+            callerCreditParmLine.selectForUpdate(true);
+            callerCreditParmLine.DocumentState = newDocumentState;
+            callerCreditParmLine.documentStateModified();
+            callerCreditParmLine.update();
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateCreditAmount</Name>
+				<Source><![CDATA[
+    public void calculateCreditAmount()
+    {
+        if (callerCreditParmLine.TradeType == RORTradeType::SalesPurch)
+        {
+            callerCreditParmLine.CreditAmount = -callerCreditParmLine.InvoicedAmount;
+        }
+        else
+        {
+            Args args = new Args();
+            args.caller(formRun);
+            args.parmObject(this);
+
+            switch (callerCreditParmLine.RefTableId)
+            {
+                case tableNum(CustInvoiceTrans) :
+                    args.record(CustInvoiceTrans::findRecId(callerCreditParmLine.RefRecId).salesLine());
+                    break;
+            
+                default:
+                    args.record(this.getSalesPurchTable());
+            }
+
+            callerCreditParmLine.CreditAmount = FINSalesTotals::calculateTotalAmount(args);
+        }
+
+        ttsbegin;
+        callerCreditParmLine.selectForUpdate(true);
+        callerCreditParmLine.setDocumentStateBasedOnCreditAmount();
+        callerCreditParmLine.update();
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSalesPurchTable</Name>
+				<Source><![CDATA[
+    public Common getSalesPurchTable()
+    {
+        Common common;
+        return common;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runSaveCreditDetails</Name>
+				<Source><![CDATA[
+    public void runSaveCreditDetails(FINCreditLineDetails _creditParmLineDetails, FINCreditLine _creditParmLine = _creditParmLineDetails.creditLine())
+    {
+        creditParmLineDetails = _creditParmLineDetails;
+        creditParmLine = _creditParmLine;
+    
+        if (_creditParmLine)
+        {
+            this.updateCreditParmLineCreditValues();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>saveAmendmentLog</Name>
+				<Source><![CDATA[
+    abstract public void saveAmendmentLog()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>saveCreditParmLineDetails</Name>
+				<Source><![CDATA[
+    public void saveCreditParmLineDetails(
+        Common                      _custInvoiceTrans,
+        FINCreditLine           _creditParmLine,
+        FINCreditLineDetails    _creditParmLineDetails)
+    {
+        this.initFromCreditParmLine(_creditParmLine);
+        if (_creditParmLineDetails.validateWrite() && this.validateRunSaveCreditDetails())
+        {
+            _creditParmLineDetails.write();
+            this.runSaveCreditDetails(_creditParmLineDetails, _creditParmLine);
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>saveOrigRecords</Name>
+				<Source><![CDATA[
+    abstract protected void saveOrigRecords()
+    {
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCreditFormClass</Name>
+				<Source><![CDATA[
+    public void setCreditFormClass(FINCreditForm _creditFormClass)
+    {
+        creditFormClass = _creditFormClass;
+        this.parmReInvoiceAll(creditFormClass.parmReInvoiceAll());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateAmendmentLog</Name>
+				<Source><![CDATA[
+    public void updateAmendmentLog()
+    {
+        SetEnumerator enumerator = amendmentLogRecIds.getEnumerator();
+        ROROrderAmendmentLog        orderAmendmentLog;
+        RecId                       recId;
+        InvoiceId                   invoiceId;
+    
+        void getInvoiceId(RecId _orderLineRecId)
+        {
+            CustInvoiceJour     invoiceJour;
+            CustInvoiceTrans    invoiceTrans;
+            SalesLine           orderLine;
+            ;
+    
+            select firstonly InvoiceId from invoiceJour
+            order by recId desc
+                exists join invoiceTrans
+                where invoiceTrans.SalesId == invoiceJour.SalesId
+                && invoiceTrans.InvoiceId == invoiceJour.InvoiceId
+                && invoiceTrans.InvoiceDate == invoiceJour.InvoiceDate
+                && invoiceTrans.numberSequenceGroup == invoiceJour.numberSequenceGroup
+                    exists join orderLine
+                    where orderLine.InventTransId == invoiceTrans.InventTransId
+                    && orderLine.RecId == _orderLineRecId;
+    
+            invoiceId = invoiceJour.InvoiceId;
+        }
+        ;
+    
+        ttsBegin;
+        while (enumerator.moveNext())
+        {
+            recId = enumerator.current();
+            select firstonly forUpdate orderAmendmentLog
+            where orderAmendmentLog.RecId == recId;
+    
+            if (orderAmendmentLog)
+            {
+                if (!invoiceId)
+                {
+                    getInvoiceId(orderAmendmentLog.RefRecId);
+                }
+    
+                orderAmendmentLog.LogTxtGenerated += strFmt("@DNR7412", invoiceId);
+                orderAmendmentLog.InvoiceId = invoiceId;
+                orderAmendmentLog.update();
+            }
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearRentalStop</Name>
+				<Source><![CDATA[
+    [SysObsolete("The method is not being used anywhere", true)]
+    public void clearRentalStop(TableId _jourTableId, RecId _jourRecId)
+    {
+        // perhaps it is not needed  
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateCreditParmLineCreditValues</Name>
+				<Source><![CDATA[
+    private void updateCreditParmLineCreditValues()
+    {
+        //FINInvoicePeriod            invoicePeriod;
+        boolean                     hasCredit;
+        AmountCurCredit             creditAmount;
+        ;
+    /*
+        while select PeriodStatus, LineAmountInvoiced from invoicePeriod
+        where invoicePeriod.RefTableId      == creditParmLine.TableId
+        &&    invoicePeriod.RefRecId        == creditParmLine.RecId
+        &&    (invoicePeriod.PeriodStatus   == INVPeriodStatus::PendingCancellation ||
+               invoicePeriod.PeriodStatus   == INVPeriodStatus::PendingCredit)
+        {
+            hasCredit = true;
+    
+            if (invoicePeriod.PeriodStatus != INVPeriodStatus::PendingDebit)
+            {
+                creditAmount += invoicePeriod.LineAmountInvoiced;
+            }
+        }
+    */
+        hasCredit = true;
+        creditAmount = creditParmLine.InvoicedAmount;
+
+        creditParmLine.selectForUpdate(true);
+    
+        if (hasCredit)
+        {
+            creditParmLine.CreditAmount = creditAmount;
+            creditParmLine.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runInsuranceCredit</Name>
+				<Source><![CDATA[
+    protected void runInsuranceCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runDeliveryCredit</Name>
+				<Source><![CDATA[
+    protected void runDeliveryCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runReturnCredit</Name>
+				<Source><![CDATA[
+    protected void runReturnCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runDirectChange</Name>
+				<Source><![CDATA[
+    // Credit changes directly on order line. applies to delivery, return and insurance credits
+    protected boolean runDirectChange(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+        boolean updateOrderLine = false;
+
+        switch (_creditParmLineDetails.CreditType)
+        {
+            case FINCreditType::Insurance :
+                this.runInsuranceCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails);
+                updateOrderLine = true;
+                break;
+
+            case FINCreditType::Delivery :
+                this.runDeliveryCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails);
+                updateOrderLine = true;
+                break;
+
+            case FINCreditType::Return :
+                this.runReturnCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails);
+                updateOrderLine = true;
+                break;
+        }
+
+        return updateOrderLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runIndirectChange</Name>
+				<Source><![CDATA[
+    // Credit changes as a price amendment, manual component etc. No direct changes on order line
+    protected void runIndirectChange(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {   
+        switch (_creditParmLineDetails.CreditType)
+        {
+            case FINCreditType::RentalMode :
+                this.runRentalModeCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails);
+                break;
+
+            case FINCreditType::Amount :
+                this.runAmountCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails);
+                break;
+
+            case FINCreditType::Days :
+                this.runDaysCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails);
+                break;
+
+            case FINCreditType::Insurance,
+                FINCreditType::Delivery,
+                 FINCreditType::Return :
+                // changes processed in updateRentalLine()
+                break;
+        }                          
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runAmountCredit</Name>
+				<Source><![CDATA[
+    protected void runAmountCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+        // Add manual price component
+        this.createManualComponentForCredit(_invoicePeriodHost, _creditParmLine, _creditParmLineDetails, creditParmLineDetails.AmountCurCredit, FINRentalAccountType::Price, "@DNR6940");
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createManualComponentForCredit</Name>
+				<Source><![CDATA[
+    protected void createManualComponentForCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails, AmountCur _amount, FINRentalAccountType _creditAccountType, Description _description)
+    {
+        // Add manual price component
+
+        FINManualPriceComponent manualPriceComponent;
+        Common orderLine = _invoicePeriodHost;
+
+        manualPriceComponent.AmountCur = -_amount;
+        manualPriceComponent.CreditAccountType = _creditAccountType;
+        manualPriceComponent.IsCredit = NoYes::Yes;
+        manualPriceComponent.FromDateTime = _creditParmLineDetails.FromDateTime;
+        manualPriceComponent.ToDateTime = _creditParmLineDetails.ToDateTime;
+        manualPriceComponent.Description = _description;
+        manualPriceComponent.TransTableId = orderLine.TableId;
+        manualPriceComponent.TransRecId = orderLine.RecId;
+        manualPriceComponent.insert();
+
+        FINCreditPendingChangesReference::createReference(_creditParmLineDetails, manualPriceComponent, _creditParmLine.DocumentState, DateTimeUtil::minValue(), DateTimeUtil::minValue());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runRentalModeCredit</Name>
+				<Source><![CDATA[
+    protected void runRentalModeCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+        // Add amendment of rental mode
+        Map changesMap = new Map(Types::Container, Types::Container);
+        
+        changesMap.insert([_creditParmLineDetails.FromDateTime, _creditParmLineDetails.ToDateTime, FINInvoicePeriodPriceComponent::RentalModeId], [_creditParmLineDetails.RentalModeId]);
+        
+        FINInvoicePeriodManager_FinancialChange::runFromMap(_invoicePeriodHost, changesMap, false, _creditParmLineDetails);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runDaysCredit</Name>
+				<Source><![CDATA[
+    protected void runDaysCredit(INVInvoicePeriodHost _invoicePeriodHost, FINCreditLine _creditParmLine, FINCreditLineDetails _creditParmLineDetails)
+    {
+        // No need to do anything FINInvoiceCalculator will make sure that line is not re-invoiced automatically with the same amount as before.
+        // Create rental stop for credited days
+        Map changesMap = new Map(Types::Container, Types::Container);
+        
+        changesMap.insert([_creditParmLineDetails.FromDateTime, _creditParmLineDetails.ToDateTime, FINInvoicePeriodPriceComponent::CalendarId], [RORParameters::find().RentalStopCalendar]);
+        
+        FINInvoicePeriodManager_FinancialChange::runFromMap(_invoicePeriodHost, changesMap, false, _creditParmLineDetails);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalLine</Name>
+				<Source><![CDATA[
+    abstract protected void updateRentalLine()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSalesPurchLines</Name>
+				<Source><![CDATA[
+    abstract protected void updateSalesPurchLines()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateRunPost</Name>
+				<Source><![CDATA[
+    private boolean validateRunPost()
+    {
+        boolean ret;
+        FINCreditLine           creditParmLineLocal;
+        FINCreditLineDetails    creditParmLineDetailsLocal;
+    
+        while select creditParmLineLocal
+        where creditParmLineLocal.JourRefTableId == callerCreditParmLine.JourRefTableId
+        && creditParmLineLocal.JourRefRecId == callerCreditParmLine.JourRefRecId
+            outer join creditParmLineDetailsLocal
+            where creditParmLineDetailsLocal.CreditLineRefRecId == creditParmLineLocal.RecId           
+        {
+            if (creditParmLineDetailsLocal || reInvoiceAll)
+            {
+                ret = true;
+                break;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateRunSaveCreditDetails</Name>
+				<Source><![CDATA[
+    public boolean validateRunSaveCreditDetails()
+    {
+        boolean ret = true;
+        ;
+    
+        if (!callerCreditParmLine)
+        {
+            ret = checkFailed(strFmt("@SYS25516", "@SYS12229"));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINCreditManager construct(SalesPurch _salesPurch)
+    {
+        FINCreditManager creditManager;
+    
+        if (_salesPurch == SalesPurch::Sales)
+        {
+            creditManager = new FINCreditManager_Rental();
+        }
+    
+        return creditManager;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateAmendmentLogSubrental</Name>
+				<Source><![CDATA[
+    [SysObsolete("The crediting functionality on sub rental orders is no longer supported", false)]
+    public static void updateAmendmentLogSubrental(ParmId _parmId)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>adjustToDateTimeForInvoiceProfile</Name>
+				<Source><![CDATA[
+    protected ToDateTime adjustToDateTimeForInvoiceProfile(ToDateTime _toDateTime, FINRentalInvoiceProfile _invoiceProfile)
+    {
+        ToDateTime toDateTime = _toDateTime;
+
+        if (_invoiceProfile)
+        {
+            // Make sure that for credit/re-invoicing calculationDateTime is set to cover entire generation period.
+            switch (_invoiceProfile.GenerationPeriod)
+            {
+                case INVGenerationPeriod::Months :
+                    toDateTime = DateTimeUtil::addMonths(toDateTime, _invoiceProfile.NumGenerationPeriods);
+                    break;
+
+                case INVGenerationPeriod::Weeks :
+                    toDateTime = DateTimeUtil::addDays(toDateTime, _invoiceProfile.NumGenerationPeriods * 7);
+                    break;
+
+                default:
+                    toDateTime = DateTimeUtil::addDays(toDateTime, 1);
+                    break;
+            }
+        }
+
+        return toDateTime;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

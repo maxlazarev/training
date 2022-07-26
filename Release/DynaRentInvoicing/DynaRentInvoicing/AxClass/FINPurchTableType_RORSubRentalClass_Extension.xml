@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINPurchTableType_RORSubRentalClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchTableType_RORSubRental))]
+public final class FINPurchTableType_RORSubRentalClass_Extension
+{
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    public void initValue()
+    {
+        next initValue();
+
+        purchTable.FINTimeZoneOrder = DateTimeUtil::getCompanyTimeZone();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updating</Name>
+				<Source><![CDATA[
+    public void updating()
+    {
+        PurchTable purchTable_Orig = purchTable.orig();
+
+        next updating();
+
+        if (purchTable.RecId && purchTable.FINTimeZoneOrder != purchTable_Orig.FINTimeZoneOrder)
+        {
+            this.FINCreateAmendmentLogForTimeZoneChange();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateField</Name>
+				<Source><![CDATA[
+    boolean validateField(FieldId fieldId)
+    {
+        PurchTable purchTable_Orig = purchTable.orig();
+
+        boolean ret = next validateField(fieldId);
+
+        // If the user changes the value in the time zone field, but before saving the record changes the value in the time zone field back to the
+        // original value, then there is no need to perform the relevant check (again).
+        if (fieldId == fieldNum(PurchTable, FINTimeZoneOrder) && purchTable.FINTimeZoneOrder != purchTable_Orig.FINTimeZoneOrder)
+        {
+            ret = ret && this.FINCheckPackingSlip();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCheckPackingSlip</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    public boolean FINCheckPackingSlip()
+    {
+        boolean     ret                 = true;
+        container   existingJournals    = purchTable.FINExistingJournals();
+
+        if (conPeek(existingJournals, PurchTableType::posPackingSlip()))
+        {
+            ret = checkFailed("@DNR:CannotUpdateTimeZoneForDeliveredOrders");
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCreateAmendmentLogForTimeZoneChange</Name>
+				<Source><![CDATA[
+    private void FINCreateAmendmentLogForTimeZoneChange()
+    {
+        PurchTable              purchTable_Orig         = purchTable.orig();
+        utcdatetime             fromDateTime            = DateTimeUtil::getSystemDateTime();
+        ROROrderAmendmentLog    orderAmendmentLogUpdate = this.FINGetAmendmentLogForTimeZoneChange();
+
+        if (orderAmendmentLogUpdate)
+        {
+            orderAmendmentLogUpdate.ToDateTime = fromDateTime;
+
+            orderAmendmentLogUpdate.update();
+        }
+
+        ROROrderAmendmentLog orderAmendmentLogInsert;
+
+        orderAmendmentLogInsert.AmendmentEventType    = DNRAmendmentEventType::TimeZone;
+        orderAmendmentLogInsert.AmendmentAction       = DNRAmendmentAction::Changed;
+        orderAmendmentLogInsert.DNRReasonType         = DNRReasonType::Misc;  // TODO: Is this correct?
+
+        orderAmendmentLogInsert.initFromSalesPurchTable(purchTable);
+
+        orderAmendmentLogInsert.CurrencyCode          = purchTable.CurrencyCode;
+        orderAmendmentLogInsert.FromDateTime          = fromDateTime;
+        orderAmendmentLogInsert.ToDateTime            = DateTimeUtil::maxValue();
+
+        str oldStrValue = enum2Str(purchTable_Orig.FINTimeZoneOrder);
+        str strValue    = enum2Str(purchTable.FINTimeZoneOrder);
+
+        orderAmendmentLogInsert.OldStrValue             = oldStrValue;  // might be truncated due to the string size of 30
+        orderAmendmentLogInsert.StrValue                = strValue;  // might be truncated due to the string size of 30
+
+        orderAmendmentLogInsert.LogTxtGenerated         = strFmt("@SYS311966", orderAmendmentLogInsert.AmendmentAction, orderAmendmentLogInsert.AmendmentEventType) +
+                                                          strFmt("@DNR:OldStrValueToNewStrValue", oldStrValue, strValue);
+
+        orderAmendmentLogInsert.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetAmendmentLogForTimeZoneChange</Name>
+				<Source><![CDATA[
+    private ROROrderAmendmentLog FINGetAmendmentLogForTimeZoneChange()
+    {
+        ROROrderAmendmentLog orderAmendmentLog;
+
+        select firstonly forupdate orderAmendmentLog
+        where orderAmendmentLog.RefTableId          == purchTable.TableId
+        &&    orderAmendmentLog.RefRecId            == purchTable.RecId
+        &&    orderAmendmentLog.ConfirmId           == ''
+        &&    orderAmendmentLog.AmendmentEventType  == DNRAmendmentEventType::TimeZone
+        &&    orderAmendmentLog.AmendmentAction     == DNRAmendmentAction::Changed
+        &&    orderAmendmentLog.ToDateTime          == DateTimeUtil::maxValue();
+
+        return orderAmendmentLog;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

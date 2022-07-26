@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalTransMgr_Sales</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBRentalTransMgr_Sales extends BOBRentalTransManager
+{
+    SalesLine salesLine;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>active</Name>
+				<Source><![CDATA[
+    protected BOBRentalTransActive active()
+    {
+        BOBRentalTrans      rentalTrans;
+        InventTransOrigin   inventTransOrigin;
+        InventJournalTrans  inventJournalTrans;
+        
+        // For a sales line linked with a conversion journal , only one of the rental transaction originating from Sales Order or from Conversion Journal shall be active
+        if(salesLine.BOBConversionJourId)
+        {
+            select firstonly Active from rentalTrans
+                join TableId from inventTransOrigin
+                where inventTransOrigin.RecId == rentalTrans.InventTransOrigin
+                    join TableId from inventJournalTrans
+                    where inventJournalTrans.InventTransId == inventTransOrigin.InventTransId
+                    &&    inventJournalTrans.RORRefRecId == salesLine.RecId
+                    &&    inventJournalTrans.JournalId == salesLine.BOBConversionJourId;
+            
+            if(rentalTrans.Active == BOBRentalTransActive::Active)
+            {
+                return BOBRentalTransActive::Inactive;
+            }
+            else
+            {
+                return BOBRentalTransActive::Active;
+            }
+        }
+
+        // only actively use the SalesLine's rental transaction when selling rental business objects
+        return (salesLine.BOBSellFixedAsset ? BOBRentalTransActive::Active : BOBRentalTransActive::Inactive);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyFrom</Name>
+				<Source><![CDATA[
+    protected BOBDateTimeCertainty certaintyFrom()
+    {
+        switch(inventTrans.StatusIssue)
+        {
+            case StatusIssue::OnOrder,
+                 StatusIssue::Picked,
+                 StatusIssue::ReservPhysical,
+                 StatusIssue::ReservOrdered:
+                return BOBDateTimeCertainty::Firm;
+    
+            case StatusIssue::Deducted, StatusIssue::Sold:
+                return BOBDateTimeCertainty::Fixed;
+    
+            default:
+                if(inventTrans.StatusIssue == StatusIssue::None && inventTrans.Qty > 0)
+                {
+                    // sales credit, correction, or cancellation
+                    switch(inventTrans.StatusReceipt)
+                    {
+                        case StatusReceipt::Ordered, StatusReceipt::Registered:
+                            return BOBDateTimeCertainty::Firm;
+    
+                        case StatusReceipt::Received, StatusReceipt::Purchased:
+                            return BOBDateTimeCertainty::Fixed;
+                    }
+                }
+        }
+    
+        throw error("@DNR6063");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyTo</Name>
+				<Source><![CDATA[
+    protected BOBDateTimeCertainty certaintyTo(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+        return BOBDateTimeCertainty::Fixed;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fromDateTime</Name>
+				<Source><![CDATA[
+    protected FromDateTime fromDateTime()
+    {
+        FromDate fromDate;
+        ;
+    
+        switch(inventTrans.StatusIssue)
+        {
+            case StatusIssue::Picked, StatusIssue::Deducted, StatusIssue::Sold:
+                if(inventTrans.DateInvent)
+                {
+                    fromDate = inventTrans.DateInvent;
+                }
+                else if(inventTrans.DatePhysical)
+                {
+                    fromDate = inventTrans.DatePhysical;
+                }
+                else
+                {
+                    fromDate = inventTrans.DateFinancial;
+                }
+    
+                fromDate = max(fromDate, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                break;
+    
+            default:
+                if(salesLine.ReceiptDateConfirmed)
+                {
+                    fromDate = salesLine.ReceiptDateConfirmed;
+                }
+                else if(salesLine.ReceiptDateRequested)
+                {
+                    fromDate = salesLine.ReceiptDateRequested;
+                }
+                else
+                {
+                    fromDate = salesLine.ShippingDateRequested;
+                }
+                break;
+        }
+    
+        return DateTimeUtil::newDateTime(fromDate, 0, DateTimeUtil::getUserPreferredTimeZone());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromBuffer</Name>
+				<Source><![CDATA[
+    protected void initFromBuffer()
+    {
+        salesLine = buffer as SalesLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventLocationId</Name>
+				<Source><![CDATA[
+    protected InventLocationId inventLocationId()
+    {
+        return inventTrans.inventLocationId();
+        // return salesLine.inventDim().InventLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalTypeId</Name>
+				<Source><![CDATA[
+    protected BOBRentalTypeId rentalTypeId()
+    {
+        return salesLine.BOBRentalTypeId();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>toDateTime</Name>
+				<Source><![CDATA[
+    protected ToDateTime toDateTime(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+        return DateTimeUtil::maxValue();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transType</Name>
+				<Source><![CDATA[
+    protected BOBRentalTransType transType()
+    {
+        return BOBRentalTransType::Sales;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBuffer</Name>
+				<Source><![CDATA[
+    protected void updateBuffer(boolean _doUpdateBuffer)
+    {
+        BOBRentalTrans rentalTrans;
+        ;
+    
+        if(salesLine.RecId)
+        {
+            select firstonly SubStatus, RecId from rentalTrans
+            order by SubStatus asc
+            where rentalTrans.InventTransOrigin == inventTrans.InventTransOrigin
+            &&    rentalTrans.TransType         != BOBRentalTransType::InventCounting;
+    
+            salesLine.selectForUpdate(true);
+            salesLine.BOBRentalSubStatus = (rentalTrans.RecId ? rentalTrans.SubStatus : subStatus);
+    
+            if(_doUpdateBuffer)
+            {
+                salesLine.doUpdate();
+            }
+        }
+        else // record is being inserted
+        {
+            salesLine.BOBRentalSubStatus = subStatus;
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

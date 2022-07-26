@@ -1,0 +1,706 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RTPReturnNoteLinesGenerate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RTPReturnNoteLinesGenerate extends RunBase
+{
+    InventJournalTable              inventJournalTable;
+    SalesTableCheckIfUpdateContract checkIfContract;
+    SalesQuantity                   salesQuantity;
+
+    RORVenueCode        venueCode;
+    ItemId              itemId;
+    NoYesId             generateBulkItemLinesPerOrder;
+    InventLocationId    inventLocationId;
+    InventSiteId        inventSiteId;
+    InventSerialId      inventSerialId;
+    ROROffRentDateTime  offRentDateTime;
+    TransDateTime       returnDateTime;
+    boolean             isManualCreation;
+    ProjId              projId;
+    SalesId             salesId;
+    SalesLineRefRecId   salesLineRecId;
+    Map                 checkedSalesTableMap;
+    InventJournalTrans  callerInventJournalTrans;
+    boolean             mustUpdateCallerInventTrans;
+    Map                 refSalesLineRecIdReturnRemainderMap;
+
+    Set                 refSalesLineRecIdSet = new Set(Types::Int64);  // Obsolete
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getSalesLineRecIdSet</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects07_2021. The set refSalesLineRecIdSet has been replaced by the map refSalesLineRecIdReturnRemainderMap. Please use the method getRefSalesLineRecIdReturnRemainderMap() instead.', false)]
+    public Set getSalesLineRecIdSet()
+    {
+        return refSalesLineRecIdSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRefSalesLineRecIdReturnRemainderMap</Name>
+				<Source><![CDATA[
+    public Map getRefSalesLineRecIdReturnRemainderMap()
+    {
+        return refSalesLineRecIdReturnRemainderMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCreateLine</Name>
+				<Source><![CDATA[
+    public boolean canCreateLine(
+        SalesTable    _salesTable,
+        SalesLine     _salesLine,
+        TransDateTime _returnDateTime = returnDateTime)
+    {
+        boolean                         ret;
+        boolean                         isRentalDirectDelivery;
+        SalesLine                       parentLine;
+        InventTransOriginSalesLine      inventTransOriginSalesLine;
+        BOBRentalTrans                  rentalTrans;
+        SalesTableCanBeUpdatedContract  canBeUpdatedContract;
+        container                       canBeUpdated;
+        boolean                         ignoreSalesTableCheck;
+        ;
+    
+        if (!checkedSalesTableMap)
+        {
+            checkedSalesTableMap = new Map(Types::Int64, Types::Enum);
+        }
+    
+        if (checkedSalesTableMap.exists(_salesTable.RecId))
+        {
+            if (checkedSalesTableMap.lookup(_salesTable.RecId) == NoYes::No)
+            {
+                return false;
+            }
+            else
+            {
+                ignoreSalesTableCheck = true;
+            }
+        }
+    
+        if (_salesLine.RORTradeType == RORTradeType::Rental
+        ||  _salesLine.RORTradeType == RORTradeType::SubRental)
+        {
+            select firstonly RecId from inventTransOriginSalesLine
+            where inventTransOriginSalesLine.SalesLineDataAreaId    == _salesLine.dataAreaId
+            &&    inventTransOriginSalesLine.SalesLineInventTransId == _salesLine.InventTransId
+                exists join rentalTrans
+                where rentalTrans.InventTransOrigin == inventTransOriginSalesLine.InventTransOrigin
+                &&    rentalTrans.SubStatus         >= BOBRentalSubStatus::Delivered
+                &&    rentalTrans.SubStatus         <  BOBRentalSubStatus::Returned
+                &&    ((isManualCreation &&
+                        rentalTrans.FromDateTime    <= _returnDateTime)
+                        ||
+                        (!isManualCreation && rentalTrans.ToDateTime <= _returnDateTime));
+    
+            ret = inventTransOriginSalesLine.RecId;
+        }
+    
+        if (ret && !ignoreSalesTableCheck)
+        {
+            // Check whether the return not can be posted
+            if (_salesTable.InterCompanyDirectDelivery
+            &&  _salesTable.SalesType == SalesType::RORRental
+            &&  _salesTable.referencePurchTable().interCompanySalesTable())
+            {
+                isRentalDirectDelivery = true;
+            }
+    
+            ret = !isRentalDirectDelivery;
+        }
+    
+        if (ret && !ignoreSalesTableCheck)
+        {
+            canBeUpdated         = _salesTable.checkIfUpdate(checkIfContract.pack());
+            canBeUpdatedContract = SalesTableCanBeUpdatedContract::create(canBeUpdated);
+            ret                  = canBeUpdatedContract.RORparmCanReturnNoteBeUpdated();
+        }
+    
+        if (ret && !ignoreSalesTableCheck)
+        {
+            ret = conPeek(salesQuantity.qtySales(_salesLine), 1);
+        }
+    
+        if (ret
+        && !ignoreSalesTableCheck
+        && (!_salesTable.type().RORmayReturnNoteBeUpdated() || _salesTable.returnItem()))
+        {
+            ret = false;
+            checkedSalesTableMap.insert(_salesTable.RecId, NoYes::No);
+        }
+    
+        ret = ret
+            && !_salesLine.isReturnReservationLine()
+            &&  _salesLine.type().RORmayReturnNoteBeUpdated()
+            && !WPPWorkOrderTable::excludeOrderLine(_salesLine.TableId, _salesLine.RecId, WPPTaskType::Load);
+    
+        if (ret && _salesLine.RORParentLineRecId)
+        {
+            // Find the parent line
+            parentLine = SalesLine::findRecId(_salesLine.RORParentLineRecId);
+    
+            while (ret && parentLine)
+            {
+                // Check whether the parent line is not linked to a work order
+                // and where the task is of type InternalDelivery
+                ret = !WPPWorkOrderTable::excludeOrderLine(parentLine.TableId, parentLine.RecId, WPPTaskType::InternalDelivery);
+    
+                if (ret)
+                {
+                    parentLine = SalesLine::findRecId(parentLine.RORParentLineRecId);
+                }
+            }
+        }
+    
+        if (ret)
+        {
+            ret = !this.checkReturnLineAddedBefore(_salesLine.RecId);
+        }
+    
+        if (ret)
+        {
+            checkedSalesTableMap.insert(_salesTable.RecId, NoYes::Yes);
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkReturnLineAddedBefore</Name>
+				<Source><![CDATA[
+    private boolean checkReturnLineAddedBefore(RecId _recId)
+    {
+        boolean             ret;
+        InventJournalTrans  inventJournalTransOther;
+        RTPInventJournalTransSalesLineReference journalTransSalesLineReference;
+    
+        select firstonly RecId from inventJournalTransOther
+        where inventJournalTransOther.JournalId == inventJournalTable.JournalId
+            exists join journalTransSalesLineReference
+            where journalTransSalesLineReference.InventJournalTransRecId == inventJournalTransOther.RecId
+            &&    journalTransSalesLineReference.SalesLineRecId == _recId;
+            
+        if (inventJournalTransOther)
+        {
+            ret = true;
+        }
+            
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        DialogRunbase   dialog;
+    
+        dialog = Dialog::newFormnameRunbase(formStr(RTPReturnNoteGenerateDialog), this);
+        dialog.caption(RTPReturnNoteLinesGenerate::description());
+        dialog = this.dialogInternal(dialog, true);
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generateLines</Name>
+				<Source><![CDATA[
+    public void generateLines(boolean _bulkItems)
+    {
+        InventJournalTrans  inventJournalTrans;
+        SalesTable          salesTable;
+        SalesLine           salesLine;
+        RORRentalDateTimes  rentalDateTimes;
+        InventDim           inventDim;
+        BOBRentalType       rentalType;
+        InventSiteId        inventSiteIdPrev;
+        InventLocationId    inventLocationIdPrev;
+        InventSerialId      inventSerialIdPrev;
+        SalesIdBase         salesIdPrev;
+        itemId              itemIdPrev;
+        boolean             insertLastRecord;
+        InventDim           newInventDim;
+        MapEnumerator       mapEnumerator;
+
+        RTPInventJournalTransSalesLineReference journalTransSalesLineReference;
+
+        CustAccount         custAccount         = inventJournalTable.RTPCustAccount;
+        RecordInsertList    recordInsertList    = new RecordInsertList(tableNum(RTPInventJournalTransSalesLineReference));
+
+        while select salesTable
+        order by salesLine.ItemId, salesLine.SalesId, inventDim.InventSiteId, inventDim.InventLocationId, salesLine.SalesUnit
+        where salesTable.CustAccount == custAccount
+        &&  (!venueCode || salesTable.RORVenueCode  == venueCode)
+        &&  (!salesId   || salesTable.SalesId       == salesId)
+        &&  (!projId    || salesTable.ProjId        == projId)
+            join salesLine
+            where salesLine.SalesId == salesTable.SalesId
+            &&    (!itemId          || salesLine.ItemId == itemId)
+            &&    (!salesLineRecId  || salesLine.RecId  == salesLineRecId)
+            &&   !salesLine.Blocked
+            &&   (salesLine.RORTradeType == RORTradeType::Rental ||
+                  salesLine.RORTradeType == RORTradeType::SubRental)
+                join OffRentDateTime, ExpectedOffRentDateTime from rentalDateTimes
+                where rentalDateTimes.RefTableId    == salesLine.TableId
+                &&    rentalDateTimes.RefRecId      == salesLine.RecId
+                    join inventSiteId, inventLocationId, InventSerialId, WMSLocationId from inventDim
+                    where inventDim.inventDimId == salesLine.InventDimId
+                    &&   (!inventLocationId || inventDim.InventLocationId == inventLocationId)
+                    &&   (!inventSiteId     || inventDim.InventSiteId     == inventSiteId)
+                    &&   (!inventSerialId   || inventDim.inventSerialId   == inventSerialId)
+                        outer join rentalType
+                        where rentalType.RentalTypeId == salesLine.BOBRentalTypeIdRequested
+        {
+            if ((_bulkItems && rentalType && rentalType.Classification == BOBRentalTypeClassification::Serialized)
+            || (!_bulkItems && (!rentalType || rentalType.Classification != BOBRentalTypeClassification::Serialized)))
+            {
+                continue;
+            }
+
+            if (offRentDateTime
+            && (rentalDateTimes.OffRentDateTime > offRentDateTime ||
+                (!rentalDateTimes.OffRentDateTime && rentalDateTimes.ExpectedOffRentDateTime != offRentDateTime)))
+            {
+                continue;
+            }
+
+            // Do not insert the first record
+            if ((inventJournalTrans.ItemId  &&
+                itemIdPrev                  &&
+                (salesLine.ItemId != itemIdPrev || (!_bulkItems && inventDim.inventSerialId != inventSerialIdPrev)))
+            // If the option 'Generate bulk item lines per order' is enabled, then journal lines for bulk rental items should be grouped by order, not by item number.
+            ||  (_bulkItems                                     &&
+                 generateBulkItemLinesPerOrder == NoYes::Yes    &&
+                 inventJournalTrans.ItemId                      &&
+                 salesIdPrev                                    &&
+                 salesLine.SalesId != salesIdPrev))
+            {
+                inventJournalTrans.insert();
+
+                mapEnumerator = refSalesLineRecIdReturnRemainderMap.getEnumerator();
+
+                while (mapEnumerator.moveNext())
+                {
+                    journalTransSalesLineReference.clear();
+
+                    journalTransSalesLineReference.InventJournalTransRecId  = inventJournalTrans.RecId;
+                    journalTransSalesLineReference.SalesLineRecId           = mapEnumerator.currentKey();
+                    journalTransSalesLineReference.RemainSalesReturn        = mapEnumerator.currentValue();
+
+                    recordInsertList.add(journalTransSalesLineReference);
+                }
+
+                inventJournalTrans.clear();
+
+                refSalesLineRecIdReturnRemainderMap = new Map(Types::Int64, Types::Real);
+                insertLastRecord                    = false;
+            }
+
+            if (this.canCreateLine(salesTable, salesLine))
+            {
+                inventJournalTrans.initFromInventJournalTable(inventJournalTable);
+
+                inventJournalTrans.TransDate                = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(inventJournalTable.RTPReturnDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+                inventJournalTrans.LineNum                  = InventJournalTrans::lastLineNum(inventJournalTable.JournalId) + 1;
+                inventJournalTrans.ItemId                   = salesLine.ItemId;
+                inventJournalTrans.RTPAvailableReturnQty    += salesLine.RORRemainSalesReturn;
+                inventJournalTrans.RORGoodQty               = inventJournalTrans.RTPAvailableReturnQty;
+                inventJournalTrans.Qty                      = inventJournalTrans.RTPAvailableReturnQty;
+
+                refSalesLineRecIdReturnRemainderMap.insert(salesLine.RecId, salesLine.RORRemainSalesReturn);
+
+                newInventDim.clear();
+
+                if (inventJournalTable.RTPReturnInventLocationId && inventJournalTable.RTPReturnInventLocationId != inventDim.InventLocationId)
+                {
+                    newInventDim.InventLocationId   = inventJournalTable.RTPReturnInventLocationId;
+                    newInventDim.InventSiteId       = InventLocation::find(inventJournalTable.RTPReturnInventLocationId).InventSiteId;
+                    newInventDim.wMSLocationId      = InventItemLocation::findFixedWarehouse(inventJournalTrans.ItemId, salesLine.InventDimId).WMSLocationIdDefaultReceipt;
+                }
+                else
+                {
+                    newInventDim.InventSiteId       = inventDim.InventSiteId;
+                    newInventDim.InventLocationId   = inventDim.InventLocationId;
+                    newInventDim.wMSLocationId      = inventDim.wMSLocationId ? inventDim.wMSLocationId :
+                                                        InventItemLocation::findFixedWarehouse(inventJournalTrans.ItemId, salesLine.InventDimId).WMSLocationIdDefaultReceipt;
+                }
+
+                if (!_bulkItems)
+                {
+                    newInventDim.inventSerialId = inventDim.inventSerialId;
+                }
+
+                newInventDim = InventDim::findOrCreate(newInventDim);
+
+                inventJournalTrans.InventDimId = newInventDim.inventDimId;
+
+                salesIdPrev             = salesLine.SalesId;
+                itemIdPrev              = salesLine.ItemId;
+                inventSiteIdPrev        = newInventDim.InventSiteId;
+                inventLocationIdPrev    = newInventDim.InventLocationId;
+                inventSerialIdPrev      = newInventDim.inventSerialId;
+
+                // When the last values are set in the table then
+                // the record is not inserted yet, this is done after the last loop
+                insertLastRecord = true;
+            }
+        }
+
+        if (insertLastRecord && inventJournalTrans.ItemId)
+        {
+            if (mustUpdateCallerInventTrans)
+            {
+                callerInventJournalTrans.data(inventJournalTrans);
+            }
+            else
+            {
+                inventJournalTrans.insert();
+                
+                mapEnumerator = refSalesLineRecIdReturnRemainderMap.getEnumerator();
+                
+                while (mapEnumerator.moveNext())
+                {
+                    journalTransSalesLineReference.clear();
+
+                    journalTransSalesLineReference.InventJournalTransRecId  = inventJournalTrans.RecId;
+                    journalTransSalesLineReference.SalesLineRecId           = mapEnumerator.currentKey();
+                    journalTransSalesLineReference.RemainSalesReturn        = mapEnumerator.currentValue();
+
+                    recordInsertList.add(journalTransSalesLineReference);
+                }
+
+                refSalesLineRecIdReturnRemainderMap = new Map(Types::Int64, Types::Real);
+            }
+        }
+
+        recordInsertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+
+        // Global, so it only have to be initialized once
+        checkIfContract = SalesTableCheckIfUpdateContract::construct();
+        checkIfContract.RORparmCheckReturnNote(true);
+
+        salesQuantity = SalesQuantity::construct(DocumentStatus::RORReturnNote);
+        salesQuantity.RORparmRentalSubStatus(BOBRentalSubStatus::Returned);
+
+        refSalesLineRecIdReturnRemainderMap = new Map(Types::Int64, Types::Real);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmInventJournalTable</Name>
+				<Source><![CDATA[
+    public InventJournalTable parmInventJournalTable(InventJournalTable _inventJournalTable = inventJournalTable)
+    {
+        inventJournalTable = _inventJournalTable;
+    
+        return inventJournalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmInventLocationId</Name>
+				<Source><![CDATA[
+    public InventLocationId parmInventLocationId(InventLocationId _inventLocationId = inventLocationId)
+    {
+        inventLocationId = _inventLocationId;
+    
+        return inventLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmOffRentDateTime</Name>
+				<Source><![CDATA[
+    public ROROffRentDateTime parmOffRentDateTime(ROROffRentDateTime _offRentDateTime = offRentDateTime)
+    {
+        offRentDateTime = _offRentDateTime;
+    
+        return offRentDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmInventSiteId</Name>
+				<Source><![CDATA[
+    public InventSiteId parmInventSiteId(InventSiteId _inventSiteId = inventSiteId)
+    {
+        inventSiteId = _inventSiteId;
+    
+        return inventSiteId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmInventSerialId</Name>
+				<Source><![CDATA[
+    public InventSerialId parmInventSerialId(InventSerialId _inventSerialId = inventSerialId)
+    {
+        inventSerialId = _inventSerialId;
+        return inventSerialId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerInventJournalTrans</Name>
+				<Source><![CDATA[
+    public InventJournalTrans parmCallerInventJournalTrans(InventJournalTrans _callerInventJournalTrans = callerInventJournalTrans)
+    {
+        callerInventJournalTrans = _callerInventJournalTrans;
+        return callerInventJournalTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmMustUpdateCallerInventTrans</Name>
+				<Source><![CDATA[
+    public boolean parmMustUpdateCallerInventTrans(boolean _mustUpdateCallerInventTrans = mustUpdateCallerInventTrans)
+    {
+        mustUpdateCallerInventTrans = _mustUpdateCallerInventTrans;
+        return mustUpdateCallerInventTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmIsManualCreation</Name>
+				<Source><![CDATA[
+    public boolean parmIsManualCreation(boolean _isManualCreation = isManualCreation)
+    {
+        isManualCreation = _isManualCreation;
+    
+        return isManualCreation;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmItemId</Name>
+				<Source><![CDATA[
+    public ItemId parmItemId(ItemId _itemId = itemId)
+    {
+        itemId = _itemId;
+    
+        return itemId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmGenerateBulkItemLinesPerOrder</Name>
+				<Source><![CDATA[
+    public NoYesId parmGenerateBulkItemLinesPerOrder(NoYesId _generateBulkItemLinesPerOrder = generateBulkItemLinesPerOrder)
+    {
+        generateBulkItemLinesPerOrder = _generateBulkItemLinesPerOrder;
+
+        return generateBulkItemLinesPerOrder;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSalesId</Name>
+				<Source><![CDATA[
+    public SalesId parmSalesId(SalesId _salesId = salesId)
+    {
+        salesId = _salesId;
+    
+        return salesId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSalesLineRecId</Name>
+				<Source><![CDATA[
+    public SalesLineRefRecId parmSalesLineRecId(SalesLineRefRecId _salesLineRecId = salesLineRecId)
+    {
+        salesLineRecId = _salesLineRecId;
+    
+        return salesLineRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmVenueCode</Name>
+				<Source><![CDATA[
+    public RORVenueCode parmVenueCode(RORVenueCode _venueCode = venueCode)
+    {
+        venueCode = _venueCode;
+    
+        return venueCode;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmProjId</Name>
+				<Source><![CDATA[
+    public ProjId parmProjId(ProjId _projId = projId)
+    {
+        projId = _projId;
+    
+        return projId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        // Used infolog.startLengthyOperation,
+        // because startLengthyOperation is only running on the client
+        infolog.startLengthyOperation();
+        returnDateTime = inventJournalTable.RTPReturnDateTime;
+    
+        //delete_from returnNoteLine;
+    
+        // process bulk items
+        this.generateLines(true);
+        // process serialized items
+        this.generateLines(false);
+    
+        ttsBegin;
+        inventJournalTable.selectForUpdate(true);
+        InventJournalTable::initTotal(inventJournalTable);
+        inventJournalTable.update();
+        ttsCommit;
+    
+        infolog.endLengthyOperation();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateItem</Name>
+				<Source><![CDATA[
+    public boolean validateItem(ItemId  _itemId)
+    {
+        boolean                     ret;
+        SalesLine                   salesLine;
+        InventTransOriginSalesLine  inventTransOriginSalesLine;
+        TransDateTime               dateTime;
+    
+        ret      = true;
+        dateTime = DateTimeUtil::applyTimeZoneOffset(inventJournalTable.RTPReturnDateTime, DateTimeUtil::getUserPreferredTimeZone());
+    
+        select firstOnly RecId from salesLine
+        where salesLine.ItemId       == _itemId
+        &&    salesLine.CustAccount  == inventJournalTable.RTPCustAccount
+        &&   (salesLine.RORTradeType == RORTradeType::Rental
+        ||    salesLine.RORTradeType == RORTradeType::SubRental)
+            exists join inventTransOriginSalesLine
+            where inventTransOriginSalesLine.SalesLineDataAreaId    == salesLine.dataAreaId
+            &&    inventTransOriginSalesLine.SalesLineInventTransId == salesLine.InventTransId;
+    
+        if (!salesLine.RecId)
+        {
+            ret = checkFailed("@DNR7225");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static server RTPReturnNoteLinesGenerate construct()
+    {
+        return new RTPReturnNoteLinesGenerate();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    client server static ClassDescription description()
+    {
+        return "@DNR7223";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        InventJournalTable          inventJournalTable;
+        RTPReturnNoteLinesGenerate  returnNoteLinesGenerate;
+        FormRun                     formRun;
+    
+        if (!_args.caller()
+        ||  (_args.dataset() != tableNum(InventJournalTable)))
+        {
+            throw error(Error::missingParameter(null));
+        }
+    
+        inventJournalTable = _args.record();
+    
+        returnNoteLinesGenerate = RTPReturnNoteLinesGenerate::construct();
+        returnNoteLinesGenerate.parmInventJournalTable(inventJournalTable);
+    
+        if (returnNoteLinesGenerate.prompt())
+        {
+            returnNoteLinesGenerate.runOperation();
+    
+            if (_args.caller() is FormRun)
+            {
+                formRun = _args.caller();
+                formRun.dataSource().research(true);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

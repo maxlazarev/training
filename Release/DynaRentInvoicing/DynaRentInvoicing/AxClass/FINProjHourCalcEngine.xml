@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINProjHourCalcEngine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINProjHourCalcEngine implements FINIInvoiceCalculatorGenericEngine
+{
+    FINInvoiceCalculatorParm        invoiceCalculatorParm;
+    Common                          parmLine;
+    RORRentalLine                   rentalLine;
+    FINProjHourJournalizer          journalizedData;
+    Map                             minMaxQtyFromContractMap = new Map(Types::String, Types::Container);
+    boolean                         calcEstimation;
+    FINInvoicingOptions             invoicingOptions;
+    AmountCur                       projHourAmount;
+    #define.engineId('ProjHour')
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>mustBeActive</Name>
+				<Source><![CDATA[
+    public boolean mustBeActive()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINProjHourCalcEngine construct(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        FINProjHourCalcEngine calcEngine = new FINProjHourCalcEngine();
+        calcEngine.initParameters(_invoiceCalculatorParm);
+        return calcEngine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParameters</Name>
+				<Source><![CDATA[
+    public void initParameters(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        invoiceCalculatorParm = _invoiceCalculatorParm;
+        parmLine = invoiceCalculatorParm.parmLine();
+        rentalLine = invoiceCalculatorParm.rentalLine();
+        invoicingOptions = invoiceCalculatorParm.getInvoicingOptions();
+        calcEstimation = invoiceCalculatorParm.IsEstimation;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustRunEngine</Name>
+				<Source><![CDATA[
+    protected boolean mustRunEngine()
+    {
+        boolean ret;
+
+        if (invoicingOptions.includeUninvoiced
+        // Proj hour trans can be linked to salesLine or purchLine
+        && (rentalLine.TableId == tableNum(SalesLine) || rentalLine.TableId == tableNum(PurchLine))
+        && UnitOfMeasure::find(rentalLine.PriceTimeUnit).FINInvoiceProjectEngine
+        && !RORParameters::find().RentalProjectInvoicing)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPeriodSpecificationMap</Name>
+				<Source><![CDATA[
+    [SysObsolete("DNRDeletedObjects01_2020. Method getPeriodSpecificationMap has been made obsolete. Please use /Classes/FINPeriodSpecificationManager/Methods/populate instead", false)]
+    protected Map getPeriodSpecificationMap()
+    {
+        // PeriodDefinitionMaps per delivery
+        // ([RecId, qty], Map(Types::Container, Types::Class))
+        Map         specificationMap    = Map::create(invoiceCalculatorParm.PeriodSpecificationPacked);
+        Timezone    timeZone            = invoiceCalculatorParm.Timezone;
+
+        if (specificationMap.empty() && !invoiceCalculatorParm.IsPeriodSpecificationCalculated)
+        {
+            TransDateTime forcedEndDateTime;
+
+            FINInvoicePeriodQtyPhysical     invPeriodQtyPhysical;
+            FINInvoicePeriodQtyFinancial    invPeriodQtyFinancial;
+
+            TransDateTime   calculationDateTime = invoicingOptions.calculationDateTime;
+            Qty             invoiceQtyRemainder = invoiceCalculatorParm.parmLineQty();
+
+            if (calcEstimation)
+            {
+                TransDate calculationDate = endMth(DateTimeUtil::date(rentalLine.RORRentalDateTimes().getOffRentDateTime(true, true)));
+
+                forcedEndDateTime   = DateTimeUtil::newDateTime(calculationDate+1, 0, timeZone);
+                calculationDateTime = forcedEndDateTime;
+            }
+
+            while select invPeriodQtyPhysical
+            order by ReturnDateTime asc
+            where invPeriodQtyPhysical.RefTableId   == rentalLine.TableId
+            &&    invPeriodQtyPhysical.RefRecId     == rentalLine.RecId
+            &&    (invPeriodQtyPhysical.QtyRented || calcEstimation)
+                exists join invPeriodQtyFinancial
+                where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+                &&    !invPeriodQtyFinancial.InvoiceId
+            {
+                if (invoiceQtyRemainder <= 0)
+                {
+                    break;
+                }
+
+                FINPeriodDatesDefinition periodDatesDefinition = FINPeriodDatesDefinition::construct(rentalLine, invPeriodQtyPhysical, true, timeZone);
+
+                if (calcEstimation)
+                {
+                    periodDatesDefinition.setForcedPeriodsEndDateTime(forcedEndDateTime);
+                }
+
+                periodDatesDefinition.setForceUntilCalculationPoint(invoicingOptions.forceUntilCalculationPoint);
+                periodDatesDefinition.calculateInvoiceToDate(calculationDateTime);
+
+                Qty invoiceQty = min(invoiceQtyRemainder, ((calcEstimation && !invPeriodQtyPhysical.QtyRented) ? rentalLine.RentQty : invPeriodQtyPhysical.QtyRented));
+
+                if (periodDatesDefinition)
+                {
+                    TimeOfDay defaultDaysSplitPerDelivery = periodDatesDefinition.defaultDaysSplit();
+
+                    specificationMap.insert([invPeriodQtyPhysical.RecId, invoiceQty, defaultDaysSplitPerDelivery], periodDatesDefinition.periodDatesDefinitionMap());
+                }
+
+                invoiceQtyRemainder -= invoiceQty;
+            }
+        }
+
+        return specificationMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasProjTransInRange</Name>
+				<Source><![CDATA[
+    protected boolean hasProjTransInRange(TransDateTime _startDateTime, TransDateTime _endDateTime)
+    {
+        boolean ret;
+        TransDate startPeriodRentDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_startDateTime , DateTimeUtil::getUserPreferredTimeZone()));
+        TransDate endPeriodRentDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(_endDateTime, DateTimeUtil::getUserPreferredTimeZone()));
+        ProjEmplTrans projEmplTrans;
+
+        while select RecId, TransDate, FromTime, ToTime, TotalSalesAmountCur, CurrencyId from projEmplTrans
+        where projEmplTrans.INVRefTableId == rentalLine.TableId
+        &&    projEmplTrans.INVRefRecId == rentalLine.RecId
+        &&    !projEmplTrans.WPPInvoiceId
+        {
+            if (!journalizedData.inResult(projEmplTrans.RecId)
+            && DateTimeUtil::newDateTime(projEmplTrans.TransDate, projEmplTrans.ToTime) >= DateTimeUtil::applyTimeZoneOffset(_startDateTime, DateTimeUtil::getUserPreferredTimeZone())
+            && DateTimeUtil::newDateTime(projEmplTrans.TransDate, projEmplTrans.FromTime) <= DateTimeUtil::applyTimeZoneOffset(_endDateTime, DateTimeUtil::getUserPreferredTimeZone()))
+            {
+                journalizedData.addResult(projEmplTrans.RecId);
+                AmountCur salesAmount = projEmplTrans.TotalSalesAmountCur;
+
+                projHourAmount += CurrencyExchangeHelper::curAmount2CurAmount(salesAmount, projEmplTrans.CurrencyId, rentalLine.CurrencyCode);
+                
+                ret = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    public void process()
+    {
+        if (this.mustRunEngine())
+        {
+            // Add result to a list storing a result of all engines.
+            List resultList = List::create(invoiceCalculatorParm.InvoiceCalcResultListPacked);
+            journalizedData = new FINProjHourJournalizer();
+
+            FINPeriodSpecificationManager periodSpecificationManager = FINPeriodSpecificationManager::construct();
+            periodSpecificationManager.populate(invoiceCalculatorParm, rentalLine, invoicingOptions);
+            Map periodSpecificationMap = periodSpecificationManager.getSpecificationMap();
+
+            boolean mustBeInvoiced = invoiceCalculatorParm.MustBeInvoiced;
+            ProjEmplTrans projEmplTrans;
+
+            select firstOnly RecId from projEmplTrans
+            where projEmplTrans.INVRefTableId == rentalLine.TableId
+            &&    projEmplTrans.INVRefRecId == rentalLine.RecId
+            &&    !projEmplTrans.WPPInvoiceId;
+
+            if (projEmplTrans && !periodSpecificationMap.empty())
+            {
+                Common common = rentalLine;
+                RORRentalDateTimes rentalDateTimes = common.RORRentalDateTimesHost::RentalDateTimes();
+                RORRentalDateTime onRentDateTime = rentalDateTimes.getOnRentDateTime();
+                RORRentalDateTime offRentDateTime = rentalDateTimes.getOffRentDateTime();
+                MapEnumerator periodEnumerator = periodSpecificationMap.getEnumerator();
+            
+                while (periodEnumerator.moveNext())
+                {
+                    Map periodDefinitionMap = periodEnumerator.currentValue();
+                    MapEnumerator enumerator = periodDefinitionMap.getEnumerator();
+
+                    boolean isFirstPeriod = true;
+
+                    while (enumerator.moveNext())
+                    {
+                        TransDateTime startDateTime, endDateTime;
+                        [startDateTime, endDateTime] = enumerator.currentKey();
+
+                        TransDateTime startDateTimeWithoutTimezone = DateTimeUtil::removeTimeZoneOffset(startDateTime, invoiceCalculatorParm.Timezone);
+                        TransDateTime endDateTimeWithoutTimezone = DateTimeUtil::removeTimeZoneOffset(endDateTime, invoiceCalculatorParm.TimeZone);
+                        // TODO: if we are going to collect projHour transactions for bulk deliveries we need to think about linking those transactions with a specific delivery.
+                        
+                        if (isFirstPeriod && onRentDateTime == startDateTimeWithoutTimezone)
+                        {
+                            startDateTimeWithoutTimezone = DateTimeUtil::minValue();
+                        }
+
+                        if (endDateTime != DateTimeUtil::minValue() && offRentDateTime == endDateTimeWithoutTimezone)
+                        {
+                            endDateTimeWithoutTimezone = DateTimeUtil::maxValue();
+                        }
+
+                        mustBeInvoiced = this.hasProjTransInRange(startDateTimeWithoutTimezone, endDateTimeWithoutTimezone) || mustBeInvoiced;
+                        
+                        isFirstPeriod = false;
+                    }
+                }
+            }
+            else if (projEmplTrans)
+            {
+                Common common = rentalLine;
+                boolean existForCharging = FINInvoicePeriodQtyFinancial::existForCharging(common.TableId, common.RecId, invoiceCalculatorParm.Timezone, FINRentalInvoiceProfile::find(rentalLine.INVInvoiceProfileId).isHourlyInvoicing());
+
+                if (!existForCharging)
+                {
+                    // If an order is fully invoiced then check for all new hour transactions until calculation point
+                    mustBeInvoiced = this.hasProjTransInRange(DateTimeUtil::minValue(), invoicingOptions.calculationDateTime) || mustBeInvoiced;
+                }
+            }
+
+            if (projHourAmount)
+            {
+                FINInvoiceCalcResult projHoursCalcResult = FINInvoiceCalcResult::construct(FINRentalAccountType::ProjectHours, projHourAmount);
+                projHoursCalcResult.mustCharge = NoYes::No;
+                resultList.addEnd(projHoursCalcResult);
+            }
+
+            invoiceCalculatorParm.WasAnyEngineExecuted = NoYes::Yes;
+            invoiceCalculatorParm.PeriodSpecificationPacked = periodSpecificationMap.pack();
+            invoiceCalculatorParm.IsPeriodSpecificationCalculated = NoYes::Yes;
+            invoiceCalculatorParm.MustBeInvoiced = mustBeInvoiced;
+            invoiceCalculatorParm.InvoiceCalcResultListPacked = resultList.pack();
+            invoiceCalculatorParm.ProjHoursCalcPacked = journalizedData.pack();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>engineId</Name>
+				<Source><![CDATA[
+    public Num engineId()
+    {
+        return #engineId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public Description description()
+    {
+        return "@DNR:ProjHourEngineDescr";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>publisher</Name>
+				<Source><![CDATA[
+    public Name publisher()
+    {
+        return "@DNR:ToIncreasePublisher";
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

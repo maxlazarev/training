@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORPostBulkReturnNote</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RORPostBulkReturnNote
+{
+    DNRTmpIdList        tmpIdList;
+
+    Map                 salesIdMap;
+
+    FormDataSource      formDataSource;
+
+    TransDateTime       returnDateTime;
+    boolean             printReport;
+    boolean             postTransaction;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>chooseLines</Name>
+				<Source><![CDATA[
+    private void chooseLines()
+    {
+        RORTmpReturnNoteLine    returnNoteLine;
+        SalesLine               salesLine;
+        Map                     salesLineMap;
+        Counter                 conCounter;
+        Qty                     actualReturnQty;
+    
+        for (returnNoteLine = formDataSource.getFirst();
+             returnNoteLine;
+             returnNoteLine = formDataSource.getNext())
+        {
+            if (returnNoteLine.ActualReturnQty > 0)
+            {
+                actualReturnQty = returnNoteLine.ActualReturnQty;
+    
+                ttsBegin;
+                delete_from tmpIdList;
+    
+                // Fill a temporary table with SalesLine RecIds
+                for (conCounter = 1; conCounter <= conLen(returnNoteLine.SalesLineRecId); conCounter++)
+                {
+                    tmpIdList.RefRecId = conPeek(returnNoteLine.SalesLineRecId, conCounter);
+                    tmpIdList.insert();
+                }
+                ttsCommit;
+    
+                // Loop through the SalesLine table joined with temporary table
+                while select SalesId, RORRemainSalesReturn, RecId from salesLine
+                order by createdDateTime asc
+                where salesLine.RORRemainSalesReturn
+                    exists join tmpIdList
+                    where tmpIdList.RefRecId == salesLine.RecId
+                {
+                    if (actualReturnQty)
+                    {
+                        // Fill a map with the SalesLine.RecId and the SalesLine.RORRemainSalesReturn
+                        // and put that map in another map with the SalesId as the key
+                        salesLineMap = new Map(Types::Int64, Types::Real);
+    
+                        if (salesIdMap.exists(salesLine.SalesId))
+                        {
+                            salesLineMap = salesIdMap.lookup(salesLine.SalesId);
+                        }
+    
+                        if (actualReturnQty >= salesLine.RORRemainSalesReturn)
+                        {
+                            salesLineMap.insert(salesLine.RecId, salesLine.RORRemainSalesReturn);
+    
+                            actualReturnQty -= salesLine.RORRemainSalesReturn;
+                        }
+                        else
+                        {
+                            salesLineMap.insert(salesLine.RecId, actualReturnQty);
+    
+                            actualReturnQty = 0;
+                        }
+    
+                        salesIdMap.insert(salesLine.SalesId, salesLineMap);
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        salesIdMap = new Map(Types::String, Types::Class);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmFormDataSource</Name>
+				<Source><![CDATA[
+    public FormDataSource parmFormDataSource(FormDataSource _formDataSource = formDataSource)
+    {
+        formDataSource = _formDataSource;
+    
+        return formDataSource;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmPostTransaction</Name>
+				<Source><![CDATA[
+    public boolean parmPostTransaction(boolean _postTransaction = postTransaction)
+    {
+        postTransaction = _postTransaction;
+    
+        return postTransaction;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmPrintReport</Name>
+				<Source><![CDATA[
+    public boolean parmPrintReport(boolean _printReport = printReport)
+    {
+        printReport = _printReport;
+    
+        return printReport;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmReturnDateTime</Name>
+				<Source><![CDATA[
+    public TransDateTime parmReturnDateTime(TransDateTime _returnDateTime = returnDateTime)
+    {
+        returnDateTime = _returnDateTime;
+    
+        return returnDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postRecordByRecord</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    private void postRecordByRecord()
+    {
+        SalesParmLine   salesParmLine;
+        Map             salesLineMap;
+        MapEnumerator   salesIdMapEnumerator;
+        MapEnumerator   salesLineMapEnumerator;
+        List            returnList;
+        SalesId         salesId;
+        RefRecId        salesLineRecId;
+        SalesFormLetter salesFormLetter;
+        SalesParmTable  salesParmTable;
+    
+        salesIdMapEnumerator = salesIdMap.getEnumerator();
+    
+        ttsBegin;
+        // Go through the map that holds the SalesId and the salesLineMap (SalesLine.RecId and SalesLine.RORRemainSalesReturn)
+        while (salesIdMapEnumerator.moveNext())
+        {
+            salesId = salesIdMapEnumerator.currentKey();
+    
+            returnList = new List(Types::Record);
+    
+            salesLineMap = salesIdMapEnumerator.currentValue();
+            salesLineMapEnumerator = salesLineMap.getEnumerator();
+    
+            // Create a list with the SalesLine(s) to post
+            while (salesLineMapEnumerator.moveNext())
+            {
+                salesLineRecId  = salesLineMapEnumerator.currentKey();
+    
+                returnList.addEnd(SalesLine::findRecId(salesLineRecId));
+            }
+    
+            salesFormLetter = SalesFormLetter::construct(DocumentStatus::RORReturnNote);
+            salesFormLetter.salesTable(SalesTable::find(salesId));
+            salesFormLetter.transDate(DateTimeUtil::date(returnDateTime));
+            salesFormLetter.specQty(SalesUpdate::All);
+            salesFormLetter.proforma(!postTransaction);
+            salesFormLetter.printFormLetter(printReport);
+            salesFormLetter.createFromLines(true);
+            salesFormLetter.lockSalesUpdateField(true);
+            salesFormLetter.enableUpdateNowField(true);
+            salesFormLetter.RORparmRentalSubStatus(BOBRentalSubStatus::Returned);
+            salesFormLetter.RORparmCanGoBatch(false);
+            salesFormLetter.parmLineList(returnList.pack());
+            salesFormLetter.initLinesQuery();
+    
+            // Update the DeliverNow quantity with the quantity from the salesLineMap
+            // and call the methods that are also called in modified method of the DeliverNow field
+            // on the SalesParmLine DataSource on the SalesEditLines form
+            while select forUpdate salesParmLine
+            where salesParmLine.ParmId == salesFormLetter.parmId()
+            {
+                if (salesLineMap.exists(salesParmLine.SalesLineRecId))
+                {
+                    salesParmLine.DeliverNow = salesLineMap.lookup(salesParmLine.SalesLineRecId);
+                    salesParmLine.setQty(salesParmLine.salesParmTable().Ordering, salesParmLine.salesParmUpdate().CreditRemaining);
+                    salesParmLine.setInventDeliverNow();
+                    salesParmLine.setLineAmount();
+    
+                    if (salesParmLine.Closed)
+                    {
+                        salesParmLine.RemainAfter = 0;
+                        salesParmLine.setRemainAfterInvent();
+                    }
+    
+                    salesParmLine.calcPackingUnitQty();
+                    salesParmLine.update();
+    
+                    // Update the time as set on the Bulk return note form
+                    salesParmTable = salesParmLine.salesParmTable(true);
+                    if (salesParmTable)
+                    {
+                        salesParmTable.BOBTransTime = DateTimeUtil::time(returnDateTime);
+                        salesParmTable.Transdate    = DateTimeUtil::date(returnDateTime);
+                        salesParmTable.update();
+                    }
+                }
+            }
+    
+            salesFormLetter.run();
+        }
+        ttsCommit;
+    
+        info(strFmt("@DNR1814", new DictEnum(enumNum(DocumentStatus)).value2Label(enum2int(DocumentStatus::RORReturnNote))));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        this.chooseLines();
+    
+        if (!salesIdMap.empty())
+        {
+            this.postRecordByRecord();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static RORPostBulkReturnNote construct()
+    {
+        return new RORPostBulkReturnNote();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

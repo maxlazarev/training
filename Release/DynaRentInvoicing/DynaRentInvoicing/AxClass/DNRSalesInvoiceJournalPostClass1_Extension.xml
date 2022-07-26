@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesInvoiceJournalPostClass1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesInvoiceJournalPost))]
+public final class DNRSalesInvoiceJournalPostClass1_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>mustUpdateInventory</Name>
+				<Source><![CDATA[
+    protected boolean mustUpdateInventory(InventMovement _inventMovement)
+    {
+        boolean ret = next mustUpdateInventory(_inventMovement);
+        SalesLine salesLine  = this.RORSalesLine();
+    
+        if (salesLine && salesLine.RORTradeType != RORTradeType::SalesPurch && !salesLine.ProjId)
+        {
+            ret = false;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postInventory</Name>
+				<Source><![CDATA[
+    protected void postInventory()
+    {
+        next postInventory();
+
+        SalesLine salesLine = this.RORSalesLine();
+    
+        if (salesLine && salesLine.RORTradeType != RORTradeType::SalesPurch && !salesLine.ProjId)
+        {
+            this.updateLineValues();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postLine</Name>
+				<Source><![CDATA[
+    protected void postLine()
+    {
+        SalesLine   salesLine  = this.RORSalesLine();
+            
+        if (salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            CustInvoiceJour custInvoiceJour = this.parmJournalTable() as CustInvoiceJour;
+                        
+            if (custInvoiceJour.ParmId)
+            {
+                CustInvoiceTrans custInvoiceTrans;
+                FINInvoiceCalculatorParm invoiceCalculatorParm;
+                FINInvoiceCalculatorParm invoiceCalculatorParmDel;
+
+                while select custInvoiceTrans
+                where custInvoiceTrans.InvoiceId == custInvoiceJour.InvoiceId
+                && custInvoiceTrans.InvoiceDate == custInvoiceJour.InvoiceDate
+                && custInvoiceTrans.numberSequenceGroup == custInvoiceJour.NumberSequenceGroup
+                && custInvoiceTrans.salesId == custInvoiceJour.SalesId
+                && custInvoiceTrans.InventTransId == salesLine.InventTransId
+                    join invoiceCalculatorParm
+                    where invoiceCalculatorParm.ParmId == custInvoiceJour.ParmId
+                    && invoiceCalculatorParm.ParmLineRecId == salesParmLine.RecId
+                    && invoiceCalculatorParm.ParmLineTableId == salesParmLine.TableId
+                {
+                    if (invoiceCalculatorParm.PostInvoiceProposal)
+                    {
+                        this.DNRPostInvoiceProposal(custInvoiceJour, invoiceCalculatorParm, custInvoiceTrans);
+                    }
+                    else
+                    {
+                        invoiceCalculatorParm.journalizeCustInvoiceTrans(custInvoiceTrans.RecId);
+                    }
+
+                    FINInvoicePeriodManager_Invoice invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::Invoice, salesLine);
+                    invoicePeriodManager.setInvoiceCalculatorParm(invoiceCalculatorParm);
+                    invoicePeriodManager.setInvoiceId(custInvoiceJour.InvoiceId);
+                    invoicePeriodManager.setInvoiceTransReference(custInvoiceTrans.TableId, custInvoiceTrans.RecId);
+                    invoicePeriodManager.run();
+                        
+                    FINOrderLineComponentInvoiceLog::setOrderLineComponentInvoiced(salesLine, custInvoiceJour.InvoiceId, invoiceCalculatorParm);
+                    
+                    delete_from invoiceCalculatorParmDel
+                    where invoiceCalculatorParmDel.RecId == invoiceCalculatorParm.RecId;
+                }               
+            }            
+        }
+        else if (salesLine.RORTradeType == RORTradeType::SalesPurch && salesLine.InventTransIdReturn)
+        {
+            FINCreditLine creditParmLine;
+            CustInvoiceTrans custInvoiceTransPrevious;
+
+            update_recordset creditParmLine
+            setting DocumentState = VersioningDocumentState::Finalized
+            where creditParmLine.DocumentState == VersioningDocumentState::Approved
+                exists join custInvoiceTransPrevious
+                where custInvoiceTransPrevious.InventTransId == salesLine.InventTransIdReturn
+                &&    custInvoiceTransPrevious.TableId == creditParmLine.RefTableId
+                &&    custInvoiceTransPrevious.RecId == creditParmLine.RefRecId;
+        }
+
+        next postLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>endPost</Name>
+				<Source><![CDATA[
+    protected void endPost()
+    {
+        next endPost();
+
+        // Remove manual price components with Keep == false
+        FINManualPriceComponent::deletePostedPriceComponents(this.parmParmTable());
+
+        switch(this.parmJournalTable().TableId)
+        {
+            case tableNum(CustInvoiceJour):
+                FINRentalPeriodJournalizer::construct(this.parmJournalTable(), null).journalize();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateJournalLine</Name>
+				<Source><![CDATA[
+    protected void updateJournalLine()
+    {
+        SalesQty updateNowOrig = updateNow;
+
+        updateNow = salesParmLine.DeliverNow;
+
+        next updateJournalLine();
+
+        updateNow = updateNowOrig;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRPostInvoiceProposal</Name>
+				<Source><![CDATA[
+    //Extension methods
+    private void DNRPostInvoiceProposal(CustInvoiceJour _custInvoiceJour, FINInvoiceCalculatorParm _invoiceCalculatorParm, CustInvoiceTrans _custInvoiceTrans)
+    {
+        FINSalesInvoiceProformaJournalPost invoiceProformaJournalPost = FINSalesInvoiceProformaJournalPost::construct();
+
+        invoiceProformaJournalPost.postInvoiceProposalLine(_custInvoiceJour, _invoiceCalculatorParm, _custInvoiceTrans, salesLine);
+               
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRASBOBCreateInventSerialFromPurchLineClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(BOBCreateInventSerialFromPurchLine))]
+public final class DNRASBOBCreateInventSerialFromPurchLineClass_Extension
+{
+    private PurchLine purchLineOrig;
+    private DNRASTmpInventSerial tmpInventSerial;
+
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    static void main(Args _args)
+    {
+        FormDataSource formDataSource;
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRASAssignSerial))
+        &&  _args.caller() && classIdGet(_args.caller()) == classNum(FormRun))
+        {
+            FormRun callerForm = _args.caller();
+ 
+            switch (callerForm.name())
+            {
+                case formStr(PurchTable):
+                    formDataSource = callerForm.dataSource(formDataSourceStr(PurchTable, PurchLine));
+                    break;
+
+                case formStr(RORPurchTable):
+                    formDataSource = callerForm.dataSource(formDataSourceStr(RORPurchTable, PurchLine));
+                    break;
+
+                case formStr(DNRRORPurchTable):
+                    formDataSource = callerForm.dataSource(formDataSourceStr(DNRRORPurchTable, PurchLine));
+                    break;
+
+                default:
+                    break;
+            }
+        }
+        
+        next main(_args);
+
+        if (formDataSource)
+        {
+            formDataSource.research(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        Object ret;
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRASAssignSerial)))
+        {
+            ret = Dialog::newFormnameRunbase(formStr(DNRASAssignSerial), this);
+        }
+        else
+        {
+            ret = next dialog();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prompt</Name>
+				<Source><![CDATA[
+    public boolean prompt()
+    {
+        boolean skipRunOperation;
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRASAssignSerial)))
+        {
+            purchLineOrig = purchLine.orig();
+
+            if (purchLineOrig.DNRASIsSerializedRental())
+            {
+                skipRunOperation = true;
+            }
+        }
+
+        boolean ret = next prompt();
+
+        if (skipRunOperation)
+        {
+            ret = false;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASDoMultiCreate</Name>
+				<Source>
+  <![CDATA[
+    // Extension methods
+
+    public void DNRASDoMultiCreate(boolean _mustConfirm)
+    {
+        Counter numOfSplitPurchLines;
+        PurchOrderedQty orderedQty = this.DNRASGetOrderedQty();
+        PurchOrderedQty remainingQty = this.DNRASGetRemainingQty();
+
+        ttsbegin;
+
+        DNRASSplitEngine splitEngine;
+        ListEnumerator splitLinesEnumerator;
+
+        if (purchLineOrig.PurchQty > 1)
+        {
+            select count(RecId) from tmpInventSerial;
+
+            splitEngine = DNRASSplitEngine::construct(purchLineOrig, min(tmpInventSerial.RecId, (purchLineOrig.PurchQty - 1)));
+            splitEngine.run();
+
+            Map splitLinesMap = splitEngine.parmSplitLinesMap();
+            MapEnumerator splitLinesMapEnumerator = splitLinesMap.getEnumerator();
+            List splitLines;
+
+            // Only interested in the 1st pair: purchLineOrig -> [split lines]
+            if (splitLinesMapEnumerator.moveNext())
+            {
+                splitLines = splitLinesMapEnumerator.currentValue();
+            }
+
+            splitLinesEnumerator = splitLines.getEnumerator();
+        }
+        else
+        {
+            // Make sure confirmation works
+            splitEngine = DNRASSplitEngine::construct(purchLineOrig, 1);
+            Map splitLinesMap = splitEngine.parmSplitLinesMap();
+        
+
+            splitLinesMap.insert(purchLineOrig.RecId, new List(Types::String));
+            splitEngine.parmSplitLinesMap(splitLinesMap);
+        }
+
+        while select tmpInventSerial
+        {
+            // Use the 'original' rental order line.
+            if (!remainingQty && (orderedQty - numOfSplitPurchLines == 1))
+            {
+                this.DNRASCreateInventSerialIdForSplitPurchLine(tmpInventSerial, purchLineOrig);
+            }
+            else
+            {
+                if (splitLinesEnumerator.moveNext())
+                {
+                    PurchLine splitPurchLine = PurchLine::findInventTransId(splitLinesEnumerator.current());
+
+                    this.DNRASCreateInventSerialIdForSplitPurchLine(tmpInventSerial, splitPurchLine);
+                    numOfSplitPurchLines++;
+                }
+            }
+        }
+
+        if (_mustConfirm)
+        {
+            splitEngine.confirmSplitLines();
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASCreateInventSerialIdForSplitPurchLine</Name>
+				<Source><![CDATA[
+    private void DNRASCreateInventSerialIdForSplitPurchLine(DNRASTmpInventSerial _tmpInventSerial, PurchLine _splitPurchLine)
+    {
+        fleetNum = _tmpInventSerial.FleetNumber;
+        newDescription = _tmpInventSerial.InventSerialText;
+        newInventSerialId = _tmpInventSerial.InventSerialId;
+        newProductionDate = _tmpInventSerial.InventSerialProdDate;
+
+        this.setPurchLine(_splitPurchLine);
+
+        this.runOperation();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASGetOrderedQty</Name>
+				<Source><![CDATA[
+    public PurchOrderedQty DNRASGetOrderedQty()
+    {
+        return purchLineOrig.PurchQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASGetRemainingQty</Name>
+				<Source><![CDATA[
+    public PurchOrderedQty DNRASGetRemainingQty()
+    {
+        return this.DNRASGetOrderedQty() - this.DNRASGetAssignedQty();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASGetAssignedQty</Name>
+				<Source><![CDATA[
+    public PurchOrderedQty DNRASGetAssignedQty()
+    {
+        select count(RecId) from tmpInventSerial;
+        return tmpInventSerial.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASGetPurchId</Name>
+				<Source><![CDATA[
+    public PurchIdBase DNRASGetPurchId()
+    {
+        return purchLineOrig.PurchId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASGetItemId</Name>
+				<Source><![CDATA[
+    public ItemId DNRASGetItemId()
+    {
+        return purchLineOrig.ItemId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASSetTmpInventSerial</Name>
+				<Source><![CDATA[
+    public void DNRASSetTmpInventSerial(DNRASTmpInventSerial _tmpInventSerial)
+    {
+        tmpInventSerial = _tmpInventSerial;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

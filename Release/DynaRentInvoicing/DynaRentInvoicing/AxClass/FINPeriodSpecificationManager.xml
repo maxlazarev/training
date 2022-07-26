@@ -1,0 +1,2404 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINPeriodSpecificationManager</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINPeriodSpecificationManager
+{
+    
+    Map specificationMap; // { [ fromDate, toDate ], FINPeriodSpecification }
+    Factor priceAdjustmentFactor;
+    UnitOfMeasureFromRecId unitOfMeasureForPeriods;
+    UnitOfMeasureFromRecId chargeablePeriodUnit;
+    RORRentalLine callerRentalLine;
+    boolean isTechnicalExchange;
+    RORRentalLine newestReplacementLineBuffer;
+    FINRentalInvoiceProfile invoiceProfile;
+    FINInvoiceCalculatorParm invoiceCalculatorParm;
+    Timezone callerTimeZone;
+    INVCalculationDateTime calculationDateTime;
+    boolean shouldCalculateDays;
+    AmountCur totalRentalAmount;
+    AmountCur totalRentalDiscount;
+    AmountCur totalInsuranceAmount;
+    RORNumOfPeriods totalNumOfOpenCalendarPeriods, totalNumOfCalendarPeriods, totalNumOfChargeablePeriods;
+    Map totalNumOfPeriodsPerDelivery = new Map(Types::Int64, Types::Container);
+    Map priceTierMultiplierMap = new Map(Types::Int64, Types::Real);
+    Map openCalendarPeriodsPerMonthMap = new Map(Types::Container, Types::Container);
+    TimeOfDay defaultDaysSplit;
+    real callerRentalModeMultiplier;
+    Qty totalInvoicedQty;
+    boolean includeCredits;
+    FINForceInvoiceUntilPoint forceUntilCalculationPoint;
+    // used for calculation multiplier onCreation and for rental totals
+    boolean calcEstimation;
+    boolean mustBeInvoiced;
+    boolean isTierMultiplierCalcForEntireRental;
+    boolean isTierMultiplierCalcForPartialBulk;
+    boolean isCreditPreview;
+    RefRecId   creditJourRefRecId;
+    Set amendmentPriceComponentSet = new Set(Types::Enum);
+    boolean lineContainsCredit;
+    RefRecId invoicePeriodQtyRecIdForEntireRental;
+    RAGTmpContractLineTier lastCalculatedContractTier;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getPriceAdjustmentFactor</Name>
+				<Source><![CDATA[
+    public Factor getPriceAdjustmentFactor()
+    {
+        return priceAdjustmentFactor;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getUnitOfMeasureForPeriods</Name>
+				<Source><![CDATA[
+    public UnitOfMeasureFromRecId getUnitOfMeasureForPeriods()
+    {
+        return unitOfMeasureForPeriods;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getChargeablePeriodUnit</Name>
+				<Source><![CDATA[
+    public UnitOfMeasureFromRecId getChargeablePeriodUnit()
+    {
+        return chargeablePeriodUnit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustBeInvoiced</Name>
+				<Source><![CDATA[
+    public boolean mustBeInvoiced()
+    {
+        return mustBeInvoiced;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setIsTierMultiplierCalcForEntireRental</Name>
+				<Source><![CDATA[
+    public void setIsTierMultiplierCalcForEntireRental(boolean _isTierMultiplierCalcForEntireRental)
+    {
+        isTierMultiplierCalcForEntireRental = _isTierMultiplierCalcForEntireRental;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new()
+    {
+        specificationMap = new Map(Types::Container, Types::Class);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCalcEstimation</Name>
+				<Source><![CDATA[
+    public void setCalcEstimation(boolean _calcEstimation)
+    {
+        calcEstimation = _calcEstimation;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCreditJourRefRecId</Name>
+				<Source><![CDATA[
+    public void setCreditJourRefRecId(RecId _creditJourRefRecId)
+    {
+        creditJourRefRecId = _creditJourRefRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateSpecificationMapKey</Name>
+				<Source><![CDATA[
+    protected void populateSpecificationMapKey()
+    {
+        boolean mustPopulateSpecificationMap = true;
+
+        // PeriodDefinitionMaps per delivery
+        specificationMap = Map::create(invoiceCalculatorParm.PeriodSpecificationPacked);
+
+        if (!specificationMap.empty())
+        {
+            mustPopulateSpecificationMap = false;
+        }
+
+        FINInvoicePeriodQtyPhysical     invPeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial    invPeriodQtyFinancial;
+        TransDateTime                   forcedEndDateTime;
+
+        Qty invoiceQtyRemainder = invoiceCalculatorParm.parmLineQty();
+
+        if (calcEstimation)
+        {
+            TransDate calculationDate = endMth(DateTimeUtil::date(callerRentalLine.RORRentalDateTimes().getOffRentDateTime(true, true)));
+            calculationDateTime = DateTimeUtil::newDateTime(calculationDate+1, 0, callerTimeZone);
+            
+            TransDateTime offRentDateTime = callerRentalLine.RORRentalDateTimes().getOffRentDateTime(false);
+
+            if (!offRentDateTime)
+            {
+                // Force to use expected off-rent during estimation if off-rent is empty
+                forcedEndDateTime = callerRentalLine.RORRentalDateTimes().getOffRentDateTime(true, true);
+            }
+        }
+
+        Set processedRecords = new Set(Types::Int64);
+
+        while select invPeriodQtyPhysical
+        order by ReturnDateTime asc
+        where invPeriodQtyPhysical.RefTableId == callerRentalLine.TableId
+        &&    invPeriodQtyPhysical.RefRecId == callerRentalLine.RecId
+        &&    (invPeriodQtyPhysical.QtyRented || calcEstimation)
+            join RecId from invPeriodQtyFinancial
+            where invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invPeriodQtyPhysical.RecId
+            &&    !invPeriodQtyFinancial.InvoiceId
+        {
+            if (invoiceQtyRemainder <= 0)
+            {
+                break;
+            }
+
+            if (processedRecords.in(invPeriodQtyPhysical.RecId))
+            {
+                continue;
+            }
+            
+            processedRecords.add(invPeriodQtyPhysical.RecId);
+
+            if (!isCreditPreview && this.existsUnapprovedCredit(invPeriodQtyPhysical.RecId, invPeriodQtyFinancial.RecId))
+            {
+                // Ignore pending credits awaiting for approval unless credit preview
+                continue;
+            }
+
+            if (invPeriodQtyPhysical.PriceTierMultiplierCalculated)
+            {
+                priceTierMultiplierMap.insert(invPeriodQtyPhysical.RecId, invPeriodQtyPhysical.PriceTierMultiplier);
+            }
+
+            Qty invoiceQty = min(invoiceQtyRemainder, ((calcEstimation && !invPeriodQtyPhysical.QtyRented) ? callerRentalLine.RentQty : invPeriodQtyPhysical.QtyRented));
+                                
+            if (mustPopulateSpecificationMap)
+            {
+                FINPeriodDatesDefinition periodDatesDefinition = FINPeriodDatesDefinition::construct(callerRentalLine, invPeriodQtyPhysical, calcEstimation, callerTimeZone);
+                
+                if (calcEstimation)
+                {
+                    periodDatesDefinition.setForcedPeriodsEndDateTime(forcedEndDateTime);
+                }
+
+                if (invoiceCalculatorParm.HeaderForceFromCalculationDateTime)
+                {
+                    periodDatesDefinition.setForceFromCalculationDateTime(invoiceCalculatorParm.HeaderForceFromCalculationDateTime);
+                }
+
+                if (!invPeriodQtyPhysical.ForceUntilCalculationDateTime
+                &&  invoiceCalculatorParm.HeaderForceUntilCalculationDateTime)
+                {
+                    invPeriodQtyPhysical.ForceUntilCalculationDateTime = invoiceCalculatorParm.HeaderForceUntilCalculationDateTime;
+                }
+
+                if (invPeriodQtyPhysical.ForceUntilCalculationDateTime && invPeriodQtyPhysical.ForceUntilCalculationDateTime <= calculationDateTime)
+                {
+                    periodDatesDefinition.setForceUntilCalculationPoint(true);
+                    periodDatesDefinition.calculateInvoiceToDate(invPeriodQtyPhysical.ForceUntilCalculationDateTime);
+                }
+                else
+                {
+                    periodDatesDefinition.setForceUntilCalculationPoint(forceUntilCalculationPoint);
+                    periodDatesDefinition.calculateInvoiceToDate(calculationDateTime);
+                }
+            
+                // This is set per delivery
+                TimeOfDay   defaultDaysSplitPerDelivery = periodDatesDefinition.defaultDaysSplit();
+                Map         periodDatesDefinitionMap = periodDatesDefinition.periodDatesDefinitionMap();
+
+                if (!periodDatesDefinitionMap.empty())
+                {
+                    specificationMap.insert([invPeriodQtyPhysical.RecId, invoiceQty, defaultDaysSplitPerDelivery], periodDatesDefinitionMap);
+                }
+            }
+
+            invoiceQtyRemainder -= invoiceQty;
+            totalInvoicedQty += invoiceQty;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isCreditCorrectionLine</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. Obsolete method', false)]
+    protected boolean isCreditCorrectionLine(RecId _invoicePeriodQtyFinancialRecId)
+    {
+        boolean ret;
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+        FINCreditLine creditParmLine;
+
+        if (callerRentalLine.TableId == tableNum(SalesLine))
+        {
+            FINCustInvoiceTrans finCustInvoiceTrans;
+            
+            select firstonly RecId from creditParmLine
+                exists join journalizedInvoicePeriod
+                where journalizedInvoicePeriod.SourceRefRecId == _invoicePeriodQtyFinancialRecId
+                &&    journalizedInvoicePeriod.RefTableId == creditParmLine.RefTableId
+                &&    journalizedInvoicePeriod.RefRecId == creditParmLine.RefRecId
+                    join TableId from finCustInvoiceTrans
+                    where finCustInvoiceTrans.CustInvoiceTransRecId == journalizedInvoicePeriod.RefRecId
+                    &&    finCustInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit;
+        }
+        else if (callerRentalLine.TableId == tableNum(PurchLine))
+        {
+            FINVendInvoiceTrans finVendInvoiceTrans;
+            
+            select firstonly RecId from creditParmLine
+                exists join journalizedInvoicePeriod
+                where journalizedInvoicePeriod.SourceRefRecId == _invoicePeriodQtyFinancialRecId
+                &&    journalizedInvoicePeriod.RefTableId == creditParmLine.RefTableId
+                &&    journalizedInvoicePeriod.RefRecId == creditParmLine.RefRecId
+                    join TableId from finVendInvoiceTrans
+                    where finVendInvoiceTrans.VendInvoiceTransRecId == journalizedInvoicePeriod.RefRecId
+                    &&    finVendInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit;
+        }
+
+        if (creditParmLine)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isNotApprovedCredit</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. Obsolete method. Use method periodContainsUnapprovedCredit instead', false)]
+    protected boolean isNotApprovedCredit(RefRecId _invoicePeriodQtyFinancialRecId)
+    {
+        boolean ret = false;
+        TableId invoiceTransTableId = (callerRentalLine.tableId == tableNum(SalesLine) ? tableNum(CustInvoiceTrans) : tableNum(VendInvoiceTrans));
+        FINCreditLine creditParmLine;
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+        select firstonly RecId from creditParmLine
+        where creditParmLine.DocumentState == VersioningDocumentState::Draft
+        ||    creditParmLine.DocumentState == VersioningDocumentState::InReview
+        ||    creditParmLine.DocumentState == VersioningDocumentState::InExternalReview
+            exists join journalizedInvoicePeriod
+            where journalizedInvoicePeriod.SourceRefRecId == _invoicePeriodQtyFinancialRecId
+            &&    journalizedInvoicePeriod.RefTableId == creditParmLine.RefTableId
+            &&    journalizedInvoicePeriod.RefRecId == creditParmLine.RefRecId
+            &&    journalizedInvoicePeriod.RefTableId == invoiceTransTableId;
+
+        if (creditParmLine)
+        {
+            ret = true;
+        }
+        
+        return ret;
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>periodContainsUnapprovedCredit</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. Use existsUnapprovedCredit method instead', false)]
+    protected boolean periodContainsUnapprovedCredit(RefRecId _invoicePeriodFinancialRecId, RefRecId _invoicePeriodPhysicalRecId)
+    {
+        boolean ret = false;
+        TableId invoiceTransTableId = (callerRentalLine.tableId == tableNum(SalesLine) ? tableNum(CustInvoiceTrans) : tableNum(VendInvoiceTrans));
+        FINCreditLine creditParmLine;
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+        select firstonly RecId from creditParmLine
+        where creditParmLine.DocumentState == VersioningDocumentState::Draft
+        ||    creditParmLine.DocumentState == VersioningDocumentState::InReview
+        ||    creditParmLine.DocumentState == VersioningDocumentState::InExternalReview
+            exists join journalizedInvoicePeriod
+            where journalizedInvoicePeriod.SourceRefRecId == _invoicePeriodFinancialRecId
+            &&    journalizedInvoicePeriod.InvPeriodQtyPhysicalRecId == _invoicePeriodPhysicalRecId
+            &&    journalizedInvoicePeriod.RefTableId == creditParmLine.RefTableId
+            &&    journalizedInvoicePeriod.RefRecId == creditParmLine.RefRecId
+            &&    journalizedInvoicePeriod.RefTableId == invoiceTransTableId;
+
+        if (creditParmLine)
+        {
+            ret = true;
+        }
+        
+        return ret;
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>existsUnapprovedCredit</Name>
+				<Source><![CDATA[
+    protected boolean existsUnapprovedCredit(RefRecId _invoicePeriodPhysicalRecId, RefRecId _invoicePeriodFinancialRecId = 0)
+    {
+        FINCreditLine creditParmLine;
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+        select firstonly RecId from creditParmLine
+        where creditParmLine.DocumentState == VersioningDocumentState::Draft
+        ||    creditParmLine.DocumentState == VersioningDocumentState::InReview
+        ||    creditParmLine.DocumentState == VersioningDocumentState::InExternalReview
+            join TableId from journalizedInvoicePeriod
+            where (!_invoicePeriodFinancialRecId || journalizedInvoicePeriod.SourceRefRecId == _invoicePeriodFinancialRecId)
+            &&    journalizedInvoicePeriod.InvPeriodQtyPhysicalRecId == _invoicePeriodPhysicalRecId
+            &&    journalizedInvoicePeriod.RefTableId == creditParmLine.RefTableId
+            &&    journalizedInvoicePeriod.RefRecId == creditParmLine.RefRecId;
+
+        return (creditParmLine.RecId ? true : false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isNotApprovedCreditPeriodDate</Name>
+				<Source><![CDATA[
+    [SysObsolete('DNRDeletedObjects01_2020. Use existsUnapprovedCredit method instead', false)]
+    public static boolean isNotApprovedCreditPeriodDate(RefTableId _invoiceTransTableId, TransDateTime _startDateTime, TransDateTime _endDateTime, RefRecId _invoicePeriodQtyRecId)
+    {
+        boolean ret = false;
+        FINCreditLine creditParmLine;
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+        
+        select firstonly RecId from creditParmLine
+        where creditParmLine.RefTableId == _invoiceTransTableId
+        &&    (creditParmLine.DocumentState == VersioningDocumentState::Draft ||
+               creditParmLine.DocumentState == VersioningDocumentState::InReview ||
+               creditParmLine.DocumentState == VersioningDocumentState::InExternalReview)
+            exists join journalizedInvoicePeriod
+            where journalizedInvoicePeriod.InvPeriodQtyPhysicalRecId == _invoicePeriodQtyRecId
+            &&    journalizedInvoicePeriod.RefTableId == creditParmLine.RefTableId
+            &&    journalizedInvoicePeriod.RefRecId == creditParmLine.RefRecId
+            &&    journalizedInvoicePeriod.PeriodStartDateTime < _endDateTime
+            &&    journalizedInvoicePeriod.PeriodEndDateTime > _startDateTime;
+
+        if (creditParmLine)
+        {
+            ret = true;
+        }
+        
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTotalAmounts</Name>
+				<Source><![CDATA[
+    public container getTotalAmounts()
+    {
+        return [totalRentalAmount, totalRentalDiscount, totalInsuranceAmount];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populate</Name>
+				<Source><![CDATA[
+    public void populate(FINInvoiceCalculatorParm _invoiceCalculatorParm, Common _common, FINInvoicingOptions _invoicingOptions)
+    {
+        this.init(_invoiceCalculatorParm, _common, _invoicingOptions);
+        
+        if (this.hasCalculatedPeriods())
+        {
+            //populate total values from existing map
+            this.populateTotals();
+        }
+        else
+        {
+            // step 1 --
+            //populate specificationMap with key containers only
+            //in case we're dealing with project hour population ONLY, we want to skip steps 2 and 3
+            this.populateSpecificationMapKey();
+                        
+            if (!specificationMap.empty())
+            {
+                // step 2 -- enumerate the map that was filled during step 1 and populate the FINPeriodSpecification struct (all fields except for InvoiceAmountCur and PeriodDisc)
+                this.populatePeriods();
+
+                this.setInvoiceAmountAdjustmentFactor();
+        
+                // step 3 -- enumerate the map again and this time populate the structs' InvoiceAmountCur and PeriodDisc
+                this.populateAmounts();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populatePeriods</Name>
+				<Source><![CDATA[
+    protected void populatePeriods()
+    {
+        List periodsToRemove = new List(Types::Container);
+        MapEnumerator periodEnumerator = specificationMap.getEnumerator();
+
+        while (periodEnumerator.moveNext())
+        {
+            RefRecId    invoicePeriodQtyRecId;
+            Qty         invoiceQty;
+            TimeOfDay   defaultDaysSplitPerDelivery;
+
+            [invoicePeriodQtyRecId, invoiceQty, defaultDaysSplitPerDelivery] = periodEnumerator.currentKey();
+            
+            defaultDaysSplit = defaultDaysSplitPerDelivery;
+            
+            Map periodDefinitionMap = periodEnumerator.currentValue();
+            MapEnumerator enumerator = periodDefinitionMap.getEnumerator();
+            
+            while (enumerator.moveNext())
+            {
+                TransDateTime startDateTime, endDateTime;
+
+                [startDateTime, endDateTime] = enumerator.currentKey();
+                
+                if (!lineContainsCredit && this.mustCalculatePeriodDate(startDateTime, endDateTime, invoicePeriodQtyRecId))
+                {
+                    this.calculatedPeriodDateForDelivery(startDateTime, endDateTime, invoicePeriodQtyRecId, invoiceQty, defaultDaysSplitPerDelivery);
+                }
+                else
+                {
+                    periodsToRemove.addEnd([invoicePeriodQtyRecId, invoiceQty, defaultDaysSplitPerDelivery]);
+                }
+            }
+        }
+
+        ListEnumerator periodsToRemoveEnumerator = periodsToRemove.getEnumerator();
+
+        while (periodsToRemoveEnumerator.moveNext())
+        {
+            specificationMap.remove(periodsToRemoveEnumerator.current());
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateAmounts</Name>
+				<Source><![CDATA[
+    protected void populateAmounts()
+    {
+        MapEnumerator periodEnumerator = specificationMap.getEnumerator();
+                
+        mustBeInvoiced = (totalNumOfCalendarPeriods != 0);
+
+        while (periodEnumerator.moveNext())
+        {
+            RefRecId    invoicePeriodQtyRecId;
+            Qty         invoiceQty;
+            TimeOfDay   defaultDaysSplitPerDelivery;
+
+            [invoicePeriodQtyRecId, invoiceQty, defaultDaysSplitPerDelivery] = periodEnumerator.currentKey();
+             
+            Map periodDefinitionMap = periodEnumerator.currentValue();
+            MapEnumerator enumerator = periodDefinitionMap.getEnumerator();
+
+            while(enumerator.moveNext())
+            {
+                List specificationList = enumerator.currentValue();
+                ListEnumerator listEnumerator = specificationList.getEnumerator();
+
+                while (listEnumerator.moveNext())
+                {
+                    FINPeriodSpecification periodSpec = listEnumerator.current();
+
+                    periodSpec.tierMultiplier = this.getTierMultiplier(periodSpec.invPeriodQtyPhysicalRecId);
+                    periodSpec.mustBeInvoiced = mustBeInvoiced;
+
+                    if (mustBeInvoiced)
+                    {
+                        periodSpec.invoiceAmountCur = this.calcLineAmountInvoiced(periodSpec) * this.calcPeriodSpecificPriceAdjustmentFactor(periodSpec);
+                        AmountCur periodDisc = (periodSpec.linePercent ? periodSpec.invoiceAmountCur * periodSpec.linePercent / 100 : 0);
+                        periodSpec.periodDisc = - periodDisc;
+                
+                        totalRentalAmount += periodSpec.invoiceAmountCur;
+                        totalRentalDiscount += periodSpec.periodDisc;
+                        totalInsuranceAmount += this.calcInsuranceAmount(periodSpec);
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcPeriodSpecificPriceAdjustmentFactor</Name>
+				<Source><![CDATA[
+    private Factor calcPeriodSpecificPriceAdjustmentFactor(FINPeriodSpecification _periodSpecification)
+    {
+        Factor ret = 1.0;
+            
+        this.setUnitOfMeasureForPeriods();
+
+        if (unitOfMeasureForPeriods)
+        {
+            ret = ret * UnitOfMeasureConverter::convert(ret, unitOfMeasureForPeriods, UnitOfMeasure::findBySymbol(_periodSpecification.priceTimeUnit).RecId, NoYes::No);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPriceComponent</Name>
+				<Source><![CDATA[
+    protected anytype getPriceComponent(TransDateTime _transDateTimeInTimeZone, FINInvoicePeriodPriceComponent _priceComponent)
+    {
+        anytype ret;
+        FINInvoicePeriodAmendment priceTable;
+        TransDateTime transDateTimeFrom = DateTimeUtil::removeTimeZoneOffset(_transDateTimeInTimeZone, callerTimeZone);
+        TransDateTime transDateTimeTo = DateTimeUtil::newDateTime(DateTimeUtil::date(_transDateTimeInTimeZone) + 1, 0, callerTimeZone);
+        TransDateTime maxTransDateTime = DateTimeUtil::maxValue();
+
+        // This condition will avoid unnecessary db calls if there are no amendments for the rental line
+        if (amendmentPriceComponentSet.in(_priceComponent))
+        {
+            if (isCreditPreview)
+            {
+                // For credit preview we can use all amendment records
+                select firstonly RecId, StrValue, RealValue, MustReinvoiceFullCredit from priceTable
+                order by CreatedDateTime desc
+                where priceTable.RefTableId == callerRentalLine.TableId
+                &&    priceTable.RefRecId == callerRentalLine.RecId
+                &&    priceTable.PriceComponent == _priceComponent
+                &&    priceTable.FromDateTime < transDateTimeTo
+                &&    (priceTable.ToDateTime == maxTransDateTime || priceTable.ToDateTime > transDateTimeFrom);
+            }
+            else
+            {
+                // Ignore pending credits
+                FINCreditPendingChangesReference pendingChangesReference;
+
+                select firstonly RecId, StrValue, RealValue, MustReinvoiceFullCredit from priceTable
+                order by CreatedDateTime desc
+                where priceTable.RefTableId == callerRentalLine.TableId
+                &&    priceTable.RefRecId == callerRentalLine.RecId
+                &&    priceTable.PriceComponent == _priceComponent
+                &&    priceTable.FromDateTime < transDateTimeTo
+                &&    (priceTable.ToDateTime == maxTransDateTime || priceTable.ToDateTime > transDateTimeFrom)
+                &&    (priceTable.DocumentState == FINAmendmentDocumentState::None || priceTable.DocumentState == FINAmendmentDocumentState::Confirmed)
+                    notexists join pendingChangesReference
+                    where pendingChangesReference.RefTableId == priceTable.TableId
+                    &&    pendingChangesReference.RefRecId == priceTable.RecId
+                    &&    (  pendingChangesReference.DocumentState == VersioningDocumentState::Draft
+                          || pendingChangesReference.DocumentState == VersioningDocumentState::InReview
+                          || pendingChangesReference.DocumentState == VersioningDocumentState::InExternalReview
+                          || pendingChangesReference.DocumentState == VersioningDocumentState::Rejected);
+            }
+        }
+
+        switch (_priceComponent)
+        {
+            case FINInvoicePeriodPriceComponent::CalendarId :
+                ret = (priceTable.RecId ? priceTable.StrValue : callerRentalLine.CalendarId);
+                break;
+
+            case FINInvoicePeriodPriceComponent::FullCredit :
+                ret = (priceTable.RecId && !priceTable.MustReinvoiceFullCredit ? priceTable.StrValue : '');
+                break;
+
+            case FINInvoicePeriodPriceComponent::LinePercent :
+                ret = (priceTable.RecId ? priceTable.RealValue : callerRentalLine.LinePercent);
+                break;
+
+            case FINInvoicePeriodPriceComponent::RentalModeId :
+                ret = (priceTable.RecId ? priceTable.RealValue : callerRentalModeMultiplier);
+                break;
+
+            case FINInvoicePeriodPriceComponent::RentalPrice :
+                ret = (priceTable.RecId ? priceTable.RealValue : callerRentalLine.Price);
+                break;
+
+            case FINInvoicePeriodPriceComponent::RentalPriceNet :
+                ret = (priceTable.RecId ? priceTable.RealValue : 0);
+                break;
+
+            case FINInvoicePeriodPriceComponent::InvoiceProfileId :
+                ret = (priceTable.RecId ? priceTable.StrValue : callerRentalLine.INVInvoiceProfileId);
+                break;
+
+            case FINInvoicePeriodPriceComponent::RateCode :
+                ret = (priceTable.RecId ? priceTable.StrValue : UnitOfMeasure::find(callerRentalLine.PriceTimeUnit).Symbol);
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustCalculatePeriodDate</Name>
+				<Source><![CDATA[
+    protected boolean mustCalculatePeriodDate(TransDateTime _startDateTime, TransDateTime _endDateTime, RefRecId _invoicePeriodQtyRecId)
+    {
+        boolean ret = true;
+        TransDateTime selectStartDateTime = DateTimeUtil::removeTimeZoneOffset(_startDateTime, callerTimeZone);
+        TransDateTime selectEndDateTime = DateTimeUtil::removeTimeZoneOffset(_endDateTime, callerTimeZone);
+
+        // If invoice posting called directly from credit form then limit order lines/ invoice periods to those related to credited invoice journal
+        if (creditJourRefRecId)
+        {
+            switch (callerRentalLine.TableId)
+            {
+                case tableNum(SalesLine) :
+                    SalesLine salesLine = callerRentalLine;
+                    ret = FINCustInvoiceTrans::mustCalculatePeriodDateForCredit(salesLine, selectStartDateTime, selectEndDateTime, _invoicePeriodQtyRecId, creditJourRefRecId);
+                    break;
+
+                case tableNum(PurchLine) :
+                    PurchLine purchLine = callerRentalLine;
+                    ret = FINVendInvoiceTrans::mustCalculatePeriodDateForCredit(purchLine, selectStartDateTime, selectEndDateTime, _invoicePeriodQtyRecId, creditJourRefRecId);
+                    break;
+            }
+        }
+        
+        // Prevent re-invoicing without crediting first
+        if (ret && !includeCredits)
+        {
+            switch (callerRentalLine.TableId)
+            {
+                case tableNum(SalesLine) :
+                    SalesLine salesLine = callerRentalLine;
+                    ret = FINCustInvoiceTrans::mustCalculatePeriodDate(salesLine, selectStartDateTime, selectEndDateTime, _invoicePeriodQtyRecId);
+                    if (ret)
+                    {
+                        ret = FINProjInvoiceItem::mustCalculatePeriodDate(salesLine, selectStartDateTime, selectEndDateTime, _invoicePeriodQtyRecId);
+                    }
+                    break;
+
+                case tableNum(PurchLine) :
+                    PurchLine purchLine = callerRentalLine;
+                    ret = FINVendInvoiceTrans::mustCalculatePeriodDate(purchLine, selectStartDateTime, selectEndDateTime, _invoicePeriodQtyRecId);
+                    break;
+
+                case tableNum(SalesQuotationLine) :
+                    ret = true;
+                    break;
+            }
+
+            lineContainsCredit = !ret;
+        }
+
+        // Prevent re-invoicing pending credit when crediting is not approved yet.
+        if (ret
+        && !creditJourRefRecId
+        &&  includeCredits
+        && (callerRentalLine.TableId == tableNum(SalesLine) || callerRentalLine.TableId == tableNum(PurchLine)))
+        {
+            ret = !this.existsUnapprovedCredit(_invoicePeriodQtyRecId);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculatedPeriodDateForDelivery</Name>
+				<Source><![CDATA[
+    protected void calculatedPeriodDateForDelivery(TransDateTime _startDateTime, TransDateTime _endDateTime, RecId _invoicePeriodQtyRecId, Qty _invoiceQty, TimeOfDay _defaultDaysSplitPerDelivery)
+    {
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancial;
+        TransDateTime selectStartDateTime = DateTimeUtil::removeTimeZoneOffset(_startDateTime, callerTimeZone);
+        TransDateTime selectEndDateTime = DateTimeUtil::removeTimeZoneOffset(_endDateTime, callerTimeZone);
+         
+        while select PeriodStartDateTime, PeriodEndDateTime, RecId from invPeriodQtyFinancial
+        order by PeriodStartDateTime
+        where !invPeriodQtyFinancial.InvoiceId
+        &&    selectEndDateTime > invPeriodQtyFinancial.PeriodStartDateTime
+        &&   ((selectStartDateTime < invPeriodQtyFinancial.PeriodEndDateTime) || (calcEstimation && !invPeriodQtyFinancial.PeriodEndDateTime))
+                join ReturnDateTime, DeliveryDateTime, RecId from invPeriodQtyPhysical
+                where invPeriodQtyPhysical.RecId == _invoicePeriodQtyRecId
+                &&    invPeriodQtyPhysical.RecId == invPeriodQtyFinancial.InvPeriodQtyPhysicalRecId
+        {
+            TransDateTime periodStartDateTime = DateTimeUtil::applyTimeZoneOffset(invPeriodQtyFinancial.PeriodStartDateTime, callerTimeZone);
+            TransDateTime periodEndDateTime;
+            
+            if (invPeriodQtyFinancial.PeriodEndDateTime == DateTimeUtil::maxValue()
+            ||  invPeriodQtyFinancial.PeriodEndDateTime == DateTimeUtil::minValue())
+            {
+                if (calcEstimation)
+                {
+                    periodEndDateTime = DateTimeUtil::applyTimeZoneOffset(callerRentalLine.RORRentalDateTimes().getOffRentDateTime(true, true), callerTimeZone);
+                }
+                else
+                {
+                    periodEndDateTime = DateTimeUtil::maxValue();
+                }
+            }
+            else
+            {
+                periodEndDateTime = DateTimeUtil::applyTimeZoneOffset(invPeriodQtyFinancial.PeriodEndDateTime, callerTimeZone);
+            }
+
+            // Adjust processing start/end points if boundaries of rental periods don't match required start/end points
+            TransDateTime startDateTimeProcessing = DNRDateTimeUtil::getLatestDateTime(periodStartDateTime, _startDateTime);
+            TransDateTime endDateTimeProcessing = DNRDateTimeUtil::getEarliestDateTime(periodEndDateTime, _endDateTime);
+
+            if (startDateTimeProcessing < endDateTimeProcessing)
+            {
+                boolean isFinalPeriod = (DateTimeUtil::applyTimeZoneOffset(invPeriodQtyPhysical.ReturnDateTime, callerTimeZone) == endDateTimeProcessing);
+                boolean isFirstPeriod = (DateTimeUtil::applyTimeZoneOffset(invPeriodQtyPhysical.DeliveryDateTime, callerTimeZone) == startDateTimeProcessing);
+
+                this.calculatePeriodData(_startDateTime, 
+                                         _endDateTime, 
+                                         startDateTimeProcessing, 
+                                         endDateTimeProcessing,
+                                         invPeriodQtyFinancial.RecId, 
+                                         invPeriodQtyPhysical.RecId, 
+                                         _invoiceQty, 
+                                         isFinalPeriod, 
+                                         isFirstPeriod, 
+                                         _defaultDaysSplitPerDelivery);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculatePeriodData</Name>
+				<Source><![CDATA[
+    protected void calculatePeriodData(TransDateTime   _startDateTimePeriod,
+        TransDateTime   _endDateTimePeriod,
+        TransDateTime   _startDateTimeCharging,
+        TransDateTime   _endDateTimeCharging,
+        RecId           _invoicePeriodQtyInvoiceRecId,
+        RecId           _invoicePeriodQtyRecId,
+        Qty             _invoicedQty,
+        boolean         _isFinalPeriod,
+        boolean         _isFirstPeriod,
+        TimeOfDay       _defaultDaysSplitPerDelivery)
+    {
+        #timeConstants;
+        TransDateTime           testDateTime = _startDateTimeCharging;
+        TransDateTime           endPeriodDateTime = _endDateTimeCharging;
+        RORNumOfPeriods         numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods;
+        DNRCalendarId           calendarId;
+        FINRentalInvoiceProfile invoiceProfileCurrent = FINRentalInvoiceProfile::find(this.getPriceComponent(_startDateTimePeriod, FINInvoicePeriodPriceComponent::InvoiceProfileId));
+        Map                     priceComponentsMap = new Map(Types::Enum, Types::Class);
+
+        boolean                 periodContainsFullCredit = this.getPriceComponent(_startDateTimePeriod, FINInvoicePeriodPriceComponent::FullCredit) != '';
+                               
+        if (shouldCalculateDays)
+        {
+            RORNumOfPeriods testPeriodLength = #hoursPerDay;
+            TransDate       testDate;
+            boolean         isFirstExecution = true;
+
+            // For each date/time in period, get details about chargeability
+            while (testDateTime < endPeriodDateTime)
+            {
+                testDate = DateTimeUtil::date(testDateTime);
+
+                // For the first day we might need to adjust testDateTime according to defaultDaySplit.
+                // For another days we simply add 24hours.
+                if (isFirstExecution)
+                {
+                    isFirstExecution = false;
+                    testDateTime = DateTimeUtil::newDateTime(testDate, defaultDaysSplit);
+
+                    // In case split day time is different than 0:00 then it can happen that the same date is counted as 2 days.
+                    if (testDateTime > _startDateTimeCharging)
+                    {
+                        testDateTime = DateTimeUtil::addDays(testDateTime, -1);
+                    }
+                    else if (testDateTime < _startDateTimeCharging)
+                    {
+                        TransDateTime transDateTimeFrom = DateTimeUtil::removeTimeZoneOffset(testDateTime, callerTimeZone);
+                        TransDateTime transDateTimeTo   = DateTimeUtil::removeTimeZoneOffset(_startDateTimeCharging, callerTimeZone);
+
+                        if (FINInvoicePeriodQtyFinancial::existInvoicedPeriodsBetween(callerRentalLine.TableId, callerRentalLine.RecId, transDateTimeFrom, transDateTimeTo))
+                        {
+                            testDateTime = DateTimeUtil::addHours(testDateTime, testPeriodLength);
+                            continue;
+                        }
+                    }
+                }
+
+                boolean isWithinGracePeriod = this.isWithinGracePeriod(_isFirstPeriod, 
+                                                                       _isFinalPeriod, 
+                                                                       invoiceProfileCurrent,
+                                                                       _startDateTimeCharging,
+                                                                       _endDateTimeCharging,
+                                                                       testDateTime);                
+                if (!isWithinGracePeriod)
+                {
+                    numOfCalendarPeriods++;
+
+                    if (!periodContainsFullCredit)
+                    {
+                        TransDateTime priceComponentDateTime = ((_isFirstPeriod && testDateTime < _startDateTimeCharging) ? _startDateTimeCharging : testDateTime);
+                        calendarId = this.getPriceComponent(priceComponentDateTime, FINInvoicePeriodPriceComponent::CalendarId);
+
+                        if (FINInvoiceServiceController::getWorkCalendar().isDateOpen(calendarId, testDate))
+                        {
+                            numOfOpenCalendarPeriods++;
+                            numOfChargeablePeriods++;
+
+                            this.addPriceComponentsToMap(priceComponentsMap, priceComponentDateTime, 1);
+                        }
+                    }
+                }
+                
+                testDateTime = DateTimeUtil::addHours(testDateTime, testPeriodLength);
+            }
+
+            if ((invoiceProfileCurrent.isMonthlyInvoicing() && 
+                (invoiceProfileCurrent.MonthlyPeriod == INVMonthlyPeriod::LinkedToDate || _isFirstPeriod || _isFinalPeriod))
+            || (invoiceProfileCurrent.PricedAt && invoiceProfileCurrent.CalculationMethod == INVCalculationMethod::AlwaysInvoiceEntirePeriod))
+            {
+                [numOfCalendarPeriods, numOfOpenCalendarPeriods] = this.getCalendarPeriods(invoiceProfileCurrent,
+                                                                                           _startDateTimePeriod,
+                                                                                           _endDateTimePeriod,
+                                                                                           _isFirstPeriod,
+                                                                                           _isFinalPeriod,
+                                                                                           _invoicePeriodQtyRecId,
+                                                                                           _invoicedQty,
+                                                                                           _defaultDaysSplitPerDelivery);
+            }
+        }
+        else
+        {
+            calendarId = this.getPriceComponent(_startDateTimeCharging, FINInvoicePeriodPriceComponent::CalendarId);
+            numOfChargeablePeriods = FINInvoiceServiceController::getWorkCalendar().getWorkingMinutes(calendarId, _startDateTimeCharging, _endDateTimeCharging);
+            numOfOpenCalendarPeriods = numOfChargeablePeriods;
+            numOfCalendarPeriods = real2int(DateTimeUtil::getDifference(_endDateTimeCharging, _startDateTimeCharging) / #secondsPerMinute);
+            this.addPriceComponentsToMap(priceComponentsMap, _startDateTimeCharging, numOfChargeablePeriods);
+        }
+                
+        this.addToTotalPeriods(_invoicePeriodQtyRecId, numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods);
+        this.addPeriodsToMap(_startDateTimePeriod, _endDateTimePeriod, _startDateTimeCharging, _endDateTimeCharging,
+            numOfOpenCalendarPeriods, numOfCalendarPeriods, numOfChargeablePeriods, _invoicePeriodQtyInvoiceRecId, _invoicePeriodQtyRecId, _invoicedQty, invoiceCalculatorParm.ParmLineRecId, priceComponentsMap, _defaultDaysSplitPerDelivery);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCalendarPeriods</Name>
+				<Source><![CDATA[
+    private container getCalendarPeriods(FINRentalInvoiceProfile    _invoiceProfileCurrent,
+                                         TransDateTime              _startDateTimeCharging,
+                                         TransDateTime              _endDateTimeCharging,
+                                         boolean                    _isFirstPeriod,
+                                         boolean                    _isFinalPeriod,
+                                         RefRecId                   _invoicePeriodQtyRecId,
+                                         qty                        _invoicedQty,
+                                         TimeOfDay                  _defaultDaysSplitPerDelivery)
+    {
+        RORNumOfPeriods numOfOpenCalendarPeriods;
+        RORNumOfPeriods numOfCalendarPeriods;
+
+        if (_invoiceProfileCurrent.isMonthlyInvoicing())
+        {
+            TransDate testDate = DateTimeUtil::date(_startDateTimeCharging);
+
+            if (_invoiceProfileCurrent.MonthlyPeriod == INVMonthlyPeriod::LinkedToDate)
+            {
+                TransDate startDate = DateTimeUtil::date(_startDateTimeCharging);
+                TransDate endDate   = DateTimeUtil::date(_endDateTimeCharging);
+
+                if (_isFinalPeriod
+                ||  (_isFirstPeriod && isTechnicalExchange))
+                {
+                    TransDate linkedDate = DNRDateTimeUtil::adjustDateToSpecificMonthDay(startDate, dayOfMth(startDate));
+        
+                    // If a specified week day is after start date then count it as a first month.
+                    int multiplierAdjustment = 0;
+
+                    if (linkedDate > startDate)
+                    {
+                        multiplierAdjustment = -1;
+                    }
+
+                    linkedDate = dateMthFwd(linkedDate, (_invoiceProfileCurrent.NumGenerationPeriods + multiplierAdjustment));
+
+                    Days startDateDay = DateTimeUtil::day(_startDateTimeCharging);
+
+                    if (startDateDay > dayOfMth(endMth(linkedDate)))
+                    {
+                        endDate = mkDate(1, mthOfYr(linkedDate) + 1, year(linkedDate));
+                    }
+                    else
+                    {
+                        // dateMthFwd only increments month number so we need to adjust the date again.
+                        endDate = DNRDateTimeUtil::adjustDateToSpecificMonthDay(linkedDate, dayOfMth(startDate));
+                    }
+
+                    // The last day should not be charged
+                    numOfCalendarPeriods = FINInvoiceServiceController::getWorkCalendar().isDateOpen(callerRentalLine.CalendarId, endDate) ?
+                                           FINInvoiceServiceController::getWorkCalendar().getOpenDays(callerRentalLine.CalendarId, startDate, endDate) - 1 :
+                                           FINInvoiceServiceController::getWorkCalendar().getOpenDays(callerRentalLine.CalendarId, startDate, endDate);
+                }
+                else
+                {
+                    numOfCalendarPeriods = dayOfMth(dateEndMth(testDate));
+                }
+
+                // The last day should not be charged
+                numOfOpenCalendarPeriods =  FINInvoiceServiceController::getWorkCalendar().isDateOpen(callerRentalLine.CalendarId, endDate) ?
+                                            FINInvoiceServiceController::getWorkCalendar().getOpenDays(callerRentalLine.CalendarId, startDate, endDate) - 1 : 
+                                            FINInvoiceServiceController::getWorkCalendar().getOpenDays(callerRentalLine.CalendarId, startDate, endDate);
+
+            }
+            else if (_isFirstPeriod || _isFinalPeriod)
+            {
+                if (openCalendarPeriodsPerMonthMap.exists([mthOfYr(testDate), year(testDate)]))
+                {
+                    [numOfCalendarPeriods, numOfOpenCalendarPeriods] = openCalendarPeriodsPerMonthMap.lookup([mthOfYr(testDate), year(testDate)]);
+                }
+                else
+                {
+                    // numOfOpenCalendarPeriods and numOfCalendarPeriods will be different only for monthly profiles.
+                    // Entire month needs to be counted even if only 2 weeks are charged.
+                    numOfCalendarPeriods = dayOfMth(dateEndMth(testDate));
+                    numOfOpenCalendarPeriods = FINInvoiceServiceController::getWorkCalendar().getOpenDays(callerRentalLine.CalendarId, dateStartMth(testDate), dateEndMth(testDate));
+
+                    openCalendarPeriodsPerMonthMap.insert([mthOfYr(testDate), year(testDate)], [numOfCalendarPeriods, numOfOpenCalendarPeriods]);
+                }
+            }
+        }
+        else if (_invoiceProfileCurrent.PricedAt && _invoiceProfileCurrent.CalculationMethod == INVCalculationMethod::AlwaysInvoiceEntirePeriod)
+        {
+            TransDateTime   startDateTime;
+            TransDateTime   endDateTime;
+            boolean         recordFound;
+
+            if (!specificationMap.empty())
+            {
+                Map periodDefinitionMap = specificationMap.lookup([_invoicePeriodQtyRecId, _invoicedQty, _defaultDaysSplitPerDelivery]);
+                MapEnumerator periodDefinitionMapEnum = periodDefinitionMap.getEnumerator();
+            
+                while (periodDefinitionMapEnum.moveNext())
+                {
+                    [startDateTime, endDateTime] = periodDefinitionMapEnum.currentKey();
+
+                    if (startDateTime <= _startDateTimeCharging && endDateTime > _startDateTimeCharging)
+                    {
+                        recordFound = true;
+                        break;
+                    }
+                }
+            }
+                
+            if (recordFound)
+            {
+                FINInvoicePeriodQtyPhysical invPeriodQtyPhysical = FINInvoicePeriodQtyPhysical::findRecId(_invoicePeriodQtyRecId);
+                TransDate                   startDate;
+                TransDate                   endDate;
+
+                [startDate, endDate]        = FINPeriodDatesDefinition::getFullInvoicePeriodStartEnd(callerRentalLine, invPeriodQtyPhysical, true, callerTimeZone, startDateTime);
+                numOfCalendarPeriods        = (endDate - startDate);
+                numOfOpenCalendarPeriods    = FINInvoiceServiceController::getWorkCalendar().getOpenDays(callerRentalLine.CalendarId, startDate, endDate);
+            }
+        }
+        
+        return [numOfCalendarPeriods, numOfOpenCalendarPeriods];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isWithinGracePeriod</Name>
+				<Source><![CDATA[
+    // If it is a first or a last day then check a grace period. For 1 day rental we always want to charge.
+    // Grace period also applies to technical exchange situation: if exchange was before midday then we charge that day on a second line. If after midday then we charge the first order line.
+    private boolean isWithinGracePeriod(boolean                 _isFirstPeriod,
+                                        boolean                 _isFinalPeriod,
+                                        FINRentalInvoiceProfile _invoiceProfileCurrent,
+                                        TransDateTime           _startDateTimeCharging,
+                                        TransDateTime           _endDateTimeCharging,
+                                        TransDateTime           _testDateTime)
+    {
+        #timeConstants;
+        boolean ret;
+        // Compare begining of charging with start of the first full day.        
+        int64   firstDayTimeLength  = DateTimeUtil::getDifference(DateTimeUtil::addHours(_testDateTime, #hoursPerDay), _startDateTimeCharging);
+        int64   lastDayTimeLength   = DateTimeUtil::getDifference(_endDateTimeCharging, _testDateTime);
+
+        if (_isFirstPeriod && !_isFinalPeriod
+        &&  (_invoiceProfileCurrent.GracePeriodOnRent || isTechnicalExchange))
+        {
+            if (_invoiceProfileCurrent.GracePeriodOnRent
+            &&  firstDayTimeLength <= (_invoiceProfileCurrent.GracePeriodOnRent * #secondsPerMinute))
+            {
+                ret = true;
+            }
+
+            if (!ret && isTechnicalExchange && firstDayTimeLength <= #secondsPerDay)
+            {
+                ret = this.isWithinGracePeriodForTechnicalExchange(true, _startDateTimeCharging);
+            }
+        }
+        else if (!_isFirstPeriod && _isFinalPeriod
+             &&  (_invoiceProfileCurrent.GracePeriodOffRent || isTechnicalExchange))
+        {
+            if (_invoiceProfileCurrent.GracePeriodOffRent
+            &&  lastDayTimeLength <= (_invoiceProfileCurrent.GracePeriodOffRent * #secondsPerMinute))
+            {
+                ret = true;
+            }
+
+            if (!ret && isTechnicalExchange && lastDayTimeLength < #secondsPerDay)
+            {
+                ret = this.isWithinGracePeriodForTechnicalExchange(false, _endDateTimeCharging);
+            }
+        }
+        else if (_isFirstPeriod && _isFinalPeriod && isTechnicalExchange
+             &&  DateTimeUtil::getDifference(_endDateTimeCharging, _startDateTimeCharging) < #secondsPerDay
+             &&  DateTimeUtil::date(_endDateTimeCharging) == DateTimeUtil::date(_startDateTimeCharging))
+        {
+            // If a machine is replaced directly upon arrival, before midday then don't charge that replaced line
+            ret = this.isWithinGracePeriodForTechnicalExchange(false, _endDateTimeCharging); 
+        }
+        else if (_isFirstPeriod && _isFinalPeriod
+             &&  (_invoiceProfileCurrent.GracePeriodOnRent || _invoiceProfileCurrent.GracePeriodOffRent || isTechnicalExchange)
+             &&  DateTimeUtil::getDifference(_endDateTimeCharging, _startDateTimeCharging) >= #secondsPerDay)
+        {
+            if (_invoiceProfileCurrent.GracePeriodOnRent
+            &&  firstDayTimeLength <= (_invoiceProfileCurrent.GracePeriodOnRent * #secondsPerMinute))
+            {
+                ret = true;
+            }
+
+            if (_invoiceProfileCurrent.GracePeriodOffRent
+            &&  lastDayTimeLength <= (_invoiceProfileCurrent.GracePeriodOffRent * #secondsPerMinute))
+            {
+                ret = true;
+            }
+
+            if (!ret && isTechnicalExchange && firstDayTimeLength < #secondsPerDay)
+            {
+                ret = this.isWithinGracePeriodForTechnicalExchange(true, _startDateTimeCharging);
+            }
+
+            if (!ret && isTechnicalExchange && lastDayTimeLength < #secondsPerDay)
+            {
+                ret = this.isWithinGracePeriodForTechnicalExchange(false, _endDateTimeCharging);
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isWithinGracePeriodForTechnicalExchange</Name>
+				<Source><![CDATA[
+    private boolean isWithinGracePeriodForTechnicalExchange(boolean _isFirstDay, TransDateTime _startEndPeriodDateTime)
+    {
+        #TimeConstants
+        boolean ret;
+        TimeOfDay middayBounduary = real2int(#secondsPerDay / 2);
+
+        if (_isFirstDay)
+        {
+            // Check if it is a line after exchange
+            RORRentalLine rentalLine = callerRentalLine.RORLineBuffer();
+
+            select firstonly RecId from rentalLine
+            where rentalLine.RecIdExchanged == callerRentalLine.RecId
+            &&    rentalLine.AmendmentExchangeType == RORAmendmentExchangeType::Technical;
+
+            if (rentalLine && DateTimeUtil::time(_startEndPeriodDateTime) >= middayBounduary)
+            {
+                ret = true;
+            }
+        }
+        // Check if it is a line before exchange
+        else if (callerRentalLine.RecIdExchanged && DateTimeUtil::time(_startEndPeriodDateTime) < middayBounduary)
+        {
+            ret = true;
+        }
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addPriceComponentsToMap</Name>
+				<Source><![CDATA[
+    protected void addPriceComponentsToMap(Map _priceComponentsMap, TransDateTime _testDateTime, int _numOfChargeablePeriods)
+    {
+        // _priceComponentsMap = Map( FINInvoicePeriodPriceComponent; Map( priceComponentValue; numOfPeriodsWithThatValue ) )
+        Price rentalPriceNet = this.getPriceComponent(_testDateTime, FINInvoicePeriodPriceComponent::RentalPriceNet);
+
+        if (rentalPriceNet)
+        {
+            this.addSinglePriceComponentToMap(_priceComponentsMap, FINInvoicePeriodPriceComponent::RentalPrice, rentalPriceNet, _numOfChargeablePeriods);
+        }
+        else 
+        {
+            Price rentalPrice = this.getPriceComponent(_testDateTime, FINInvoicePeriodPriceComponent::RentalPrice);
+            this.addSinglePriceComponentToMap(_priceComponentsMap, FINInvoicePeriodPriceComponent::RentalPrice, rentalPrice, _numOfChargeablePeriods);
+
+            SalesLinePercent linePercent = this.getPriceComponent(_testDateTime, FINInvoicePeriodPriceComponent::LinePercent);
+            this.addSinglePriceComponentToMap(_priceComponentsMap, FINInvoicePeriodPriceComponent::LinePercent, linePercent, _numOfChargeablePeriods);
+        }
+
+        INVRateMultiplier rentalModeMultiplier = this.getPriceComponent(_testDateTime, FINInvoicePeriodPriceComponent::RentalModeId);
+        this.addSinglePriceComponentToMap(_priceComponentsMap, FINInvoicePeriodPriceComponent::RentalModeId, rentalModeMultiplier, _numOfChargeablePeriods);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addSinglePriceComponentToMap</Name>
+				<Source><![CDATA[
+    protected void addSinglePriceComponentToMap(Map _priceComponentsMap, FINInvoicePeriodPriceComponent _priceComponentType, real _priceComponentValue, int _numOfChargeablePeriods)
+    {
+        Map pricesMap;
+        RORNumOfPeriods numOfChargeablePeriods = _numOfChargeablePeriods;
+
+        if (_priceComponentsMap.exists(_priceComponentType))
+        {
+            pricesMap = _priceComponentsMap.lookup(_priceComponentType);
+        }
+        else
+        {
+            pricesMap = new Map(Types::Real, Types::Integer);
+        }
+
+        if (pricesMap.exists(_priceComponentValue))
+        {
+            numOfChargeablePeriods += pricesMap.lookup(_priceComponentValue);
+        }
+
+        pricesMap.insert(_priceComponentValue, numOfChargeablePeriods);
+        _priceComponentsMap.insert(_priceComponentType, pricesMap);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setPriceComponents</Name>
+				<Source><![CDATA[
+    protected void setPriceComponents(Map _priceComponentsMap, FINPeriodSpecification _periodSpecification, int _numOfChargeablePeriods)
+    {
+        if (_priceComponentsMap && !_priceComponentsMap.empty() && _numOfChargeablePeriods)
+        {
+            MapEnumerator mapEnumerator = _priceComponentsMap.getEnumerator();
+
+            while (mapEnumerator.moveNext())
+            {
+                FINInvoicePeriodPriceComponent priceComponent = mapEnumerator.currentKey();
+                real priceComponentValue;
+                Map pricesMap = mapEnumerator.currentValue();
+                MapEnumerator pricesMapEnumerator = pricesMap.getEnumerator();
+
+                while (pricesMapEnumerator.moveNext())
+                {
+                    real partialPriceComponentValue = pricesMapEnumerator.currentKey();
+                    RORNumOfPeriods numOfPeriods = pricesMapEnumerator.currentValue();
+
+                    priceComponentValue += (partialPriceComponentValue * numOfPeriods / _numOfChargeablePeriods);
+                }
+
+                switch (priceComponent)
+                {
+                    case FINInvoicePeriodPriceComponent::RentalPrice :
+                        _periodSpecification.rentalPrice = priceComponentValue;
+                        break;
+
+                    case FINInvoicePeriodPriceComponent::LinePercent :
+                        _periodSpecification.linePercent = priceComponentValue;
+                        break;
+
+                    case FINInvoicePeriodPriceComponent::RentalModeId :
+                        _periodSpecification.rentalModeMultiplier = priceComponentValue;
+                        break;
+                }
+            }
+
+            _periodSpecification.priceComponentMap = _priceComponentsMap;
+        }
+        else
+        {
+            _periodSpecification.rentalPrice = callerRentalLine.Price;
+            _periodSpecification.linePercent = callerRentalLine.LinePercent;
+            _periodSpecification.rentalModeMultiplier = INVRentalMode::find(callerRentalLine.INVRentalModeId).RateMultiplier;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addToTotalPeriods</Name>
+				<Source><![CDATA[
+    protected void addToTotalPeriods(RefRecId _invoicePeriodQtyRecId, int _numOfOpenCalendarPeriods, int _numOfCalendarPeriods, int _numOfChargeablePeriods)
+    {
+        totalNumOfOpenCalendarPeriods += _numOfOpenCalendarPeriods;
+        totalNumOfCalendarPeriods += _numOfCalendarPeriods;
+        totalNumOfChargeablePeriods += _numOfChargeablePeriods;
+
+        RORNumOfPeriods totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv;
+        
+        if (totalNumOfPeriodsPerDelivery.exists(_invoicePeriodQtyRecId))
+        {
+            [totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv] = totalNumOfPeriodsPerDelivery.lookup(_invoicePeriodQtyRecId);
+        }
+
+        totalNumOfOpenCalendarPeriodsPerDlv += _numOfOpenCalendarPeriods;
+        totalNumOfCalendarPeriodsPerDlv += _numOfCalendarPeriods;
+        totalNumOfChargeablePeriodsPerDlv += _numOfChargeablePeriods;
+
+        totalNumOfPeriodsPerDelivery.insert(_invoicePeriodQtyRecId, [totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv]);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addPeriodsToMap</Name>
+				<Source><![CDATA[
+    protected void addPeriodsToMap(TransDateTime   _startDateTimePeriod,
+        TransDateTime   _endDateTimePeriod,
+        TransDateTime   _startDateTimeCharging,
+        TransDateTime   _endDateTimeCharging,
+        int             _numOfOpenCalendarPeriods,
+        int             _numOfCalendarPeriods,
+        int             _numOfChargeablePeriods,
+        RecId           _invPeriodQtyFinancialRecId,
+        RecId           _invPeriodQtyPhysicalRecId,
+        Qty             _invoicedQty,
+        RecId           _parmLineRecId,
+        Map             _priceComponentsMap,
+        TimeOfDay       _defaultDaysSplitPerDelivery)
+    {
+        Map periodsMap = specificationMap.lookup([_invPeriodQtyPhysicalRecId, _invoicedQty, _defaultDaysSplitPerDelivery]);
+        List specificationList = periodsMap.lookup([_startDateTimePeriod, _endDateTimePeriod]);
+        FINPeriodSpecification periodSpecification = FINPeriodSpecification::construct();
+        
+        periodSpecification.fromDateTime = _startDateTimeCharging;
+        periodSpecification.toDateTime = _endDateTimeCharging;
+        periodSpecification.invPeriodQtyPhysicalRecId = _invPeriodQtyPhysicalRecId;
+        periodSpecification.invPeriodQtyFinancialRecId = _invPeriodQtyFinancialRecId;
+        periodSpecification.numOfOpenCalendarPeriods = _numOfOpenCalendarPeriods;
+        periodSpecification.numOfCalendarPeriods = _numOfCalendarPeriods;
+        periodSpecification.numOfChargedPeriods = _numOfChargeablePeriods;
+        periodSpecification.lineQty = _invoicedQty;
+        
+        this.setPriceComponents(_priceComponentsMap, periodSpecification, _numOfChargeablePeriods);
+        periodSpecification.baseAmountCur = _invoicedQty * periodSpecification.rentalPrice * periodSpecification.rentalModeMultiplier;
+        periodSpecification.priceTimeUnit = this.getPriceComponent(periodSpecification.fromDateTime, FINInvoicePeriodPriceComponent::RateCode);
+        
+        specificationList.addEnd(periodSpecification);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    protected void init(FINInvoiceCalculatorParm _invoiceCalculatorParm, Common _common, FINInvoicingOptions _invoicingOptions)
+    {
+        invoiceCalculatorParm       = _invoiceCalculatorParm;
+        callerRentalLine            = _common;
+        isTechnicalExchange         = callerRentalLine.RORRentalLine::isTechnicalExchange();
+
+        if (isTechnicalExchange)
+        {
+            newestReplacementLineBuffer = callerRentalLine.RORRentalLine::getNewestReplacementLineBuffer();
+        }
+
+        callerTimeZone              = _invoiceCalculatorParm.Timezone;
+        invoiceProfile              = FINRentalInvoiceProfile::find(callerRentalLine.INVInvoiceProfileId);
+        calculationDateTime         = _invoicingOptions.calculationDateTime;
+        callerRentalModeMultiplier  = INVRentalMode::find(callerRentalLine.INVRentalModeId).RateMultiplier;
+        shouldCalculateDays         = invoiceProfile.shouldCalculateDays();
+        includeCredits              = _invoicingOptions.includeCredited;
+        forceUntilCalculationPoint  = _invoicingOptions.forceUntilCalculationPoint;
+        isCreditPreview             = _invoicingOptions.isCreditPreview;
+        creditJourRefRecId          = invoiceCalculatorParm.CreditJourRefRecId;
+
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+
+        select count(RecId) from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefRecId == callerRentalLine.RecId
+        &&    invoicePeriodQtyPhysical.RefTableId == callerRentalLine.TableId;
+
+        isTierMultiplierCalcForPartialBulk = (invoicePeriodQtyPhysical.RecId > 1);
+
+        if (!calcEstimation && invoiceCalculatorParm.IsEstimation)
+        {
+            calcEstimation = true;
+        }
+
+        this.initInvoicePeriodAmendmentCache();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initInvoicePeriodAmendmentCache</Name>
+				<Source><![CDATA[
+    private void initInvoicePeriodAmendmentCache()
+    {
+        FINInvoicePeriodAmendment invoicePeriodAmendment;
+
+        while select invoicePeriodAmendment
+        group by PriceComponent
+        where invoicePeriodAmendment.RefRecId == callerRentalLine.RecId
+        &&    invoicePeriodAmendment.RefTableId == callerRentalLine.TableId
+        &&    (isCreditPreview || (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed))
+        {
+            amendmentPriceComponentSet.add(invoicePeriodAmendment.PriceComponent);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINPeriodSpecificationManager construct()
+    {
+        return new FINPeriodSpecificationManager();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTransportTierMultiplier</Name>
+				<Source><![CDATA[
+    public RAGTierMultiplier getTransportTierMultiplier()
+    {
+        RAGTierMultiplier   ret = 1;
+        RORNumOfPeriods     numOfPeriods;
+        RAGPriceTierPeriod  priceTierPeriod;
+
+        if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Chargeable)
+        {
+            numOfPeriods = totalNumOfChargeablePeriods;
+            priceTierPeriod = (shouldCalculateDays ? RAGPriceTierPeriod::ChargeableDays : RAGPriceTierPeriod::ChargeableHours);
+        }
+        else if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Calendar)
+        {
+            numOfPeriods = totalNumOfCalendarPeriods;
+            priceTierPeriod = (shouldCalculateDays ? RAGPriceTierPeriod::Days : RAGPriceTierPeriod::Hours);
+        }
+
+        if (invoiceCalculatorParm.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(invoiceCalculatorParm.RAGContractLinePacked); // TODO: change field name
+            
+            if (numOfPeriods)
+            {
+                ret = contractData.getTierMultiplier(callerRentalLine.BOBRentalTypeId, RAGAgreementType::TransportTier, numOfPeriods, priceTierPeriod);
+                lastCalculatedContractTier.data(contractData.getLastCaclulatedContractTier());
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTierMultiplier</Name>
+				<Source><![CDATA[
+    public RAGTierMultiplier getTierMultiplier(RecId _invoicePeriodQtyRecId, boolean _forceRecalculation = false)
+    {
+        RAGTierMultiplier ret = 1;
+        boolean mustCheckHighestTier = true;
+        
+        if (!_forceRecalculation && priceTierMultiplierMap && priceTierMultiplierMap.exists(_invoicePeriodQtyRecId))
+        {
+            // Total number of periods was already known so price tier needs to be calculated once
+            ret = priceTierMultiplierMap.lookup(_invoicePeriodQtyRecId);
+        }
+        else if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::RangeCalendar)
+        {
+            ret = 1;
+            priceTierMultiplierMap.insert(_invoicePeriodQtyRecId, ret);
+        }
+        else
+        {
+            RORNumOfPeriods numOfPeriods;
+            RAGPriceTierPeriod priceTierPeriod;
+                            
+            if (isTechnicalExchange)
+            {
+                Map numOfPeriodsForExchange = FINInvoiceServiceController::getNumOfPeriodsForExchange();
+                Map numOfPeriodsForExchangePreviouslyInvoiced = FINInvoiceServiceController::getPreviouslyInvoicedNumOfPeriodsForExchange();
+                RORNumOfPeriods previousNumOfOpenCalendarPeriodsExchange, previousNumOfCalendarPeriodsExchange, previousNumOfChargeablePeriodsExchange;
+
+                if (numOfPeriodsForExchangePreviouslyInvoiced.exists(newestReplacementLineBuffer.RecId))
+                {
+                    [previousNumOfOpenCalendarPeriodsExchange, previousNumOfCalendarPeriodsExchange, previousNumOfChargeablePeriodsExchange] = numOfPeriodsForExchangePreviouslyInvoiced.lookup(newestReplacementLineBuffer.RecId);
+                }
+                else
+                {
+                    [previousNumOfOpenCalendarPeriodsExchange, previousNumOfCalendarPeriodsExchange, previousNumOfChargeablePeriodsExchange] = FINInvoicePeriodTableHelper::getPreviouslyInvoicedPeriodsForExchange(newestReplacementLineBuffer, invoiceCalculatorParm.ParmId);
+
+                    numOfPeriodsForExchangePreviouslyInvoiced.insert(newestReplacementLineBuffer.RecId, [previousNumOfOpenCalendarPeriodsExchange, previousNumOfCalendarPeriodsExchange, previousNumOfChargeablePeriodsExchange]);
+                }
+
+                RORNumOfPeriods totalNumOfOpenCalendarPeriodsExchange, totalNumOfCalendarPeriodsExchange, totalNumOfChargeablePeriodsExchange;
+                    
+                if (numOfPeriodsForExchange.exists(newestReplacementLineBuffer.RecId))
+                {
+                    [totalNumOfOpenCalendarPeriodsExchange, totalNumOfCalendarPeriodsExchange, totalNumOfChargeablePeriodsExchange] = numOfPeriodsForExchange.lookup(newestReplacementLineBuffer.RecId);
+                }
+
+                totalNumOfOpenCalendarPeriodsExchange += previousNumOfOpenCalendarPeriodsExchange;
+                totalNumOfCalendarPeriodsExchange += previousNumOfCalendarPeriodsExchange;
+                totalNumOfChargeablePeriodsExchange += previousNumOfChargeablePeriodsExchange;
+
+                if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Chargeable)
+                {
+                    numOfPeriods = totalNumOfChargeablePeriodsExchange;
+                    priceTierPeriod = (shouldCalculateDays ? RAGPriceTierPeriod::ChargeableDays : RAGPriceTierPeriod::ChargeableHours);
+                }
+                else if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Calendar)
+                {
+                    numOfPeriods += totalNumOfCalendarPeriodsExchange;
+                    priceTierPeriod = (shouldCalculateDays ? RAGPriceTierPeriod::Days : RAGPriceTierPeriod::Hours);
+                }
+
+                // There is no bulk items exchange so checking offRentDateTime is good enough
+                RORRentalDateTimesHost rentalDateTimeHost;
+                Common common;
+
+                common = newestReplacementLineBuffer;
+                rentalDateTimeHost = common;
+                mustCheckHighestTier = (rentalDateTimeHost.RORRentalDateTimesHost::rentalDateTimes().OffRentDateTime == DateTimeUtil::minValue());
+            }
+            else
+            {
+                // Calculate priecTierMultiplier per delivery
+                RORNumOfPeriods totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv;
+                
+                if (totalNumOfPeriodsPerDelivery.exists(_invoicePeriodQtyRecId))
+                {
+                    [totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv] = totalNumOfPeriodsPerDelivery.lookup(_invoicePeriodQtyRecId);
+                }
+            
+                container numOfPeriodsCon;
+                numOfPeriodsCon = [totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv];
+                    
+                FINChargeablePeriodsCache chargeablePeriodsCache = FINChargeablePeriodsCache::construct();
+                //calculate total charged periods, including current one which is in fact not charged yet
+                chargeablePeriodsCache.calculatePreviousNumOfPeriods(callerRentalLine, _invoicePeriodQtyRecId);
+                // add periods from current posting run
+                chargeablePeriodsCache.addNumOfPeriods(callerRentalLine, numOfPeriodsCon);
+                // get total periods including previously posted
+                RORNumOfPeriods totalNumOfOpenCalendarPeriodsPerLine, totalNumOfCalendarPeriodsPerLine, totalNumOfChargeablePeriodsPerLine;
+                [totalNumOfOpenCalendarPeriodsPerLine, totalNumOfCalendarPeriodsPerLine, totalNumOfChargeablePeriodsPerLine] = chargeablePeriodsCache.getTotalNumOfPeriods(callerRentalLine);
+
+                // get total periods including current run and previously posted
+                if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Chargeable)
+                {
+                    numOfPeriods = totalNumOfChargeablePeriodsPerLine;
+                    priceTierPeriod = (shouldCalculateDays ? RAGPriceTierPeriod::ChargeableDays : RAGPriceTierPeriod::ChargeableHours);
+                }
+                else if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Calendar)
+                {
+                    numOfPeriods = totalNumOfCalendarPeriodsPerLine;
+                    priceTierPeriod = (shouldCalculateDays ? RAGPriceTierPeriod::Days : RAGPriceTierPeriod::Hours);
+                }
+
+                // Multiplier is calculated per delivery.
+                FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+
+                select firstonly ReturnDateTime from invoicePeriodQtyPhysical
+                where invoicePeriodQtyPhysical.RecId == _invoicePeriodQtyRecId;
+
+                mustCheckHighestTier = (!calcEstimation && (invoicePeriodQtyPhysical.ReturnDateTime == DateTimeUtil::minValue() || invoicePeriodQtyPhysical.ReturnDateTime == DateTimeUtil::maxValue()));
+            }
+
+            if (invoiceCalculatorParm.RAGContractLinePacked)
+            {
+                RAGContractData contractData = new RAGContractData();
+                contractData.unpack(invoiceCalculatorParm.RAGContractLinePacked);
+            
+                if (numOfPeriods
+                &&  (   contractData.getHighestTierMultiplier(callerRentalLine.BOBRentalTypeId, RAGAgreementType::PriceTier, priceTierPeriod) <= numOfPeriods
+                    ||  isTierMultiplierCalcForEntireRental
+                    ||  isTierMultiplierCalcForPartialBulk))
+                {
+                    ret = contractData.getTierMultiplier(callerRentalLine.BOBRentalTypeId, RAGAgreementType::PriceTier, numOfPeriods, priceTierPeriod);
+                    lastCalculatedContractTier.data(contractData.getLastCaclulatedContractTier());
+                }
+                else if (numOfPeriods && !mustCheckHighestTier)
+                {
+                    // Check multiplier based on periods of entire rental
+                    invoicePeriodQtyRecIdForEntireRental = _invoicePeriodQtyRecId;
+                    ret = this.getTierMultiplierForEntireRental(callerRentalLine);
+                }
+                else
+                {
+                    // If no highest tier is reached then do not invoice.
+                    mustBeInvoiced = false;
+                }
+            }
+            
+            priceTierMultiplierMap.insert(_invoicePeriodQtyRecId, ret);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcLineAmountInvoiced</Name>
+				<Source><![CDATA[
+    protected LineAmount calcLineAmountInvoiced(FINPeriodSpecification _periodSpecification)
+    {
+        RAGTierMultiplier       tierMultiplier = _periodSpecification.tierMultiplier;
+        RORNumOfPeriods         numOfChargeablePeriods = _periodSpecification.numOfChargedPeriods;
+        LineAmount              ret = (_periodSpecification.baseAmountCur * tierMultiplier);
+        FINRentalInvoiceProfile invoiceProfileCurrent = FINRentalInvoiceProfile::find(this.getPriceComponent(_periodSpecification.fromDateTime, FINInvoicePeriodPriceComponent::InvoiceProfileId));
+        UnitOfMeasureRecId      rateCode = UnitOfMeasure::findBySymbol(_periodSpecification.priceTimeUnit).RecId;
+
+        if (invoiceProfileCurrent.isMonthlyInvoicing())
+        {
+            RORParameters rorParameters = RORParameters::find();
+
+            switch (invoiceProfileCurrent.CalculationMethod)
+            {
+                case INVCalculationMethod::AlwaysInvoiceEntirePeriod:
+                    // TODO: check for forced calculation point to charge only once?
+                    if (isTechnicalExchange)
+                    {
+                        FINMonthlyPeriodsCollection periodsCollection = FINInvoiceServiceController::getPeriodsCollection();
+                        
+                        if (!periodsCollection || periodsCollection.mustInvoiceEntirePeriod(newestReplacementLineBuffer, _periodSpecification))
+                        {
+                            ret = ret * 1;
+                        }
+                        else
+                        {
+                            mustBeInvoiced = (ret != 0 ? true : false);
+                            ret = 0;
+                        }
+                    }
+                    else
+                    {
+                        ret = ret * 1; // For entire periods, then only include once
+                    }
+                    break;
+
+                case INVCalculationMethod::ProRataFixedFactor:
+                    FINMonthlyPeriodsCollection periodsCollection = FINInvoiceServiceController::getPeriodsCollection();
+                    Factor                      periodsTotalChargeableSetup = UnitOfMeasureConverter::convert(1.00, rateCode, rorParameters.PriceRateDay, NoYes::No);
+                    ToDate                      prevMonthDate = mkDate(DateTimeUtil::day(_periodSpecification.toDateTime), DateTimeUtil::month(_periodSpecification.toDateTime) - 1, DateTimeUtil::year(_periodSpecification.toDateTime));
+                    Days                        nrOfDaysPrevMonth = date2Num(endMth(prevMonthDate)) + 1 - date2Num(dateStartMth(prevMonthDate));
+                     
+                    if (_periodSpecification.numOfChargedPeriods == _periodSpecification.numOfOpenCalendarPeriods
+                    // shift happened (equal monthly billing with start date of 30/31)
+                    || (invoiceProfileCurrent.MonthlyPeriod == INVMonthlyPeriod::LinkedToDate && !isTechnicalExchange && DateTimeUtil::day(_periodSpecification.toDateTime) > nrOfDaysPrevMonth))
+                    {
+                        ret = ret * 1;
+                    }
+                    else if (isTechnicalExchange && periodsCollection && periodsCollection.mustInvoiceEntireProRataPeriod(newestReplacementLineBuffer, _periodSpecification, _periodSpecification.numOfOpenCalendarPeriods))
+                    {
+                        SalesLine exchangeSalesLine;
+                        RORRentalDateTimes rentalDateTimes;
+
+                        select firstonly RecId from exchangeSalesLine
+                        where exchangeSalesLine.RORAmendmentExchangeType == RORAmendmentExchangeType::Technical
+                        &&    exchangeSalesLine.RORRecIdExchanged == callerRentalLine.RecId
+                            join OffRentDateTime from rentalDateTimes
+                            where rentalDateTimes.RefTableId == exchangeSalesLine.TableId
+                            &&    rentalDateTimes.RefRecId == exchangeSalesLine.RecId;
+
+                        ROROffRentDateTime offRentDateTime = DateTimeUtil::applyTimeZoneOffset(rentalDateTimes.OffRentDateTime, callerTimeZone);
+
+                        if (exchangeSalesLine.RecId && offRentDateTime >= _periodSpecification.fromDateTime && offRentDateTime <= _periodSpecification.toDateTime)
+                        {
+                            ret = ret * (UnitOfMeasureConverter::convert(1.00, rorParameters.PriceRateDay, rateCode, NoYes::No) * _periodSpecification.numOfChargedPeriods);
+                        }
+                        else
+                        {
+                            ret = ret * (1 / periodsTotalChargeableSetup * (_periodSpecification.numOfChargedPeriods + periodsTotalChargeableSetup - nrOfDaysPrevMonth));
+                        }
+                    }
+                    else
+                    {
+                        ret = ret * (UnitOfMeasureConverter::convert(1.00, rorParameters.PriceRateDay, rateCode, NoYes::No) * _periodSpecification.numOfChargedPeriods);
+                    }
+                    break;
+
+                case INVCalculationMethod::ProRataCalendar:
+                    // All open days in a specific calendar
+                    RORNumOfPeriods periodsTotalChargeable = _periodSpecification.numOfOpenCalendarPeriods;
+
+                    if (_periodSpecification.numOfChargedPeriods && periodsTotalChargeable)
+                    {
+                        ret = ret * (_periodSpecification.numOfChargedPeriods / periodsTotalChargeable);
+                    }
+                    else
+                    {
+                        ret = 0;
+                    }
+                    break;
+
+                case INVCalculationMethod::FixedFactor:
+                    ret = ret * (UnitOfMeasureConverter::convert(1.00, rorParameters.PriceRateDay, rorParameters.PriceRateMonth, NoYes::No) * _periodSpecification.numOfChargedPeriods);
+                    break;
+            }
+            
+        }
+        else if (invoiceProfile.PricedAt && invoiceProfile.CalculationMethod == INVCalculationMethod::AlwaysInvoiceEntirePeriod)
+        {
+            if (isTechnicalExchange)
+            {
+                FINMonthlyPeriodsCollection periodsCollection = FINInvoiceServiceController::getPeriodsCollection();
+                        
+                if (!periodsCollection || periodsCollection.mustInvoiceEntirePeriod(newestReplacementLineBuffer, _periodSpecification))
+                {
+                    ret = ret * 1;
+                }
+                else
+                {
+                    mustBeInvoiced = (ret != 0 ? true : false);
+                    ret = 0;
+                }
+            }
+            else
+            {
+                ret = ret * 1; // For entire periods, then only include once
+            }
+        }
+        else
+        {
+            ret = (ret * numOfChargeablePeriods);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInvoiceAmountAdjustmentFactor</Name>
+				<Source><![CDATA[
+    // Adjustment factor not related to number of periods or other period specific info
+    [SysObsolete('DNRDeletedObjects07_2020. Price unit functionality has been moved to period specific level. Please use the calcPeriodSpecificPriceAdjustmentFactor method instead.')]
+    protected void setInvoiceAmountAdjustmentFactor()
+    {
+        priceAdjustmentFactor = 1.0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setUnitOfMeasureForPeriods</Name>
+				<Source><![CDATA[
+    protected void setUnitOfMeasureForPeriods()
+    {
+        if (!unitOfMeasureForPeriods)
+        {
+            if (invoiceProfile.isHourlyInvoicing())
+            {
+                unitOfMeasureForPeriods = RAGParameters::find().PriceTierTimeUnit1;
+            }
+            else if (invoiceProfile.isMonthlyInvoicing())
+            {
+                unitOfMeasureForPeriods = RORParameters::find().PriceRateMonth;
+            }
+            else if (invoiceProfile.PricedAt && invoiceProfile.CalculationMethod == INVCalculationMethod::AlwaysInvoiceEntirePeriod)
+            {
+                unitOfMeasureForPeriods = invoiceProfile.PricedAt;
+            }
+            else
+            {
+                unitOfMeasureForPeriods = RORParameters::find().PriceRateDay;
+            }
+
+            chargeablePeriodUnit = shouldCalculateDays ?  RORParameters::find().PriceRateDay :  RAGParameters::find().PriceTierTimeUnit1;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSpecificationMap</Name>
+				<Source><![CDATA[
+    public Map getSpecificationMap()
+    {
+        return specificationMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasCalculatedPeriods</Name>
+				<Source><![CDATA[
+    public boolean hasCalculatedPeriods()
+    {
+        boolean ret = false;
+        // Map( [InvoicePeriodQtyRecId, invoiceQty], Map([ FromDateTime, ToDateTime ] , List(FINPeriodSpecification)))
+        specificationMap = Map::create(invoiceCalculatorParm.PeriodSpecificationPacked);
+
+        if (invoiceCalculatorParm.IsPeriodSpecificationCalculated)
+        {
+            // When specification is empty it makes no sense to calculate it over and over again.
+            ret = true;
+        }
+        else if (!specificationMap.empty())
+        {
+            MapEnumerator enumerator = specificationMap.getEnumerator();
+
+            while (enumerator.moveNext())
+            {
+                Map periodDefinitionMap = enumerator.currentValue();
+                MapEnumerator specificationEnumerator = periodDefinitionMap.getEnumerator();
+                
+                while (specificationEnumerator.moveNext())
+                {
+                    List specificationList = specificationEnumerator.currentValue();
+
+                    if (!specificationList.empty())
+                    {
+                        ret = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populatePeriodsTotalFromMap</Name>
+				<Source><![CDATA[
+    public static container populatePeriodsTotalFromMap(Map _specificationMap)
+    {
+        FINPeriodSpecificationManager specificationManager = new FINPeriodSpecificationManager();
+        
+        specificationManager.specificationMap = _specificationMap;
+        specificationManager.populateTotals();
+
+        return [specificationManager.totalNumOfCalendarPeriods, specificationManager.totalNumOfChargeablePeriods];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTotals</Name>
+				<Source><![CDATA[
+    protected void populateTotals()
+    {
+        if (!specificationMap.empty())
+        {
+            Set processedDeliveries = new Set(Types::Int64);
+            MapEnumerator periodEnumerator = specificationMap.getEnumerator();
+
+            mustBeInvoiced = true;
+
+            while(periodEnumerator.moveNext())
+            {
+                Map periodDefinitionMap = periodEnumerator.currentValue();
+                MapEnumerator enumerator = periodDefinitionMap.getEnumerator();
+
+                while(enumerator.moveNext())
+                {
+                    List            specificationList = enumerator.currentValue();
+                    ListEnumerator  listEnumerator = specificationList.getEnumerator();
+                
+                    while (listEnumerator.moveNext())
+                    {
+                        FINPeriodSpecification periodSpec = listEnumerator.current();
+
+                        totalNumOfCalendarPeriods += periodSpec.numOfCalendarPeriods;
+                        totalNumOfChargeablePeriods += periodSpec.numOfChargedPeriods;
+                        totalNumOfOpenCalendarPeriods += periodSpec.numOfOpenCalendarPeriods;
+
+                        totalRentalAmount += periodSpec.invoiceAmountCur;
+                        totalRentalDiscount += periodSpec.periodDisc;
+                        totalInsuranceAmount += periodSpec.insuranceAmount;
+
+                        if (!processedDeliveries.in(periodSpec.invPeriodQtyPhysicalRecId))
+                        {
+                            // Add only once per delivery
+                            totalInvoicedQty += periodSpec.lineQty;
+                            processedDeliveries.add(periodSpec.invPeriodQtyPhysicalRecId);
+                        }
+                        if (!periodSpec.mustBeInvoiced)
+                        {
+                            mustBeInvoiced = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateChargeablePeriodsQtyMap</Name>
+				<Source><![CDATA[
+    public Map populateChargeablePeriodsQtyMap()
+    {
+        Map chargeablePeriodsQtyMap = new Map(Types::Int64, Types::Container);
+
+        if (!specificationMap.empty())
+        {
+            Set processedDeliveries = new Set(Types::Int64);
+            MapEnumerator periodEnumerator = specificationMap.getEnumerator();
+
+            while(periodEnumerator.moveNext())
+            {
+                Map periodDefinitionMap = periodEnumerator.currentValue();
+                MapEnumerator enumerator = periodDefinitionMap.getEnumerator();
+
+                while(enumerator.moveNext())
+                {
+                    List            specificationList = enumerator.currentValue();
+                    ListEnumerator  listEnumerator = specificationList.getEnumerator();
+                
+                    while (listEnumerator.moveNext())
+                    {
+                        FINPeriodSpecification periodSpec = listEnumerator.current();
+                        Qty invoicedQty;
+                        RORNumOfPeriods numOfChargedPeriods;
+                                                                        
+                        if (processedDeliveries.in(periodSpec.invPeriodQtyPhysicalRecId))
+                        {
+                            if (chargeablePeriodsQtyMap.exists(periodSpec.invPeriodQtyPhysicalRecId))
+                            {
+                                [invoicedQty, numOfChargedPeriods] = chargeablePeriodsQtyMap.lookup(periodSpec.invPeriodQtyPhysicalRecId);
+                            }
+
+                            numOfChargedPeriods += periodSpec.numOfChargedPeriods;
+
+                            chargeablePeriodsQtyMap.insert(periodSpec.invPeriodQtyPhysicalRecId, [invoicedQty, numOfChargedPeriods]);
+                        }
+                        else
+                        {
+                            // Add only once per delivery
+                            chargeablePeriodsQtyMap.insert(periodSpec.invPeriodQtyPhysicalRecId, [periodSpec.lineQty, periodSpec.numOfChargedPeriods]);
+                            processedDeliveries.add(periodSpec.invPeriodQtyPhysicalRecId);
+                        }
+                    }
+                }
+            }
+        }
+
+        return chargeablePeriodsQtyMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateNumOfPeriods</Name>
+				<Source><![CDATA[
+    public void populateNumOfPeriods(FINInvoiceCalculatorParm _invoiceCalculatorParm, Common _common, FINInvoicingOptions _invoicingOptions)
+    {
+        this.init(_invoiceCalculatorParm, _common, _invoicingOptions);
+        
+        // step 1 --
+        //populate specificationMap with key containers only
+        //in case we're dealing with project hour population ONLY, we want to skip steps 2 and 3
+        this.populateSpecificationMapKey();
+                        
+        if (!specificationMap.empty())
+        {
+            // step 2 -- enumerate the map that was filled during step 1 and populate the FINPeriodSpecification struct (all fields except for InvoiceAmountCur and PeriodDisc)
+            this.populatePeriods();
+
+            // step 3 -- sum up number of periods from current invoicing + previous invoicing and add it to a map so it can be used in entire technical exchange chain
+            this.sumUpPeriods();
+            
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>sumUpPeriods</Name>
+				<Source><![CDATA[
+    protected void sumUpPeriods()
+    {
+        if (isTechnicalExchange)
+        {
+            // We allow exchange only for single delivery lines (for bulk items we never do an exchange)
+            if (newestReplacementLineBuffer)
+            {
+                if (invoiceProfile.isMonthlyInvoicing()
+                ||  (invoiceProfile.PricedAt && invoiceProfile.CalculationMethod == INVCalculationMethod::AlwaysInvoiceEntirePeriod))
+                {
+                    FINMonthlyPeriodsCollection periodsCollection = FINInvoiceServiceController::getPeriodsCollection();
+                    periodsCollection.populatePeriodsCollection(newestReplacementLineBuffer, specificationMap);
+                }
+    
+                RORNumOfPeriods totalNumOfOpenCalendarPeriodsPerLine, totalNumOfCalendarPeriodsPerLine, totalNumOfChargeablePeriodsPerLine;
+                Map numOfPeriodsForExchange = FINInvoiceServiceController::getNumOfPeriodsForExchange();
+
+                if (!numOfPeriodsForExchange)
+                {
+                    numOfPeriodsForExchange = new Map(Types::Int64, Types::Container);
+                }
+
+                if (!isTierMultiplierCalcForEntireRental || !numOfPeriodsForExchange.exists(newestReplacementLineBuffer.RecId))
+                {
+                    // if isTierMultiplierCalcForEntireRental == true then in numOfPeriodsForExchange map we have already total number of periods.
+                    [totalNumOfOpenCalendarPeriodsPerLine, totalNumOfCalendarPeriodsPerLine, totalNumOfChargeablePeriodsPerLine] = this.calculateNumOfPeriods(false);
+                }
+
+                if (numOfPeriodsForExchange.exists(newestReplacementLineBuffer.RecId))
+                {
+                    RORNumOfPeriods totalNumOfOpenCalendarPeriodsPrevious, totalNumOfCalendarPeriodsPrevious, totalNumOfChargeablePeriodsPrevious;
+                    [totalNumOfOpenCalendarPeriodsPrevious, totalNumOfCalendarPeriodsPrevious, totalNumOfChargeablePeriodsPrevious] = numOfPeriodsForExchange.lookup(newestReplacementLineBuffer.RecId);
+
+                    totalNumOfOpenCalendarPeriodsPerLine += totalNumOfOpenCalendarPeriodsPrevious;
+                    totalNumOfCalendarPeriodsPerLine += totalNumOfCalendarPeriodsPrevious;
+                    totalNumOfChargeablePeriodsPerLine += totalNumOfChargeablePeriodsPrevious;
+                }
+                
+                numOfPeriodsForExchange.insert(newestReplacementLineBuffer.RecId, [totalNumOfOpenCalendarPeriodsPerLine, totalNumOfCalendarPeriodsPerLine, totalNumOfChargeablePeriodsPerLine]);
+
+                FINInvoiceServiceController::setNumOfPeriodsForExchange(numOfPeriodsForExchange);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDeliveriesSet</Name>
+				<Source><![CDATA[
+    protected Set getDeliveriesSet()
+    {
+        Set deliveriesSet = new Set(Types::Int64);
+        MapEnumerator periodEnumerator = specificationMap.getEnumerator();
+        
+        while (periodEnumerator.moveNext())
+        {
+            Map periodDefinitionMap = periodEnumerator.currentValue();
+            MapEnumerator enumerator = periodDefinitionMap.getEnumerator();
+
+            while(enumerator.moveNext())
+            {
+                List specificationList = enumerator.currentValue();
+                ListEnumerator listEnumerator = specificationList.getEnumerator();
+
+                while (listEnumerator.moveNext())
+                {
+                    FINPeriodSpecification periodSpec = listEnumerator.current();
+
+                    deliveriesSet.add(periodSpec.invPeriodQtyPhysicalRecId);
+                }
+            }
+        }
+
+        return deliveriesSet;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateNumOfPeriods</Name>
+				<Source><![CDATA[
+    protected container calculateNumOfPeriods(boolean _calculatePreviouslyInvoiced = true)
+    {
+        RORNumOfPeriods totalNumOfOpenCalendarPeriodsPerLine, totalNumOfCalendarPeriodsPerLine, totalNumOfChargeablePeriodsPerLine;
+        FINChargeablePeriodsCache chargeablePeriodsCache = FINChargeablePeriodsCache::construct();
+        Set deliveriesSet = this.getDeliveriesSet();
+        SetEnumerator enumerator = deliveriesSet.getEnumerator();
+                
+        while (enumerator.moveNext())
+        {
+            RefRecId deliveryRecId = enumerator.current();
+            RORNumOfPeriods totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv;
+            container numOfPeriodsCon;
+
+            if (totalNumOfPeriodsPerDelivery.exists(deliveryRecId))
+            {
+                [totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv] = totalNumOfPeriodsPerDelivery.lookup(deliveryRecId);
+            }
+
+            numOfPeriodsCon = [totalNumOfOpenCalendarPeriodsPerDlv, totalNumOfCalendarPeriodsPerDlv, totalNumOfChargeablePeriodsPerDlv];
+                                        
+            //calculate total charged periods, including current one which is in fact not charged yet
+            if (_calculatePreviouslyInvoiced)
+            {
+                chargeablePeriodsCache.calculatePreviousNumOfPeriods(callerRentalLine, deliveryRecId);
+            }
+
+            // add periods from current posting run
+            chargeablePeriodsCache.addNumOfPeriods(callerRentalLine, numOfPeriodsCon);
+        }
+                    
+        // get total periods including previously posted
+        [totalNumOfOpenCalendarPeriodsPerLine, totalNumOfCalendarPeriodsPerLine, totalNumOfChargeablePeriodsPerLine] = chargeablePeriodsCache.getTotalNumOfPeriods(callerRentalLine);
+               
+        return [totalNumOfOpenCalendarPeriodsPerLine, totalNumOfCalendarPeriodsPerLine, totalNumOfChargeablePeriodsPerLine];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTotalChargeablePeriods</Name>
+				<Source><![CDATA[
+    public int getTotalChargeablePeriods()
+    {
+        return totalNumOfChargeablePeriods;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTotalCalendarPeriods</Name>
+				<Source><![CDATA[
+    public int getTotalCalendarPeriods()
+    {
+        return totalNumOfCalendarPeriods;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTotalInvoicedQty</Name>
+				<Source><![CDATA[
+    public Qty getTotalInvoicedQty()
+    {
+        return totalInvoicedQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTierMultiplierChargeableOnCreation</Name>
+				<Source><![CDATA[
+    public static INVRateMultiplierTier getTierMultiplierChargeableOnCreation(Common _common, FINRentalInvoiceProfile _invoiceProfile)
+    {
+        return FINPeriodSpecificationManager::getContractTierChargeableOnCreation(_common, _invoiceProfile, RAGAgreementType::PriceTier).Multiplier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContractTierChargeableOnCreation</Name>
+				<Source><![CDATA[
+    public static RAGTmpContractLineTier getContractTierChargeableOnCreation(Common _common, FINRentalInvoiceProfile _invoiceProfile, RAGAgreementType _agreementType)
+    {
+        RORRentalLine               rentalLine = _common;
+        INVRateMultiplierTier       rateMultiplier;
+        FINInvoicePeriodAmendment   invoicePeriodAmendment;
+        boolean                     mustPopulateTimes = _invoiceProfile.isHourlyInvoicing();
+        Map                         calendarMap = new Map(Types::String, Types::Enum);
+        
+        calendarMap.insert(rentalLine.CalendarId, mustPopulateTimes);
+
+        while select StrValue from invoicePeriodAmendment
+        where invoicePeriodAmendment.RefTableId == _common.TableId
+        &&    invoicePeriodAmendment.RefRecId == _common.RecId
+        &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::CalendarId
+        &&    (invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::None || invoicePeriodAmendment.DocumentState == FINAmendmentDocumentState::Confirmed)
+        {
+            if (calendarMap.exists(invoicePeriodAmendment.StrValue))
+            {
+                mustPopulateTimes = (mustPopulateTimes || calendarMap.lookup(invoicePeriodAmendment.StrValue));
+            }
+ 
+            calendarMap.insert(invoicePeriodAmendment.StrValue, mustPopulateTimes);
+        }
+
+        RORRentalDateTimes rentalDateTimes = rentalLine.RORRentalDateTimes();
+        ROROffRentDateTime offRentDateTime = rentalDateTimes.getOffRentDateTime(true, true);
+        ROROnRentDateTime onRentDateTime = rentalDateTimes.getOnRentDateTime();
+        FINWorkCalendar workCalendar = new FINWorkCalendar();
+        StartDate startDate;
+        EndDate endDate;
+
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        // On creation there is no delivery yet so always only 1 record exists
+        select firstonly invPeriodQtyPhysical
+        where invPeriodQtyPhysical.RefTableId == _common.TableId
+        &&    invPeriodQtyPhysical.RefRecId == _common.RecId;
+
+        if (_invoiceProfile.isMonthlyInvoicing())
+        {
+            startDate = DateTimeUtil::date(onRentDateTime);
+            startDate = str2DateDMY(strFmt("1-%1-%2", mthOfYr(startDate), year(startDate)));
+            endDate = endMth(DateTimeUtil::date(offRentDateTime));
+        }
+        else if (_invoiceProfile.PricedAt && _invoiceProfile.CalculationMethod == INVCalculationMethod::AlwaysInvoiceEntirePeriod)
+        {
+            Timezone timeZoneOrder = rentalLine.RORRentalLine::FINTimeZoneOrder();
+
+            startDate   = conPeek(FINPeriodDatesDefinition::getFullInvoicePeriodStartEnd(_common, invPeriodQtyPhysical, true, timeZoneOrder, onRentDateTime), 1);
+            endDate     = conPeek(FINPeriodDatesDefinition::getFullInvoicePeriodStartEnd(_common, invPeriodQtyPhysical, true, timeZoneOrder, offRentDateTime), 2);
+        }
+        else
+        {
+            startDate = DateTimeUtil::date(onRentDateTime);
+            endDate = DateTimeUtil::date(offRentDateTime);
+        }
+
+        if (startDate == DateTimeUtil::date(DateTimeUtil::minValue()) || endDate == DateTimeUtil::date(DateTimeUtil::minValue()))
+        {
+            warning (strFmt("@DNR:ImpossibleToCalcMultiplier", rentalLine.HeaderId, rentalLine.InventTransId));
+            RAGTmpContractLineTier tmpTier;
+            return tmpTier;
+        }
+
+        workCalendar.populate(calendarMap, endMth(DateTimeUtil::date(DateTimeUtil::addMonths(DateTimeUtil::newDateTime(startDate, 0), -2))) - 1 , DateTimeUtil::date(DateTimeUtil::addMonths(DateTimeUtil::newDateTime(endMth(endDate), 0), 1)) + 1);
+        FINInvoiceServiceController::setWorkCalendar(workCalendar);
+
+        SalesParmLine parmLine; // dummy record
+        parmLine.DeliverNow = rentalLine.RentQty;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+        FINInvoiceCalculator invoiceCalculator = FINInvoiceCalculator::construct(rentalLine, parmLine, invoiceCalculatorParm);
+        invoiceCalculatorParm = invoiceCalculator.getInvoiceCalculatorParm();
+                
+        FINInvoicingOptions invoicingOptions = FINInvoicingOptions::construct();
+        invoicingOptions.calculationDateTime = offRentDateTime;
+        invoicingOptions.includeCredited = true;
+        invoicingOptions.includeUninvoiced = true;
+        invoicingOptions.forceUntilCalculationPoint = NoYes::No;
+        invoicingOptions.parmId = invoiceCalculatorParm.ParmId;
+            
+        FINPeriodSpecificationManager periodSpecificationManager = FINPeriodSpecificationManager::construct();
+        periodSpecificationManager.setCalcEstimation(true);
+        periodSpecificationManager.populateNumOfPeriods(invoiceCalculatorParm, rentalLine, invoicingOptions);
+          
+        if (_agreementType == RAGAgreementType::TransportTier)
+        {
+            rateMultiplier = periodSpecificationManager.getTransportTierMultiplier();
+        }
+        else
+        {
+            rateMultiplier = periodSpecificationManager.getTierMultiplier(invPeriodQtyPhysical.RecId, true);
+        }
+            
+        // dispose calendar map
+        FINInvoiceServiceController::setWorkCalendar(null);
+        FINInvoiceServiceController::setPreviouslyInvoicedNumOfPeriodsForExchange(new Map(Types::Int64, Types::Container));
+        FINInvoiceServiceController::setNumOfPeriodsForExchange(new Map(Types::Int64, Types::Container));
+
+        return periodSpecificationManager.getLastCaclulatedContractTier();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTierMultiplierCalendarOnCreation</Name>
+				<Source><![CDATA[
+    public static INVRateMultiplierTier getTierMultiplierCalendarOnCreation(Common _common, FINRentalInvoiceProfile _invoiceProfile)
+    {
+        return FINPeriodSpecificationManager::getContractTierCalendarOnCreation(_common, _invoiceProfile, RAGAgreementType::PriceTier).Multiplier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContractTierCalendarOnCreation</Name>
+				<Source><![CDATA[
+    public static RAGTmpContractLineTier getContractTierCalendarOnCreation(Common _common, FINRentalInvoiceProfile _invoiceProfile, RAGAgreementType _agreementType)
+    {
+        RORRentalLine rentalLine = _common;
+
+        RORRentalDateTimes rentalDateTimes;
+        ROROffRentDateTime offRentDateTime;
+        ROROnRentDateTime onRentDateTime;
+
+        if (rentalLine.RORRentalLine::isTechnicalExchange())
+        {
+            RORRentalLine exchangeRentalLine = rentalLine.RORRentalLine::getOrigReplacementLineBuffer();
+            rentalDateTimes = exchangeRentalLine.RORRentalDateTimes();
+            onRentDateTime = rentalDateTimes.getOnRentDateTime();
+
+            exchangeRentalLine = rentalLine.RORRentalLine::getNewestReplacementLineBuffer();
+            rentalDateTimes = exchangeRentalLine.RORRentalDateTimes();
+            offRentDateTime = rentalDateTimes.getOffRentDateTime(true, true);
+        }
+        else
+        {
+            rentalDateTimes = rentalLine.RORRentalDateTimes();
+            offRentDateTime = rentalDateTimes.getOffRentDateTime(true, true);
+            onRentDateTime = rentalDateTimes.getOnRentDateTime();
+        }
+
+        RAGPriceTierPeriod tierPeriod = (_invoiceProfile.isHourlyInvoicing() ? RAGPriceTierPeriod::Hours : RAGPriceTierPeriod::Days);
+        int64 onOffDifferenceInSeconds = DateTimeUtil::getDifference(offRentDateTime, onRentDateTime);
+
+        #TimeConstants
+        RORNumOfPeriods secondsPerUnit = (tierPeriod == RAGPriceTierPeriod::Hours ? #secondsPerHour : #secondsPerDay);
+        RORNumOfPeriods totalPeriodsNum = any2Int(onOffDifferenceInSeconds div secondsPerUnit);
+
+        if (onOffDifferenceInSeconds mod secondsPerUnit > 0)
+        {
+            totalPeriodsNum += 1;
+        }
+
+        RAGContractDataParm contractDataParm;
+        contractDataParm.initFromRentalLine(rentalLine);
+
+        RAGContractData contractData = new RAGContractData();
+        contractData.parmDataParm(contractDataParm);
+        contractData.populateData();
+
+        INVRateMultiplierTier rateMultiplier = contractData.getTierMultiplier(rentalLine.BOBRentalTypeId, _agreementType, totalPeriodsNum, tierPeriod);
+        contractData.getLastCaclulatedContractTier().Multiplier = rateMultiplier;
+
+        return contractData.getLastCaclulatedContractTier();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTierMultiplierOnCreation</Name>
+				<Source><![CDATA[
+    public static INVRateMultiplierTier getTierMultiplierOnCreation(Common _common)
+    {
+        return FINPeriodSpecificationManager::getContractTierOnCreation(_common, RAGAgreementType::PriceTier).Multiplier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContractTierOnCreation</Name>
+				<Source><![CDATA[
+    public static RAGTmpContractLineTier getContractTierOnCreation(Common _common, RAGAgreementType _agreementType)
+    {
+        RORRentalLine rentalLine = _common;
+        RAGTmpContractLineTier tmpContractlineTier;
+        FINRentalInvoiceProfile invoiceProfile = FINRentalInvoiceProfile::find(rentalLine.INVInvoiceProfileId);
+        
+        if (!invoiceProfile || invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::None)
+        {
+            tmpContractlineTier.Multiplier = 1;
+        }
+        else if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::RangeCalendar)
+        {
+            FINPriceTierRangeRecalculate priceTierRangeRecalculate = new FINPriceTierRangeRecalculate();
+            priceTierRangeRecalculate.parmIsManualRecalculation(true);
+            priceTierRangeRecalculate.run(_common);
+
+            // Actual multilier is saved as price amendment
+            tmpContractlineTier.Multiplier = 1;
+        }
+        else if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Calendar)
+        {
+            tmpContractlineTier = FINPeriodSpecificationManager::getContractTierCalendarOnCreation(_common, invoiceProfile, _agreementType);
+        }
+        else if (invoiceProfile.MultiplierPeriods == INVMultiplierPeriods::Chargeable)
+        {
+            tmpContractlineTier = FINPeriodSpecificationManager::getContractTierChargeableOnCreation(_common, invoiceProfile, _agreementType);
+        }
+
+        return tmpContractlineTier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTierMultiplierForEntireRental</Name>
+				<Source><![CDATA[
+    public INVRateMultiplierTier getTierMultiplierForEntireRental(RORRentalLine _rentalLine)
+    {
+        RORRentalDateTimes rentalDateTimes = _rentalLine.RORRentalDateTimes();
+        ROROffRentDateTime offRentDateTime = rentalDateTimes.getOffRentDateTime(true, true);
+                
+        SalesParmLine parmLine; // dummy record
+        parmLine.DeliverNow = _rentalLine.RentQty;
+        FINInvoiceCalculatorParm invoiceCalculatorParmLocal;
+        FINInvoiceCalculator invoiceCalculator = FINInvoiceCalculator::construct(_rentalLine, parmLine, invoiceCalculatorParmLocal);
+        invoiceCalculatorParmLocal = invoiceCalculator.getInvoiceCalculatorParm();
+                
+        FINInvoicingOptions invoicingOptions = FINInvoicingOptions::construct();
+        invoicingOptions.calculationDateTime = offRentDateTime;
+        invoicingOptions.includeCredited = true;
+        invoicingOptions.includeUninvoiced = true;
+        invoicingOptions.forceUntilCalculationPoint = NoYes::No;
+        invoicingOptions.parmId = invoiceCalculatorParmLocal.ParmId;
+        invoicingOptions.isCreditPreview = isCreditPreview;
+        FINPeriodSpecificationManager periodSpecificationManager = FINPeriodSpecificationManager::construct();
+        periodSpecificationManager.setCalcEstimation(true);
+        periodSpecificationManager.setIsTierMultiplierCalcForEntireRental(true);
+        periodSpecificationManager.populateNumOfPeriods(invoiceCalculatorParmLocal, _rentalLine, invoicingOptions);
+        INVRateMultiplierTier rateMultiplier = periodSpecificationManager.getTierMultiplier(invoicePeriodQtyRecIdForEntireRental, true);
+        lastCalculatedContractTier.data(periodSpecificationManager.getLastCaclulatedContractTier());
+
+        return rateMultiplier;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcInsuranceAmount</Name>
+				<Source><![CDATA[
+    protected AmountCur calcInsuranceAmount(FINPeriodSpecification _periodSpecification)
+    {
+        FINInvoicePeriodAmendment   invoicePeriodAmendment;
+
+        AmountCur baseAmount = callerRentalLine.InsuranceCalcBasis == RORInsuranceCalcBasis::Gross ? _periodSpecification.invoiceAmountCur : _periodSpecification.invoiceAmountCur + _periodSpecification.periodDisc;
+
+        select firstOnly RecId, RealValue from invoicePeriodAmendment
+        order by CreatedDateTime desc
+        where invoicePeriodAmendment.RefRecId       == callerRentalLine.RecId
+        &&    invoicePeriodAmendment.RefTableId     == callerRentalLine.TableId
+        &&    invoicePeriodAmendment.PriceComponent == FINInvoicePeriodPriceComponent::Insurance
+        &&    invoicePeriodAmendment.FromDateTime   <= _periodSpecification.toDateTime
+        &&    invoicePeriodAmendment.ToDateTime     >= _periodSpecification.fromDateTime;
+
+        RORInsurancePercentage insurancePct = invoicePeriodAmendment.RecId ? invoicePeriodAmendment.RealValue : callerRentalLine.RORRentalLine::getInsurancePercentage();
+
+        AmountCur ret = baseAmount * insurancePct / 100;
+
+        _periodSpecification.insuranceCalcBasis = callerRentalLine.InsuranceCalcBasis;
+        _periodSpecification.insuranceAmount = ret;
+        _periodSpecification.insurancePct = insurancePct;
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLastCaclulatedContractTier</Name>
+				<Source><![CDATA[
+    public RAGTmpContractLineTier getLastCaclulatedContractTier()
+    {
+        return lastCalculatedContractTier;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

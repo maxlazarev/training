@@ -1,0 +1,672 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPTransportPlanboardData_Unplanned</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class WPPTransportPlanboardData_Unplanned extends WPPTransportPlanboardData
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getDisplayMode</Name>
+				<Source><![CDATA[
+    protected abstract WPPPlanboardDisplayMode getDisplayMode()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getEmptyTmpTable</Name>
+				<Source><![CDATA[
+    public WPPTmpTransportPlanboardData getEmptyTmpTable()
+    {
+        tmpData.insert(); // insert blank record
+        return tmpData;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getImages</Name>
+				<Source><![CDATA[
+    public container getImages(WPPTmpTransportPlanboardData _tmpData)
+    {
+        container           ret;
+        WHSShipmentTable    shipment;
+        WPPWorkOrderTable   workOrderTable;
+        InventJournalTable  inventJournalTable;
+        InventJournalTrans  inventJournalTrans;
+
+        ret = super(_tmpData);
+
+        select firstOnly RecId from shipment
+            exists join workOrderTable
+            where workOrderTable.OrderTableId   == shipment.TableId
+            &&    workOrderTable.OrderRecId     == shipment.RecId
+            &&    workOrderTable.RecId          == _tmpData.WorkOrderTableRecId;
+
+        if (!shipment)
+        {
+            select firstOnly RecId from inventJournalTable
+                exists join workOrderTable
+                where workOrderTable.OrderTableId   == inventJournalTable.TableId
+                &&    workOrderTable.OrderRecId     == inventJournalTable.RecId
+                &&    workOrderTable.RecId          == _tmpData.WorkOrderTableRecId;
+        }
+
+        if (!shipment && !inventJournalTable)
+        {
+            if (_tmpData.LastOnRentDate)
+            {
+                ret += [ #ObjLord ];
+            }
+        }
+
+        if (_tmpData.WorkOrderTableRecId)
+        {
+            select firstOnly RecId from shipment
+            where shipment.ShipmentStatus == WHSShipmentStatus::InProcess
+            ||    shipment.ShipmentStatus == WHSShipmentStatus::Shipped
+            ||    shipment.ShipmentStatus == WHSShipmentStatus::Loaded
+            ||    shipment.ShipmentStatus == WHSShipmentStatus::Waved
+                exists join workOrderTable
+                where workOrderTable.OrderTableId   == shipment.TableId
+                &&    workOrderTable.OrderRecId     == shipment.RecId
+                &&    workOrderTable.RecId          == _tmpData.WorkOrderTableRecId;
+
+            if (shipment.RecId != 0)
+            {
+                ret += [ #ShipmentHasBeenPicked ];
+            }
+
+            select firstOnly RecId from inventJournalTable
+                join RecId from workOrderTable
+                where workOrderTable.OrderTableId   == inventJournalTable.TableId
+                &&    workOrderTable.OrderRecId     == inventJournalTable.RecId
+                &&    workOrderTable.RecId          == _tmpData.WorkOrderTableRecId
+                    outer join RecId from inventJournalTrans
+                    where inventJournalTrans.JournalId == inventJournalTable.JournalId;
+
+            if (inventJournalTable.RecId != 0 && inventJournalTrans.RecId == 0)
+            {
+                ret += [ #EmptyReturnJournal ];
+            }
+
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPlanningEntryColor</Name>
+				<Source><![CDATA[
+    protected int getPlanningEntryColor(WPPTmpTransportPlanboardData _tmpData)
+    {
+        return #ColorPowderBlue;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>internalTaskType</Name>
+				<Source><![CDATA[
+    protected abstract WPPTaskType internalTaskType()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        super();
+        //planningItemList = _itemList;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpData</Name>
+				<Source><![CDATA[
+    protected void populateTmpData(RecId _recIdFilter = 0)
+    {
+        WPPWorkOrderTaskTable               taskTable;
+        WPPWorkOrderTable                   workOrderTable;
+        WPPWorkOrderLine                    workOrderLine;
+        WPPWorkOrderLineResource            plannedTask;
+        PurchLine                           purchLine;
+        PurchTable                          purchTable;
+        SalesLine                           salesLine, salesLineKit, salesLineMC;
+        SalesTable                          salesTable;
+        VendTable                           vendTable;
+        CustTable                           custTable;
+        LogisticsPostalAddress              postalAddress;
+        LogisticsEntityPostalAddressView    addressView;
+        InventLocation                      inventLocation;
+        InventDim                           inventDim;
+        InventTable                         inventTable;
+        DirPartyTable                       dirPartyTable;
+        BOBObjectTable                      objectTable;
+        BOBObjectView                       objectView;
+        BOBObjectOwnershipLog               ownershipLog;
+        BOBObjectAvailabilityLog            availabilityLog;
+        DNRAdditionalNoteTable              addNoteTableHeader, addNoteTableLine;
+        //FromDateTime                        fromDateTime = this.fromDateTime();
+        //ToDateTime                          toDateTime = this.toDateTime();
+        TransDateTime                       nullDateTime = DateTimeUtil::addDays(utcDateTimeNull(), 1);
+        TransDateTime                       currentDateTime = DateTimeUtil::getSystemDateTime();
+        WHSShipmentTable                    shipment;
+        InventJournalTable                  inventJournalTable;
+        ContactPerson                       contactPerson;
+        ProjInvoiceTable                    projInvoiceTable;
+        RORVenueTable                       venueTable;
+        smmBusRelTable                      smmBusRelTable;
+        EcoResProductTranslation            productTranslation;
+        LanguageId                          companyLanguageId;
+        EcoResProduct                       ecoResProduct;
+        BOBRentalType                       rentalType;
+        WPPWorkOrderDetailsView             workOrderDetailsView;
+
+        // populate work order-related fields
+        insert_recordset tmpData (RequestedStartDateTime, RequestedEndDateTime, WorkOrderLineStatus, WorkOrderParentLineRecId, WorkOrderLineRecId, ExecutionGroupId, TaskId,
+                                  WorkOrderLineTaskDescription, TaskType, WorkOrderTableRecId, ObjectTableRecId, WorkOrderTableWarehouse, VenueCode, WPPOrderTableId, WPPOrderRecId)
+        select RequestedStartDateTime, RequestedEndDateTime, Status, ParentLineRecId, RecId, ExecutionGroupId from workOrderLine
+        where workOrderLine.Status == WPPWorkOrderLineStatus::Created
+        &&   (!settings.ExecutionGroupId || workOrderLine.ExecutionGroupId == settings.ExecutionGroupId)
+        &&    workOrderLine.RequestedStartDateTime >= nullDateTime
+        &&    workOrderLine.RequestedEndDateTime >= nullDateTime
+        &&    workOrderLine.RequestedEndDateTime > workOrderLine.RequestedStartDateTime
+        //&&    (!toDateTime || workOrderLine.RequestedStartDateTime <= toDateTime)
+        //&&    (!fromDateTime || workOrderLine.RequestedEndDateTime >= fromDateTime)
+        &&    (!_recIdFilter || workOrderLine.RecId == _recIdFilter)
+            join TaskId, Description, TaskType from taskTable
+            where taskTable.TaskId == workOrderLine.TaskId
+            &&   (taskTable.TaskType == this.taskType() || taskTable.TaskType == this.internalTaskType())
+                join RecId, BOBObjectTableRecId, InventLocationId, RORVenueCode, OrderTableId, OrderRecId from workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    notExists join plannedTask
+                    where plannedTask.WorkOrderLineRecId == workOrderLine.RecId;
+
+        // populate business object-related fields
+        // 2 seperate updates, because when this is merged into one and there are more
+        // than 10.000 objects, then the plan board does not open anymore in a timely fashion
+        update_recordSet tmpData
+        setting BOBFleetNumber = objectTable.FleetNumber,
+                InventSerialId = objectTable.InventSerialId,
+                ObjectCategory = objectTable.Category,
+                ObjectId = objectTable.ObjectId,
+                LastOnRentDate = ownershipLog.LastOnRentDate
+        where tmpData.ObjectTableRecId != 0
+            join FleetNumber, InventSerialId, Category, ObjectId from objectTable
+            where objectTable.RecId == tmpData.ObjectTableRecId
+                join LastOnRentDate from ownershipLog
+                where ownershipLog.ObjectId == objectTable.ObjectId
+                    exists join objectView
+                    where objectView.OwnershipRecId == ownershipLog.RecId;
+
+        update_recordSet tmpData
+        setting IsObjectAvailable = availabilityLog.IsAvailable
+        where tmpData.ObjectTableRecId != 0
+            join InventSerialId, Category from objectTable
+            where objectTable.RecId == tmpData.ObjectTableRecId
+                join IsAvailable from availabilityLog
+                where availabilityLog.ObjectId == objectTable.ObjectId
+                    exists join objectView
+                    where objectView.AvailabilityRecId == availabilityLog.RecId;
+
+        update_recordSet tmpData
+        setting ItemId = inventTable.ItemId
+        where tmpData.ObjectTableRecId != 0
+            join TableId from objectTable
+            where objectTable.RecId == tmpData.ObjectTableRecId
+                join TableId from ecoResProduct
+                where ecoResProduct.BOBRentalTypeId == objectTable.RentalTypeId
+                &&    ecoResProduct.DisplayProductNumber == ecoResProduct.BOBRentalTypeId
+                    join ItemId from inventTable
+                    where inventTable.Product == ecoResProduct.RecId;
+
+        // populate rental order line-related fields
+        update_recordSet tmpData
+        setting CustName = dirPartyTable.Name,
+                CustAccount = custTable.AccountNum,
+                SalesTableRecId = salesTable.RecId,
+                ShipCarrierDeliveryContact = salesTable.ShipCarrierDeliveryContact,
+                SalesLineRecId = salesLine.RecId,
+                RentalTypeIdRequested = salesLine.BOBRentalTypeIdRequested,
+                RentalTypeIdAssigned = salesLine.BOBRentalTypeIdAssigned,
+                IsSubRental = (salesLine.RORTradeType == RORTradeType::SubRental),
+                SalesId = salesTable.SalesId
+            join TableId from workOrderTable
+            where workOrderTable.RecId == tmpData.WorkOrderTableRecId
+                join BOBRentalTypeIdRequested, BOBRentalTypeIdAssigned, RORTradeType, RecId from salesLine
+                where salesLine.TableId == workOrderTable.OrderTableId
+                &&    salesLine.RecId == workOrderTable.OrderRecId
+                    join RecId, ShipCarrierDeliveryContact, SalesId from salesTable
+                    where salesLine.SalesId == salesTable.SalesId
+                        join AccountNum from custTable
+                        where custTable.AccountNum == salesTable.CustAccount
+                            join Name from dirPartyTable
+                            where dirPartyTable.RecId == custTable.Party;
+
+        update_recordSet tmpData
+        setting SalesId = workOrderDetailsView.SalesLineSalesId
+            where tmpData.WPPOrderTableId == tableNum(Salesline)
+            &&    tmpData.WPPOrderRecId
+            &&   !tmpData.SalesId
+                join  SalesLineSalesId from workOrderDetailsView
+                where workOrderDetailsView.WorkOrderOrderTableId == tmpData.WPPOrderTableId
+                &&    workOrderDetailsView.WorkOrderOrderRecId == tmpData.WPPOrderRecId;
+
+        // populate rental order related fields
+        update_recordSet tmpData
+        setting CustName = dirPartyTable.Name,
+                CustAccount = custTable.AccountNum,
+                SalesTableRecId = salesTable.RecId,
+                SalesId = salesTable.SalesId
+            join Name from dirPartyTable
+                join AccountNum from custTable
+                where custTable.Party == dirPartyTable.RecId
+                    join SalesId, RecId from salesTable
+                    where salesTable.CustAccount == custTable.AccountNum
+                        exists join workOrderTable
+                        where workOrderTable.RecId == tmpData.WorkOrderTableRecId
+                        &&    workOrderTable.OrderTableId == tableNum(SalesTable)
+                        &&    workOrderTable.OrderRecId == salesTable.RecId;
+
+        update_recordSet tmpData
+        setting SalesId = workOrderDetailsView.SalesTableSalesId
+        where tmpData.WPPOrderTableId == tableNum(SalesTable)
+        &&    tmpData.WPPOrderRecId
+        &&   !tmpData.SalesId
+            join SalesTableSalesId from workOrderDetailsView
+            where workOrderDetailsView.WorkOrderOrderTableId == tmpData.WPPOrderTableId
+            &&    workOrderDetailsView.WorkOrderOrderRecId == tmpData.WPPOrderRecId;
+
+        // populate work order related fields
+        update_recordSet tmpData
+        setting CustName = dirPartyTable.Name,
+                CustAccount = custTable.AccountNum
+        where !tmpData.SalesLineRecId
+            join Name from dirPartyTable
+                join AccountNum from custTable
+                where custTable.Party == dirPartyTable.RecId
+                    exists join workOrderTable
+                    where workOrderTable.OrganizationParty == custTable.Party
+                    &&    workOrderTable.CustVendAccountType == CustVendACType::Cust
+                    &&    workOrderTable.RecId == tmpData.WorkOrderTableRecId
+                    &&   ((!workOrderTable.OrderTableId && !workOrderTable.OrderRecId) || workOrderTable.OrderTableId == tableNum(WHSShipmentTable));
+
+        // populate address on delivery/load tasks -- use work order address
+        update_recordSet tmpData
+        setting City = postalAddress.City,
+                ZipCode = postalAddress.ZipCode,
+                Street = postalAddress.Street,
+                StreetNumber = postalAddress.StreetNumber,
+                County = postalAddress.county,
+                State = postalAddress.state,
+                CountryRegionId = postalAddress.CountryRegionId
+        where tmpData.TaskType == WPPTaskType::Delivery || tmpData.TaskType == WPPTaskType::Load
+            join City, ZipCode, Street, StreetNumber, County, State, CountryRegionId from postalAddress
+                exists join workOrderTable
+                where workOrderTable.LogisticsLocationRecId == postalAddress.RecId
+                &&    workOrderTable.RecId == tmpData.WorkOrderTableRecId;
+
+        // populate address on internal load tasks with the object's current address
+        update_recordSet tmpData
+        setting City = postalAddress.City,
+                ZipCode = postalAddress.ZipCode,
+                Street = postalAddress.Street,
+                StreetNumber = postalAddress.StreetNumber,
+                County = postalAddress.county,
+                State = postalAddress.state,
+                CountryRegionId = postalAddress.CountryRegionId
+        where tmpData.TaskId == parameters.InternalLoadTaskId
+        ||    tmpData.TaskType == WPPTaskType::Load
+            join City, ZipCode, Street, StreetNumber, County, State, CountryRegionId from postalAddress
+                exists join objectView
+                where objectView.PostalAddressRecId == postalAddress.RecId
+                    join TableId from objectTable
+                    where objectTable.RecId == tmpData.ObjectTableRecId
+                    &&    objectTable.ObjectId == objectView.ObjectId;
+
+        // populate address on internal delivery tasks from return warehouse
+        update_recordSet tmpData
+        setting City = postalAddress.City,
+                ZipCode = postalAddress.ZipCode,
+                Street = postalAddress.Street,
+                StreetNumber = postalAddress.StreetNumber,
+                County = postalAddress.county,
+                State = postalAddress.state,
+                CountryRegionId = postalAddress.CountryRegionId
+        where tmpData.TaskId == parameters.InternalDeliveryTaskId
+            join City, ZipCode, Street, StreetNumber, County, State, CountryRegionId from postalAddress
+                exists join addressView
+                where addressView.PostalAddress == postalAddress.RecId
+                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                &&    addressView.IsPrimary
+                &&    addressView.ValidFrom <= currentDateTime // validTimeState is not allowed in an update_recordset
+                &&    addressView.ValidTo   >= currentDateTime // validTimeState is not allowed in an update_recordset
+                    join TableId from inventLocation
+                    where inventLocation.RecId == addressView.Entity
+                        join TableId from workOrderTable
+                        where workOrderTable.RecId == tmpData.WorkOrderTableRecId
+                        &&    workOrderTable.RORReturnInventLocationId == inventLocation.InventLocationId;
+
+        // populate note-related fields
+        update_recordset tmpData
+        setting HasLocationNote = (addNoteTableHeader.LocationNote != ''),
+                HasRouteNote = (addNoteTableHeader.RouteNote != ''),
+                HasObjectNote = (addNoteTableLine.ObjectNote != ''),
+                HasTerminationNote = (addNoteTableLine.TerminationNote != ''),
+                HasOrderNote = (addNoteTableHeader.OrderNote != ''),
+                HasInternalNote = (addNoteTableLine.InternalNote != '')
+        where tmpData.SalesLineRecId
+            outer join LocationNote, RouteNote, OrderNote from addNoteTableHeader
+            where addNoteTableHeader.RefTableId == tableNum(SalesTable)
+            &&    addNoteTableHeader.RefRecId == tmpData.SalesTableRecId
+            &&   (addNoteTableHeader.LocationNote || addNoteTableHeader.RouteNote || addNoteTableHeader.OrderNote)
+                outer join ObjectNote, TerminationNote, InternalNote from addNoteTableLine
+                where addNoteTableLine.RefTableId == tableNum(SalesLine)
+                &&    addNoteTableLine.RefRecId == tmpData.SalesLineRecId
+                &&   (addNoteTableLine.ObjectNote || addNoteTableLine.TerminationNote || addNoteTableLine.InternalNote);
+
+        update_recordSet tmpData
+        setting BOBFleetNumber = objectTable.FleetNumber,
+                InventSerialId = objectTable.InventSerialId,
+                ObjectTableRecId = objectTable.RecId,
+                IsKit = NoYes::Yes,
+                RentalTypeIdRequested = salesLineMC.BOBRentalTypeIdRequested,
+                RentalTypeIdAssigned = salesLineMC.BOBRentalTypeIdAssigned
+        where !tmpData.ObjectTableRecId
+        &&     tmpData.SalesLineRecId
+            join FleetNumber, InventSerialId, RecId from objectTable
+            where objectTable.InventSerialId
+                join TableId from inventDim
+                where inventDim.inventSerialId == objectTable.InventSerialId
+                    join BOBRentalTypeIdRequested, BOBRentalTypeIdAssigned from salesLineMC
+                    where salesLineMC.InventDimId == inventDim.inventDimId
+                        join TableId from salesLineKit
+                        where salesLineKit.RecId == salesLineMC.RORParentLineRecId
+                        &&    salesLineKit.RecId == tmpData.SalesLineRecId
+                            join TableId from inventTable
+                            where inventTable.ItemId == salesLineMC.ItemId
+                                join TableId from ecoResProduct
+                                where ecoResProduct.RecId == inventTable.Product
+                                    join rentalType
+                                    where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId
+                                    &&    rentalType.RORIsMainComponent;
+
+        // populate outbound instead of warehouse city; clear serialId
+        update_recordSet tmpData
+        setting InventSerialId = '',
+                ObjectId = ''
+        where tmpData.TaskType == WPPTaskType::Delivery
+            exists join workOrderTable
+            where workOrderTable.RecId == tmpData.WorkOrderTableRecId
+                join TableId from shipment
+                where shipment.TableId == workOrderTable.OrderTableId
+                &&    shipment.RecId   == workOrderTable.OrderRecId;
+
+        // set customer from return journal
+        this.populateReturnJournalData(tmpData);
+
+        if (this.getDisplayMode() == WPPPlanboardDisplayMode::Grid)
+        {
+            companyLanguageId = CompanyInfo::languageId();
+
+            //populate operator
+            update_recordSet tmpData
+            setting Operator = dirPartyTable.Name,
+                    OperatorContactPersonId = contactPerson.ContactPersonId
+                join Name from dirPartyTable
+                    join ContactPersonId from contactPerson
+                    where contactPerson.Party == dirPartyTable.RecId
+                        join TableId from salesTable
+                        where salesTable.RORContactPersonIdOperator == contactPerson.ContactPersonId
+                        &&    salesTable.RecId == tmpData.salesTableRecId;
+
+            // Populate contact person
+            update_recordSet tmpData
+            setting ContactPersonId = contactPerson.ContactPersonId,
+                    ContactPersonName = dirPartyTable.Name
+                join Name from dirPartyTable
+                    join ContactPersonId from contactPerson
+                    where contactPerson.Party == dirPartyTable.RecId
+                        join TableId from salesTable
+                        where salesTable.ContactPersonId == contactPerson.ContactPersonId
+                        &&    salesTable.RecId == tmpData.salesTableRecId;
+
+            // Populate the "from" address on delivery tasks from the current object's address
+            update_recordSet tmpData
+            setting WHSFromCity = postalAddress.City,
+                    WHSFromZipCode = postalAddress.ZipCode,
+                    WHSFromStreet = postalAddress.Street,
+                    WHSFromStreetNumber = postalAddress.StreetNumber,
+                    WHSFromCounty = postalAddress.County,
+                    WHSFromState = postalAddress.State,
+                    WHSFromCountryRegionId = postalAddress.CountryRegionId
+            where tmpData.TaskType == WPPTaskType::Delivery
+                join City, ZipCode, Street, StreetNumber, County, State, CountryRegionId from postalAddress
+                    exists join objectView
+                    where objectView.PostalAddressRecId == postalAddress.RecId
+                        join TableId from objectTable
+                        where objectTable.RecId == tmpData.ObjectTableRecId
+                        &&    objectTable.ObjectId == objectView.ObjectId;
+
+            // Populate the "from" address on internal delivery tasks from the delivery address on the work order
+            update_recordSet tmpData
+            setting WHSFromCity = postalAddress.City,
+                    WHSFromZipCode = postalAddress.ZipCode,
+                    WHSFromStreet = postalAddress.Street,
+                    WHSFromStreetNumber = postalAddress.StreetNumber,
+                    WHSFromCounty = postalAddress.County,
+                    WHSFromState = postalAddress.State,
+                    WHSFromCountryRegionId = postalAddress.CountryRegionId
+                where tmpData.TaskId == parameters.InternalDeliveryTaskId
+                join City, ZipCode, Street, StreetNumber, County, State, CountryRegionId from postalAddress
+                    exists join workOrderTable
+                    where workOrderTable.LogisticsLocationRecId == postalAddress.RecId
+                    &&    workOrderTable.RecId == tmpData.WorkOrderTableRecId;
+
+            // populate "to" address on load tasks from return warehouse
+            update_recordSet tmpData
+            setting WHSToCity = postalAddress.City,
+                    WHSToZipCode = postalAddress.ZipCode,
+                    WHSToStreet = postalAddress.Street,
+                    WHSToStreetNumber = postalAddress.StreetNumber,
+                    WHSToCounty = postalAddress.County,
+                    WHSToState = postalAddress.State,
+                    WHSToCountryRegionId = postalAddress.CountryRegionId
+            where tmpData.TaskType == WPPTaskType::Load
+                join City, ZipCode, Street, StreetNumber, County, State, CountryRegionId from postalAddress
+                    exists join addressView
+                    where addressView.PostalAddress == postalAddress.RecId
+                    &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                    &&    addressView.IsPrimary
+                    &&    addressView.ValidFrom <= currentDateTime // validTimeState is not allowed in an update_recordset
+                    &&    addressView.ValidTo   >= currentDateTime // validTimeState is not allowed in an update_recordset
+                        join TableId from inventLocation
+                        where inventLocation.RecId == addressView.Entity
+                            join TableId from workOrderTable
+                            where workOrderTable.RecId == tmpData.WorkOrderTableRecId
+                            &&    workOrderTable.RORReturnInventLocationId == inventLocation.InventLocationId;
+
+            // populate "to" address on load tasks with the Venue's primary address
+            update_recordSet tmpData
+            setting WHSToCity = postalAddress.City,
+                    WHSToZipCode = postalAddress.ZipCode,
+                    WHSToStreet = postalAddress.Street,
+                    WHSToStreetNumber = postalAddress.StreetNumber,
+                    WHSToCounty = postalAddress.County,
+                    WHSToState = postalAddress.State,
+                    WHSToCountryRegionId = postalAddress.CountryRegionId
+            where tmpData.TaskType == WPPTaskType::Load
+                join City, ZipCode, Street, StreetNumber, County, State, CountryRegionId from postalAddress
+                    exists join addressView
+                    where addressView.PostalAddress == postalAddress.RecId
+                    &&    addressView.EntityType == LogisticsLocationEntityType::Party
+                    &&    addressView.IsPrimary
+                    &&    addressView.ValidFrom <= currentDateTime // validTimeState is not allowed in an update_recordset
+                    &&    addressView.ValidTo   >= currentDateTime // validTimeState is not allowed in an update_recordset
+                        join TableId from vendTable
+                        where vendTable.Party == addressView.Entity
+                            join TableId from purchTable
+                            where purchTable.OrderAccount == vendTable.AccountNum
+                                join TableId from purchLine
+                                where purchLine.PurchId == purchTable.PurchId
+                                    join TableId from salesLine
+                                    where salesLine.InventRefId      == purchLine.PurchId
+                                    &&    salesLine.InventRefTransId == purchLine.InventTransId
+                                    &&    salesLine.RORTradeType     == RORTradeType::SubRental
+                                    &&    salesLine.InventRefType    == InventRefType::Purch
+                                    &&    salesLine.RecId            == tmpData.SalesLineRecId;
+
+            // populate "to" address on internal load tasks from the delivery address on the work order
+            update_recordSet tmpData
+            setting WHSToCity = postalAddress.City,
+                    WHSToZipCode = postalAddress.ZipCode,
+                    WHSToStreet = postalAddress.Street,
+                    WHSToStreetNumber = postalAddress.StreetNumber,
+                    WHSToCounty = postalAddress.County,
+                    WHSToState = postalAddress.State,
+                    WHSToCountryRegionId = postalAddress.CountryRegionId
+            where tmpData.TaskId == parameters.InternalLoadTaskId
+                join City, ZipCode, Street, StreetNumber, County, State, CountryRegionId from postalAddress
+                    exists join workOrderTable
+                    where workOrderTable.LogisticsLocationRecId == postalAddress.RecId
+                    &&    workOrderTable.RecId == tmpData.WorkOrderTableRecId;
+
+            // Populate work order information
+            update_recordSet tmpData
+            setting WorkOrderLineProjId = workOrderLine.ProjId,
+                    WorkOrderLineProjGroupId = workOrderTable.ProjGroupId,
+                    WorkOrderTableCompanyId = workOrderTable.CompanyId,
+                    WorkOrderTableInventLocationId = workOrderTable.InventLocationId,
+                    CustVendAccountType = workOrderTable.CustVendAccountType
+                join ProjId from workOrderLine
+                where workOrderLine.RecId == tmpData.WorkOrderLineRecId
+                    join ProjGroupId, CompanyId, InventLocationId, CustVendAccountType from workOrderTable
+                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId;
+
+            // Populate Project invoice information
+            update_recordSet tmpData
+            setting WorkOrderTableInvoiceStatus = projInvoiceTable.WPPInvoiceStatus
+                join TableId from workOrderTable
+                where workOrderTable.RecId == tmpData.WorkOrderTableRecId
+                &&    workOrderTable.ProjInvoiceProjId
+                    join WPPInvoiceStatus from projInvoiceTable
+                    where projInvoiceTable.ProjInvoiceProjId == workOrderTable.ProjInvoiceProjId;
+
+            // Populate work location information
+            update_recordSet tmpData
+            setting VenueName = venueTable.Name,
+                    VenueGroupId = venueTable.VenueGroupId
+                join Name, VenueGroupId from venueTable
+                where venueTable.VenueCode == tmpData.VenueCode;
+
+            // Populate inventory dimension and sales lines information
+            update_recordSet tmpData
+            setting InventSiteId = inventDim.InventSiteId,
+                    SalesUnit = salesLine.SalesUnit,
+                    SalesQty = salesLine.SalesQty
+                join SalesUnit, SalesQty from salesLine
+                where salesLine.RecId == tmpData.SalesLineRecId
+                    join InventSiteId from inventDim
+                    where inventDim.inventDimId == salesLine.InventDimId;
+
+            // Populate object information
+            update_recordSet tmpData
+            setting ObjectOrganizationParty = objectTable.OrganizationParty,
+                    ObjectIdExternal = objectTable.ExternalObjectId,
+                    ObjectWarrantyToDate = objectTable.WarrantyToDate
+                join OrganizationParty, ExternalObjectId, WarrantyToDate from objectTable
+                where objectTable.ObjectId == tmpData.ObjectId;
+
+            // Populate the name of the Organization set on the object
+            update_recordSet tmpData
+            setting  ObjectOrganizationName = dirPartyTable.Name
+                join Name from dirPartyTable
+                where dirPartyTable.RecId == tmpData.ObjectOrganizationParty;
+
+            // Populate item name
+            update_recordSet tmpData
+            setting ItemName = productTranslation.Name
+                join TableId from inventTable
+                where inventTable.ItemId == tmpData.ItemId
+                    join Name from productTranslation
+                    where productTranslation.Product == inventTable.Product
+                    &&    productTranslation.LanguageId == companyLanguageId;
+
+            // Populate note related fields
+            update_recordset tmpData
+            setting HasOrderNote = (addNoteTableHeader.OrderNote != '' || addNoteTableLine.OrderNote != '')
+            where !tmpData.HasOrderNote
+                outer join OrderNote from addNoteTableHeader
+                where addNoteTableHeader.RefTableId == tableNum(WPPWorkOrderTable)
+                &&    addNoteTableHeader.RefRecId == tmpData.WorkOrderTableRecId
+                &&    addNoteTableHeader.OrderNote
+                    outer join OrderNote from addNoteTableLine
+                    where addNoteTableLine.RefTableId == tableNum(WPPWorkOrderLine)
+                    &&    addNoteTableLine.RefRecId == tmpData.WorkOrderLineRecId
+                    &&    addNoteTableLine.OrderNote;
+
+            update_recordset tmpData
+            setting HasInternalNote = (addNoteTableHeader.InternalNote != '' || addNoteTableLine.InternalNote != '')
+            where !tmpData.HasInternalNote
+                outer join InternalNote from addNoteTableHeader
+                where addNoteTableHeader.RefTableId == tableNum(WPPWorkOrderTable)
+                &&    addNoteTableHeader.RefRecId == tmpData.WorkOrderTableRecId
+                &&    addNoteTableHeader.InternalNote
+                    outer join InternalNote from addNoteTableLine
+                    where addNoteTableLine.RefTableId == tableNum(WPPWorkOrderLine)
+                    &&    addNoteTableLine.RefRecId == tmpData.WorkOrderLineRecId
+                    &&    addNoteTableLine.InternalNote;
+
+            update_recordset tmpData
+            setting SalesOrderLocationNote        = addNoteTableHeader.LocationNote,
+                    SalesOrderOrderNote           = addNoteTableHeader.OrderNote,
+                    SalesOrderRouteNote           = addNoteTableHeader.RouteNote,
+                    SalesOrderLineTerminationNote = addNoteTableLine.TerminationNote,
+                    SalesOrderLineObjectNote      = addNoteTableLine.ObjectNote,
+                    SalesOrderLineInternalNote    = addNoteTableLine.InternalNote
+                outer join LocationNote, OrderNote, RouteNote from addNoteTableHeader
+                where addNoteTableHeader.RefTableId == tableNum(SalesTable)
+                &&    addNoteTableHeader.RefRecId == tmpData.SalesTableRecId
+                &&   (addNoteTableHeader.LocationNote || addNoteTableHeader.OrderNote || addNoteTableHeader.RouteNote)
+                    outer join TerminationNote, ObjectNote, InternalNote  from addNoteTableLine
+                    where addNoteTableLine.RefTableId == tableNum(SalesLine)
+                    &&    addNoteTableLine.RefRecId == tmpData.SalesLineRecId
+                    &&   (addNoteTableLine.TerminationNote || addNoteTableLine.ObjectNote || addNoteTableLine.InternalNote);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>taskType</Name>
+				<Source><![CDATA[
+    protected abstract WPPTaskType taskType()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateReturnJournalData</Name>
+				<Source><![CDATA[
+    protected void populateReturnJournalData(WPPTmpTransportPlanboardData _tmpData)
+    {
+        // Implemented in other model if needed;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

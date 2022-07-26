@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINRentalOrderTimezoneCheck</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINRentalOrderTimezoneCheck
+{
+    Common                  buffer;
+    RORParameters           parameters;
+    boolean                 runSilent;
+    Hours                   hoursDifference;
+    Timezone                bufferTimezone;
+    Timezone                userTimezone;
+    Num                     orderId;
+    FINTimezoneCheckProcess checkProcess;
+    int                     infologLine;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static FINRentalOrderTimezoneCheck construct(Common _buffer, FINTimezoneCheckProcess _checkProcess, boolean _runSilent)
+    {
+        return new FINRentalOrderTimezoneCheck(_buffer, _checkProcess, _runSilent);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new(Common _buffer, FINTimezoneCheckProcess _checkProcess, boolean _runSilent)
+    {
+        buffer = _buffer;
+        parameters = RORParameters::find();
+        runSilent = _runSilent;
+        checkProcess = _checkProcess;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>check</Name>
+				<Source><![CDATA[
+    public static boolean check(Common _buffer, FINTimezoneCheckProcess _checkProcess, boolean _runSilent = false)
+    {
+        return FINRentalOrderTimezoneCheck::construct(_buffer, _checkProcess, _runSilent).checkTimezone() == 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkTimezone</Name>
+				<Source><![CDATA[
+    public Hours checkTimezone()
+    {
+        if (!this.checkProcess())
+        {
+            return 0;
+        }
+
+        this.init();
+
+        hoursDifference = this.calculateHourDifference();
+
+        if (!runSilent && hoursDifference != 0)
+        {
+            this.notifyUser();
+        }
+
+        return hoursDifference;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkProcess</Name>
+				<Source><![CDATA[
+    protected boolean checkProcess()
+    {
+        return !runSilent 
+            && checkProcess != FINTimezoneCheckProcess::Unknown 
+            && FINTimezoneCheckProcessEnablement::findOrCreate(checkProcess).IsEnabled;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateHourDifference</Name>
+				<Source><![CDATA[
+    protected Hours calculateHourDifference()
+    {
+        #TimeConstants
+
+        userTimezone = DateTimeUtil::getUserPreferredTimeZone();
+
+        if (userTimezone == bufferTimezone)
+        {
+            return 0;
+        }
+
+        utcdatetime dateTimeNow = DateTimeUtil::getSystemDateTime();
+
+        Seconds differenceInSeconds = DateTimeUtil::getDifference(DateTimeUtil::applyTimeZoneOffset(dateTimeNow, userTimezone), DateTimeUtil::applyTimeZoneOffset(dateTimeNow, bufferTimezone));
+
+        return  differenceInSeconds / #secondsPerHour;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>notifyUser</Name>
+				<Source><![CDATA[
+    protected void notifyUser()
+    {
+        switch (parameters.FINTimezoneMismatchCheckLevel)
+        {
+            case FINTimezoneMismatchCheckLevel::None:
+                return;
+
+            case FINTimezoneMismatchCheckLevel::Warning:
+                warning(this.getMessage());
+                infologLine = infologLine();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getMessage</Name>
+				<Source><![CDATA[
+    protected str getMessage()
+    {
+        str warningMessage = hoursDifference < 0 ? "@DNR:TimeZoneMismatchBehind" : "@DNR:TimeZoneMismatchAhead";
+
+        if (orderId)
+        {
+            warningMessage += strFmt(buffer.TableId == tableNum(SalesQuotationTable) ? "@DNR:OfQuotationX" : "@DNR:OfOrderX", orderId);
+        }
+
+        return strFmt(warningMessage, userTimezone, abs(hoursDifference), bufferTimezone);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    protected void init()
+    {
+        switch (buffer.TableId)
+        {
+            case tableNum(SalesTable):
+                SalesTable salesTable = buffer;
+                bufferTimezone = salesTable.FINTimeZoneOrder ? salesTable.FINTimeZoneOrder : DateTimeUtil::getCompanyTimeZone();
+                orderId = salesTable.SalesId;
+                break;
+
+            case tableNum(PurchTable):
+                PurchTable purchTable = buffer;
+                bufferTimezone = purchTable.FINTimeZoneOrder ? purchTable.FINTimeZoneOrder : DateTimeUtil::getCompanyTimeZone();
+                orderId = purchTable.PurchId;
+                break;
+
+            case tableNum(SalesQuotationTable):
+                SalesQuotationTable salesQuotationTable = buffer;
+                bufferTimezone = salesQuotationTable.FINTimeZoneOrder ? salesQuotationTable.FINTimeZoneOrder : DateTimeUtil::getCompanyTimeZone();
+                orderId = salesQuotationTable.QuotationId;
+                break;
+            
+            default:
+                bufferTimezone = DateTimeUtil::getCompanyTimeZone();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getProcessFromMenuItem</Name>
+				<Source><![CDATA[
+    public static FINTimezoneCheckProcess getProcessFromMenuItem(menuItemNameAction _callerMenuItem)
+    {
+        switch (_callerMenuItem)
+        {
+            case menuitemactionstr(SalesFormLetter_PackingSlip):
+            case menuitemactionstr(PurchFormLetter_PackingSlip):
+            case menuitemactionstr(SalesFormLetter_RORDocumentStatusRN):
+            case menuitemactionstr(PurchFormLetter_RORReturnNoteDocumentStatus):
+                return FINTimezoneCheckProcess::DeliveryReturn;
+            case menuitemactionstr(RORSalesFormLetter_InvoiceProj_Action):
+            case menuItemActionStr(SalesFormLetter_Invoice):
+            case menuItemActionStr(SalesFormLetter_Proforma_Invoice):
+                return FINTimezoneCheckProcess::Invoice;
+            default:
+                return FINTimezoneCheckProcess::Unknown;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInfologLine</Name>
+				<Source><![CDATA[
+    public int getInfologLine()
+    {
+        return infologLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>formTaskEventHandler</Name>
+				<Source><![CDATA[
+    public static void formTaskEventHandler(FormRun _hostForm, int _taskId)
+    {
+        #Task
+        
+        if ((_taskId == #taskSwitchToDetailsView || _taskId == #taskSwitchToHeaderDetailsView || _taskId == #taskSwitchToLineDetailsView)
+            && formHasMethod(_hostForm, identifierStr(FINisCreateNewRecord)) && !_hostForm.FINisCreateNewRecord()
+            && RORParameters::find().FINTimezoneMismatchCheckLevel != FINTimezoneMismatchCheckLevel::None)
+        {
+            FINRentalOrderTimezoneCheck::check(_hostForm.dataSource().cursor(), FINTimezoneCheckProcess::Open);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINEvent_HostFormDS_OnInitValue</Name>
+				<Source><![CDATA[
+    [FormDataSourceEventHandler(formDataSourceStr(RORPurchCreateOrder, PurchTable), FormDataSourceEventType::InitValue),
+     FormDataSourceEventHandler(formDataSourceStr(RORSalesCreateQuotation, SalesQuotationTable), FormDataSourceEventType::InitValue),
+     FormDataSourceEventHandler(formDataSourceStr(RORSalesCreateOrder, SalesTable), FormDataSourceEventType::InitValue)]
+    public static void FINEvent_HostFormDS_OnInitValue(FormDataSource _sender, FormDataSourceEventArgs _args)
+    {
+        FINRentalOrderTimezoneCheck::check(_sender.cursor(), FINTimezoneCheckProcess::Create);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINEvent_HostForm_OnInitialized</Name>
+				<Source><![CDATA[
+    [FormEventHandler(formStr(RORSalesQuotationProjTable), FormEventType::Initialized),
+     FormEventHandler(formStr(RORSalesTable), FormEventType::Initialized),
+     FormEventHandler(formStr(RORPurchTable), FormEventType::Initialized),
+     FormEventHandler(formStr(DNRRORPurchTable), FormEventType::Initialized),
+     FormEventHandler(formStr(DNRRORSalesTable), FormEventType::Initialized),
+     FormEventHandler(formStr(RORSalesQuotationTable), FormEventType::Initialized)]
+    public static void FINEvent_HostForm_OnInitialized(xFormRun _sender, FormEventArgs _args)
+    {
+        FormRun hostForm = _sender as FormRun;
+        hostForm.onTask += eventhandler(FINRentalOrderTimezoneCheck::formTaskEventHandler);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

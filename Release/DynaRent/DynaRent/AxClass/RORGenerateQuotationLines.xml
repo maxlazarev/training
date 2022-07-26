@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORGenerateQuotationLines</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class RORGenerateQuotationLines
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkCreateQuotationLines</Name>
+				<Source><![CDATA[
+    public void checkCreateQuotationLines(SalesQuotationTable _salesQuotationTable)
+    {
+        SalesQuotationLine          existingQuotationLine, newQuotationLine;
+        WPPWorkOrderTemplateTable   templateTable;
+        WPPWorkOrderTemplateLine    templateLine;
+        ProjGroup                   projGroup;
+        ;
+    
+        while select existingQuotationLine
+        order by ProjTransType asc // check 'hour' lines first
+        where existingQuotationLine.QuotationId == _salesQuotationTable.QuotationId
+        &&   (existingQuotationLine.ProjTransType == QuotationProjTransType::Hour ||
+             (existingQuotationLine.ProjTransType == QuotationProjTransType::Item && existingQuotationLine.WPPWorkOrderTemplateId))
+            outer join ResourceQty, ProjCategoryIdDefault, TaskId from templateLine
+            where templateLine.TemplateId == existingQuotationLine.WPPWorkOrderTemplateId
+                outer join TableId from templateTable
+                where templateTable.TemplateId == templateLine.TemplateId
+                    outer join projGroup
+                    where projGroup.ProjGroupId == templateTable.ProjGroupId
+        {
+            if(existingQuotationLine.ProjTransType == QuotationProjTransType::Hour)
+            {
+                info(strFmt("@DNR8668", _salesQuotationTable.QuotationId));
+                return;
+            }
+    
+            newQuotationLine.clear();
+            newQuotationLine.QuotationType  = QuotationType::Project;
+            newQuotationLine.initValue();
+            newQuotationLine.initFromSalesQuotationTable(_salesQuotationTable);
+            newQuotationLine.LineNum        = SalesQuotationLine::lastLineNum(_salesQuotationTable.QuotationId) + 1;
+            newQuotationLine.ProjTransType  = QuotationProjTransType::Hour;
+    
+            newQuotationLine.SalesQty       = templateLine.ResourceQty;
+            newQuotationLine.ProjCategoryId = templateLine.ProjCategoryIdDefault;
+            newQuotationLine.modifiedField(fieldNum(SalesQuotationLine, ProjCategoryId));
+    
+            newQuotationLine.LinePropertyId = projGroup.projLinePropertyId(false, projGroup, '');
+            newQuotationLine.RORParentLineRecId = existingQuotationLine.RecId;
+    
+            if(newQuotationLine.validateWrite())
+            {
+                if (templateLine.TaskId)
+                {
+                    newQuotationLine.ProjActivity = this.createSubActivity(existingQuotationLine, newQuotationLine, templateLine.TaskId, _salesQuotationTable);
+                }
+    
+                // there's no point in using a RecordInsertList because SalesQuotationLine.insert()
+                // is overwritten, so we're stuck with record-by-record inserts either way
+                newQuotationLine.insert();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSubActivity</Name>
+				<Source><![CDATA[
+    private ProjActivityNumber createSubActivity(SalesQuotationLine _parentQuotationLine, SalesQuotationLine _childQuotationLine, Name _name, SalesQuotationTable _salesQuotationTable = null)
+    {
+        SalesQuotationTable         salesQuotationTable = _salesQuotationTable;
+        HierarchyLinkTable          hierarchyLinkTable;
+        HierarchyTreeTable          hierarchyTreeTable;
+        HierarchyTreeTable          hierarchyTreeTableChild;
+        smmActivities               smmActivities;
+        smmActivities               smmActivitiesChild;
+        PSAActivitySetup            activitySetupChild;
+        ProjActivity                projActivity;
+        ProjActivity                projActivityChild;
+        ProjActivityNumber          activityNumber;
+        Set                         updatedRecords = new Set(Types::Int64);
+        RORRentalDateTimes          rentalDateTimes;
+        ;
+    
+        if (!_parentQuotationLine.ProjActivity)
+        {
+            return '';
+        }
+    
+        rentalDateTimes = _parentQuotationLine.RORRentalDateTimesHost::rentalDateTimes();
+    
+        smmActivities = smmActivities::find(_parentQuotationLine.ProjActivity);
+        projActivity = ProjActivity::find(smmActivities.ActivityNumber);
+    
+        if (!salesQuotationTable)
+        {
+            salesQuotationTable = _parentQuotationLine.salesQuotationTable();
+        }
+    
+        ttsBegin;
+    
+        select hierarchyTreeTable
+        where hierarchyTreeTable.RefRecId == smmActivities.RecId
+            exists join hierarchyLinkTable
+            where hierarchyLinkTable.RefTableId  == tableNum(SalesQuotationTable)
+            &&    hierarchyLinkTable.RefRecId    == salesQuotationTable.RecId
+            &&    hierarchyLinkTable.HierarchyId == hierarchyTreeTable.HierarchyId;
+    
+        HierarchyTreeTable::insertNode(hierarchyTreeTable.HierarchyId, hierarchyTreeTable.ElementNumber, _name);
+    
+        while select RecId from hierarchyTreeTableChild
+        order HierarchyId, ParentElementNumber, SiblingNumber
+        where hierarchyTreeTableChild.HierarchyId           == hierarchyTreeTable.HierarchyId
+        &&    hierarchyTreeTableChild.ParentElementNumber   == hierarchyTreeTable.ElementNumber
+            join ActivityNumber from smmActivitiesChild
+            where smmActivitiesChild.RecId == hierarchyTreeTableChild.RefRecId
+                outer join forUpdate activitySetupChild
+                where activitySetupChild.ActivityNumber == smmActivitiesChild.ActivityNumber
+        {
+            if (!updatedRecords.in(activitySetupChild.RecId) && !activitySetupChild.ActivityNumber)
+            {
+                activitySetupChild.initValue();
+                activitySetupChild.initDate(hierarchyTreeTable, salesQuotationTable);
+    
+                if (rentalDateTimes
+                && DateTimeUtil::date(rentalDateTimes.OffRentDateTime) <= dateNull())
+                {
+                    activitySetupChild.PSASchedEnd = DateTimeUtil::date(rentalDateTimes.ExpectedOffRentDateTime);
+                }
+    
+                activitySetupChild.ActivityNumber    = smmActivitiesChild.ActivityNumber;
+                activitySetupChild.Effort            = 0;
+                activitySetupChild.EffortAtComplete  = 0;
+                activitySetupChild.CategoryDefault   = projActivity.CategoryDefault;
+                if (activitySetupChild)
+                {
+                    activitySetupChild.update();
+                }
+                else
+                {
+                    activitySetupChild.insert();
+                }
+    
+                activityNumber = activitySetupChild.ActivityNumber;
+    
+                if (projActivity && !projActivityChild)
+                {
+                    projActivityChild.initValue();
+                    projActivityChild.initFromProjActivities(projActivity);
+                    projActivityChild.initFromSmmActivities(smmActivitiesChild);
+                    projActivityChild.PSARefRecId    = activitySetupChild.RecId;
+                    projActivityChild.insert();
+                }
+    
+                updatedRecords.add(activitySetupChild.RecId);
+            }
+        }
+    
+        ttsCommit;
+    
+        return activityNumber;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        SalesQuotationTable         salesQuotationTable;
+        FormDataSource              dataSource;
+        RORGenerateQuotationLines   generateLines;
+        ;
+    
+        if(_args.dataset() == tableNum(SalesQuotationTable))
+        {
+            salesQuotationTable = _args.record();
+            dataSource          = FormDataUtil::getFormDataSource(salesQuotationTable);
+            generateLines       = new RORGenerateQuotationLines();
+    
+            ttsBegin;
+    
+            generateLines.checkCreateQuotationLines(salesQuotationTable);
+    
+            ttsCommit;
+    
+            dataSource.research(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,1961 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINRentalInvoiceDetailHelper</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINRentalInvoiceDetailHelper
+{
+    Common callerBuffer;
+    boolean includePreviousInvoice;
+    FINInvoiceCalculatorParm invoiceCalculatorParm;
+    public RORRentalLine rentalLine;
+    // Used only because of fields in Dynarent model that cannot be accessed via RORRentalLine map.
+    SalesLine salesLine;
+    SalesQuotationLine salesQuotationLine;
+    PurchLine purchLine;
+    PurchLineHistory purchLineHistory;
+    RORRentalDateTimes rentalDateTimesFromLine;
+    boolean isHourProjectInvoicing;
+    boolean keepPreCalculatedPeriodData;
+    Timezone timezone;
+
+    RAGTmpContractLine tmpContractLine;
+
+    //Header info
+    public RORHeaderId orderId;
+    public InvoiceId invoiceId;
+    public AmountCur totalChargedAmount;
+    public AmountCur totalInternalPostings;
+    private boolean isInvoiceProposalPosting;
+
+    // Rental engine
+    public RefTableId gridRefTableId;
+    public RefRecId gridRefRecId;
+    public Price grossPrice;
+    [SysObsolete('DNRDeletedObjects07_2020. Price unit functionality has been moved to period specific level.')]
+    public RAGTimeUnit grosPriceUnit;
+    public DiscPct discPct;
+    public DiscPct insurancePct;
+    public RORShouldInsureRentalStops insureHireStop;
+    public RORInsuranceCalcBasis insuranceCalcBasis;
+    public Qty invoicedQty;
+    public LineAmount rentalGrossAmount;
+    public LineAmount rentalNetAmount;
+    public AmountCur discountAmount;
+    public AmountCur insuranceAmount;
+    public INVChargedPeriods chargedPeriods;
+    public FINInvoicePeriodAmendment invoicePeriodAmendmentJournalized;
+
+    // Transport engine
+    public AmountCur deliveryBaseAmount;
+    public AmountCur deliveryAmount;
+    public AmountCur deliveryDiscount;
+    public RAGTierMultiplier deliveryTierMultiplier;
+    public AmountCur returnBaseAmount;
+    public AmountCur returnAmount;
+    public AmountCur returnDiscount;
+    public RAGTierMultiplier returnTierMultiplier;
+
+    // Cost engine
+    public RORPriceTimeUnit costPriceTimeUnit;
+    public CostPrice costPrice;
+    public INVChargedPeriods numOfChargeablePeriodsForCost;
+    public CostAmount costAmount;
+
+    // Proj engine
+    public AmountCur projTotalSalesAmountCur;
+    public Qty projHourQty;
+
+    // Manual component engine
+    public AmountCur manualComponentsValue;
+
+    // Credit engine
+    public AmountCur creditCharged;
+    public AmountCur creditDeliveryTransport;
+    public AmountCur creditReturnTransport;
+    public AmountCur creditInsurance;
+    public AmountCur creditManualComponents;
+    public boolean calculateAllCreditAmount = true;
+           
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getRentalInvoiceDetails</Name>
+				<Source><![CDATA[
+    public static FINRentalInvoiceDetailHelper getRentalInvoiceDetails(Common _callerBuffer, boolean _includePreviousInvoice = false)
+    {
+        FINRentalInvoiceDetailHelper helper = new FINRentalInvoiceDetailHelper();
+        helper.initParameters(_callerBuffer, _includePreviousInvoice);
+        helper.calculate();
+
+        return helper;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRentalInvoiceDetailsForProforma</Name>
+				<Source><![CDATA[
+    public static FINRentalInvoiceDetailHelper getRentalInvoiceDetailsForProforma(InvoiceId _invoiceId, Common _callerBuffer, boolean _includePreviousInvoice = false)
+    {
+        FINRentalInvoiceDetailHelper helper = new FINRentalInvoiceDetailHelper();
+        helper.initParameters(_callerBuffer, _includePreviousInvoice);
+        helper.setProformaInvoiceId(_invoiceId);
+        helper.calculate();
+
+        return helper;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setProformaInvoiceId</Name>
+				<Source><![CDATA[
+    public void setProformaInvoiceId(InvoiceId _invoiceId)
+    {
+        invoiceId = _invoiceId;
+        isInvoiceProposalPosting = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTimezone</Name>
+				<Source><![CDATA[
+    public Timezone parmTimezone(Timezone _timezone = timezone)
+    {
+        timezone = _timezone;
+        return timezone;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initParameters</Name>
+				<Source><![CDATA[
+    public void initParameters(Common _callerBuffer, boolean _includePreviousInvoice = false)
+    {
+        includePreviousInvoice  = _includePreviousInvoice;
+        callerBuffer            = _callerBuffer;
+        gridRefTableId          = callerBuffer.TableId;
+        gridRefRecId            = callerBuffer.RecId;
+
+        FINRentalInvoiceDetailPeriod rentalInvoiceDetailPeriod;
+        
+        select firstonly RecId from rentalInvoiceDetailPeriod
+        where rentalInvoiceDetailPeriod.RefTableId == gridRefTableId
+        &&    rentalInvoiceDetailPeriod.RefRecId == gridRefRecId;
+        
+        // Later this is marked false for non-journalized tables where period information might change
+        keepPreCalculatedPeriodData = rentalInvoiceDetailPeriod.RecId;
+
+        switch (callerBuffer.TableId)
+        {
+            case tableNum(SalesLine) :
+                rentalLine = callerBuffer;
+                salesLine = callerBuffer;
+                orderId = salesLine.SalesId;
+                rentalDateTimesFromLine = salesLine.RORRentalDateTimes();
+                keepPreCalculatedPeriodData = false;
+                break;
+
+            case tableNum(SalesParmLine) :
+                SalesParmLine salesParmLine = callerBuffer;
+                rentalLine = salesParmLine.salesLine();
+                salesLine = rentalLine;
+                orderId = salesLine.SalesId;
+                rentalDateTimesFromLine = salesLine.RORRentalDateTimes();
+                keepPreCalculatedPeriodData = false;
+                break;
+
+            case tableNum(CustInvoiceTrans) :
+                CustInvoiceTrans custInvoiceTrans = callerBuffer;
+                rentalLine = custInvoiceTrans.salesLine();
+                salesLine = rentalLine;
+                orderId = salesLine.SalesId;
+                rentalDateTimesFromLine = salesLine.RORRentalDateTimes();
+                break;
+
+            case tableNum(CustQuotationConfirmTrans) :
+                CustQuotationConfirmTrans custQuotationConfirmTrans = callerBuffer;
+                rentalLine = SalesQuotationLine::findInventTransId(custQuotationConfirmTrans.InventTransId);
+                salesQuotationLine = rentalLine;
+                orderId = salesQuotationLine.QuotationId;
+                rentalDateTimesFromLine = salesQuotationLine.RORRentalDateTimes();
+                break;
+
+            case tableNum(CustQuotationTrans) :
+                CustQuotationTrans custQuotationTrans = callerBuffer;
+                rentalLine = SalesQuotationLine::findInventTransId(custQuotationTrans.InventTransId);
+                salesQuotationLine = rentalLine;
+                orderId = salesQuotationLine.QuotationId;
+                rentalDateTimesFromLine = salesQuotationLine.RORRentalDateTimes();
+                break;
+
+            case tableNum(CustConfirmTrans) :
+                CustConfirmTrans custConfirmTrans = callerBuffer;
+                rentalLine = SalesLine::findInventTransId(custConfirmTrans.InventTransId);
+                salesLine = rentalLine;
+                orderId = salesLine.SalesId;
+                rentalDateTimesFromLine = salesLine.RORRentalDateTimes();
+                break;
+
+            case tableNum(FINCustInvoiceTransProforma) :
+                FINCustInvoiceTransProforma custInvoiceTransProforma = callerBuffer;
+                rentalLine = custInvoiceTransProforma.salesLine();
+                salesLine = rentalLine;
+                orderId = salesLine.SalesId;
+                rentalDateTimesFromLine = salesLine.RORRentalDateTimes();
+                keepPreCalculatedPeriodData = false;
+                break;
+
+            case tableNum(SalesQuotationParmLine) :
+                SalesQuotationParmLine salesQuotationParmLine = callerBuffer;
+                rentalLine = salesQuotationParmLine.salesQuotationLine();
+                salesQuotationLine = rentalLine;
+                orderId = salesQuotationLine.QuotationId;
+                rentalDateTimesFromLine = salesQuotationLine.RORRentalDateTimes();
+                keepPreCalculatedPeriodData = false;
+                break;
+
+            case tableNum(ProjProposalItem) :
+                ProjProposalItem projProposalItem = callerBuffer;
+                rentalLine = projProposalItem.salesLine();
+                salesLine = rentalLine;
+                orderId = salesLine.SalesId;
+                rentalDateTimesFromLine = salesLine.RORRentalDateTimes();
+                ProjEmplTrans projEmplTrans;
+
+                select firstonly RecId from projEmplTrans
+                where projEmplTrans.INVRefTableId == salesLine.TableId
+                &&    projEmplTrans.INVRefRecId == salesLine.RecId
+                &&    !projEmplTrans.WPPInvoiceId;
+
+                if (projEmplTrans.RecId)
+                {
+                    isHourProjectInvoicing = true;
+                }
+                keepPreCalculatedPeriodData = false;
+                break;
+
+            case tableNum(psaTmpProjProposalTrans) :
+                psaTmpProjProposalTrans psaTmpProjProposalTrans = callerBuffer;
+                if (psaTmpProjProposalTrans.RefTableId == tableNum(SalesLine))
+                {
+                    salesLine = SalesLine::findRecId(psaTmpProjProposalTrans.RefRecId);
+                    orderId = salesLine.SalesId;
+                    rentalLine = salesLine;
+                    rentalDateTimesFromLine = salesLine.RORRentalDateTimes();
+                }
+                keepPreCalculatedPeriodData = false;
+                break;
+
+            case tableNum(ProjJournalTrans):
+                ProjJournalTrans projJournalTrans = callerBuffer;
+                if (projJournalTrans.INVRefTableId == tableNum(SalesLine))
+                {
+                    salesLine = SalesLine::findRecId(projJournalTrans.INVRefRecId);
+                    orderId = salesLine.SalesId;
+                    rentalLine = salesLine;
+                    rentalDateTimesFromLine = salesLine.RORRentalDateTimes();
+                }
+                break;
+
+            case tableNum(VendInvoiceInfoLine) :
+                VendInvoiceInfoLine vendInvoiceInfoLine = callerBuffer;
+                rentalLine = vendInvoiceInfoLine.purchLine();
+                purchLine = rentalLine;
+                orderId = purchLine.PurchId;
+                rentalDateTimesFromLine = purchLine.RORRentalDateTimes();
+                break;
+
+            case tableNum(PurchLine) :
+                rentalLine = callerBuffer;
+                purchLine = callerBuffer;
+                orderId = purchLine.PurchId;
+                rentalDateTimesFromLine = purchLine.RORRentalDateTimes();
+                keepPreCalculatedPeriodData = false;
+                break;
+
+            case tableNum(VendInvoiceTrans) :
+                VendInvoiceTrans vendInvoiceTrans = callerBuffer;
+                rentalLine = vendInvoiceTrans.purchLine();
+                purchLine = rentalLine;
+                orderId = purchLine.PurchId;
+                rentalDateTimesFromLine = purchLine.RORRentalDateTimes();
+                break;
+
+            case tableNum(PurchLineAllVersions):
+                PurchLineAllVersions purchLineAllVersions = callerBuffer;
+                purchLine = PurchLine::findInventTransId(purchLineAllVersions.InventTransId);
+                orderId = purchLine.PurchId;
+                rentalLine = purchLine;
+                rentalDateTimesFromLine = purchLine.RORRentalDateTimes();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculate</Name>
+				<Source><![CDATA[
+    public void calculate()
+    {
+        CustInvoiceTrans                custInvoiceTrans;
+        FINCustInvoiceTrans             finCustInvoiceTrans;
+        SalesLine                       salesLineLocal;
+        VendInvoiceTrans                vendInvoiceTrans;
+        FINVendInvoiceTrans             finVendInvoiceTrans;
+        PurchLine                       purchLineLocal;
+        FINInvoicePeriodQtyFinancial    periodQtyFinancial;
+        FINInvoicePeriodQtyPhysical     periodQtyPhysical;
+        InventTransId                   inventTransId;
+        
+        // Before executing new calculation delete any orphaned periods that could exists for the non journalized callerBuffer and userId
+        this.deleteCalculatedPeriods();        
+
+        switch (callerBuffer.TableId)
+        {
+            case tableNum(SalesParmLine),
+                 tableNum(SalesLine) :
+                SalesParmLine   salesParmLine = callerBuffer as SalesParmLine;
+                SalesLine       salesLineCaller = callerBuffer as SalesLine;
+
+                if (salesParmLine)
+                {
+                    invoiceCalculatorParm = FINInvoiceCalculatorParm::find(salesParmLine.ParmId, salesParmLine.TableId, salesParmLine.RecId);
+                    inventTransId = salesParmLine.InventTransId;
+                }
+                else if (salesLineCaller)
+                {
+                    inventTransId = salesLineCaller.InventTransId;
+                }
+               
+                // calculate first previously invoiced
+                if (includePreviousInvoice && inventTransId)
+                {
+                    while select finCustInvoiceTrans
+                        exists join custInvoiceTrans
+                        where custInvoiceTrans.RecId == finCustInvoiceTrans.CustInvoiceTransRecId
+                        &&    custInvoiceTrans.InventTransId == inventTransId
+                            join TableId from salesLineLocal
+                            where salesLineLocal.InventTransId == custInvoiceTrans.InventTransId
+                                join TableId from periodQtyPhysical
+                                where periodQtyPhysical.RefTableId == salesLineLocal.TableId
+                                &&    periodQtyPhysical.RefRecId == salesLineLocal.RecId
+                                    join TableId from periodQtyFinancial
+                                    where periodQtyFinancial.InvPeriodQtyPhysicalRecId == periodQtyPhysical.RecId
+                                    &&    periodQtyFinancial.InvoiceId == custInvoiceTrans.InvoiceId
+                    {
+                        this.parmTimezone(finCustInvoiceTrans.Timezone);
+                        this.calculateFromCustInvoiceTrans(finCustInvoiceTrans);
+                    }
+                }
+                break;
+
+            case tableNum(CustInvoiceTrans) :
+                select firstonly finCustInvoiceTrans
+                where finCustInvoiceTrans.CustInvoiceTransRecId == callerBuffer.RecId
+                    exists join custInvoiceTrans
+                    where custInvoiceTrans.RecId == finCustInvoiceTrans.CustInvoiceTransRecId
+                        join TableId from salesLineLocal
+                        where salesLineLocal.InventTransId == custInvoiceTrans.InventTransId
+                            join TableId from periodQtyPhysical
+                            where periodQtyPhysical.RefTableId == salesLineLocal.TableId
+                            &&    periodQtyPhysical.RefRecId == salesLineLocal.RecId
+                                join TableId from periodQtyFinancial
+                                where periodQtyFinancial.InvPeriodQtyPhysicalRecId == periodQtyPhysical.RecId;
+
+                if (finCustInvoiceTrans)
+                {
+                    this.parmTimezone(finCustInvoiceTrans.Timezone);
+                    this.calculateFromCustInvoiceTrans(finCustInvoiceTrans);
+                }
+                break;
+
+            case tableNum(CustQuotationConfirmTrans) :
+                CustQuotationConfirmTrans       custQuotationConfirmTrans = callerBuffer;
+                FINCustQuotationConfirmTrans    finCustQuotationConfirmTrans;
+
+                select firstonly finCustQuotationConfirmTrans
+                where finCustQuotationConfirmTrans.CustQuotationConfirmTransRecId == CustQuotationConfirmTrans.RecId;
+
+                if (finCustQuotationConfirmTrans)
+                {
+                    this.parmTimezone(finCustQuotationConfirmTrans.Timezone);
+                    this.calculateFromCustQuotationConfirmTrans(finCustQuotationConfirmTrans);
+                }
+                break;
+
+            case tableNum(CustQuotationTrans) :
+                CustQuotationTrans      custQuotationTrans = callerBuffer;
+                FINCustQuotationTrans   finCustQuotationTrans;
+
+                select firstonly finCustQuotationTrans
+                where finCustQuotationTrans.CustQuotationTransRecId == CustQuotationTrans.RecId;
+
+                if (finCustQuotationTrans)
+                {
+                    this.parmTimezone(finCustQuotationTrans.Timezone);
+                    this.calculateFromCustQuotationTrans(finCustQuotationTrans);
+                }
+                break;
+
+            case tableNum(CustConfirmTrans) :
+                CustConfirmTrans    custConfirmTrans = callerBuffer;
+                FINCustConfirmTrans finCustConfirmTrans;
+
+                select firstonly finCustConfirmTrans
+                where finCustConfirmTrans.CustConfirmTransRecId == custConfirmTrans.RecId;
+
+                if (finCustConfirmTrans)
+                {
+                    this.parmTimezone(finCustConfirmTrans.Timezone);
+                    this.calculateFromCustConfirmTrans(finCustConfirmTrans);
+                }
+                break;
+
+            case tableNum(FINCustInvoiceTransProforma) :
+                FINCustInvoiceTransProforma custInvoiceTransProforma;
+                FINCustInvoiceTransProformaInvoiceTrans finCustInvoiceTransProformaInvoiceTrans;
+
+                select firstonly finCustInvoiceTransProformaInvoiceTrans
+                where finCustInvoiceTransProformaInvoiceTrans.CustInvoiceTransRecId == callerBuffer.RecId
+                    exists join custInvoiceTransProforma
+                    where custInvoiceTransProforma.RecId == finCustInvoiceTransProformaInvoiceTrans.CustInvoiceTransRecId
+                        join TableId from salesLineLocal
+                        where salesLineLocal.InventTransId == custInvoiceTransProforma.InventTransId
+                            join TableId from periodQtyPhysical
+                            where periodQtyPhysical.RefTableId == salesLineLocal.TableId
+                            &&    periodQtyPhysical.RefRecId == salesLineLocal.RecId
+                                join TableId from periodQtyFinancial
+                                where periodQtyFinancial.InvPeriodQtyPhysicalRecId == periodQtyPhysical.RecId
+                                &&    periodQtyFinancial.InvoiceId == custInvoiceTransProforma.InvoiceId;
+
+                if (finCustInvoiceTransProformaInvoiceTrans)
+                {
+                    this.parmTimezone(finCustInvoiceTransProformaInvoiceTrans.Timezone);
+                    this.calculateFromCustInvoiceTransProforma(finCustInvoiceTransProformaInvoiceTrans);
+                }
+                break;
+
+            case tableNum(SalesQuotationParmLine) :
+                SalesQuotationParmLine salesQuotationParmLine = callerBuffer;
+                invoiceCalculatorParm = FINInvoiceCalculatorParm::find(salesQuotationParmLine.ParmId, salesQuotationParmLine.TableId, salesQuotationParmLine.RecId);
+                this.parmTimezone(invoiceCalculatorParm.Timezone);
+                break;
+
+            case tableNum(ProjProposalItem) :
+                ProjProposalItem projProposalItem = callerBuffer;
+
+                select firstOnly invoiceCalculatorParm 
+                where invoiceCalculatorParm.OrderLineRecId      == projProposalItem.RecId
+                &&    invoiceCalculatorParm.OrderLineTableId    == projProposalItem.TableId
+                &&    invoiceCalculatorParm.ParmId              == projProposalItem.ProposalId;
+
+                if (!invoiceCalculatorParm)
+                {
+                    FINProjInvoiceItem finProjInvoiceItem;
+                    ProjInvoiceItem projInvoiceItem;
+                    ProjProposalJour projProposalJour;
+                    
+                    select firstonly finProjInvoiceItem
+                        exists join projInvoiceItem
+                        where projInvoiceItem.RecId == finProjInvoiceItem.ProjInvoiceItemRecId
+                        &&    projInvoiceItem.InventTransId == projProposalItem.InventTransId
+                            join TableId from projProposalJour
+                            where projProposalJour.ProposalId == projProposalItem.ProposalId
+                            &&    projProposalJour.InvoiceDate == projInvoiceItem.InvoiceDate
+                            &&    projProposalJour.ProjInvoiceId == projInvoiceItem.ProjInvoiceId;
+
+                    if (finProjInvoiceItem)
+                    {
+                        this.parmTimezone(finProjInvoiceItem.Timezone);
+                        this.calculateFromProjInvoiceItem(finProjInvoiceItem);
+                    }
+                }
+                break;
+
+            case tableNum(PSATmpProjProposalTrans) :
+                psaTmpProjProposalTrans psaTmpProjProposalTrans = callerBuffer;
+                invoiceCalculatorParm = FINInvoiceCalculatorParm::find(psaTmpProjProposalTrans.FINParmId, psaTmpProjProposalTrans.TableId, psaTmpProjProposalTrans.RecId);
+                this.parmTimezone(invoiceCalculatorParm.Timezone);
+                break;
+
+            case tableNum(VendInvoiceInfoLine),
+                 tableNum(PurchLine) :
+                VendInvoiceInfoLine vendInvoiceInfoLine = callerBuffer as VendInvoiceInfoLine;
+                PurchLine purchLineCaller = callerBuffer as PurchLine;
+
+                if (vendInvoiceInfoLine)
+                {
+                    invoiceCalculatorParm = FINInvoiceCalculatorParm::find(vendInvoiceInfoLine.ParmId, vendInvoiceInfoLine.TableId, vendInvoiceInfoLine.RecId);
+                    inventTransId = vendInvoiceInfoLine.InventTransId;
+                }
+                else if (purchLineCaller)
+                {
+                    inventTransId = purchLineCaller.InventTransId;
+                }
+
+                // calculate first previously invoiced
+                if (includePreviousInvoice && inventTransId)
+                {
+                    while select finVendInvoiceTrans
+                        exists join vendInvoiceTrans
+                        where vendInvoiceTrans.RecId == finVendInvoiceTrans.VendInvoiceTransRecId
+                        &&    vendInvoiceTrans.InventTransId == inventTransId
+                            join TableId from purchLineLocal
+                            where purchLineLocal.InventTransId == vendInvoiceTrans.InventTransId
+                                join TableId from periodQtyPhysical
+                                where periodQtyPhysical.RefTableId == purchLineLocal.TableId
+                                &&    periodQtyPhysical.RefRecId == purchLineLocal.RecId
+                                    join TableId from periodQtyFinancial
+                                    where periodQtyFinancial.InvPeriodQtyPhysicalRecId == periodQtyPhysical.RecId
+                                    &&    periodQtyFinancial.InvoiceId == vendInvoiceTrans.InvoiceId
+                    {
+                        this.calculateFromVendInvoiceTrans(finVendInvoiceTrans);
+                    }
+                }
+                break;
+
+            case tableNum(VendInvoiceTrans) :
+                vendInvoiceTrans = callerBuffer;
+                
+                select firstonly finVendInvoiceTrans
+                where finVendInvoiceTrans.VendInvoiceTransRecId == callerBuffer.RecId
+                    exists join vendInvoiceTrans
+                    where vendInvoiceTrans.RecId == finVendInvoiceTrans.VendInvoiceTransRecId
+                        join TableId from purchLineLocal
+                        where purchLineLocal.InventTransId == vendInvoiceTrans.InventTransId
+                            join TableId from periodQtyPhysical
+                            where periodQtyPhysical.RefTableId == purchLineLocal.TableId
+                            &&    periodQtyPhysical.RefRecId == purchLineLocal.RecId
+                                join TableId from periodQtyFinancial
+                                where periodQtyFinancial.InvPeriodQtyPhysicalRecId == periodQtyPhysical.RecId;
+
+                if (finVendInvoiceTrans)
+                {
+                    this.parmTimezone(finVendInvoiceTrans.Timezone);
+                    this.calculateFromVendInvoiceTrans(finVendInvoiceTrans);
+                }
+                break;
+
+            case tableNum(PurchLineAllVersions):
+                FINPurchLineAllVersions finPurchLineAllVersions;
+                
+                select firstonly finPurchLineAllVersions
+                where finPurchLineAllVersions.RefTableId == purchLine.TableId
+                &&    finPurchLineAllVersions.RefRecId == purchLine.RecId;
+
+                this.parmTimezone(finPurchLineAllVersions.Timezone);
+                this.calculateFromPurchLineAllVersions(finPurchLineAllVersions);
+                break;
+
+            case tableNum(ProjJournalTrans):
+                FINProjJournalTrans finProjJournalTrans;
+
+                select firstonly finProjJournalTrans
+                where finProjJournalTrans.ProjJournalTransRecId == callerBuffer.RecId;
+
+                this.parmTimezone(finProjJournalTrans.Timezone);
+                this.calculateFromProjJournalTrans(finProjJournalTrans);
+                break;
+        }
+
+        if (invoiceCalculatorParm)
+        {
+            
+            this.parmTimezone(invoiceCalculatorParm.Timezone);
+            this.calculateFromInvoiceCalcParm();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromInvoiceCalcParm</Name>
+				<Source><![CDATA[
+    protected void calculateFromInvoiceCalcParm()
+    {
+        totalChargedAmount += invoiceCalculatorParm.InvoiceAmount;
+        totalInternalPostings += (invoiceCalculatorParm.MarkupAmount - invoiceCalculatorParm.InvoiceAmount);
+
+        if (invoiceCalculatorParm.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(invoiceCalculatorParm.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (invoiceCalculatorParm.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(invoiceCalculatorParm.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+
+            if (invoiceCalculatorParm.PeriodSpecificationPacked)
+            {
+                this.createPeriods(invoiceCalculatorParm.PeriodSpecificationPacked);
+            }            
+        }
+        // If only credit then show periods from the original invoice
+        else if (invoiceCalculatorParm.CreditCalcPacked)
+        {
+            this.calculateFromCalculatorParmForCredit(); 
+        }
+        
+        if (invoiceCalculatorParm.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(invoiceCalculatorParm.TransportCalcPacked);
+        }
+
+        if (invoiceCalculatorParm.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(invoiceCalculatorParm.CostPriceCalcPacked);
+        }
+
+        if (invoiceCalculatorParm.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(invoiceCalculatorParm.ProjHoursCalcPacked);
+        }
+
+        if (invoiceCalculatorParm.ManualCalcPacked)
+        {
+            this.calculateManualEngine(invoiceCalculatorParm.ManualCalcPacked);
+        }
+
+        if (invoiceCalculatorParm.CreditCalcPacked)
+        {
+            calculateAllCreditAmount = true;
+            this.calculateCreditEngine(invoiceCalculatorParm.CreditCalcPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromCalculatorParmForCredit</Name>
+				<Source><![CDATA[
+    protected void calculateFromCalculatorParmForCredit()
+    {
+        FINCreditJournalizer creditJournalizer = new FINCreditJournalizer();
+        creditJournalizer.unpack(invoiceCalculatorParm.CreditCalcPacked);
+        Set invoiceTransRefdSet = creditJournalizer.getSetOfCreditedJournalTransRef();
+        SetEnumerator enumerator = invoiceTransRefdSet.getEnumerator();
+            
+        while (enumerator.moveNext())
+        {
+            RefRecId recIdRef;
+            RefTableId tableIdRef;
+            
+            [tableIdRef, recIdRef] = enumerator.current();
+            // In invoicing screen show simply periods from original invoice.
+            if (tableIdRef == tableNum(CustInvoiceTrans))
+            {
+                FINCustInvoiceTrans finCustInvoiceTransPrevious;
+
+                select firstonly RentalCalcPacked from finCustInvoiceTransPrevious
+                where finCustInvoiceTransPrevious.CustInvoiceTransRecId == recIdRef;
+
+                if (finCustInvoiceTransPrevious)
+                {
+                    FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+                    rentalJournalizer.unpack(finCustInvoiceTransPrevious.RentalCalcPacked);
+                    rentalJournalizer.resetAmountsForCredit();
+                    this.calculateRentalEngine(rentalJournalizer);
+                }
+            }
+            else if (tableIdRef == tableNum(ProjInvoiceItem))
+            {
+                FINProjInvoiceItem finProjInvoiceItemPrevious;
+
+                select firstonly RentalCalcPacked from finProjInvoiceItemPrevious
+                where finProjInvoiceItemPrevious.ProjInvoiceItemRecId == recIdRef;
+
+                if (finProjInvoiceItemPrevious)
+                {
+                    FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+                    rentalJournalizer.unpack(finProjInvoiceItemPrevious.RentalCalcPacked);
+                    rentalJournalizer.resetAmountsForCredit();
+                    this.calculateRentalEngine(rentalJournalizer);
+                }
+            }
+
+            this.createPeriodsFromCreditedJournal(tableIdRef, recIdRef);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromCustInvoiceTrans</Name>
+				<Source><![CDATA[
+    protected void calculateFromCustInvoiceTrans(FINCustInvoiceTrans _finCustInvoiceTrans)
+    {
+        MarkupTable markupTable;
+        MarkupTrans markupTrans;
+
+        while select CalculatedAmount from markupTrans
+        where markupTrans.TransTableId == tableNum(CustInvoiceTrans)
+        &&    markupTrans.TransRecId == _finCustInvoiceTrans.CustInvoiceTransRecId
+            join CustType, VendType from markupTable
+            where markupTable.ModuleType == markupTrans.ModuleType
+            &&    markupTable.MarkupCode == markupTrans.MarkupCode
+        {
+            NoYes mustCharge = (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend);
+
+            if (mustCharge)
+            {
+                totalChargedAmount += markupTrans.CalculatedAmount;
+            }
+            else
+            {
+                totalInternalPostings -= markupTrans.CalculatedAmount;
+            }
+        }
+
+        if (_finCustInvoiceTrans.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finCustInvoiceTrans.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finCustInvoiceTrans.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finCustInvoiceTrans.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+
+            if (_finCustInvoiceTrans.PeriodSpecificationPacked)
+            {
+                FINPeriodSpecificationJournalizer periodSpecificationJournalizer = new FINPeriodSpecificationJournalizer();
+                periodSpecificationJournalizer.unpack(_finCustInvoiceTrans.PeriodSpecificationPacked);
+                periodSpecificationJournalizer.parmTimezone(_finCustInvoiceTrans.Timezone);
+
+                this.createPeriodsFromPeriodSpecificationJournalizer(periodSpecificationJournalizer);
+            }
+            else
+            {
+                this.createPeriodsFromJournal(tableNum(CustInvoiceTrans), _finCustInvoiceTrans.CustInvoiceTransRecId);
+            }
+        }
+
+        if (_finCustInvoiceTrans.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finCustInvoiceTrans.TransportCalcPacked);
+        }
+
+        if (_finCustInvoiceTrans.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finCustInvoiceTrans.CostPriceCalcPacked);
+        }
+
+        if (_finCustInvoiceTrans.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finCustInvoiceTrans.ProjHoursCalcPacked);
+        }
+
+        if (_finCustInvoiceTrans.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finCustInvoiceTrans.ManualCalcPacked);
+        }
+
+        if (_finCustInvoiceTrans.CreditCalcPacked)
+        {
+            this.calculateCreditEngine(_finCustInvoiceTrans.CreditCalcPacked);
+        }
+
+        if (_finCustInvoiceTrans.PriceComponentsAmendmentPacked)
+        {
+            this.calculatePriceComponentsAmendmentPacked(_finCustInvoiceTrans.PriceComponentsAmendmentPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromCustQuotationConfirmTrans</Name>
+				<Source><![CDATA[
+    protected void calculateFromCustQuotationConfirmTrans(FINCustQuotationConfirmTrans _finCustQuotationConfirmTrans)
+    {
+        totalChargedAmount += _finCustQuotationConfirmTrans.InvoiceAmount;
+        totalInternalPostings += (_finCustQuotationConfirmTrans.MarkupAmount - _finCustQuotationConfirmTrans.InvoiceAmount);
+
+        if (_finCustQuotationConfirmTrans.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finCustQuotationConfirmTrans.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finCustQuotationConfirmTrans.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finCustQuotationConfirmTrans.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+
+            if (_finCustQuotationConfirmTrans.PeriodSpecificationPacked)
+            {
+                this.createPeriods(_finCustQuotationConfirmTrans.PeriodSpecificationPacked);
+            }
+        }
+
+        if (_finCustQuotationConfirmTrans.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finCustQuotationConfirmTrans.TransportCalcPacked);
+        }
+
+        if (_finCustQuotationConfirmTrans.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finCustQuotationConfirmTrans.CostPriceCalcPacked);
+        }
+
+        if (_finCustQuotationConfirmTrans.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finCustQuotationConfirmTrans.ProjHoursCalcPacked);
+        }
+
+        if (_finCustQuotationConfirmTrans.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finCustQuotationConfirmTrans.ManualCalcPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromCustQuotationTrans</Name>
+				<Source><![CDATA[
+    protected void calculateFromCustQuotationTrans(FINCustQuotationTrans _finCustQuotationTrans)
+    {
+        totalChargedAmount += _finCustQuotationTrans.InvoiceAmount;
+        totalInternalPostings += (_finCustQuotationTrans.MarkupAmount - _finCustQuotationTrans.InvoiceAmount);
+
+        if (_finCustQuotationTrans.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finCustQuotationTrans.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finCustQuotationTrans.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finCustQuotationTrans.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+
+            if (_finCustQuotationTrans.PeriodSpecificationPacked)
+            {
+                this.createPeriods(_finCustQuotationTrans.PeriodSpecificationPacked);
+            }
+        }
+
+        if (_finCustQuotationTrans.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finCustQuotationTrans.TransportCalcPacked);
+        }
+
+        if (_finCustQuotationTrans.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finCustQuotationTrans.CostPriceCalcPacked);
+        }
+
+        if (_finCustQuotationTrans.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finCustQuotationTrans.ProjHoursCalcPacked);
+        }
+
+        if (_finCustQuotationTrans.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finCustQuotationTrans.ManualCalcPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateCreditEngine</Name>
+				<Source><![CDATA[
+    protected void calculateCreditEngine(container _creditCalcPacked)
+    {
+        FINCreditJournalizer creditJournalizer = new FINCreditJournalizer();
+        creditJournalizer.unpack(_creditCalcPacked);
+        
+        Set creditSet = creditJournalizer.getChargedValues();
+        SetEnumerator creditSetEnumerator = creditSet.getEnumerator();
+
+        while (creditSetEnumerator.moveNext())
+        {
+            FINRentalAccountType    accountType;
+            AmountCur               amount;
+            Description             description;
+            boolean                 isCredit;
+            FINRentalAccountType    creditAccountType;
+
+            [accountType, amount, description, isCredit, creditAccountType] = creditSetEnumerator.current();
+            
+            if (isCredit
+            // Ignore re-invoicing
+            || (calculateAllCreditAmount && !strScan(description, 'Credited - Credited', 0, strLen(description))))
+            {
+
+                FINRentalAccountType testAccountType = (isCredit ? creditAccountType : accountType);
+
+                switch (testAccountType)
+                {
+                    case FINRentalAccountType::Price :
+                        creditCharged += amount;
+                        break;
+
+                    case FINRentalAccountType::Insurance :
+                        creditInsurance += amount;
+                        break;
+
+                    case FINRentalAccountType::Manual :
+                        creditManualComponents += amount;
+                        break;
+
+                    case FINRentalAccountType::DeliveryTransport :
+                        creditDeliveryTransport += amount;
+                        break;
+
+                    case FINRentalAccountType::ReturnTransport :
+                        creditReturnTransport += amount;
+                        break;
+
+                    default :
+                    // do nothing
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromCustConfirmTrans</Name>
+				<Source><![CDATA[
+    protected void calculateFromCustConfirmTrans(FINCustConfirmTrans _finCustConfirmTrans)
+    {
+        totalChargedAmount += _finCustConfirmTrans.InvoiceAmount;
+        totalInternalPostings += (_finCustConfirmTrans.MarkupAmount - _finCustConfirmTrans.InvoiceAmount);
+
+        if (_finCustConfirmTrans.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finCustConfirmTrans.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finCustConfirmTrans.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finCustConfirmTrans.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+
+            if (_finCustConfirmTrans.PeriodSpecificationPacked)
+            {
+                this.createPeriods(_finCustConfirmTrans.PeriodSpecificationPacked);
+            }
+        }
+
+        if (_finCustConfirmTrans.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finCustConfirmTrans.TransportCalcPacked);
+        }
+
+        if (_finCustConfirmTrans.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finCustConfirmTrans.CostPriceCalcPacked);
+        }
+
+        if (_finCustConfirmTrans.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finCustConfirmTrans.ProjHoursCalcPacked);
+        }
+
+        if (_finCustConfirmTrans.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finCustConfirmTrans.ManualCalcPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromProjInvoiceItem</Name>
+				<Source><![CDATA[
+    protected void calculateFromProjInvoiceItem(FINProjInvoiceItem _finProjInvoiceItem)
+    {
+        MarkupTable markupTable;
+        MarkupTrans markupTrans;
+
+        while select CalculatedAmount from markupTrans
+        where markupTrans.TransTableId == tableNum(ProjInvoiceItem)
+        &&    markupTrans.TransRecId == _finProjInvoiceItem.ProjInvoiceItemRecId
+            join CustType, VendType from markupTable
+            where markupTable.ModuleType == markupTrans.ModuleType
+            &&    markupTable.MarkupCode == markupTrans.MarkupCode
+        {
+            NoYes mustCharge = (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend);
+
+            if (mustCharge)
+            {
+                totalChargedAmount += markupTrans.CalculatedAmount;
+            }
+            else
+            {
+                totalInternalPostings += abs(markupTrans.CalculatedAmount);
+            }
+        }
+
+        if (_finProjInvoiceItem.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finProjInvoiceItem.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finProjInvoiceItem.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finProjInvoiceItem.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+
+            this.createPeriodsFromJournal(tableNum(ProjInvoiceItem), _finProjInvoiceItem.ProjInvoiceItemRecId);
+        }
+
+        if (_finProjInvoiceItem.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finProjInvoiceItem.TransportCalcPacked);
+        }
+
+        if (_finProjInvoiceItem.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finProjInvoiceItem.CostPriceCalcPacked);
+        }
+
+        if (_finProjInvoiceItem.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finProjInvoiceItem.ProjHoursCalcPacked);
+        }
+
+        if (_finProjInvoiceItem.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finProjInvoiceItem.ManualCalcPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromCustInvoiceTransProforma</Name>
+				<Source><![CDATA[
+    protected void calculateFromCustInvoiceTransProforma(FINCustInvoiceTransProformaInvoiceTrans _finCustInvoiceTrans)
+    {
+        MarkupTable markupTable;
+        MarkupTrans markupTrans;
+
+        while select Value from markupTrans
+        where markupTrans.TransTableId == tableNum(FINCustInvoiceTransProforma)
+        &&    markupTrans.TransRecId == _finCustInvoiceTrans.CustInvoiceTransRecId
+            join CustType, VendType from markupTable
+            where markupTable.ModuleType == markupTrans.ModuleType
+            && markupTable.MarkupCode == markupTrans.MarkupCode
+        {
+            NoYes mustCharge = (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend);
+
+            if (mustCharge)
+            {
+                totalChargedAmount += markupTrans.Value;
+            }
+            else
+            {
+                totalInternalPostings += abs(markupTrans.Value);
+            }
+        }
+
+        if (_finCustInvoiceTrans.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finCustInvoiceTrans.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finCustInvoiceTrans.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finCustInvoiceTrans.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+
+            if (_finCustInvoiceTrans.PeriodSpecificationPacked)
+            {
+                FINPeriodSpecificationJournalizer periodSpecificationJournalizer = new FINPeriodSpecificationJournalizer();
+                periodSpecificationJournalizer.unpack(_finCustInvoiceTrans.PeriodSpecificationPacked);
+                periodSpecificationJournalizer.parmTimezone(_finCustInvoiceTrans.Timezone);
+
+                this.createPeriodsFromPeriodSpecificationJournalizer(periodSpecificationJournalizer);
+            }
+            else
+            {
+                this.createPeriodsFromJournal(tableNum(FINCustInvoiceTransProforma), _finCustInvoiceTrans.CustInvoiceTransRecId);
+            }
+        }
+
+        if (_finCustInvoiceTrans.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finCustInvoiceTrans.TransportCalcPacked);
+        }
+
+        if (_finCustInvoiceTrans.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finCustInvoiceTrans.CostPriceCalcPacked);
+        }
+
+        if (_finCustInvoiceTrans.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finCustInvoiceTrans.ProjHoursCalcPacked);
+        }
+
+        if (_finCustInvoiceTrans.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finCustInvoiceTrans.ManualCalcPacked);
+        }
+        
+        // Add correction as manual engine
+        this.calculateProformaCorrection(_finCustInvoiceTrans);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromVendInvoiceTrans</Name>
+				<Source><![CDATA[
+    protected void calculateFromVendInvoiceTrans(FINVendInvoiceTrans _finVendInvoiceTrans)
+    {
+        MarkupTable markupTable;
+        MarkupTrans markupTrans;
+
+        while select CalculatedAmount from markupTrans
+        where markupTrans.TransTableId == tableNum(VendInvoiceTrans)
+        &&    markupTrans.TransRecId == _finVendInvoiceTrans.VendInvoiceTransRecId
+            join CustType, VendType from markupTable
+            where markupTable.ModuleType == markupTrans.ModuleType
+            && markupTable.MarkupCode == markupTrans.MarkupCode
+        {
+            NoYes mustCharge = (markupTable.CustType == MarkupType::CustVend || markupTable.VendType == MarkupType::CustVend);
+
+            if (mustCharge)
+            {
+                totalChargedAmount += markupTrans.CalculatedAmount;
+            }
+            else
+            {
+                totalInternalPostings += abs(markupTrans.CalculatedAmount);
+            }
+        }
+
+        if (_finVendInvoiceTrans.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finVendInvoiceTrans.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finVendInvoiceTrans.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finVendInvoiceTrans.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+            this.createPeriodsFromJournal(tableNum(VendInvoiceTrans), _finVendInvoiceTrans.VendInvoiceTransRecId);
+        }
+
+        if (_finVendInvoiceTrans.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finVendInvoiceTrans.TransportCalcPacked);
+        }
+
+        if (_finVendInvoiceTrans.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finVendInvoiceTrans.CostPriceCalcPacked);
+        }
+
+        if (_finVendInvoiceTrans.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finVendInvoiceTrans.ProjHoursCalcPacked);
+        }
+
+        if (_finVendInvoiceTrans.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finVendInvoiceTrans.ManualCalcPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPeriodsFromJournal</Name>
+				<Source><![CDATA[
+    protected void createPeriodsFromJournal(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        FINRentalInvoiceDetailPeriod rentalInvoiceDetailPeriod;
+        FINJournalizedInvoicePeriod invoicePeriod;
+        RefRecId invoicePeriodQtyRecId;
+        boolean hasAnyPeriod;
+        
+        if (keepPreCalculatedPeriodData)
+        {
+            return;
+        }
+
+        while select invoicePeriod
+        order by InvPeriodQtyPhysicalRecId
+        where invoicePeriod.RefTableId == _refTableId
+        &&    invoicePeriod.RefRecId == _refRecId
+        {
+            hasAnyPeriod = true;
+
+            // One record per delivery
+            if (invoicePeriodQtyRecId != invoicePeriod.InvPeriodQtyPhysicalRecId)
+            {
+                rentalInvoiceDetailPeriod.clear();
+                rentalInvoiceDetailPeriod.QtyInvoiced = invoicePeriod.QtyInvoiced;
+                rentalInvoiceDetailPeriod.RefTableId = gridRefTableId;
+                rentalInvoiceDetailPeriod.RefRecId = gridRefRecId;
+            }
+
+            rentalInvoiceDetailPeriod.DiscAmount += invoicePeriod.DiscAmount;
+            rentalInvoiceDetailPeriod.LineAmount += (invoicePeriod.LineAmount + invoicePeriod.DiscAmount);
+            rentalInvoiceDetailPeriod.NumOfCalendarPeriods += invoicePeriod.NumOfCalendarPeriods;
+            rentalInvoiceDetailPeriod.NumOfChargeablePeriods += invoicePeriod.NumOfChargeablePeriods;
+                
+            if (rentalInvoiceDetailPeriod.PeriodStartDateTime == DateTimeUtil::minValue())
+            {
+                rentalInvoiceDetailPeriod.PeriodStartDateTime = invoicePeriod.PeriodStartDateTime;
+            }
+            rentalInvoiceDetailPeriod.PeriodEndDateTime = invoicePeriod.PeriodEndDateTime;
+          
+            invoicePeriodQtyRecId = invoicePeriod.InvPeriodQtyPhysicalRecId;
+        }
+
+        if (hasAnyPeriod)
+        {
+            rentalInvoiceDetailPeriod.InsuranceAmount = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? (rentalInvoiceDetailPeriod.LineAmount - rentalInvoiceDetailPeriod.DiscAmount) * insurancePct / 100 : rentalInvoiceDetailPeriod.LineAmount * insurancePct / 100);
+            rentalInvoiceDetailPeriod.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPeriodsFromCreditedJournal</Name>
+				<Source><![CDATA[
+    protected void createPeriodsFromCreditedJournal(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        FINRentalInvoiceDetailPeriod rentalInvoiceDetailPeriod;
+        FINJournalizedInvoicePeriod invoicePeriod;
+        RefRecId invoicePeriodQtyRecId;
+        boolean hasAnyPeriod;
+        
+        if (keepPreCalculatedPeriodData)
+        {
+            return;
+        }
+
+        while select invoicePeriod
+        order by InvPeriodQtyPhysicalRecId
+        where invoicePeriod.RefTableId == _refTableId
+        &&    invoicePeriod.RefRecId == _refRecId
+        {
+            hasAnyPeriod = true;
+
+            // One record per delivery
+            if (invoicePeriodQtyRecId != invoicePeriod.InvPeriodQtyPhysicalRecId)
+            {
+                rentalInvoiceDetailPeriod.clear();
+                rentalInvoiceDetailPeriod.QtyInvoiced = invoicePeriod.QtyInvoiced;
+                rentalInvoiceDetailPeriod.RefTableId = gridRefTableId;
+                rentalInvoiceDetailPeriod.RefRecId = gridRefRecId;
+            }
+
+            rentalInvoiceDetailPeriod.DiscAmount = 0;
+            rentalInvoiceDetailPeriod.LineAmount = 0;
+            rentalInvoiceDetailPeriod.NumOfCalendarPeriods += invoicePeriod.NumOfCalendarPeriods;
+            rentalInvoiceDetailPeriod.NumOfChargeablePeriods += invoicePeriod.NumOfChargeablePeriods;
+                
+            if (rentalInvoiceDetailPeriod.PeriodStartDateTime == DateTimeUtil::minValue())
+            {
+                rentalInvoiceDetailPeriod.PeriodStartDateTime = invoicePeriod.PeriodStartDateTime;
+            }
+            rentalInvoiceDetailPeriod.PeriodEndDateTime = invoicePeriod.PeriodEndDateTime;
+          
+            invoicePeriodQtyRecId = invoicePeriod.InvPeriodQtyPhysicalRecId;
+        }
+
+        if (hasAnyPeriod)
+        {
+            rentalInvoiceDetailPeriod.InsuranceAmount = 0;
+            rentalInvoiceDetailPeriod.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateProjEngine</Name>
+				<Source><![CDATA[
+    protected void calculateProjEngine(container _projHoursCalcPacked)
+    {
+        FINProjHourJournalizer projHourJournalizer = new FINProjHourJournalizer();
+        projHourJournalizer.unpack(_projHoursCalcPacked);
+        Set recIdSet = projHourJournalizer.getSetOfProjTransRecIds();
+        SetEnumerator enumerator = recIdSet.getEnumerator();
+        
+        while (enumerator.moveNext())
+        {
+            ProjEmplTransRefRecId refRecId = enumerator.current();
+            ProjEmplTrans projEmplTrans = ProjEmplTrans::findRecId(refRecId);
+
+            projHourQty += projEmplTrans.Qty;
+            projTotalSalesAmountCur += projEmplTrans.TotalSalesAmountCur;
+        }
+        
+        // Project hours are charged as std ax. THey don't create misc. charges in its engine
+        totalChargedAmount += projTotalSalesAmountCur;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateCostEngine</Name>
+				<Source><![CDATA[
+    protected void calculateCostEngine(container _costPriceCalcPacked)
+    {
+        FINCostPriceJournalizer costJournalizer = new FINCostPriceJournalizer();
+        costJournalizer.unpack(_costPriceCalcPacked);
+
+        costPriceTimeUnit = costJournalizer.getPriceTimeUnit();
+        costPrice = costJournalizer.getCostPrice();
+        numOfChargeablePeriodsForCost += costJournalizer.getNumOfChargeablePeriods();
+        costAmount = costJournalizer.getCostAmount();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateTransportEngine</Name>
+				<Source><![CDATA[
+    protected void calculateTransportEngine(container _transportCalcPacked)
+    {
+        FINTransportPriceJournalizer transportJournalizer = new FINTransportPriceJournalizer();
+        transportJournalizer.unpack(_transportCalcPacked);
+            
+        deliveryBaseAmount += transportJournalizer.getDeliveryBaseAmount();
+        deliveryAmount += transportJournalizer.getDeliveryAmount();
+        deliveryDiscount += transportJournalizer.getDeliveryDiscountAmount();
+        deliveryTierMultiplier = transportJournalizer.getDeliveryTierMultiplier();
+        returnBaseAmount += transportJournalizer.getReturnBaseAmount();
+        returnAmount += transportJournalizer.getReturnAmount();
+        returnDiscount += transportJournalizer.getReturnDiscountAmount();
+        returnTierMultiplier = transportJournalizer.getReturnTierMultiplier();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateManualEngine</Name>
+				<Source><![CDATA[
+    protected void calculateManualEngine(container _manualCalcPacked)
+    {
+        FINManualComponentJournalizer manualJournalizer = new FINManualComponentJournalizer();
+        manualJournalizer.unpack(_manualCalcPacked);
+            
+        manualComponentsValue += manualJournalizer.getTotalChargedValue();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateRentalEngine</Name>
+				<Source><![CDATA[
+    protected void calculateRentalEngine(FINRentalJournalizer _rentalJournalizer)
+    {
+        grossPrice = rentalLine.Price;
+        discPct = rentalLine.LinePercent;
+        
+        if (salesLine)
+        {
+            insureHireStop = salesLine.RORInsuranceInsureHireStops;
+            insuranceCalcBasis = salesLine.RORInsuranceCalcBasis;
+            insurancePct = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? salesLine.RORInsuranceGrossPercentage : salesLine.RORInsuranceNetPercentage);
+        }
+        else if (salesQuotationLine)
+        {
+            insureHireStop = salesQuotationLine.RORInsuranceInsureHireStops;
+            insuranceCalcBasis = salesQuotationLine.RORInsuranceCalcBasis;
+            insurancePct = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? salesQuotationLine.RORInsuranceGrossPercentage : salesQuotationLine.RORInsuranceNetPercentage);
+        }
+        else if (purchLine)
+        {
+            insureHireStop = purchLine.RORInsuranceInsureHireStops;
+            insuranceCalcBasis = purchLine.RORInsuranceCalcBasis;
+            insurancePct = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? purchLine.RORInsuranceGrossPercentage : purchLine.RORInsuranceNetPercentage);
+        }
+
+        //Totals
+        invoicedQty += _rentalJournalizer.getInvoicedQty();
+        rentalGrossAmount += _rentalJournalizer.getRentalAmount();
+        discountAmount += _rentalJournalizer.getRentalDiscountAmount();
+        rentalNetAmount += (_rentalJournalizer.getRentalAmount() + _rentalJournalizer.getRentalDiscountAmount());
+        insuranceAmount += _rentalJournalizer.getInsuranceAmount();
+        chargedPeriods += _rentalJournalizer.getChargedPeriods();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateProformaCorrection</Name>
+				<Source><![CDATA[
+    protected void calculateProformaCorrection(FINCustInvoiceTransProformaInvoiceTrans _finCustInvoiceTrans)
+    {
+        FINManualPriceComponentProforma manualPriceComponentProforma;
+        FINCustInvoiceTransProForma     custInvoiceTransProForma;
+        RefTableId refTableId = tableNum(FINCustInvoiceTransProForma);
+
+        while select AmountCur, ProFormaInvoiceVersion from manualPriceComponentProforma
+        where manualPriceComponentProforma.TransTableId == refTableId
+        &&    manualPriceComponentProforma.TransRecId == _finCustInvoiceTrans.CustInvoiceTransRecId
+            join ProFormaInvoiceVersion from custInvoiceTransProForma
+            where custInvoiceTransProForma.TableId == manualPriceComponentProforma.TransTableId
+            &&    custInvoiceTransProForma.RecId   == manualPriceComponentProforma.TransRecId
+        {
+            if (custInvoiceTransProForma.ProFormaInvoiceVersion < manualPriceComponentProforma.ProFormaInvoiceVersion)
+            {
+                totalChargedAmount += manualPriceComponentProforma.AmountCur;
+            }
+            
+            manualComponentsValue += manualPriceComponentProforma.AmountCur;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculatePriceComponentsAmendmentPacked</Name>
+				<Source><![CDATA[
+    protected void calculatePriceComponentsAmendmentPacked(container _priceComponentsAmendmentPacked)
+    {
+        FINPriceComponentsAmendmentJournalizer priceComponentsAmendmentJournalizer = new FINPriceComponentsAmendmentJournalizer();
+        priceComponentsAmendmentJournalizer.unpack(_priceComponentsAmendmentPacked);
+
+        invoicePeriodAmendmentJournalized = priceComponentsAmendmentJournalizer.getInvoicePeriodAmendment();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPeriods</Name>
+				<Source><![CDATA[
+    protected void createPeriods(container _periodSpecificationPacked)
+    {
+        if (keepPreCalculatedPeriodData)
+        {
+            return;
+        }
+
+        // Map( [InvoicePeriodQtyRecId, qtyInvoiced], Map([ FromDateTime, ToDateTime ] , List(FINPeriodSpecification)))
+        Map specificationMap = Map::create(_periodSpecificationPacked);
+        
+        if (!specificationMap.empty())
+        {
+            this.runForSpecificationMap(specificationMap);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runForSpecificationMap</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInsertMethodInLoop", "Cannot be refactored without altering functionality of method")]
+    protected void runForSpecificationMap(Map _specificationMap)
+    {
+        MapEnumerator enumerator = _specificationMap.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            RefRecId invoicePeriodQtyRecId;
+            Qty invoiceQty;
+            TimeOfDay defaultDaysSplitPerDelivery;
+            // qty is also stamped on periodSpec.lineQty so no need to pass the value here.
+            [invoicePeriodQtyRecId, invoiceQty, defaultDaysSplitPerDelivery] = enumerator.currentKey();
+
+            Map periodDefinitionMap = enumerator.currentValue();
+
+            this.processDelivery(invoiceQty, invoicePeriodQtyRecId, periodDefinitionMap);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processDelivery</Name>
+				<Source><![CDATA[
+    protected void processDelivery(Qty _invoiceQty, RefRecId _periodPhysicalRecId, Map  _periodDefinitionMap)
+    {
+        MapEnumerator specificationEnumerator = _periodDefinitionMap.getEnumerator();
+        FINInvoicePeriodQtyFinancial invoicedPeriodFinancial;
+        FINInvoicePeriodQtyPhysical invoicedPeriodPhysical;
+        
+        while (specificationEnumerator.moveNext())
+        {
+            TransDateTime fromDateTimeInTimeZone;
+            TransDateTime toDateTimeInTimeZone;
+
+            // DateTimes are in order line site specific timezone
+            [fromDateTimeInTimeZone, toDateTimeInTimeZone] = specificationEnumerator.currentKey();
+            
+            TransDateTime   fromDateTime        = DateTimeUtil::removeTimeZoneOffset(fromDateTimeInTimeZone, timezone);
+            TransDateTime   toDateTime          = DateTimeUtil::removeTimeZoneOffset(toDateTimeInTimeZone, timezone);
+            List            specificationList   = specificationEnumerator.currentValue();
+            
+            select firstonly invoicedPeriodPhysical
+            where invoicedPeriodPhysical.RecId == _periodPhysicalRecId
+                exists join invoicedPeriodFinancial
+                where invoicedPeriodFinancial.InvPeriodQtyPhysicalRecId == invoicedPeriodPhysical.RecId
+                &&    invoicedPeriodFinancial.InvoiceId
+                &&    invoicedPeriodFinancial.PeriodStartDateTime < toDateTime
+                &&    invoicedPeriodFinancial.PeriodEndDateTime > fromDateTime;
+
+            // Add values not invoiced yet
+            FINPeriodSpecification periodSpecPeriod = this.processSinglePeriod(invoicedPeriodPhysical, specificationList);
+            
+            if (periodSpecPeriod.invoiceAmountCur || periodSpecPeriod.numOfCalendarPeriods)
+            {
+                FINJournalizedInvoicePeriod journalizedInvoicePeriod = this.existsReversalJournal(fromDateTime, toDateTime);
+                
+                // One record per delivery
+                FINRentalInvoiceDetailPeriod rentalInvoiceDetailPeriod;
+                rentalInvoiceDetailPeriod.clear();
+                rentalInvoiceDetailPeriod.QtyInvoiced = _invoiceQty;
+                rentalInvoiceDetailPeriod.RefTableId = gridRefTableId;
+                rentalInvoiceDetailPeriod.RefRecId = gridRefRecId;
+
+                if (journalizedInvoicePeriod)
+                {
+                    AmountCur reversalLineAmt = journalizedInvoicePeriod.LineAmount + journalizedInvoicePeriod.DiscAmount;
+                    rentalInvoiceDetailPeriod.LineAmount -= reversalLineAmt;
+                }
+                              
+                // Compare dateTimes from period definition to avoid extending periods during invoicing.
+                if (rentalInvoiceDetailPeriod.PeriodStartDateTime == DateTimeUtil::minValue())
+                {
+                    if (rentalDateTimesFromLine && rentalDateTimesFromLine.OnRentDateTime > fromDateTime)
+                    {
+                        rentalInvoiceDetailPeriod.PeriodStartDateTime = rentalDateTimesFromLine.OnRentDateTime;
+                    }
+                    else
+                    {
+                        rentalInvoiceDetailPeriod.PeriodStartDateTime = fromDateTime;
+                    }
+                }
+
+                if (rentalDateTimesFromLine && rentalDateTimesFromLine.OffRentDateTime && rentalDateTimesFromLine.OffRentDateTime < toDateTime)
+                {
+                    rentalInvoiceDetailPeriod.PeriodEndDateTime = rentalDateTimesFromLine.OffRentDateTime;
+                }
+                else
+                {
+                    rentalInvoiceDetailPeriod.PeriodEndDateTime = toDateTime;
+                }
+            
+                this.addFromPeriodSpec(rentalInvoiceDetailPeriod, periodSpecPeriod);
+
+                rentalInvoiceDetailPeriod.InsuranceAmount = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? (rentalInvoiceDetailPeriod.LineAmount - rentalInvoiceDetailPeriod.DiscAmount) * insurancePct / 100 : rentalInvoiceDetailPeriod.LineAmount * insurancePct / 100);
+                rentalInvoiceDetailPeriod.insert();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSingleDelivery</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is obsolete, Please use processDelivery")]
+    protected void processSingleDelivery(FINRentalInvoiceDetailPeriod _rentalInvoiceDetailPeriod, RecId _periodPhysicalRecId, Map  _periodDefinitionMap)
+    {
+        MapEnumerator specificationEnumerator = _periodDefinitionMap.getEnumerator();
+        FINInvoicePeriodQtyFinancial invoicedPeriodFinancial;
+        FINInvoicePeriodQtyPhysical invoicedPeriodPhysical;
+        
+        while (specificationEnumerator.moveNext())
+        {
+            TransDateTime fromDateTimeInTimeZone;
+            TransDateTime toDateTimeInTimeZone;
+            TransDateTime fromDateTime;
+            TransDateTime toDateTime;
+            // DateTimes are in order line site specific timezone
+            [fromDateTimeInTimeZone, toDateTimeInTimeZone] = specificationEnumerator.currentKey();
+            fromDateTime = DateTimeUtil::removeTimeZoneOffset(fromDateTimeInTimeZone, this.parmTimezone());
+            toDateTime = DateTimeUtil::removeTimeZoneOffset(toDateTimeInTimeZone, this.parmTimezone());
+           
+            List specificationList = specificationEnumerator.currentValue();
+            
+            select firstonly invoicedPeriodPhysical
+                exists join invoicedPeriodFinancial
+                where invoicedPeriodFinancial.InvPeriodQtyPhysicalRecId == _periodPhysicalRecId
+                &&    invoicedPeriodFinancial.InvoiceId
+                &&    invoicedPeriodFinancial.PeriodStartDateTime < toDateTime
+                &&    invoicedPeriodFinancial.PeriodEndDateTime > fromDateTime
+                &&    invoicedPeriodFinancial.InvPeriodQtyPhysicalRecId == invoicedPeriodPhysical.RecId;
+            
+            // Add values not invoiced yet
+            FINPeriodSpecification periodSpecPeriod = this.processSinglePeriod(invoicedPeriodPhysical, specificationList);
+            
+            if (periodSpecPeriod.invoiceAmountCur || periodSpecPeriod.numOfCalendarPeriods)
+            {
+                // Compare dateTimes from period definition to avoid extending periods during invoicing.
+                if (_rentalInvoiceDetailPeriod.PeriodStartDateTime == DateTimeUtil::minValue())
+                {
+                    if (rentalDateTimesFromLine && rentalDateTimesFromLine.OnRentDateTime > fromDateTime)
+                    {
+                        _rentalInvoiceDetailPeriod.PeriodStartDateTime = rentalDateTimesFromLine.OnRentDateTime;
+                    }
+                    else
+                    {
+                        _rentalInvoiceDetailPeriod.PeriodStartDateTime = fromDateTime;
+                    }
+                }
+                
+                if (rentalDateTimesFromLine && rentalDateTimesFromLine.OffRentDateTime && rentalDateTimesFromLine.OffRentDateTime < toDateTime)
+                {
+                    _rentalInvoiceDetailPeriod.PeriodEndDateTime = rentalDateTimesFromLine.OffRentDateTime;
+                }
+                else
+                {
+                    _rentalInvoiceDetailPeriod.PeriodEndDateTime = toDateTime;
+                }
+            
+                this.addFromPeriodSpec(_rentalInvoiceDetailPeriod, periodSpecPeriod);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addFromPeriodSpec</Name>
+				<Source><![CDATA[
+    protected void addFromPeriodSpec(FINRentalInvoiceDetailPeriod _rentalInvoiceDetailPeriod, FINPeriodSpecification _periodSpec)
+    {
+        if (!isHourProjectInvoicing)
+        {
+            _rentalInvoiceDetailPeriod.DiscAmount = _periodSpec.periodDisc;
+            _rentalInvoiceDetailPeriod.LineAmount = (_periodSpec.invoiceAmountCur + _periodSpec.periodDisc);
+        }
+        _rentalInvoiceDetailPeriod.NumOfCalendarPeriods = _periodSpec.numOfCalendarPeriods;
+        _rentalInvoiceDetailPeriod.NumOfChargeablePeriods = _periodSpec.numOfChargedPeriods;
+                
+        // There is always only 1 tier multiplier per delivery
+        _rentalInvoiceDetailPeriod.PriceTierMultiplier = _periodSpec.tierMultiplier;
+        _rentalInvoiceDetailPeriod.RateCode = _periodSpec.priceTimeUnit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>existsReversalJournal</Name>
+				<Source><![CDATA[
+    protected FINJournalizedInvoicePeriod existsReversalJournal(TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        CustInvoiceTrans custInvoiceTrans;
+        VendInvoiceTrans vendInvoiceTrans;
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+        if (salesLine)
+        {
+            if (isHourProjectInvoicing)
+            {
+                if (callerBuffer.TableId == tableNum(ProjProposalItem))
+                {
+                    ProjProposalItem projProposalItem = callerBuffer;
+                    ProjInvoiceItem projInvoiceItem;
+                    
+                    select firstonly journalizedInvoicePeriod
+                    where journalizedInvoicePeriod.PeriodStartDateTime == _fromDateTime
+                    &&    journalizedInvoicePeriod.PeriodEndDateTime == _toDateTime
+                        exists join projInvoiceItem
+                        where projInvoiceItem.TableId == journalizedInvoicePeriod.RefTableId
+                        &&    projInvoiceItem.RecId == journalizedInvoicePeriod.RefRecId
+                        &&    projInvoiceItem.InventTransId == projProposalItem.InventTransId;
+                }
+            }
+            else
+            {
+                select firstonly journalizedInvoicePeriod
+                where journalizedInvoicePeriod.PeriodStartDateTime == _fromDateTime
+                &&    journalizedInvoicePeriod.PeriodEndDateTime == _toDateTime
+                    exists join custInvoiceTrans
+                    where custInvoiceTrans.TableId == journalizedInvoicePeriod.RefTableId
+                    &&    custInvoiceTrans.RecId == journalizedInvoicePeriod.RefRecId
+                    &&    custInvoiceTrans.InventTransId == salesLine.InventTransId;
+            }
+        }
+        else if (purchLine)
+        {
+            select firstonly journalizedInvoicePeriod
+            where journalizedInvoicePeriod.PeriodStartDateTime == _fromDateTime
+            &&    journalizedInvoicePeriod.PeriodEndDateTime == _toDateTime
+                exists join vendInvoiceTrans
+                where vendInvoiceTrans.TableId == journalizedInvoicePeriod.RefTableId
+                &&    vendInvoiceTrans.RecId == journalizedInvoicePeriod.RefRecId
+                &&    vendInvoiceTrans.InventTransId == purchLine.InventTransId;
+        }
+
+        return journalizedInvoicePeriod;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSinglePeriod</Name>
+				<Source><![CDATA[
+    protected FINPeriodSpecification processSinglePeriod(FINInvoicePeriodQtyPhysical _invoicedPeriodPhysicalList, List _specificationList)
+    {
+        ListEnumerator listEnumerator = _specificationList.getEnumerator();
+        FINPeriodSpecification periodSpecTotal = FINPeriodSpecification::construct();
+
+        while (listEnumerator.moveNext())
+        {
+            FINPeriodSpecification periodSpec = listEnumerator.current();
+            periodSpecTotal.periodDisc += periodSpec.periodDisc;
+            periodSpecTotal.invoiceAmountCur += periodSpec.invoiceAmountCur;
+            periodSpecTotal.numOfCalendarPeriods += periodSpec.numOfCalendarPeriods;
+            periodSpecTotal.numOfChargedPeriods += periodSpec.numOfChargedPeriods;
+            periodSpecTotal.numOfOpenCalendarPeriods += periodSpec.numOfOpenCalendarPeriods;
+            periodSpecTotal.tierMultiplier = periodSpec.tierMultiplier;
+            periodSpecTotal.priceTimeUnit = periodSpec.priceTimeUnit;
+        }
+                       
+        return periodSpecTotal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteCalculatedPeriods</Name>
+				<Source><![CDATA[
+    public void deleteCalculatedPeriods()
+    {
+        if (!keepPreCalculatedPeriodData)
+        {
+            FINRentalInvoiceDetailPeriod rentalInvoiceDetailPeriod;
+        
+            delete_from rentalInvoiceDetailPeriod
+            where rentalInvoiceDetailPeriod.RefTableId == gridRefTableId
+            &&    rentalInvoiceDetailPeriod.RefRecId == gridRefRecId
+            &&    rentalInvoiceDetailPeriod.CreatedBy == curUserId();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPeriodsFromPeriodSpecificationJournalizer</Name>
+				<Source><![CDATA[
+    protected void createPeriodsFromPeriodSpecificationJournalizer(FINPeriodSpecificationJournalizer _periodSpecificationJournalizer)
+    {
+        SetEnumerator periodSpecificationSetEnumerator = _periodSpecificationJournalizer.getSummarizedValues().getEnumerator();
+        FINInvoicePeriodQtyFinancial invoicedPeriodFinancial;
+        FINInvoicePeriodQtyPhysical invoicedPeriodPhysical;
+        
+        if (keepPreCalculatedPeriodData)
+        {
+            return;
+        }
+
+        while (periodSpecificationSetEnumerator.moveNext())
+        {
+            RefRecId                invoicePeriodQtyRecId;
+            Qty                     invoiceQty;
+            TimeOfDay               defaultDaysSplitPerDelivery;
+            TransDateTime           fromDateTime;
+            TransDateTime           toDateTime;
+            FINPeriodSpecification  periodSpecTotal;
+            container               periodSpecTotalContainer;
+           
+            [invoicePeriodQtyRecId, invoiceQty, defaultDaysSplitPerDelivery, fromDateTime, toDateTime, periodSpecTotalContainer] = periodSpecificationSetEnumerator.current();
+
+            periodSpecTotal = FINPeriodSpecification::create(periodSpecTotalContainer);
+                        
+            if (periodSpecTotal.invoiceAmountCur || periodSpecTotal.numOfCalendarPeriods)
+            {
+                FINJournalizedInvoicePeriod journalizedInvoicePeriod = this.existsReversalJournal(fromDateTime, toDateTime);
+                
+                FINRentalInvoiceDetailPeriod rentalInvoiceDetailPeriod;
+                rentalInvoiceDetailPeriod.clear();
+                rentalInvoiceDetailPeriod.QtyInvoiced = invoiceQty;
+                rentalInvoiceDetailPeriod.RefTableId = gridRefTableId;
+                rentalInvoiceDetailPeriod.RefRecId = gridRefRecId;
+
+                if (journalizedInvoicePeriod)
+                {
+                    AmountCur reversalLineAmt = journalizedInvoicePeriod.LineAmount + journalizedInvoicePeriod.DiscAmount;
+                    rentalInvoiceDetailPeriod.LineAmount -= reversalLineAmt;
+                }        
+
+                if (rentalDateTimesFromLine && rentalDateTimesFromLine.OnRentDateTime > fromDateTime)
+                {
+                    rentalInvoiceDetailPeriod.PeriodStartDateTime = rentalDateTimesFromLine.OnRentDateTime;
+                }
+                else
+                {
+                    rentalInvoiceDetailPeriod.PeriodStartDateTime = fromDateTime;
+                }
+
+                if (rentalDateTimesFromLine && rentalDateTimesFromLine.OffRentDateTime && rentalDateTimesFromLine.OffRentDateTime < toDateTime)
+                {
+                    rentalInvoiceDetailPeriod.PeriodEndDateTime = rentalDateTimesFromLine.OffRentDateTime;
+                }
+                else
+                {
+                    rentalInvoiceDetailPeriod.PeriodEndDateTime = toDateTime;
+                }
+            
+                this.addFromPeriodSpec(rentalInvoiceDetailPeriod, periodSpecTotal);
+
+                rentalInvoiceDetailPeriod.InsuranceAmount = (insuranceCalcBasis == RORInsuranceCalcBasis::Gross ? (rentalInvoiceDetailPeriod.LineAmount - rentalInvoiceDetailPeriod.DiscAmount) * insurancePct / 100 : rentalInvoiceDetailPeriod.LineAmount * insurancePct / 100);
+                rentalInvoiceDetailPeriod.insert();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromPurchLineAllVersions</Name>
+				<Source><![CDATA[
+    protected void calculateFromPurchLineAllVersions(FINPurchLineAllVersions _finPurchLineAllVersions)
+    {
+        totalChargedAmount += _finPurchLineAllVersions.InvoiceAmount;
+        totalInternalPostings += (_finPurchLineAllVersions.MarkupAmount - _finPurchLineAllVersions.InvoiceAmount);        
+
+        if (_finPurchLineAllVersions.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finPurchLineAllVersions.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finPurchLineAllVersions.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finPurchLineAllVersions.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+                        
+            if (_finPurchLineAllVersions.PeriodSpecificationPacked)
+            {
+                FINPeriodSpecificationJournalizer periodSpecificationJournalizer = new FINPeriodSpecificationJournalizer();
+                periodSpecificationJournalizer.unpack(_finPurchLineAllVersions.PeriodSpecificationPacked);
+                periodSpecificationJournalizer.parmTimezone(_finPurchLineAllVersions.Timezone);
+
+                this.createPeriodsFromPeriodSpecificationJournalizer(periodSpecificationJournalizer);
+            }
+        }
+
+        if (_finPurchLineAllVersions.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finPurchLineAllVersions.TransportCalcPacked);
+        }
+
+        if (_finPurchLineAllVersions.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finPurchLineAllVersions.CostPriceCalcPacked);
+        }
+
+        if (_finPurchLineAllVersions.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finPurchLineAllVersions.ProjHoursCalcPacked);
+        }
+
+        if (_finPurchLineAllVersions.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finPurchLineAllVersions.ManualCalcPacked);
+        }
+
+        if (_finPurchLineAllVersions.PriceComponentsAmendmentPacked)
+        {
+            this.calculatePriceComponentsAmendmentPacked(_finPurchLineAllVersions.PriceComponentsAmendmentPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calculateFromProjJournalTrans</Name>
+				<Source><![CDATA[
+    protected void calculateFromProjJournalTrans(FINProjJournalTrans _finProjJournalTrans)
+    {
+        totalChargedAmount += _finProjJournalTrans.InvoiceAmount;
+        totalInternalPostings += (_finProjJournalTrans.MarkupAmount - _finProjJournalTrans.InvoiceAmount);
+
+        if (_finProjJournalTrans.RAGContractLinePacked)
+        {
+            RAGContractData contractData = new RAGContractData();
+            contractData.unpack(_finProjJournalTrans.RAGContractLinePacked);
+            tmpContractLine = contractData.getContractLineTmpRecord();
+        }
+
+        if (_finProjJournalTrans.RentalCalcPacked)
+        {
+            FINRentalJournalizer rentalJournalizer = new FINRentalJournalizer();
+            rentalJournalizer.unpack(_finProjJournalTrans.RentalCalcPacked);
+            this.calculateRentalEngine(rentalJournalizer);
+            
+            FINPeriodSpecificationJournalizer periodSpecificationJournalizer = new FINPeriodSpecificationJournalizer();
+            periodSpecificationJournalizer.unpack(_finProjJournalTrans.PeriodSpecificationPacked);
+            periodSpecificationJournalizer.parmTimezone(_finProjJournalTrans.Timezone);
+
+            this.createPeriodsFromPeriodSpecificationJournalizer(periodSpecificationJournalizer);
+        }
+
+        if (_finProjJournalTrans.TransportCalcPacked)
+        {
+            this.calculateTransportEngine(_finProjJournalTrans.TransportCalcPacked);
+        }
+
+        if (_finProjJournalTrans.CostPriceCalcPacked)
+        {
+            this.calculateCostEngine(_finProjJournalTrans.CostPriceCalcPacked);
+        }
+
+        if (_finProjJournalTrans.ProjHoursCalcPacked)
+        {
+            this.calculateProjEngine(_finProjJournalTrans.ProjHoursCalcPacked);
+        }
+
+        if (_finProjJournalTrans.ManualCalcPacked)
+        {
+            this.calculateManualEngine(_finProjJournalTrans.ManualCalcPacked);
+        }
+
+        if (_finProjJournalTrans.CreditCalcPacked)
+        {
+            this.calculateCreditEngine(_finProjJournalTrans.CreditCalcPacked);
+        }
+
+        if (_finProjJournalTrans.PriceComponentsAmendmentPacked)
+        {
+            this.calculatePriceComponentsAmendmentPacked(_finProjJournalTrans.PriceComponentsAmendmentPacked);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

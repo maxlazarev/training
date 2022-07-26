@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRRetailCreateLinesFromProductsToAddClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(RetailCreateLinesFromProductsToAdd))]
+public final class DNRRetailCreateLinesFromProductsToAddClass_Extension
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createProducts</Name>
+				<Source><![CDATA[
+    public void createProducts(TmpRetailProductsToAdd _tmpProductsToAdd)
+    {
+        next createProducts(_tmpProductsToAdd);
+        
+        if(common.TableId == tableNum(SalesQuotationTable))
+        {
+            this.RORCreateQuotationLine(SalesQuotationTable::findRec(common.RecId), _tmpProductsToAdd);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>loadLinesFromCaller</Name>
+				<Source><![CDATA[
+    public void loadLinesFromCaller(Args _callerArgs, TmpRetailProductsToAdd    _tmpProductsToAdd)
+    {
+        next loadLinesFromCaller(_callerArgs, _tmpProductsToAdd);
+        
+        if (_callerArgs.dataset() == tableNum(SalesQuotationTable))
+        {
+            this.RORLoadSalesQuotationLine();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORLoadSalesQuotationLine</Name>
+				<Source><![CDATA[
+    private void RORLoadSalesQuotationLine()
+    {
+        SalesQuotationLine      salesQuotationLineTmp;
+        SalesQuotationTable     salesQuotationTableLocal;
+        InventTable             inventTable;
+        EcoResProduct           ecoResProduct;
+
+        salesQuotationTableLocal = callerArgs.record();
+
+        while select ItemId, SalesQty, InventDimId, RecId 
+        from salesQuotationLineTmp order by LineNum
+        where salesQuotationLineTmp.QuotationId == salesQuotationTableLocal.QuotationId
+            join product from inventTable
+            where inventTable.ItemId == salesQuotationLineTmp.ItemId
+                join ecoResProduct
+                where ecoResProduct.RecId == inventTable.Product
+        {
+            this.loadLines(ecoResProduct, salesQuotationLineTmp.SalesQty, salesQuotationLineTmp.InventDimId, 0, salesQuotationLineTmp.RecId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCreateQuotationLine</Name>
+				<Source><![CDATA[
+    private void RORCreateQuotationLine(SalesQuotationTable _salesQuotationTable, TmpRetailProductsToAdd _tmpProductsToAdd)
+    {
+        SalesQuotationLine   salesQuotationLine;
+        lineSet = new Set(Types::Int64);
+
+        setPrefix("@SYS74342");
+
+        while select _tmpProductsToAdd
+        {
+            setPrefix(strFmt("@SYS24300", _tmpProductsToAdd.ItemId));
+
+            try
+            {
+                ttsbegin;
+                if (mapLines.exists(_tmpProductsToAdd.RecId) && !deletedTmpProductsSet.in(_tmpProductsToAdd.RecId)) 
+                {
+                    lineRecID = mapLines.lookup(_tmpProductsToAdd.RecId); //find salesLine record ID through keyvalue.
+
+                    salesQuotationLine = SalesQuotationLine::findRecId(lineRecID, true);
+
+                    if (salesQuotationLine.RecId &&
+                        (salesQuotationLine.InventDimId != _tmpProductsToAdd.InventDim || salesQuotationLine.SalesQty != _tmpProductsToAdd.Quantity))
+                    {
+                        RetailCreateLinesFromProductsToAdd::RORUpdateExistingSalesQuotationLine(salesQuotationLine, _tmpProductsToAdd.Quantity, _tmpProductsToAdd.InventDim);
+
+                        RetailCreateLinesFromProductsToAdd::RORUpdateSingleSalesQuotationLine(salesQuotationLine, _tmpProductsToAdd);
+                    }
+                }
+                else
+                {
+                    salesQuotationLine = RetailCreateLinesFromProductsToAdd::RORInitSalesQuotationLine(_salesQuotationTable.QuotationId, _tmpProductsToAdd.ItemId, _tmpProductsToAdd.Quantity, _tmpProductsToAdd.InventDim);
+
+                    RetailCreateLinesFromProductsToAdd::RORCreateSingleSalesQuotationLine(salesQuotationLine, _salesQuotationTable, _tmpProductsToAdd);
+
+                    _tmpProductsToAdd.delete();
+                }
+
+                lineSet.add(salesQuotationLine.RecId);
+                ttscommit;
+            }
+            catch (Exception::Error)
+            {
+                lineSet.add(salesQuotationLine.RecId); //still add into set if any exception occured.
+                checkFailed("@SYS18447");
+            }
+        }
+
+        // add lines which are selected on the Add product form .
+        mapLinesIterator = new MapIterator(mapLines);
+
+
+        while (mapLinesIterator.more())
+        {
+            try
+            {
+                ttsbegin;
+                if (!lineSet.in(mapLinesIterator.value()))
+                {
+                    salesQuotationLine = SalesQuotationLine::findRecId(mapLinesIterator.value(), true);
+
+                    setPrefix(strFmt("@SYS24300", salesQuotationLine.ItemId));
+
+                    if (salesQuotationLine.validateDelete())
+                    {
+                        salesQuotationLine.deleteWithoutUpdatingDeliveryScheduleLines();
+                    }
+                    else
+                    {
+                        throw error("@RET490478");
+                    }
+                }
+                ttscommit;
+            }
+            catch (Exception::Error)
+            {
+                checkFailed("@SYS18447");
+            }
+
+            mapLinesIterator.next();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateExistingSalesQuotationLine</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    private static void RORUpdateExistingSalesQuotationLine(SalesQuotationLine _salesQuotationLine, Qty _qty, InventDimId _inventDimId)
+    {
+        _salesQuotationLine.setInventDimId(_inventDimId);
+        _salesQuotationLine.SalesQty = _qty;
+
+        SalesQuotationLine::modifySalesQty(_salesQuotationLine, _salesQuotationLine.inventDim());
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCreateSingleSalesQuotationLine</Name>
+				<Source><![CDATA[
+    [Hookable(true)]
+    private static void RORCreateSingleSalesQuotationLine(SalesQuotationLine _salesQuotationLine, SalesQuotationTable _salesQuotationTable, TmpRetailProductsToAdd _tmpProductsToAdd)
+    {
+        ttsbegin;
+
+        _salesQuotationLine.createLine(true,
+                                        true,
+                                        true,
+                                        true,
+                                        true,
+                                        true,
+                                        '',
+                                        true);
+        ttscommit;
+
+        if (_salesQuotationLine.RecId)
+        {
+            info("@RET260034");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateSingleSalesQuotationLine</Name>
+				<Source><![CDATA[
+    [Hookable(true)]
+    private static void RORUpdateSingleSalesQuotationLine(SalesQuotationLine _salesQuotationLine, TmpRetailProductsToAdd _tmpProductsToAdd)
+    {
+        if (_salesQuotationLine.validateWrite())
+        {
+            _salesQuotationLine.updateWithoutUpdatingDeliveryScheduleLines();
+        }
+        else
+        {
+            throw error("@RET490477") ;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORInitSalesQuotationLine</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    private static SalesQuotationLine RORInitSalesQuotationLine(SalesQuotationId _salesQuotationId, ItemId _itemId, Qty _qty, InventDimId _inventDimId)
+    {
+        SalesQuotationLine salesQuotationLine;
+
+        salesQuotationLine.initValue();
+        
+        salesQuotationLine.QuotationId  = _salesQuotationId;
+        salesQuotationLine.ItemId       = _itemId;
+        salesQuotationLine.SalesQty     = _qty;
+        salesQuotationLine.SalesUnit    = InventTableModule::find(salesQuotationLine.ItemId, ModuleInventPurchSales::Sales).UnitId;
+        salesQuotationLine.setInventDimId(_inventDimId);
+        
+        SalesQuotationTable salesQuotationTableLocal =  salesQuotationLine.salesQuotationTable();
+        
+        if (salesQuotationTableLocal.QuotationType == QuotationType::RORRental || salesQuotationTableLocal.QuotationType == QuotationType::RORProjRental)
+        {
+            salesQuotationLine.RORTradeType = RORTradeType::Rental;
+            salesQuotationLine.RORReturnInventLocationId = salesQuotationLine.RORReturnInventLocationId ? salesQuotationLine.RORReturnInventLocationId : salesQuotationLine.inventDim().InventLocationId;
+            
+            if(salesQuotationTableLocal.QuotationType == QuotationType::RORProjRental)
+            {
+                salesQuotationLine.ProjTransType = QuotationProjTransType::Item;
+            }
+        }
+
+        InventMovement::setMinMaxQty(salesQuotationLine);
+
+        return salesQuotationLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSingleSalesLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Creates the record in <c>SalesLine</c> table.
+    /// </summary>
+    /// <param name = "_salesLine">
+    /// The <c>SalesLine</c> record buffer.
+    /// </param>
+    /// <param name = "_salesTable">
+    /// The <c>SalesTable</c> record buffer.
+    /// </param>
+    /// <param name = "_tmpProductsToAdd">
+    /// The <c>TmpRetailProductsToAdd</c> record buffer.
+    /// </param>
+    protected void createSingleSalesLine(SalesLine _salesLine, SalesTable _salesTable, TmpRetailProductsToAdd _tmpProductsToAdd)
+    {
+        next createSingleSalesLine(_salesLine, _salesTable, _tmpProductsToAdd);
+
+        if (_salesLine.RecId && _salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            RORRentalLineEditorForm::createSupplementaryItemsLines(_salesLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initPurchLine_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(RetailCreateLinesFromProductsToAdd), staticMethodStr(RetailCreateLinesFromProductsToAdd, initPurchLine))]
+    public static void initPurchLine_post(XppPrePostArgs _eventArgs)
+    {
+        PurchLine purchLine = _eventArgs.getReturnValue() as PurchLine;
+        purchLine.RORTradeType = (purchLine.purchTable().PurchaseType == PurchaseType::RORSubRental ? RORTradeType::SubRental : RORTradeType::SalesPurch);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSalesLine_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(RetailCreateLinesFromProductsToAdd), staticMethodStr(RetailCreateLinesFromProductsToAdd, initSalesLine))]
+    public static void initSalesLine_post(XppPrePostArgs _eventArgs)
+    {
+        SalesLine salesLine = _eventArgs.getReturnValue() as SalesLine;
+        salesLine.RORTradeType = (salesLine.salesTable().SalesType == SalesType::RORRental ? RORTradeType::Rental : RORTradeType::SalesPurch);
+        salesLine.RORReturnInventLocationId = salesLine.RORReturnInventLocationId ? salesLine.RORReturnInventLocationId : salesLine.inventDim().InventLocationId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

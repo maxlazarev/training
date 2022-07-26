@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPRegisterTravelTime</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPRegisterTravelTime extends RunBase
+{
+    WPPWorkOrderLineResource    workOrderLineResource;
+    WPPWorkOrderLine            workOrderLine;
+    WPPWorkOrderTable           workOrderTable;
+    ProjJournalTable            projJournalTable;
+
+    boolean                     createForAllDays;
+    boolean                     createForAllResources;
+
+    FromDateTime                travelFromDateTime;
+    ToDateTime                  travelToDateTime;
+    ProjCategoryIdAll           categoryIdFrom, categoryIdTo;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>buildQuery</Name>
+				<Source><![CDATA[
+    private Query buildQuery()
+    {
+        Query                   query;
+        QueryBuildDataSource    qbdsResourceTable, qbdsWorkOrderLineResource;
+    
+        query = new query();
+    
+        qbdsResourceTable = query.addDataSource(tableNum(WPPResourceTable));
+    
+        qbdsWorkOrderLineResource = qbdsResourceTable.addDataSource(tableNum(WPPWorkOrderLineResource));
+        qbdsWorkOrderLineResource.addLink(fieldNum(WPPResourceTable, ResourceId), fieldNum(WPPWorkOrderLineResource, ResourceId));
+        qbdsWorkOrderLineResource.joinMode(JoinMode::ExistsJoin);
+        qbdsWorkOrderLineResource.addRange(fieldNum(WPPWorkOrderLineResource, WorkOrderLineRecId)).value(SysQuery::value(workOrderLineResource.WorkOrderLineRecId));
+        qbdsWorkOrderLineResource.addRange(fieldNum(WPPWorkOrderLineResource, ActualFromDateTime)).value(SysQuery::value(workOrderLineResource.ActualFromDateTime));
+        qbdsWorkOrderLineResource.addRange(fieldNum(WPPWorkOrderLineResource, ActualToDateTime)).value(SysQuery::value(workOrderLineResource.ActualToDateTime));
+    
+        if (!createForAllResources)
+        {
+            qbdsWorkOrderLineResource.addRange(fieldNum(WPPWorkOrderLineResource, ResourceId)).value(SysQuery::value(workOrderLineResource.ResourceId));
+        }
+    
+        return query;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createForAllDays</Name>
+				<Source><![CDATA[
+    private void createForAllDays()
+    {
+        QueryRun                    queryRun;
+        WPPResourceTable            resourceTable, resourceTableResource;
+        WPPResourceGroupResource    resourceGroupResource;
+        TransDateTime               travelDateTime;
+    
+        queryRun = new QueryRun(this.buildQuery());
+    
+        while (queryRun.next())
+        {
+            resourceTable = queryRun.get(tableNum(WPPResourceTable));
+    
+            if (resourceTable.IsIndividualResource)
+            {
+                for (travelDateTime  = travelFromDateTime;
+                     travelDateTime <= travelToDateTime;
+                     travelDateTime  = DateTimeUtil::newDateTime(DateTimeUtil::date(travelDateTime) + 1, DateTimeUtil::time(travelDateTime)))
+                {
+                    this.createProjJournalTrans(travelDateTime, true, resourceTable);
+                    this.createProjJournalTrans(travelDateTime, false, resourceTable);
+                }
+            }
+            else
+            {
+                while select resourceTableResource
+                where resourceTableResource.IsIndividualResource
+                    exists join resourceGroupResource
+                    where resourceGroupResource.ResourceGroup == resourceTable.ResourceId
+                    &&    resourceGroupResource.ResourceId    == resourceTableResource.ResourceId
+                {
+                    for (travelDateTime  = travelFromDateTime;
+                         travelDateTime <= travelToDateTime;
+                         travelDateTime  = DateTimeUtil::newDateTime(DateTimeUtil::date(travelDateTime) + 1, DateTimeUtil::time(travelDateTime)))
+                    {
+                        this.createProjJournalTrans(travelDateTime, true, resourceTableResource);
+                        this.createProjJournalTrans(travelDateTime, false, resourceTableResource);
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createForStartAndEndDay</Name>
+				<Source><![CDATA[
+    private void createForStartAndEndDay()
+    {
+        QueryRun                    queryRun;
+        WPPResourceTable            resourceTable, resourceTableResource;
+        WPPResourceGroupResource    resourceGroupResource;
+    
+        queryRun = new QueryRun(this.buildQuery());
+    
+        while (queryRun.next())
+        {
+            resourceTable = queryRun.get(tableNum(WPPResourceTable));
+    
+            if (resourceTable.IsIndividualResource)
+            {
+                this.createProjJournalTrans(travelFromDateTime,
+                                            true,
+                                            resourceTable);
+    
+                this.createProjJournalTrans(travelToDateTime,
+                                            DateTimeUtil::date(travelFromDateTime) != DateTimeUtil::date(travelToDateTime),
+                                            resourceTable);
+            }
+            else
+            {
+                while select resourceTableResource
+                where resourceTableResource.IsIndividualResource
+                    exists join resourceGroupResource
+                    where resourceGroupResource.ResourceGroup == resourceTable.ResourceId
+                    &&    resourceGroupResource.ResourceId == resourceTableResource.ResourceId
+                {
+                    this.createProjJournalTrans(travelFromDateTime,
+                                                true,
+                                                resourceTableResource);
+    
+                    this.createProjJournalTrans(travelToDateTime,
+                                                DateTimeUtil::date(travelFromDateTime) != DateTimeUtil::date(travelToDateTime),
+                                                resourceTableResource);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createProjJournalTrans</Name>
+				<Source><![CDATA[
+    private void createProjJournalTrans(TransDateTime _travelDateTime, boolean _createOutwardJourney, WPPResourceTable _resourceTable)
+    {
+        ProjJournalTrans    projJournalTrans;
+        ProjTable           projTable;
+        FromDateTime        fromDateTimeAdjusted;
+        ToDateTime          toDateTimeAdjusted;
+    
+        #TimeConstants
+    
+        projTable = projTable::find(workOrderLine.ProjId);
+    
+        projJournalTrans.initValue();
+        projJournalTrans.initFromProjJournalTable(projJournalTable);
+        projJournalTrans.WPPResourceId    = _resourceTable.ResourceId;
+        projJournalTrans.ProjId         = workOrderLine.ProjId;
+        projJournalTrans.TransDate      = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+        projJournalTrans.ProjTransDate  = DateTimeUtil::date(_travelDateTime);
+        projJournalTrans.Txt            = "@DNR939";
+    
+        if (_createOutwardJourney)
+        {
+            // Adjust the date time so the time zone is applied
+            fromDateTimeAdjusted        = workOrderLineResource.ActualFromDateTime ?
+                                            DateTimeUtil::applyTimeZoneOffset(workOrderLineResource.ActualFromDateTime, DateTimeUtil::getClientMachineTimeZone()) :
+                                            DateTimeUtil::applyTimeZoneOffset(workOrderLineResource.PlannedFromDateTime, DateTimeUtil::getClientMachineTimeZone());
+    
+            projJournalTrans.FromTime   = DateTimeUtil::time(travelFromDateTime);
+            projJournalTrans.ToTime     = DateTimeUtil::time(fromDateTimeAdjusted);
+            projJournalTrans.CategoryId = categoryIdFrom;
+        }
+        else
+        {
+            // Adjust the date time so the time zone is applied
+            toDateTimeAdjusted          = workOrderLineResource.ActualToDateTime ?
+                                            DateTimeUtil::applyTimeZoneOffset(workOrderLineResource.ActualToDateTime, DateTimeUtil::getClientMachineTimeZone()) :
+                                            DateTimeUtil::applyTimeZoneOffset(workOrderLineResource.PlannedToDateTime, DateTimeUtil::getClientMachineTimeZone());
+    
+    
+            projJournalTrans.FromTime   = DateTimeUtil::time(toDateTimeAdjusted);
+            projJournalTrans.ToTime     = DateTimeUtil::time(travelToDateTime);
+            projJournalTrans.CategoryId = categoryIdTo;
+        }
+    
+        projJournalTrans.Qty            = (projJournalTrans.ToTime - projJournalTrans.FromTime) / #secondsPerHour;
+        projJournalTrans.TaxItemGroupId = ProjCategory::find(projJournalTrans.CategoryId).TaxItemGroupId;
+        projJournalTrans.setPeriodDate();
+        projJournalTrans.initFromProjTable(workOrderLine.projTable());
+    
+        if (projJournalTrans.validateWrite())
+        {
+            projJournalTrans.insertFromCode();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createTravelTimeRecords</Name>
+				<Source><![CDATA[
+    private void createTravelTimeRecords()
+    {
+        if (createForAllDays)
+        {
+            this.createForAllDays();
+        }
+        else
+        {
+            this.createForStartAndEndDay();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        DialogRunbase   dialog;
+    
+        dialog = Dialog::newFormnameRunbase(formStr(WPPRegisterTravelTime), this);
+        dialog = this.dialogInternal(dialog);
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCategoryIdFrom</Name>
+				<Source><![CDATA[
+    public ProjCategoryIdAll parmCategoryIdFrom(ProjCategoryIdAll _categoryIdFrom = categoryIdFrom)
+    {
+        categoryIdFrom = _categoryIdFrom;
+    
+        return categoryIdFrom;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCategoryIdTo</Name>
+				<Source><![CDATA[
+    public ProjCategoryIdAll parmCategoryIdTo(ProjCategoryIdAll _categoryIdTo = categoryIdTo)
+    {
+        categoryIdTo = _categoryIdTo;
+    
+        return categoryIdTo;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCreateForAllDays</Name>
+				<Source><![CDATA[
+    public boolean parmCreateForAllDays(boolean _createForAllDays = createForAllDays)
+    {
+        createForAllDays = _createForAllDays;
+    
+        return createForAllDays;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCreateForAllResources</Name>
+				<Source><![CDATA[
+    public boolean parmCreateForAllResources(boolean _createForAllResources = createForAllResources)
+    {
+        createForAllResources = _createForAllResources;
+    
+        return createForAllResources;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTravelFromDateTime</Name>
+				<Source><![CDATA[
+    public FromDateTime parmTravelFromDateTime(FromDateTime _travelFromDateTime = travelFromDateTime)
+    {
+        travelFromDateTime = _travelFromDateTime;
+    
+        return travelFromDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTravelToDateTime</Name>
+				<Source><![CDATA[
+    public ToDateTime parmTravelToDateTime(ToDateTime _travelToDateTime = travelToDateTime)
+    {
+        travelToDateTime = _travelToDateTime;
+    
+        return travelToDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmWorkOrderLineResource</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderLineResource parmWorkOrderLineResource(WPPWorkOrderLineResource _workOrderLineResource = workOrderLineResource)
+    {
+        workOrderLineResource = _workOrderLineResource;
+    
+        return workOrderLineResource;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        WPPWorkOrderLineProjJournalLink workOrderLineProjJournalLink;
+        WPPManageHourJournal            manageHourJournal;
+        Args                            args;
+    
+        super();
+    
+        workOrderLine  = workOrderLineResource.workOrderLine();
+    
+        if (workOrderLine.ProjId)
+        {
+            workOrderTable = workOrderLine.workOrderTable();
+    
+            workOrderLineProjJournalLink = WPPWorkOrderLineProjJournalLink::findNotPosted(workOrderLineResource.WorkOrderLineRecId);
+            if (workOrderLineProjJournalLink)
+            {
+                projJournalTable = ProjJournalTable::find(workOrderLineProjJournalLink.ProjJournalId);
+            }
+    
+            ttsBegin;
+            args = new args();
+            args.parmEnumType(enumNum(WPPIncludeJournalLines));
+            args.parmEnum(WPPIncludeJournalLines::Yes);
+            args.record(workOrderLineResource);
+    
+            manageHourJournal = WPPManageHourJournal::construct(args);
+            manageHourJournal.run();
+    
+            if (manageHourJournal.parmCanContinue())
+            {
+                projJournalTable = manageHourJournal.returnProjJournalTable();
+                this.createTravelTimeRecords();
+            }
+            manageHourJournal.updateProjJournalTableTotalsOrDelete();
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static WPPRegisterTravelTime construct()
+    {
+        return new WPPRegisterTravelTime();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        WPPRegisterTravelTime       registerTravelTime;
+        WPPWorkOrderLineResource    workOrderLineResource;
+    
+        if (_args.dataset() != tableNum(WPPWorkOrderLineResource))
+        {
+            throw error(Error::missingRecord(tableId2pname(tableNum(WPPWorkOrderLineResource))));
+        }
+    
+        workOrderLineResource = _args.record();
+    
+        registerTravelTime = WPPRegisterTravelTime::construct();
+        registerTravelTime.parmWorkOrderLineResource(workOrderLineResource);
+    
+        if (registerTravelTime.prompt())
+        {
+            registerTravelTime.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

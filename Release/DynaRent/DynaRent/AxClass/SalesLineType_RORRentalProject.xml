@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>SalesLineType_RORRentalProject</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[SalesLineTypeFactoryAttribute(SalesType::RORRental, NoYes::Yes)]
+class       SalesLineType_RORRentalProject
+extends     SalesLineType_Project
+{
+    SalesLine exchangedSalesLine;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>deleting</Name>
+				<Source><![CDATA[
+    public void deleting()
+    {
+        super();
+        exchangedSalesLine = this.updateExchangedSalesLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleted</Name>
+				<Source><![CDATA[
+    public void deleted()
+    {
+        super();
+        if (exchangedSalesLine)
+        {
+            WPPWorkOrderSynchronizer workOrderSynchronizer = WPPWorkOrderSynchronizer::newSalesTable(exchangedSalesLine.salesTable());
+
+            if (workOrderSynchronizer)
+            {
+                workOrderSynchronizer.run();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDeleteWarning</Name>
+				<Source><![CDATA[
+    str getDeleteWarning()
+    {
+        str warningMsg;
+        ItemId itemIdWarranty = RAGParameters::find().ItemIdWarranty;
+    
+        if (salesLine.ItemId == itemIdWarranty)
+        {
+            warningMsg = strFmt("@DNR7171", salesLine.RORLineType, "@DNR5038", salesLine.RORGetParentLine().ItemId);
+        }
+    
+        return warningMsg;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateExchangedSalesLine</Name>
+				<Source><![CDATA[
+    private SalesLine updateExchangedSalesLine()
+    {
+        SalesLine           salesLineExchanged, salesLineTransport;
+        RORRentalDateTimes  rentalDateTimes, rentalDateTimesExchanged;
+        boolean             isCommercialExchange;
+        RAGParameters       parameters;
+    
+        RORTmpOrderAmendmentDialogTable tmpOrderAmendmentDialogTable;
+        ROROrderAmendmentLog            orderAmendmentLog;
+    
+        ttsBegin;
+        // Find the record that has been exchanged
+        select forupdate firstonly salesLineExchanged
+        where salesLineExchanged.RORRecIdExchanged == salesLine.RecId;
+    
+        if (salesLineExchanged)
+        {
+            WPPWorkOrderTemplateOrderReference::deleteWorkOrders(salesLineExchanged);
+            isCommercialExchange = salesLineExchanged.RORAmendmentExchangeType == RORAmendmentExchangeType::Commercial;
+    
+            // Because the replacement line is being deleted
+            // the RecId exchanged is set to 0
+            salesLineExchanged.RORRecIdExchanged = 0;
+            salesLineExchanged.RORAmendmentExchangeType = RORAmendmentExchangeType::None;
+            salesLineExchanged.update();
+    
+            if (!isCommercialExchange
+            && salesLineExchanged.RORTradeType != RORTradeType::SalesPurch)
+            {
+                // reset discount on return transport set during exchange
+                // TODO: Move to Dynarent model
+                //salesLineExchanged.RORReturnPercent= 0
+            }
+            salesLineExchanged.update();
+
+            // Update the rental dates/times
+            rentalDateTimes = salesLine.RORRentalDateTimesHost::rentalDateTimes();
+            if (rentalDateTimes.OffRentDateTime
+            ||  rentalDateTimes.ExpectedOffRentDateTime)
+            {
+                rentalDateTimesExchanged = salesLineExchanged.RORRentalDateTimesHost::rentalDateTimes(true);
+    
+                tmpOrderAmendmentDialogTable.OffRentDateTime = rentalDateTimesExchanged.OffRentDateTime;
+    
+                if (rentalDateTimes.OffRentDateTime)
+                {
+                    rentalDateTimesExchanged.OffRentDateTime = rentalDateTimes.OffRentDateTime;
+                    rentalDateTimesExchanged.modifiedField(fieldNum(RORRentalDateTimes, OffRentDateTime));
+                }
+                else
+                if (rentalDateTimes.ExpectedOffRentDateTime)
+                {
+                    rentalDateTimesExchanged.OffRentDateTime = DateTimeUtil::newDateTime(dateNull(), 0);//DateTimeUtil::maxValue();
+                    rentalDateTimesExchanged.modifiedField(fieldNum(RORRentalDateTimes, OffRentDateTime));
+    
+                    rentalDateTimesExchanged.ExpectedOffRentDateTime = rentalDateTimes.ExpectedOffRentDateTime;
+                }
+    
+                rentalDateTimesExchanged.update();
+            }
+    
+            tmpOrderAmendmentDialogTable.ItemIdRequested = salesLine.ItemId;
+            // Remember to set salesPurchLine.RORIsModified to Yes when inserting amendment log record.
+            orderAmendmentLog.initValue();
+            orderAmendmentLog.DNRReasonType = DNRReasonType::ReverseExchange;
+            orderAmendmentLog.initFromSalesPurchLine(salesLineExchanged);
+            orderAmendmentLog.setLogTextGenerated(tmpOrderAmendmentDialogTable, DNRReasonType::ReverseExchange);
+            orderAmendmentLog.insert();
+        }
+        ttsCommit;
+    
+        return salesLineExchanged;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    static SalesLineType construct(SalesLine salesLine, SalesTable salesTable = salesLine.salesTable())
+    {
+        return new SalesLineType_RORRental(salesLine, salesTable);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRTaxProjClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(TaxProj))]
+final class DNRTaxProjClass_Extension
+{   
+    public FINMarkupWorkTrans   markupWorkTrans;
+    public boolean              markupWorkTransAdminister;
+    public RefTableId           markupWorkTransParentSourceTableId;
+    public RefRecId             markupWorkTransParentSourceRecId;
+       
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>calcMarkup</Name>
+				<Source><![CDATA[
+    protected void calcMarkup()
+    {
+        next calcMarkup();
+
+        this.FINCalcMarkupWorkTrans();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>sourceRecId</Name>
+				<Source><![CDATA[
+    public RecId sourceRecId()
+    {
+        RecId ret = next sourceRecId();
+
+        if (this.FINGetMarkupWorkTransAdminister())
+        {
+            ret = this.FINGetMarkupWorkTrans().RecId;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>sourceTableId</Name>
+				<Source><![CDATA[
+    public RefTableId sourceTableId()
+    {
+        RefTableId ret = next sourceTableId();
+
+        if (this.FINGetMarkupWorkTransAdminister())
+        {
+            ret = this.FINGetMarkupWorkTrans().TableId;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCalcMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    // method based /Classes/TaxProj/calcMarkup
+    public void FINCalcMarkupWorkTrans()
+    {
+        SalesCalcTax_ProjProposal  salesCalcTaxLocal = salesCalcTax;
+        TaxAmount   taxAmount;
+        NoYes       moreMarkup;
+        Amount      baseAmount;
+        Percent     cashDisc;
+        AmountCur   lineAmount;
+        boolean     taxCalculateLineLocal = taxCalculateLine;
+        ParmId      parmId;
+        boolean     mustCalcMarkupWorkTrans = true;
+
+        if (salesCalcTaxLocal)
+        {
+            cashDisc = CashDisc::find(salesCalcTaxLocal.parmProjProposalJour().CashDiscCode).Percent;
+        }
+
+        moreMarkup  = true;
+                         
+        markupWorkTransParentSourceTableId = this.sourceTableId();
+        markupWorkTransParentSourceRecId = this.sourceRecId();
+        
+        if (salesCalcTaxLocal)
+        {
+            if (!salesCalcTaxLocal.FINParmIsLineRelatedMarkupTrans())
+            {
+                mustCalcMarkupWorkTrans = false;
+            }
+
+            if (mustCalcMarkupWorkTrans)
+            {
+                parmId = salesCalcTaxLocal.parmProjProposalJour().ProposalId;
+
+                if (!this.FINMustCheckMarkupWorkTrans(parmId))
+                {
+                    mustCalcMarkupWorkTrans = false;
+                }
+            }            
+            
+        }
+
+        if (mustCalcMarkupWorkTrans)
+        {
+            Set processedRecordsSet = new Set(Types::Int64);
+
+            while select markupWorkTrans
+                where markupWorkTrans.ParmLineTableId == markupWorkTransParentSourceTableId
+                && markupWorkTrans.ParmLineRecId == markupWorkTransParentSourceRecId
+                && ((parmId && markupWorkTrans.ParmId == parmId) ||
+                    (!parmId && !markupWorkTrans.ParmLineRecId))
+            {
+                if (processedRecordsSet.in(markupWorkTrans.RecId))
+                {
+                    continue;
+                }
+                else
+                {
+                    processedRecordsSet.add(markupWorkTrans.RecId);
+                }
+
+                markupWorkTransAdminister= NoYes::Yes;
+                
+                this.FINConfigureTaxForMarkupLine();
+
+                lineAmount = markupWorkTrans.AmountCur * -1;
+                
+                // get the amount excluding tax
+                if (salesCalcTaxLocal.isTaxIncluded())
+                {
+                    baseAmount = this.amountExclTax(
+                                        lineAmount,
+                                        false,
+                                        false,
+                                        0,
+                                        '',
+                                        '',
+                                        markupWorkTrans.RecId,
+                                        markupWorkTrans.TableId);
+                }
+                else
+                {
+                    baseAmount = lineAmount;
+                }
+
+                // deduct non tax portion of the cash discount from the base amount
+                if (this.taxParameters().TaxLessCashDisc)
+                {
+                    baseAmount -= baseAmount * cashDisc / 100;
+                }
+                
+                this.insertLineInInternal(baseAmount,
+                                              0,
+                                              '',
+                                              '',
+                                              0,
+                                              salesCalcTaxLocal.transDimension(),
+                                              LedgerDimensionFacade::serviceCreateLedgerDimension(salesCalcTaxLocal.operationAccountMarkup(), salesCalcTaxLocal.transDimension()),
+                    salesCalcTaxLocal.operationPostingMarkup());
+                            
+                if (taxCalculateLineLocal)
+                {
+                    taxAmount = this.calcTax();
+                
+                    this.saveInProcessTransaction();
+                
+                }
+            }
+            markupWorkTransAdminister = NoYes::No;
+            markupWorkTransParentSourceTableId = 0;
+            markupWorkTransParentSourceRecId = 0;
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINConfigureTaxForMarkupLine</Name>
+				<Source><![CDATA[
+    protected void FINConfigureTaxForMarkupLine()
+    {
+        SalesCalcTax_ProjProposal  salesCalcTaxLocal = salesCalcTax;
+        NoYes                   moreMarkup;
+        TransDate               taxCalculationDate;
+        TaxCalculationDateType  taxCalculationDateType = this.taxParameters().TaxCalculationDateType;
+        boolean                 checkTaxCodesByLine;
+                
+        if (markupWorkTrans)
+        {
+            markupWorkTransAdminister = NoYes::Yes;
+
+            switch (taxCalculationDateType)
+            {
+                case TaxCalculationDateType::DeliveryDate:
+                    taxCalculationDate = salesCalcTaxLocal.deliveryDateMarkup();
+                    break;
+
+                case TaxCalculationDateType::DocumentDate:
+                    taxCalculationDate = salesCalcTaxLocal.documentDate();
+                    break;
+
+                case TaxCalculationDateType::InvoiceDate:
+                    taxCalculationDate = salesCalcTaxLocal.invoiceDate();
+                    break;
+            }
+                        
+            this.insertIntersection(markupWorkTrans.TaxGroup,
+                markupWorkTrans.TaxItemGroup,
+                salesCalcTaxLocal.transTransId(),
+                markupWorkTrans.Txt,
+                taxCalculationDate);
+
+            checkTaxCodesByLine = this.checkTaxCodesByLine();
+            if (! checkTaxCodesByLine)
+            {
+                throw error("@SYS22772");
+            }
+        }
+        else
+        {
+            markupWorkTransAdminister   = NoYes::No;
+            moreMarkup                  = false;
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINMustCheckMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    private boolean FINMustCheckMarkupWorkTrans(ParmId _parmId)
+    {
+        boolean ret = true;
+        
+        if (_parmId)
+        {
+            FINMarkupWorkTransReference markupWorkTransReference;
+
+            select firstonly RecId from markupWorkTransReference
+            where markupWorkTransReference.ParmId == _parmId
+            &&    markupWorkTransReference.MarkupWorkTransRecId;
+
+            // Do not calculated tax based on markupWorkTrans when opening Totals from proj invoice proposal.
+            // In such situation markupTrans records were temporary created on opening Totals form and the tax would be calculated from there.            
+            if (markupWorkTransReference)
+            {
+                ret = false;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    public FINMarkupWorkTrans FINGetMarkupWorkTrans()
+    {
+        return markupWorkTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTransAdminister</Name>
+				<Source><![CDATA[
+    public boolean FINGetMarkupWorkTransAdminister()
+    {
+        return markupWorkTransAdminister;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTransParentSourceTableId</Name>
+				<Source><![CDATA[
+    public RefTableId FINGetMarkupWorkTransParentSourceTableId()
+    {
+        return markupWorkTransParentSourceTableId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINGetMarkupWorkTransParentSourceRecId</Name>
+				<Source><![CDATA[
+    public RefRecId FINGetMarkupWorkTransParentSourceRecId()
+    {
+        return markupWorkTransParentSourceRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetMarkupWorkTrans</Name>
+				<Source><![CDATA[
+    public void FINSetMarkupWorkTrans(FINMarkupWorkTrans _markupWorkTrans)
+    {
+        markupWorkTrans = _markupWorkTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetMarkupWorkTransAdminister</Name>
+				<Source><![CDATA[
+    public void FINSetMarkupWorkTransAdminister(boolean _markupWorkTransAdminister)
+    {
+        markupWorkTransAdminister = _markupWorkTransAdminister;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetMarkupWorkTransParentSourceTableId</Name>
+				<Source><![CDATA[
+    public void FINSetMarkupWorkTransParentSourceTableId(RefTableId _markupWorkTransParentSourceTableId)
+    {
+        markupWorkTransParentSourceTableId = _markupWorkTransParentSourceTableId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINSetMarkupWorkTransParentSourceRecId</Name>
+				<Source><![CDATA[
+    public void FINSetMarkupWorkTransParentSourceRecId(RefRecId _markupWorkTransParentSourceRecId)
+    {
+        markupWorkTransParentSourceRecId = _markupWorkTransParentSourceRecId;
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>skipTaxCalculations_post</Name>
+				<Source><![CDATA[
+    // Event handler methods
+
+    [PostHandlerFor(classStr(Tax), methodStr(Tax, skipTaxCalculations))]
+    public static void skipTaxCalculations_post(XppPrePostArgs _args)
+    {
+        _args.setReturnValue(false);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,3431 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORRentalDateTimes</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class RORRentalDateTimes extends common
+{
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>applyDateTimeOffset</Name>
+				<Source><![CDATA[
+    private void applyDateTimeOffset(
+        FieldId         _fieldId,
+        TransDate       _baseDate,
+        int             _dateOffset,
+        RORDateUnit     _dateUnit,
+        boolean         _applyDateOffset,
+        TimeOfDay       _baseTime,
+        int             _timeOffset,
+        RORTimeUnit     _timeUnit,
+        boolean         _applyTimeOffset,
+        boolean         _hasSystemTime = false)
+    {
+        int         timeZoneDifference = (DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(DateTimeUtil::getSystemDateTime(), DateTimeUtil::getUserPreferredTimeZone()))
+                        - DateTimeUtil::time(DateTimeUtil::getSystemDateTime()));
+        TransDate   rentDate = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(this.(_fieldId), DateTimeUtil::getUserPreferredTimeZone()));
+        TimeOfDay   rentTime = DateTimeUtil::time(this.(_fieldId)) + timeZoneDifference;
+    
+        if (_applyDateOffset)
+        {
+            rentDate = RORRentalDateTimes::applyDateOffset(_baseDate, _dateOffset, _dateUnit);
+        }
+    
+        if (_applyTimeOffset)
+        {
+            rentTime = RORRentalDateTimes::applyTimeOffset(_baseTime, _timeOffset, _timeUnit);
+        }
+    
+        if (!rentDate && _hasSystemTime)
+        {
+            rentTime = rentTime + timeZoneDifference;
+        }
+
+        if (!rentDate && rentTime < 0)
+        {
+            rentTime = 0;            
+        }
+    
+        this.(_fieldId) = _hasSystemTime ? DateTimeUtil::newDateTime(rentDate, rentTime) : DateTimeUtil::newDateTime(rentDate, rentTime, DateTimeUtil::getUserPreferredTimeZone());
+    
+        this.modifiedField(_fieldId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadeToLines</Name>
+				<Source><![CDATA[
+    public server void cascadeToLines(RORSubrentalSynchroniser _subrentalSynchroniser = null,
+                                      boolean                  _maySynchronizeSubrental = true)
+    {
+        RORRentalDateTimes          rentalDateTimes;
+        boolean                     maySynchronizeSubrental;
+        RORSubrentalSynchroniser    subrentalSynchroniser   = _subrentalSynchroniser;
+        RORRentalLine               rentalLineReplacement;
+        RORRentalLine               rentalLineExchange;
+        Common                      common;
+        ;
+        // initialize table map
+        common                  = this.getHostBuffer();
+        rentalLineReplacement   = common;
+        rentalLineExchange      = rentalLineReplacement.RORLineBuffer();
+    
+        if (maySynchronizeSubrental && !subrentalSynchroniser)
+        {
+            subrentalSynchroniser = RORSubrentalSynchroniser::construct(this.RefTableId);
+        }
+    
+        ttsBegin;
+    
+        while select forupdate rentalDateTimes
+        where rentalDateTimes.ParentRentalDateTimes   == this.RecId
+        {
+            if (rentalDateTimes.SynchronizeFromParent)
+            {
+                maySynchronizeSubrental = rentalDateTimes.maySynchronizeSubrental() && _maySynchronizeSubrental;
+    
+                rentalDateTimes.initDateTimesFromParent(this, !rentalDateTimes.SynchronizeFromParent);
+                rentalDateTimes.update(subrentalSynchroniser, maySynchronizeSubrental, subrentalSynchroniser.parmForceStopTierRangeRecalculation());
+            }
+            else
+            {
+                select RecId from rentalLineReplacement
+                where rentalLineReplacement.RecId == rentalDateTimes.RefRecId
+                    outer join rentalLineExchange
+                    where rentalLineExchange.RecIdExchanged == rentalLineReplacement.RecId;
+    
+                if (rentalLineReplacement && rentalLineExchange && !rentalDateTimes.OffRentDateTime)
+                {
+                    maySynchronizeSubrental = rentalDateTimes.maySynchronizeSubrental() && _maySynchronizeSubrental;
+    
+                    rentalDateTimes.initDateTimesFromParent(this, !rentalDateTimes.SynchronizeFromParent);
+                    rentalDateTimes.update(subrentalSynchroniser, maySynchronizeSubrental);
+                }
+            }
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cascadingUpdateFromRentalDatesSetup</Name>
+				<Source><![CDATA[
+    private void cascadingUpdateFromRentalDatesSetup(FieldId _fieldIdChanged, RORRentalDateTimesHost _rentalDateTimesHost = null)
+    {
+        RORRentalDateTimeType   dateTimeType;
+        RORRentalDatesSetup     rentalDatesSetup;
+        FieldId                 fieldId;
+        TransDate               baseDate;
+        TimeOfDay               baseTime;
+        boolean                 hasSystemTime;
+        boolean                 applyDateOffset = true;
+        boolean                 applyTimeOffset = true;
+    
+        #TimeConstants
+    
+        hasSystemTime = false;
+        dateTimeType = RORRentalDateTimes::fieldId2DateTimeType(_fieldIdChanged);
+    
+        if (dateTimeType != RORRentalDateTimeType::None)
+        {
+            // Find all fields which rely on the modified field and update them
+            while select DateTimeType, DateOffset, DateUnit, TimeOffset, TimeUnit from rentalDatesSetup
+            where   (rentalDatesSetup.SetupActionDate       == RORRentalDateTimeSetupAction::Field
+            &&       rentalDatesSetup.DateTimeTypeDateFrom  == dateTimeType)
+            ||      (rentalDatesSetup.SetupActionTime       == RORRentalDateTimeSetupAction::Field
+            &&       rentalDatesSetup.DateTimeTypeTimeFrom  == dateTimeType)
+            {
+                fieldId = RORRentalDateTimes::dateTimeType2FieldId(rentalDatesSetup.DateTimeType);
+    
+                if (rentalDatesSetup.DateTimeTypeDateFrom == dateTimeType)
+                {
+                    applyDateOffset = true;
+                    switch (rentalDatesSetup.SetupActionDate)
+                    {
+                        case RORRentalDateTimeSetupAction::Fixed:
+                            baseDate = rentalDatesSetup.DateFixed;
+                            break;
+    
+                        case RORRentalDateTimeSetupAction::System:
+                            baseDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+                            break;
+    
+                        case RORRentalDateTimeSetupAction::Field:
+                            baseDate = DateTimeUtil::date(this.(_fieldIdChanged));
+                            break;
+    
+                        default :
+                            baseDate = dateNull();
+                    }
+                }
+                else
+                {
+                    // leave without change
+                    applyDateOffset = false;
+                }
+    
+                baseDate = DateTimeUtil::date(DateTimeUtil::newDateTime(baseDate, 0));
+    
+                fieldId = RORRentalDateTimes::dateTimeType2FieldId(rentalDatesSetup.DateTimeType);
+    
+                if (rentalDatesSetup.DateTimeTypeTimeFrom == dateTimeType)
+                {
+                    applyTimeOffset = true;
+                    switch (rentalDatesSetup.SetupActionTime)
+                    {
+                        case RORRentalDateTimeSetupAction::Fixed:
+                            baseTime = rentalDatesSetup.TimeFixed;
+                            break;
+    
+                        case RORRentalDateTimeSetupAction::System:
+                            baseTime = DateTimeUtil::time(DateTimeUtil::getSystemDateTime());
+                            hasSystemTime = true;
+                            break;
+    
+                        case RORRentalDateTimeSetupAction::Field:
+                            baseTime = DateTimeUtil::time(DateTimeUtil::applyTimeZoneOffset(this.(_fieldIdChanged), DateTimeUtil::getUserPreferredTimeZone()));
+                            break;
+    
+                        default :
+                            baseTime = 0;
+                    }
+                }
+                else
+                {
+                    // leave without change
+                    applyTimeOffset = false;
+                }
+    
+                this.applyDateTimeOffset(
+                    fieldId,
+                    baseDate,
+                    rentalDatesSetup.DateOffset,
+                    rentalDatesSetup.DateUnit,
+                    applyDateOffset,
+                    baseTime,
+                    rentalDatesSetup.TimeOffset,
+                    rentalDatesSetup.TimeUnit,
+                    applyTimeOffset,
+                    hasSystemTime);
+    
+                this.dateTimeModified(fieldId, _rentalDateTimesHost);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkClearTimes</Name>
+				<Source><![CDATA[
+    private void checkClearTimes()
+    {
+        void checkClear(FieldId _fieldIdDateTime)
+        {
+            TransDate rentalDate = DateTimeUtil::date(this.(_fieldIdDateTime));
+            ;
+    
+            if (!rentalDate || rentalDate == dateMax())
+            {
+                this.(_fieldIdDateTime) = DateTimeUtil::newDateTime(rentalDate, 0);
+            }
+        }
+    
+        checkClear(fieldNum(RORRentalDateTimes, PreparationDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, OutboundDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, RequestedDeliveryDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, OnRentDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, BuildDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, EventStartDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, EventEndDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, StrikeDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, OffRentDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, RequestedPickupDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, InboundDateTime));
+        checkClear(fieldNum(RORRentalDateTimes, InspectionDateTime));
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkDateCalendar</Name>
+				<Source><![CDATA[
+    private boolean checkDateCalendar(FieldId _fieldId, DNRCalendarId _calendarId = '')
+    {
+        boolean             ret = true;
+        DNRCalendarId       calendarId = _calendarId;
+        DNRCalendarDate     workCalendarDate;
+        TransDate           rentalDate = DateTimeUtil::date(this.(_fieldId));
+    
+        Query                       query;
+        SysInfoAction_FormrunQuery  infoAction;
+        ;
+    
+        if (rentalDate
+        && this.RORRentalDateTimesHost::isWorksheetTable()
+        && this.hostHeadingLineLevel() == HeadingLine::Line)
+        {
+            if (!calendarId)
+            {
+                calendarId = this.getHostBuffer().calendarId;
+            }
+    
+            if (calendarId)
+            {
+                workCalendarDate = DNRCalendarDate::RORfind(calendarId, rentalDate);
+    
+                if (!workCalendarDate)
+                {
+                    query = new Query();
+                    query.addDataSource(tablenum(DNRCalendarTable)).addRange(fieldnum(DNRCalendarTable, CalendarId)).value(queryValue(calendarId)) ;
+    
+                    infoAction = SysInfoAction_FormrunQuery::newFormnameQuery(formstr(DNRCalendarTable), query);
+                    ret = checkFailed(strFmt("@DNR3262", calendarId, rentalDate), '', infoAction);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkDatesAgainstCalendar</Name>
+				<Source><![CDATA[
+    public boolean checkDatesAgainstCalendar(DNRCalendarId _calendarId, boolean _showWarning, boolean _updateWhenBlocked, FieldId _fieldId = 0)
+    {
+        DNRWorkCalendarSched        workCalendarSched = new DNRWorkCalendarSched(true); 
+        RORRentalDatesSetup         rentalDatesSetup;
+        RORRentalDateTimeType       filterField = RORRentalDateTimeType::None;
+    
+        FieldId                     fieldId;
+        TransDate                   transDate;
+    
+        boolean                     wasUpdated = false;
+        boolean                     retVal = true;
+        ;
+    
+        if (_fieldId)
+        {
+            filterField = RORRentalDateTimes::fieldId2DateTimeType(_fieldId);
+        }
+    
+        ttsBegin;
+    
+        this.selectForUpdate(_updateWhenBlocked);
+    
+        // Iterate each date type with a set which requires a calendar check
+        // Filter if a filter field supplied
+        while select DateTimeType, ClosedAction from rentalDatesSetup
+        where rentalDatesSetup.ClosedAction     != RORRentalDateClosedAction::None
+        &&    (filterField                      == RORRentalDateTimeType::None
+        ||     rentalDatesSetup.DateTimeType    == filterField)
+        {
+            fieldId = RORRentalDateTimes::dateTimeType2FieldId(rentalDatesSetup.DateTimeType);
+            transDate = DateTimeUtil::date(this.(fieldId));
+            if (transDate)
+            {
+                if (!RORRentalDateTimes::dateIsOpen(_calendarId, transDate))
+                {
+                    retVal = _showWarning && !_updateWhenBlocked ? checkFailed (strFmt("@DNR1345", fieldId2PName(tableNum(RORRentalDateTimes), fieldId),
+                                                                            dayName(dayOfWk(transDate)), transDate, _calendarId)) : false;
+    
+                    if (_updateWhenBlocked)
+                    {
+                        switch (rentalDatesSetup.ClosedAction)
+                        {
+                            case RORRentalDateClosedAction::RollForwards:   this.(fieldId) = this.rollDateToOpen(_calendarId, transDate, 1, workCalendarSched);
+                                                                            wasUpdated = true;
+                                                                            break;
+                            case RORRentalDateClosedAction::RollBackwards:  this.(fieldId) = this.rollDateToOpen(_calendarId, transDate, -1, workCalendarSched);
+                                                                            wasUpdated = true;
+                                                                            break;
+                        }
+    
+                        if (_showWarning)
+                        {
+                            info (strFmt("@DNR1346", fieldId2PName(tableNum(RORRentalDateTimes), fieldId),
+                                this.(fieldId), dayName(dayofwk(this.orig().(fieldId))), this.orig().(fieldId), _calendarId));
+                        }
+                    }
+                }
+            }
+        }
+    
+        if (wasUpdated)
+        {
+            this.update();
+        }
+    
+        ttsCommit;
+    
+        return retVal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dateTimeModified</Name>
+				<Source><![CDATA[
+    public void dateTimeModified(FieldId _fieldId, RORRentalDateTimesHost _rentalDateTimesHost = null)
+    {
+        RORRentalDateTimeType   dateTimeType;
+        RORRentalDateTImes      orig = this.orig();
+        RORRentalDateTimesHost  rentalDateTimesHost = _rentalDateTimesHost.HeaderId ? _rentalDateTimesHost : this.getHostBuffer();
+        Common                  hostBuffer = rentalDateTimesHost;
+        TransDate               dateOrig = DateTimeUtil::date(orig.(_fieldId));
+        TransDate               dateThis = DateTimeUtil::date(this.(_fieldId));
+        TransDateTime           transDateTimeWithTimeZone = DateTimeUtil::applyTimeZoneOffset(this.(_fieldId), DateTimeUtil::getUserPreferredTimeZone());
+        ;
+    
+        // If a date is changed to datenull or datemax, then time should be set to zero.  If WAS a datenull or max, but now given a real value, then init the time
+        // based on the setup
+        dateTimeType = RORRentalDateTimes::fieldId2DateTimeType(_fieldId);
+        if (dateThis != dateOrig
+        && (dateOrig == dateNull() || dateOrig == dateMax() || dateThis == dateNull() || dateThis == dateMax()))
+        {
+            if (dateThis == dateNull() || dateThis == dateMax())
+            {
+                this.(_fieldId) = DateTimeUtil::newDateTime(dateThis, 0);
+            }
+            else if (!DateTimeUtil::time(transDateTimeWithTimeZone))
+            {
+                boolean ignoreTimeSetup = (orig && dateThis && _fieldId == fieldNum(RORRentalDateTimes, OffRentDateTime));
+
+                // Do not force time from setup if off-rent dateTime set specificaly with time 0:00, for instance during exchange.
+                if (!ignoreTimeSetup)
+                {
+                    this.initTimeFromSetup(dateTimeType);
+                }
+            }
+        }
+    
+        // check new date/time in relation with host record e.g. against rental calendar
+        if (hostBuffer.RORRentalDateTimesHost::isWorksheetTable() && rentalDateTimesHost.CalendarId)
+        {
+            this.checkDatesAgainstCalendar(rentalDateTimesHost.CalendarId, true, false, _fieldId);
+        }
+    
+        // Now check for other fields to update etc
+        this.cascadingUpdateFromRentalDatesSetup(_fieldId, rentalDateTimesHost);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getHostBuffer</Name>
+				<Source><![CDATA[
+    public RORRentalDateTimesHost getHostBuffer()
+    {
+        RORRentalDateTimesHost    rentalDateTimesHost;
+    
+        switch (this.RefTableId)
+        {
+            case tableNum(SalesLine):
+                rentalDateTimesHost = SalesLine::findRecId(this.RefRecId);
+                break;
+            case tableNum(SalesTable):
+                rentalDateTimesHost = SalesTable::findRecId(this.RefRecId);
+                break;
+            case tableNum(SalesQuotationLine):
+                rentalDateTimesHost = SalesQuotationLine::findRecId(this.RefRecId);
+                break;
+            case tableNum(SalesQuotationTable):
+                rentalDateTimesHost = SalesQuotationTable::findRec(this.RefRecId);
+                break;
+            case tableNum(PurchLine):
+                rentalDateTimesHost = PurchLine::findRecId(this.RefRecId);
+                break;
+            case tableNum(PurchTable):
+                rentalDateTimesHost = PurchTable::findRecId(this.RefRecId);
+                break;
+            case tableNum(CustConfirmTrans):
+                rentalDateTimesHost = CustConfirmTrans::findRecId(this.RefRecId);
+                break;
+            case tableNum(CustConfirmJour):
+                rentalDateTimesHost = CustConfirmJour::findRecId(this.RefRecId);
+                break;
+        }
+    
+        return rentalDateTimesHost;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOffRentDateTime</Name>
+				<Source><![CDATA[
+    public ROROffRentDateTime getOffRentDateTime(boolean _checkExpectedOffRent = true, boolean _ignoreTimeWithoutDate = true)
+    {
+        ROROffRentDateTime  offRentDate;
+        FieldId             fieldIdPeriodStartDateTime;
+        FieldId             fieldIdPeriodEndDateTime;
+        FieldId             fieldIdPeriodExpectedEndDateTime;
+        ;
+    
+        [fieldIdPeriodStartDateTime, fieldIdPeriodEndDateTime, fieldIdPeriodExpectedEndDateTime] = RORRentalDateTimes::getPeriodFieldIds();
+    
+        offRentDate = this.(fieldIdPeriodEndDateTime);
+    
+        if (DateTimeUtil::date(offRentDate) <= dateNull() || DateTimeUtil::date(offRentDate) >= dateMax())
+        {
+            if (_checkExpectedOffRent)
+            {
+                offRentDate = this.(fieldIdPeriodExpectedEndDateTime);
+            }
+            else if (_ignoreTimeWithoutDate)
+            {
+                offRentDate = DateTimeUtil::minValue();
+            }
+        }
+
+        // This shall never happen
+        if(DateTimeUtil::date(offRentDate) >= dateMax())
+        {
+            throw error(error::wrongUseOfFunction(funcName()));
+        }
+    
+        return offRentDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getOnRentDateTime</Name>
+				<Source><![CDATA[
+    public ROROnRentDateTime getOnRentDateTime()
+    {
+        ROROnRentDateTime   onRentDate;
+        FieldId             fieldIdPeriodStartDateTime;
+        FieldId             fieldIdPeriodEndDateTime;
+        FieldId             fieldIdPeriodExpectedEndDateTime;
+        ;
+    
+        [fieldIdPeriodStartDateTime, fieldIdPeriodEndDateTime, fieldIdPeriodExpectedEndDateTime] = RORRentalDateTimes::getPeriodFieldIds();
+    
+        onRentDate = this.(fieldIdPeriodStartDateTime);
+    
+        return onRentDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRentalPeriodDateTimes</Name>
+				<Source><![CDATA[
+    public container getRentalPeriodDateTimes(
+        FieldId _fieldIdPeriodStartDateTime = 0,
+        FieldId _fieldIdPeriodEndDateTime = 0,
+        FieldId _fieldIdPeriodExpectedEndDateTime = 0)
+    {
+        FieldId         fieldIdPeriodStartDateTime = _fieldIdPeriodStartDateTime;
+        FieldId         fieldIdPeriodEndDateTime = _fieldIdPeriodEndDateTime;
+        FieldId         fieldIdPeriodExpectedEndDateTime = _fieldIdPeriodExpectedEndDateTime;
+        TransDateTime   minValue = DateTimeUtil::minValue();
+        TransDateTime   maxValue = DateTimeUtil::maxValue();
+        ;
+    
+        if (!fieldIdPeriodStartDateTime || !fieldIdPeriodEndDateTime || !fieldIdPeriodExpectedEndDateTime)
+        {
+            // Field Ids already take primary/secondary fields into consideration
+            [fieldIdPeriodStartDateTime, fieldIdPeriodEndDateTime, fieldIdPeriodExpectedEndDateTime] = RORRentalDateTimes::getPeriodFieldIds();
+        }
+    
+        return [this.(fieldIdPeriodStartDateTime)       ? this.(fieldIdPeriodStartDateTime)       : minValue,
+               this.(fieldIdPeriodEndDateTime)          ? this.(fieldIdPeriodEndDateTime)         : maxValue,
+               this.(fieldIdPeriodExpectedEndDateTime)  ? this.(fieldIdPeriodExpectedEndDateTime) : minValue];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hostHeadingLineLevel</Name>
+				<Source><![CDATA[
+    public HeadingLine hostHeadingLineLevel(RefTableId _refTableId = this.RefTableId)
+    {
+        HeadingLine ret;
+        ;
+    
+        switch (_refTableId)
+        {
+            case
+                tableNum(SalesTable),
+                tableNum(SalesQuotationTable),
+                tableNum(PurchTable),
+                tableNum(CustConfirmJour),
+                tableNum(CustInvoiceJour),
+                tableNum(CustQuotationJour),
+                tableNum(CustQuotationConfirmJour),
+                tableNum(VendPurchOrderJour),
+                tableNum(VendInvoiceJour):
+                    ret = HeadingLine::Heading;
+                    break;
+    
+            case
+                tableNum(SalesLine),
+                tableNum(SalesQuotationLine),
+                tableNum(PurchLine),
+                tableNum(CustConfirmTrans),
+                tableNum(CustInvoiceTrans),
+                tableNum(CustQuotationTrans),
+                tableNum(CustQuotationConfirmTrans),
+                tableNum(PurchLineHistory),
+                tableNum(VendInvoiceTrans),
+                tableNum(RORRentalEditorLine):
+                    ret = HeadingLine::Line;
+                    break;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initDateTimesFromParent</Name>
+				<Source><![CDATA[
+    public void initDateTimesFromParent(RORRentalDateTimes _rentalDateTimesParent = RORRentalDateTimes::find(this.ParentRentalDateTimes), boolean _onlyPostRental = false)
+    {
+        if (_rentalDateTimesParent)
+        {
+            this.initFromRentalDateTimes(_rentalDateTimesParent, true, _onlyPostRental);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initDateTimesFromSetup</Name>
+				<Source><![CDATA[
+    public void initDateTimesFromSetup()
+    {
+        RORRentalDatesSetup rentalDatesSetup;
+        FieldId             fieldId;
+        TransDate           baseDate;
+        TimeOfDay           baseTime;
+        boolean             hasSystemTime = false;
+    
+        #TimeConstants
+        ;
+    
+        // Only set fixed defaults at header level, lines will take defaults from related header dates
+        if (this.hostHeadingLineLevel() == HeadingLine::Heading)
+        {
+            while select rentalDatesSetup
+            where rentalDatesSetup.SetupActionDate ==  RORRentalDateTimeSetupAction::Fixed
+            ||    rentalDatesSetup.SetupActionDate ==  RORRentalDateTimeSetupAction::System
+            ||    rentalDatesSetup.SetupActionTime ==  RORRentalDateTimeSetupAction::Fixed
+            ||    rentalDatesSetup.SetupActionTime ==  RORRentalDateTimeSetupAction::System
+            {
+                hasSystemTime = false;
+    
+                switch (rentalDatesSetup.SetupActionDate)
+                {
+                    case RORRentalDateTimeSetupAction::Fixed:
+                        baseDate = rentalDatesSetup.DateFixed;
+                        break;
+                    case RORRentalDateTimeSetupAction::System:
+                        baseDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+                        break;
+    
+                    default : baseDate = dateNull();
+                }
+    
+                baseDate = DateTimeUtil::date(DateTimeUtil::newDateTime(baseDate, 0));
+    
+                fieldId = RORRentalDateTimes::dateTimeType2FieldId(rentalDatesSetup.DateTimeType);
+    
+                switch (rentalDatesSetup.SetupActionTime)
+                {
+                    case RORRentalDateTimeSetupAction::Fixed:
+                        baseTime = rentalDatesSetup.TimeFixed;
+                        break;
+                    case RORRentalDateTimeSetupAction::System:
+                        baseTime = DateTimeUtil::time(DateTimeUtil::getSystemDateTime());
+                        hasSystemTime = true;
+                        break;
+    
+                    default : baseTime = 0;
+                }
+    
+                this.applyDateTimeOffset(fieldId,
+                                         baseDate,
+                                         rentalDatesSetup.DateOffset,
+                                         rentalDatesSetup.DateUnit,
+                                         true,
+                                         baseTime,
+                                         rentalDatesSetup.TimeOffset,
+                                         rentalDatesSetup.TimeUnit,
+                                         true,
+                                         hasSystemTime);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromHost</Name>
+				<Source><![CDATA[
+    public void initFromHost(Common _common)
+    {
+        this.RefTableId = _common.TableId;
+        this.RefRecId   = _common.RecId;
+    
+        if (this.hostHeadingLineLevel() == HeadingLine::Line)
+        {
+            this.setParentReference(_common);
+    
+            if (this.SynchronizeFromParent == NoYes::Yes)
+            {
+                this.initDateTimesFromParent();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromProjectQuotationDates</Name>
+				<Source><![CDATA[
+    public void initFromProjectQuotationDates(SalesQuotationTable _salesQuotationTable)
+    {
+        if (_salesQuotationTable.QuotationType == QuotationType::RORProjRental)
+        {
+            if (DateTimeUtil::date(this.OnRentDateTime))
+            {
+                this.OnRentDateTime = DateTimeUtil::newDateTime(_salesQuotationTable.PSAEstProjStartDate, DateTimeUtil::time(this.OnRentDateTime));
+            }
+            else
+            {
+                this.OnRentDateTime = DateTimeUtil::newDateTime(_salesQuotationTable.PSAEstProjStartDate, DateTimeUtil::time(this.OnRentDateTime), DateTimeUtil::getUserPreferredTimeZone());
+            }
+            this.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+            if (DateTimeUtil::date(this.ExpectedOffRentDateTime))
+            {
+                this.ExpectedOffRentDateTime = DateTimeUtil::newDateTime(_salesQuotationTable.PSAEstProjEndDate, DateTimeUtil::time(this.ExpectedOffRentDateTime));
+            }
+            else
+            {
+                this.ExpectedOffRentDateTime = DateTimeUtil::newDateTime(_salesQuotationTable.PSAEstProjEndDate, DateTimeUtil::time(this.ExpectedOffRentDateTime), DateTimeUtil::getUserPreferredTimeZone());
+            }
+            this.modifiedField(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromRentalDateTimes</Name>
+				<Source><![CDATA[
+    public void initFromRentalDateTimes(RORRentalDateTimes _rentalDateTimes, boolean _onlyDateTimeFields = false, boolean _onlyPostRental = false)
+    {
+        if (!_onlyPostRental)
+        {
+            this.PreparationDateTime        = _rentalDateTimes.PreparationDateTime;
+            this.OutboundDateTime           = _rentalDateTimes.OutboundDateTime;
+            this.RequestedDeliveryDateTime  = _rentalDateTimes.RequestedDeliveryDateTime;
+            this.OnRentDateTime             = _rentalDateTimes.OnRentDateTime;
+            this.BuildDateTime              = _rentalDateTimes.BuildDateTime;
+            this.EventStartDateTime         = _rentalDateTimes.EventStartDateTime;
+        }
+    
+        this.EventEndDateTime           = _rentalDateTimes.EventEndDateTime;
+        this.StrikeDateTime             = _rentalDateTimes.StrikeDateTime;
+        this.ExpectedOffRentDateTime    = _rentalDateTimes.ExpectedOffRentDateTime;
+        this.OffRentDateTime            = _rentalDateTimes.OffRentDateTime;
+        this.RequestedPickupDateTime    = _rentalDateTimes.RequestedPickupDateTime;
+        this.InboundDateTime            = _rentalDateTimes.InboundDateTime;
+        this.InspectionDateTime         = _rentalDateTimes.InspectionDateTime;
+    
+        if (!_onlyDateTimeFields && !_onlyPostRental)
+        {
+            this.SynchronizeFromParent  = _rentalDateTimes.SynchronizeFromParent;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromRentalDateTimesWithOffset</Name>
+				<Source><![CDATA[
+    public void initFromRentalDateTimesWithOffset(
+        RORRentalDateTimes  _rentalDateTimes,
+        boolean             _onlyDateTimeFields = false,
+        boolean             _onlyPostRental = false,
+        int                 _preRentalOffset = 0,
+        int                 _postRentalOffset = 0
+        )
+    {
+        if (!_onlyPostRental)
+        {
+            this.PreparationDateTime        = DateTimeUtil::addSeconds(_rentalDateTimes.PreparationDateTime,      (DateTimeUtil::date(_rentalDateTimes.PreparationDateTime) ? _preRentalOffset : 0));
+            this.OutboundDateTime           = DateTimeUtil::addSeconds(_rentalDateTimes.OutboundDateTime,         (DateTimeUtil::date(_rentalDateTimes.OutboundDateTime) ? _preRentalOffset : 0));
+            this.RequestedDeliveryDateTime  = DateTimeUtil::addSeconds(_rentalDateTimes.RequestedDeliveryDateTime,(DateTimeUtil::date(_rentalDateTimes.RequestedDeliveryDateTime) ? _preRentalOffset : 0));
+            this.OnRentDateTime             = DateTimeUtil::addSeconds(_rentalDateTimes.OnRentDateTime,           (DateTimeUtil::date(_rentalDateTimes.OnRentDateTime) ? _preRentalOffset : 0));
+            this.BuildDateTime              = DateTimeUtil::addSeconds(_rentalDateTimes.BuildDateTime,            (DateTimeUtil::date(_rentalDateTimes.BuildDateTime) ? _preRentalOffset : 0));
+            this.EventStartDateTime         = DateTimeUtil::addSeconds(_rentalDateTimes.EventStartDateTime,       (DateTimeUtil::date(_rentalDateTimes.EventStartDateTime) ? _preRentalOffset : 0));
+        }
+    
+        this.EventEndDateTime           = DateTimeUtil::addSeconds(_rentalDateTimes.EventEndDateTime,         (DateTimeUtil::date(_rentalDateTimes.EventEndDateTime) ? _postRentalOffset : 0));
+        this.StrikeDateTime             = DateTimeUtil::addSeconds(_rentalDateTimes.StrikeDateTime,           (DateTimeUtil::date(_rentalDateTimes.StrikeDateTime) ? _postRentalOffset : 0));
+        this.ExpectedOffRentDateTime    = DateTimeUtil::addSeconds(_rentalDateTimes.ExpectedOffRentDateTime,  (DateTimeUtil::date(_rentalDateTimes.ExpectedOffRentDateTime) ? _postRentalOffset : 0));
+        this.OffRentDateTime            = DateTimeUtil::addSeconds(_rentalDateTimes.OffRentDateTime,          (DateTimeUtil::date(_rentalDateTimes.OffRentDateTime) ? _postRentalOffset : 0));
+        this.RequestedPickupDateTime    = DateTimeUtil::addSeconds(_rentalDateTimes.RequestedPickupDateTime,  (DateTimeUtil::date(_rentalDateTimes.RequestedPickupDateTime) ? _postRentalOffset : 0));
+        this.InboundDateTime            = DateTimeUtil::addSeconds(_rentalDateTimes.InboundDateTime,          (DateTimeUtil::date(_rentalDateTimes.InboundDateTime) ? _postRentalOffset : 0));
+        this.InspectionDateTime         = DateTimeUtil::addSeconds(_rentalDateTimes.InspectionDateTime,       (DateTimeUtil::date(_rentalDateTimes.InspectionDateTime) ? _postRentalOffset : 0));
+    
+        if (!_onlyDateTimeFields && !_onlyPostRental)
+        {
+            this.SynchronizeFromParent  = _rentalDateTimes.SynchronizeFromParent;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromSalesQuotationTable</Name>
+				<Source><![CDATA[
+    public void initFromSalesQuotationTable(SalesQuotationTable _salesQuotationTable)
+    {
+        this.initFromProjectQuotationDates(_salesQuotationTable);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initRentalDateTimes</Name>
+				<Source><![CDATA[
+    public void initRentalDateTimes(Common _common)
+    {
+        this.initValue();
+        this.initFromHost(_common);
+        this.initDateTimesFromSetup();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initTimeFromSetup</Name>
+				<Source><![CDATA[
+    private void initTimeFromSetup(RORRentalDateTimeType _dateTimeType)
+    {
+        RORRentalDatesSetup rentalDatesSetup;
+        FieldId             fieldId;
+        ;
+    
+        select firstonly rentalDatesSetup
+        where rentalDatesSetup.DateTimeType == _dateTimeType;
+    
+        if (rentalDatesSetup)
+        {
+            switch (rentalDatesSetup.SetupActionTime)
+            {
+                case RORRentalDateTimeSetupAction::Fixed:
+                    fieldId = RORRentalDateTimes::dateTimeType2FieldId(rentalDatesSetup.DateTimeType);
+                    this.(fieldId) = DateTimeUtil::newDateTime(
+                        DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(this.(fieldId), DateTimeUtil::getUserPreferredTimeZone())),
+                        RORRentalDateTimes::applyTimeOffset(rentalDatesSetup.TimeFixed, rentalDatesSetup.TimeOffset, rentalDatesSetup.TimeUnit),
+                        DateTimeUtil::getUserPreferredTimeZone());
+                    // will be called outside just after calling this method
+                    //this.cascadingUpdateFromRentalDatesSetup(fieldId);
+                    break;
+                case RORRentalDateTimeSetupAction::System:
+                    fieldId = RORRentalDateTimes::dateTimeType2FieldId(rentalDatesSetup.DateTimeType);
+                    this.(fieldId) = DateTimeUtil::newDateTime(DateTimeUtil::date(this.(fieldId)), RORRentalDateTimes::applyTimeOffset(DateTimeUtil::time(DateTimeUtil::getSystemDateTime())/*timeNow()*/, rentalDatesSetup.TimeOffset, rentalDatesSetup.TimeUnit));
+                    break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isEntireRental</Name>
+				<Source><![CDATA[
+    public boolean isEntireRental(INVPeriodStartDateTime _periodStartDateTime, INVPeriodEndDateTime _periodEndDateTime)
+    {
+        boolean ret;
+        RORRentalDateTime   startDateTime = this.(RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingStart()));
+        RORRentalDateTime   endDateTime = this.(RORRentalDateTimes::dateTimeType2FieldId(RORParameters::DateTimeTypeInvoicingEnd()));
+        
+        if (_periodStartDateTime <= startDateTime
+        && _periodEndDateTime >= endDateTime)
+        {
+            ret = true;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>maySynchronizeSubrental</Name>
+				<Source><![CDATA[
+    private boolean maySynchronizeSubrental()
+    {
+        boolean ret;
+    
+        RORRentalLine   rentalLine;
+        Common          common;
+        ;
+    
+        // synchronise only rental and subrental lines
+        // (when using amendment than original order line will be updated when confirm amendment and at that moment trigger synchroniser)
+        if (this.RefTableId == tableNum(SalesLine))
+        {
+            common = this.getHostBuffer();
+            rentalLine = common;
+    
+            if (RORSubrentalReference::existSales(rentalLine.InventTransId))
+            {
+                ret = true;
+            }
+        }
+    
+        if (this.RefTableId == tableNum(PurchLine))
+        {
+            common = this.getHostBuffer();
+            rentalLine = common;
+    
+            if (RORSubrentalReference::existPurch(rentalLine.InventTransId))
+            {
+                ret = true;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    public void modifiedField(FieldId _fieldId)
+    {
+        super(_fieldId);
+    
+        switch (_fieldId)
+        {
+            case fieldNum(RORRentalDateTimes, SynchronizeFromParent) :
+                if (this.SynchronizeFromParent == NoYes::Yes)
+                {
+                    this.initDateTimesFromParent();
+                }
+                break;
+
+            case fieldNum(RORRentalDateTimes, BuildDate), fieldNum(RORRentalDateTimes, BuildTime):
+                this.BuildDateTime = (this.BuildDate ? DateTimeUtil::newDateTime(this.BuildDate, this.BuildTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, BuildDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, EventEndDate), fieldNum(RORRentalDateTimes, EventEndTime):
+                this.EventEndDateTime = (this.EventEndDate ? DateTimeUtil::newDateTime(this.EventEndDate, this.EventEndTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, EventEndDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, EventStartDate), fieldNum(RORRentalDateTimes, EventStartTime):
+                this.EventStartDateTime = (this.EventStartDate ? DateTimeUtil::newDateTime(this.EventStartDate, this.EventStartTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, EventStartDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, ExpectedOffRentDate), fieldNum(RORRentalDateTimes, ExpectedOffRentTime):
+                this.ExpectedOffRentDateTime = (this.ExpectedOffRentDate ? DateTimeUtil::newDateTime(this.ExpectedOffRentDate, this.ExpectedOffRentTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, InboundDate), fieldNum(RORRentalDateTimes, InboundTime):
+                this.InboundDateTime = (this.InboundDate ? DateTimeUtil::newDateTime(this.InboundDate, this.InboundTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, InboundDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, InspectionDate), fieldNum(RORRentalDateTimes, InspectionTime):
+                this.InspectionDateTime = (this.InspectionDate ? DateTimeUtil::newDateTime(this.InspectionDate, this.InspectionTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, InspectionDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, OffRentDate), fieldNum(RORRentalDateTimes, OffRentTime):
+                this.OffRentDateTime = (this.OffRentDate ? DateTimeUtil::newDateTime(this.OffRentDate, this.OffRentTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, OffRentDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, OnRentDate), fieldNum(RORRentalDateTimes, OnRentTime):
+                this.OnRentDateTime = (this.OnRentDate ? DateTimeUtil::newDateTime(this.OnRentDate, this.OnRentTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, OutboundDate), fieldNum(RORRentalDateTimes, OutboundTime):
+                this.OutboundDateTime = (this.OutboundDate ? DateTimeUtil::newDateTime(this.OutboundDate, this.OutboundTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, OutboundDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, PreparationDate), fieldNum(RORRentalDateTimes, PreparationTime):
+                this.PreparationDateTime = (this.PreparationDate ? DateTimeUtil::newDateTime(this.PreparationDate, this.PreparationTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, PreparationDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, RequestedDeliveryDate), fieldNum(RORRentalDateTimes, RequestedDeliveryTime):
+                this.RequestedDeliveryDateTime = (this.RequestedDeliveryDate ? DateTimeUtil::newDateTime(this.RequestedDeliveryDate, this.RequestedDeliveryTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, RequestedDeliveryDateTime));
+                break;
+                
+            case fieldNum(RORRentalDateTimes, RequestedPickupDate), fieldNum(RORRentalDateTimes, RequestedPickupTime):
+                this.RequestedPickupDateTime = (this.RequestedPickupDate ? DateTimeUtil::newDateTime(this.RequestedPickupDate, this.RequestedPickupTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, RequestedPickupDateTime));
+                break;
+
+            case fieldNum(RORRentalDateTimes, StrikeDate), fieldNum(RORRentalDateTimes, StrikeTime):
+                this.StrikeDateTime = (this.StrikeDate ? DateTimeUtil::newDateTime(this.StrikeDate, this.StrikeTime, DateTimeUtil::getUserPreferredTimeZone()) : utcDateTimeNull());
+                this.modifiedField(fieldNum(RORRentalDateTimes, StrikeDateTime));
+                break;
+                
+            default :
+                // Apply triggers based on rental date setup
+                this.dateTimeModified(_fieldId);
+                this.populateNonSqlFields();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustSynchronizeIC</Name>
+				<Source><![CDATA[
+    private boolean mustSynchronizeIC()
+    {
+        boolean ret;
+    
+        RORRentalLine   rentalLine;
+        Common          common;
+        SalesLine       salesLine;
+        SalesTable      salesTable;
+        PurchLine       purchLine;
+        PurchTable      purchTable;
+        CompanyId       companyId = curext();
+        ;
+    
+        // synchronise only rental and subrental lines
+        // (when using amendment than original order line will be updated when confirm amendment and at that moment trigger synchroniser)
+        if (this.RefTableId == tableNum(SalesLine))
+        {
+            common = this.getHostBuffer();
+            rentalLine = common;
+            salesLine = rentalLine;
+            salesTable = salesLine.salesTable();
+    
+            if ((salesTable.InterCompanyDirectDeliveryOrig/* || salesTable.InterCompanyDirectDelivery*/)
+            && RORSubrentalReference::existSales(rentalLine.InventTransId))
+            {
+                ret = true;
+            }
+        }
+    
+        if (this.RefTableId == tableNum(PurchLine))
+        {
+            common = this.getHostBuffer();
+            rentalLine = common;
+            purchLine = rentalLine;
+            purchTable = purchLine.purchTable();
+    
+            if (purchTable.InterCompanyDirectDelivery
+            && purchTable.InterCompanyOrder)
+            {
+                if (purchTable.InterCompanyCompanyId)
+                {
+                    companyId = purchTable.InterCompanyCompanyId;
+                }
+    
+                changeCompany(companyId)
+                {
+                    ret = RORSubrentalReference::existPurch(rentalLine.InventTransId);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rollDateToOpen</Name>
+				<Source><![CDATA[
+    private TransDate rollDateToOpen(DNRCalendarId _calendarId, TransDate _baseDate, int _offset, DNRWorkCalendarSched _workCalendarSched = null)
+    {
+        TransDate returnDate = _baseDate;
+        ;
+    
+        returnDate = returnDate + _offset;
+    
+        while (!RORRentalDateTimes::dateIsOpen(_calendarId, returnDate, _workCalendarSched))
+        {
+            returnDate = returnDate + _offset;
+        }
+    
+        return returnDate;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setParentReference</Name>
+				<Source><![CDATA[
+    private void setParentReference(RORRentalLine _rentalLine, boolean _synchronizeFromParent = NoYes::Yes)
+    {
+        RORRentalHeader         rentalHeader;
+        RORRentalEditorLine     rentalEditorLine;
+        ;
+    
+        this.SynchronizeFromParent  = _synchronizeFromParent;
+    
+        if (_rentalLine.ParentLineRecId)
+        {
+            if (_rentalLine.TableId == tableNum(RORRentalEditorLine))
+            {
+                rentalEditorLine = _rentalLine.RORGetParentLine();
+                this.ParentRentalDateTimes = rentalEditorLine.RORRentalDateTimes().RecId;
+            }
+            else
+            {
+                this.ParentRentalDateTimes = _rentalLine.RORGetParentLine().RORRentalDateTimesHost::rentalDateTimes().RecId;
+            }
+        }
+        else
+        {
+            rentalHeader = _rentalLine.RORGetHeader();
+            this.ParentRentalDateTimes = RORRentalDateTimes::findReference(rentalHeader.TableId, rentalHeader.RecId).RecId;
+        }
+    
+        // default init value for lines is keeping synchronization with parent. Might be overrule outside of this method for special cases e.g. machine exchange
+        if (!this.RecId && this.ParentRentalDateTimes)
+        {
+            this.SynchronizeFromParent = NoYes::Yes;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>update</Name>
+				<Source><![CDATA[
+    public void update(
+        RORSubrentalSynchroniser _subrentalSynchroniser = null,
+        boolean                  _maySynchronize = (this.RefTableId == tableNum(SalesLine) || this.RefTableId == tableNum(PurchLine)),
+        boolean                  _forceStopTierRangeRecalculation = false,
+        boolean                  _checkClearTimes = true)
+    {
+        RORRentalDateTimes  rentalDateTimes_orig = this.orig();
+        boolean             maySynchronizeSubrental;
+        boolean             mustSynchronizeIC;
+    
+        RORSubrentalSynchroniser subrentalSynchroniser = _subrentalSynchroniser;
+        RORRentalDateSynchroniser   rentalDateSynchroniser;
+        Common                  hostBuffer = this.getHostBuffer();
+        RORRentalDateTimesHost  rentalDateTimesHost = hostBuffer;
+        PurchLine               purchLine;
+        ;
+    
+        if (rentalDateTimesHost && hostBuffer.RORRentalDateTimesHost::isWorksheetTable())
+        {
+            mustSynchronizeIC = _maySynchronize && this.mustSynchronizeIC();
+            maySynchronizeSubrental = _maySynchronize && !mustSynchronizeIC && this.maySynchronizeSubrental();
+    
+            if (!this.validateWrite())
+            {
+                throw error(strFmt("@DNR3263", rentalDateTimesHost.HeaderId, ''/*, this.LineId*/));
+            }
+    
+            if (_checkClearTimes)
+            {
+                this.checkClearTimes();
+            }
+    
+            if (hostBuffer.TableId == tableNum(PurchLine))
+            {
+                purchLine = hostBuffer;
+                VersioningPurchaseOrder::newPurchaseOrder(purchLine.PurchTable(true), true).change(purchLine, purchLine.Orig());
+            }
+    
+            this.cleanEmptyDateTime();
+            RAGContractData::clearContractCacheData(hostBuffer.TableId, hostBuffer.RecId);
+
+            super();
+    
+            if (this.RefTableId == tableNum(SalesLine) 
+            ||  this.RefTableId == tableNum(PurchLine)
+            ||  this.RefTableId == tableNum(SalesQuotationLine))
+            {
+                RAGContractTable::updateFromRentalLine(rentalDateTimes_orig, this);
+            }
+    
+            hostBuffer.RORRentalDateTimesHost::modifiedRORRentalDateTimes(rentalDateTimes_orig, this, _forceStopTierRangeRecalculation);
+
+            DNRPrimitiveDisposableContext context = DNRPrimitiveDisposableContext::current();
+
+            if (!subrentalSynchroniser)
+            {
+                subrentalSynchroniser = RORSubrentalSynchroniser::construct(this.RefTableId);
+                subrentalSynchroniser.parmForceStopTierRangeRecalculation(_forceStopTierRangeRecalculation);
+            }
+
+            if (rentalDateTimes_orig.recVersion != this.recVersion
+            && (hostBuffer.TableId == tableNum(SalesLine) ||
+                hostBuffer.TableId == tableNum(SalesTable)||
+                hostBuffer.TableId == tableNum(PurchLine) ||
+                hostBuffer.TableId == tableNum(PurchTable))
+            && (!context || !(context.DNRparmBoolean() == true) 
+            && (subrentalSynchroniser.parmskipUpdateHostRecord() == false)))
+            //&& !rentalDateTimesHost.IsModified)
+            {
+                rentalDateTimesHost.IsModified = NoYes::Yes;
+                rentalDateTimesHost.update();
+            }
+    
+            if (_maySynchronize)
+            {
+                if (mustSynchronizeIC)
+                {
+                    rentalDateSynchroniser = RORRentalDateSynchroniser::construct();
+                    rentalDateSynchroniser.synchronizeIC(this, rentalDateTimesHost);
+                }
+                else if (maySynchronizeSubrental)
+                {
+   
+                    subrentalSynchroniser.triggerUpdateSubRentalDates(rentalDateTimes_orig, this);
+                }
+            }
+    
+            this.cascadeToLines(subrentalSynchroniser);
+        }
+        else
+        {
+            this.cleanEmptyDateTime();
+
+            super();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateBusinessObjectAvailability</Name>
+				<Source><![CDATA[
+    public boolean validateBusinessObjectAvailability(RORRentalDateTime _dateTimeToCheck)
+    {
+        boolean                     ret = true;
+        InventDim                   inventDim;
+        SalesLine                   salesLine;
+        SalesTable                  salesTable;
+        date                        dateToCheck = DateTimeUtil::date(_dateTimeToCheck);
+        BOBObjectAssignmentEngine   objectAssignmentEngine;
+        RORRentalDateTimes          rentalDateTimes;
+    
+        switch (this.RefTableId)
+        {
+            case tableNum(SalesLine):
+                salesLine              = SalesLine::findRecId(this.RefRecId);
+                inventDim              = salesLine.inventDim();
+    
+                if (inventDim.inventSerialId)
+                {
+                    if (this.isTmp())
+                    {
+                        objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, inventDim.inventSerialId);
+                        objectAssignmentEngine.parmRentalDateTimes(this);
+                        ret = objectAssignmentEngine.checkObjectAvailability();
+                    }
+                    else
+                    {
+                        ret = BOBObjectAssignmentEngine::construct(salesLine, inventDim.inventSerialId).checkObjectAvailability();
+                    }
+                }
+                break;
+    
+            case tableNum(SalesTable):
+                while select InventSerialId from inventDim
+                where inventDim.inventSerialId
+                    join salesLine
+                    where salesLine.InventDimId == inventDim.inventDimId
+                        exists join salesTable
+                        where salesTable.SalesId == salesLine.SalesId
+                        &&    salesTable.RecId   == this.RefRecId
+                {
+                    rentalDateTimes = salesLine.RORRentalDateTimes();
+    
+                    if (rentalDateTimes && rentalDateTimes.SynchronizeFromParent)
+                    {
+                        objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, inventDim.inventSerialId);
+                        objectAssignmentEngine.parmRentalDateTimes(this);
+                        ret = objectAssignmentEngine.checkObjectAvailability();
+                    }
+                    else
+                    {
+                        ret = BOBObjectAssignmentEngine::construct(salesLine, inventDim.inventSerialId).checkObjectAvailability();
+                    }
+                }
+                break;
+    
+            default:
+                break;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateField</Name>
+				<Source><![CDATA[
+    public boolean validateField(FieldId _fieldIdToCheck)
+    {
+        boolean ret;
+    
+        ret = super(_fieldIdToCheck);
+    
+        switch (_fieldIdToCheck)
+        {
+            case fieldNum(RORRentalDateTimes, OnRentDate):
+            case fieldNum(RORRentalDateTimes, OnRentTime):
+                ret = this.validateBusinessObjectAvailability(DateTimeUtil::newDateTime(this.OnRentDate, this.OnRentTime));
+    
+                if (isConfigurationkeyEnabled(configurationKeyNum(ROROffRentDateTime)))
+                {
+                    if (this.OffRentDate && DateTimeUtil::newDateTime(this.OnRentDate, this.OnRentTime) >= DateTimeUtil::newDateTime(this.OffRentDate, this.OffRentTime))
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(ROROffRentDateTime))));
+                    }
+                    else if (this.ExpectedOffRentDate && DateTimeUtil::newDateTime(this.OnRentDate, this.OnRentTime) > DateTimeUtil::newDateTime(this.ExpectedOffRentDate, this.ExpectedOffRentTime))
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(RORExpectedOffRentDateTime))));
+                    }
+                }
+                break;
+
+            case fieldNum(RORRentalDateTimes, OnRentDateTime):
+                ret = this.validateBusinessObjectAvailability(this.OnRentDateTime);
+    
+                if (isConfigurationkeyEnabled(configurationKeyNum(ROROffRentDateTime)))
+                {
+                    if (DateTimeUtil::date(this.OffRentDateTime) && this.OnRentDateTime >= this.OffRentDateTime)
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(ROROffRentDateTime))));
+                    }
+                    else if (!DateTimeUtil::date(this.OffRentDateTime) && DateTimeUtil::date(this.ExpectedOffRentDateTime) && this.OnRentDateTime > this.ExpectedOffRentDateTime)
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(RORExpectedOffRentDateTime))));
+                    }
+                }
+                break;
+    
+            case fieldNum(RORRentalDateTimes, OffRentDate):
+            case fieldNum(RORRentalDateTimes, OffRentTime):
+                if (isConfigurationkeyEnabled(configurationKeyNum(ROROnRentDateTime)))
+                {
+                    if (this.OffRentDate && DateTimeUtil::newDateTime(this.OffRentDate, this.OffRentTime) <= DateTimeUtil::newDateTime(this.OnRentDate, this.OnRentTime))
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(ROROffRentDateTime))));
+                    }
+                    else if (!this.OffRentDate && this.ExpectedOffRentDate && DateTimeUtil::newDateTime(this.ExpectedOffRentDate, this.ExpectedOffRentTime) < DateTimeUtil::newDateTime(this.OnRentDate, this.OnRentTime))
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(RORExpectedOffRentDateTime))));
+                    }
+                }
+                break;
+
+            case fieldNum(RORRentalDateTimes, OffRentDateTime):
+                //ret = this.validateBusinessObjectAvailability(this.OffRentDateTime);
+    
+                if (isConfigurationkeyEnabled(configurationKeyNum(ROROnRentDateTime)))
+                {
+                    if (DateTimeUtil::date(this.OffRentDateTime) && this.OffRentDateTime <= this.OnRentDateTime)
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(ROROffRentDateTime))));
+                    }
+                    else if (!DateTimeUtil::date(this.OffRentDateTime) && DateTimeUtil::date(this.ExpectedOffRentDateTime) && this.ExpectedOffRentDateTime < this.OnRentDateTime)
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(RORExpectedOffRentDateTime))));
+                    }
+                }
+                break;
+    
+            case fieldNum(RORRentalDateTimes, ExpectedOffRentDate):
+            case fieldNum(RORRentalDateTimes, ExpectedOffRentTime):
+                if (isConfigurationkeyEnabled(configurationKeyNum(ROROnRentDateTime)))
+                {
+                    if (this.ExpectedOffRentDate && DateTimeUtil::newDateTime(this.ExpectedOffRentDate, this.ExpectedOffRentTime) < DateTimeUtil::newDateTime(this.OnRentDate, this.OnRentTime))
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(RORExpectedOffRentDateTime))));
+                    }
+                }
+                break;
+
+            case fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime):
+                if (isConfigurationkeyEnabled(configurationKeyNum(ROROnRentDateTime)))
+                {
+                    if (!DateTimeUtil::date(this.OffRentDateTime) && DateTimeUtil::date(this.ExpectedOffRentDateTime) && this.ExpectedOffRentDateTime < this.OnRentDateTime)
+                    {
+                        ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(RORExpectedOffRentDateTime))));
+                    }
+                }
+                break;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    public boolean validateWrite()
+    {
+        boolean ret;
+
+        if (this.isTmp() && this.validateRentalDurationDateTimes())
+        {
+            return true;
+        }
+    
+        ret = super();
+
+        // On creation field RefRecId is empty so uniqness cannot be guarantee by index property.
+        if (ret && this.RefRecId)
+        {
+            ret = (select RecId from RORRentalDateTimes
+                    where RORRentalDateTimes.RefRecId == this.RefRecId
+                    && RORRentalDateTimes.RefTableId == this.RefTableId
+                    && RORRentalDateTimes.RecId != this.RecId).RecId == 0;
+        }
+
+        //The date/time value validation logic is placed in the validateField() method. Triggering the rental duration logic here to avoid possibility of invalid OnRent-Expected/OffRent Date/Time values
+        ret = ret && this.validateRentalDurationDateTimes();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWriteFromCode</Name>
+				<Source><![CDATA[
+    public boolean validateWriteFromCode(RORCalendarId _calendarId = '')
+    {
+        boolean ret;
+        ;
+    
+        ret =  this.checkDateCalendar(fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime), _calendarId);
+        ret = ret && this.checkDateCalendar(fieldNum(RORRentalDateTimes, OffRentDateTime), _calendarId);
+    
+        if (!this.RecId && !ret)
+        {
+            throw error(strFmt("@DNR3261", this.getHostBuffer().HeaderId/*, this.getHostBuffer().LineId*/));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>applyDateOffset</Name>
+				<Source><![CDATA[
+    public static client server TransDate applyDateOffset(TransDate     _baseDate,
+                                                          int           _offset,
+                                                          RORDateUnit   _dateUnit)
+    {
+        TransDate   retVal = datenull();
+        int         i;
+        #TimeConstants
+        ;
+    
+        if (_baseDate || _offSet)
+        {
+            switch (_dateUnit)
+            {
+                case RORDateUnit::Day:
+                    retVal = _baseDate + _offset;
+                    break;
+    
+                case RORDateUnit::Week:
+                    retVal = _baseDate + (_offset * #daysPerWeek);
+                    break;
+    
+                case RORDateUnit::Month:
+                    retVal = dateMthFwd(_baseDate, _offset);
+                    break;
+    
+                case RORDateUnit::Year:
+                    retVal  = _baseDate;
+                    for (i = 1; i <= abs(_offset); i++)
+                    {
+                        retval = (_offset > 0) ? nextYr(retVal) : prevYr(retVal);
+                    }
+                    break;
+            }
+        }
+    
+        return retVal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>applyTimeOffset</Name>
+				<Source><![CDATA[
+    public static client server TimeOfDay applyTimeOffset(TimeOfDay _baseTime, int _offset, RORTimeUnit _timeUnit)
+    {
+        TimeOfDay   retVal;
+        #TimeConstants
+        ;
+    
+        switch (_timeUnit)
+        {
+            case RORTimeUnit::Second:
+                retVal = _baseTime + _offset;
+                break;
+    
+            case RORTimeUnit::Minute:
+                retVal = _baseTime + (_offset * #MinutesPerHour);
+                break;
+    
+            case RORTimeUnit::Hour:
+                retVal = _baseTime + (_offset * #SecondsPerHour);
+                break;
+        }
+    
+        return retVal;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyRentalDateTimes</Name>
+				<Source><![CDATA[
+    public static void copyRentalDateTimes(
+        RORRentalDateTimes  _rentalDateTimesFrom,
+        RORRentalDateTimes  _rentalDateTimesTo,
+        Common              _hostTo)
+    {
+        if (_rentalDateTimesFrom)
+        {
+            _rentalDateTimesTo.initFromRentalDateTimes(_rentalDateTimesFrom);
+    
+            if (_rentalDateTimesTo)
+            {
+                _rentalDateTimesTo.update();
+            }
+            else
+            {
+                _rentalDateTimesTo.initFromHost(_hostTo);
+                _rentalDateTimesTo.insert();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dateIsOpen</Name>
+				<Source><![CDATA[
+    private static boolean dateIsOpen(DNRCalendarId _calendarId, TransDate _transDate, DNRWorkCalendarSched _workCalendarSched = null)
+    {
+        DNRWorkCalendarSched workCalendarSched = _workCalendarSched ? _workCalendarSched : new DNRWorkCalendarSched(true);
+        ;
+    
+        return workCalendarSched.isDateOpen(_calendarId, _transDate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dateTimeType2FieldId</Name>
+				<Source><![CDATA[
+    public client server static FieldId dateTimeType2FieldId(RORRentalDateTimeType _dateTimeType)
+    {
+        FieldId fieldId;
+    
+        switch (_dateTimeType)
+        {
+            case RORRentalDateTimeType::Preparation:
+                fieldId = fieldNum(RORRentalDateTimes, PreparationDateTime);
+                break;
+    
+            case RORRentalDateTimeType::Outbound:
+                fieldId = fieldNum(RORRentalDateTimes, OutboundDateTime);
+                break;
+    
+            case RORRentalDateTimeType::RequestedDelivery:
+                fieldId = fieldNum(RORRentalDateTimes, RequestedDeliveryDateTime);
+                break;
+    
+            case RORRentalDateTimeType::OnRent:
+                fieldId = fieldNum(RORRentalDateTimes, OnRentDateTime);
+                break;
+    
+            case RORRentalDateTimeType::Build:
+                fieldId = fieldNum(RORRentalDateTimes, BuildDateTime);
+                break;
+    
+            case RORRentalDateTimeType::EventStart:
+                fieldId = fieldNum(RORRentalDateTimes, EventStartDateTime);
+                break;
+    
+            case RORRentalDateTimeType::EventEnd:
+                fieldId = fieldNum(RORRentalDateTimes, EventEndDateTime);
+                break;
+    
+            case RORRentalDateTimeType::Strike:
+                fieldId = fieldNum(RORRentalDateTimes, StrikeDateTime);
+                break;
+    
+            case RORRentalDateTimeType::ExpectedOffRent:
+                fieldId = fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime);
+                break;
+    
+            case RORRentalDateTimeType::OffRent:
+                fieldId = fieldNum(RORRentalDateTimes, OffRentDateTime);
+                break;
+    
+            case RORRentalDateTimeType::RequestedPickup:
+                fieldId = fieldNum(RORRentalDateTimes, RequestedPickupDateTime);
+                break;
+    
+            case RORRentalDateTimeType::Inbound:
+                fieldId = fieldNum(RORRentalDateTimes, InboundDateTime);
+                break;
+    
+            case RORRentalDateTimeType::Inspection:
+                fieldId = fieldNum(RORRentalDateTimes, InspectionDateTime);
+                break;
+    
+            default :
+                throw error(strFmt("@DNR6660", _dateTimeType, tableId2pname(TableNum(RORRentalDateTimes))));
+        }
+    
+        return fieldId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>enableDisableDateTimeFields</Name>
+				<Source><![CDATA[
+    public static void enableDisableDateTimeFields(FormDataSource _rentalDateTimesDS, boolean _synchronizedWithParent)
+    {
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, PreparationDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, PreparationTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, OutboundDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, OutboundTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, RequestedDeliveryDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, RequestedDeliveryTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, OnRentDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, OnRentTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, BuildDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, BuildTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, EventStartDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, EventStartTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, EventEndDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, EventEndTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, StrikeDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, StrikeTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, ExpectedOffRentDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, ExpectedOffRentTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, OffRentDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, OffRentTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, RequestedPickupDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, RequestedPickupTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, InboundDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, InboundTime)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, InspectionDate)).allowEdit(!_synchronizedWithParent);
+        _rentalDateTimesDS.object(fieldNum(RORRentalDateTimes, InspectionTime)).allowEdit(!_synchronizedWithParent);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>exist</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Determines whether the specified record in the <c>RORRentalDateTimes</c> table exists.
+    /// </summary>
+    /// <param name="_recId">
+    /// The record ID of the <c>RORRentalDateTimes</c> record.
+    /// </param>
+    /// <returns>
+    /// true if the specified record exists; otherwise, false.
+    /// </returns>
+    public static boolean exist(RecId _recId)
+    {
+        RORRentalDateTimes rentalDateTimes;
+        ;
+    
+        select firstonly RecId from rentalDateTimes
+        where rentalDateTimes.RecId == _recId;
+    
+        return rentalDateTimes != null;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>existReference</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Determines whether for a specified parent the record in the <c>RORRentalDateTimes</c> table exists.
+    /// </summary>
+    /// <param name="_refTableId">
+    /// The table ID of a parent record.
+    /// </param>
+    /// <param name="_refRecId">
+    /// The record ID of a parent record.
+    /// </param>
+    /// <returns>
+    /// true if the specified record exists; otherwise, false.
+    /// </returns>
+    public static boolean existReference(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        RORRentalDateTimes rentalDateTimes;
+        ;
+    
+        select firstonly RecId from rentalDateTimes
+        where rentalDateTimes.RefTableId == _refTableId
+        && rentalDateTimes.RefRecId == _refRecId;
+    
+        return rentalDateTimes != null;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fieldId2DateTimeType</Name>
+				<Source><![CDATA[
+    public client server static RORRentalDateTimeType fieldId2DateTimeType(FieldId _fieldId)
+    {
+        RORRentalDateTimeType   dateTimeType;
+        ;
+    
+        switch (_fieldId)
+        {
+            case fieldNum(RORRentalDateTimes, PreparationDateTime) :
+                dateTimeType = RORRentalDateTimeType::Preparation;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, OutboundDateTime) :
+                dateTimeType = RORRentalDateTimeType::Outbound;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, RequestedDeliveryDateTime) :
+                dateTimeType = RORRentalDateTimeType::RequestedDelivery;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, OnRentDateTime) :
+                dateTimeType = RORRentalDateTimeType::OnRent;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, BuildDateTime) :
+                dateTimeType = RORRentalDateTimeType::Build;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, EventStartDateTime) :
+                dateTimeType = RORRentalDateTimeType::EventStart;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, EventEndDateTime) :
+                dateTimeType = RORRentalDateTimeType::EventEnd;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, StrikeDateTime) :
+                dateTimeType = RORRentalDateTimeType::Strike;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, ExpectedOffRentDateTime) :
+                dateTimeType = RORRentalDateTimeType::ExpectedOffRent;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, OffRentDateTime) :
+                dateTimeType = RORRentalDateTimeType::OffRent;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, RequestedPickupDateTime) :
+                dateTimeType = RORRentalDateTimeType::RequestedPickup;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, InboundDateTime) :
+                dateTimeType = RORRentalDateTimeType::Inbound;
+                break;
+    
+            case fieldNum(RORRentalDateTimes, InspectionDateTime) :
+                dateTimeType = RORRentalDateTimeType::Inspection;
+                break;
+    
+            default :
+                throw error(strFmt("@SYS55418", _fieldId));
+        }
+    
+        return dateTimeType;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>find</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Finds the specified record in the <c>RORRentalDateTimes</c> table.
+    /// </summary>
+    /// <param name="_recId">
+    ///    The record ID of the <c>RORRentalDateTimes</c> record to find.
+    /// </param>
+    /// <param name="_forupdate">
+    ///    A Boolean value that indicates whether to read the record for update; optional.
+    /// </param>
+    /// <param name="_concurrencyModel">
+    ///    The concurrency model option to use when reading the record; optional.
+    /// </param>
+    /// <returns>
+    ///    The specified record in the <c>RORRentalDateTimes</c> table; otherwise, an empty record.
+    /// </returns>
+    public static RORRentalDateTimes find(
+        RecId               _recId,
+        boolean             _forupdate = false,
+        ConcurrencyModel    _concurrencyModel = ConcurrencyModel::Auto)
+    {
+        RORRentalDateTimes rentalDateTimes;
+        ;
+    
+        if (_recId)
+        {
+            rentalDateTimes.selectForUpdate(_forupdate);
+    
+            if (_forupdate  && _concurrencyModel != ConcurrencyModel::Auto)
+            {
+                rentalDateTimes.concurrencyModel(_concurrencyModel);
+            }
+    
+            select firstonly rentalDateTimes
+            where rentalDateTimes.RecId == _recId;
+        }
+    
+        return rentalDateTimes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findReference</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Finds the record in the <c>RORRentalDateTimes</c> table that is linked with a specified parent record.
+    /// </summary>
+    /// <param name="_refTableId">
+    /// The table ID of a parent record.
+    /// </param>
+    /// <param name="_refRecId">
+    /// The record ID of a parent record.
+    /// </param>
+    /// <param name="_forupdate">
+    ///    A Boolean value that indicates whether to read the record for update; optional.
+    /// </param>
+    /// <param name="_concurrencyModel">
+    ///    The concurrency model option to use when reading the record; optional.
+    /// </param>
+    /// <returns>
+    ///    The specified record in the <c>RORRentalDateTimes</c> table; otherwise, an empty record.
+    /// </returns>
+    public static RORRentalDateTimes findReference(
+        RefTableId          _refTableId,
+        RefRecId            _refRecId,
+        boolean             _forupdate = false,
+        ConcurrencyModel    _concurrencyModel = ConcurrencyModel::Auto)
+    {
+        RORRentalDateTimes rentalDateTimes;
+        ;
+    
+        if (_refTableId && _refRecId)
+        {
+            rentalDateTimes.selectForUpdate(_forupdate);
+    
+            if (_forupdate  && _concurrencyModel != ConcurrencyModel::Auto)
+            {
+                rentalDateTimes.concurrencyModel(_concurrencyModel);
+            }
+    
+            select firstonly rentalDateTimes
+            where rentalDateTimes.RefTableId == _refTableId
+            && rentalDateTimes.RefRecId == _refRecId;
+        }
+    
+        return rentalDateTimes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPeriodFieldIds</Name>
+				<Source><![CDATA[
+    public static container getPeriodFieldIds()
+    {
+        FieldId             fieldIdPeriodStartDateTime;
+        FieldId             fieldIdPeriodEndDateTime;
+        FieldId             fieldIdPeriodExpectedEndDateTime;
+                
+        fieldIdPeriodStartDateTime          = RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingStart());
+        fieldIdPeriodEndDateTime            = RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingEnd());
+        fieldIdPeriodExpectedEndDateTime    = RORRentalDateTimes::dateTimeType2FieldId(RORParameters::dateTimeTypeInvoicingExpectedEnd());
+    
+        return [fieldIdPeriodStartDateTime, fieldIdPeriodEndDateTime, fieldIdPeriodExpectedEndDateTime];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isModified</Name>
+				<Source><![CDATA[
+    public static client boolean isModified(RORRentalDateTimes _rentalDateTimesOrig,
+                                            RORRentalDateTimes _rentalDateTimesModified)
+    {
+        boolean ret = false;
+    
+        if (_rentalDateTimesOrig.BuildDateTime             != _rentalDateTimesModified.BuildDateTime
+        ||  _rentalDateTimesOrig.EventEndDateTime          != _rentalDateTimesModified.EventEndDateTime
+        ||  _rentalDateTimesOrig.EventStartDateTime        != _rentalDateTimesModified.EventStartDateTime
+        ||  _rentalDateTimesOrig.ExpectedOffRentDateTime   != _rentalDateTimesModified.ExpectedOffRentDateTime
+        ||  _rentalDateTimesOrig.InboundDateTime           != _rentalDateTimesModified.InboundDateTime
+        ||  _rentalDateTimesOrig.InspectionDateTime        != _rentalDateTimesModified.InspectionDateTime
+        ||  _rentalDateTimesOrig.OffRentDateTime           != _rentalDateTimesModified.OffRentDateTime
+        ||  _rentalDateTimesOrig.OnRentDateTime            != _rentalDateTimesModified.OnRentDateTime
+        ||  _rentalDateTimesOrig.OutboundDateTime          != _rentalDateTimesModified.OutboundDateTime
+        ||  _rentalDateTimesOrig.ParentRentalDateTimes     != _rentalDateTimesModified.ParentRentalDateTimes
+        ||  _rentalDateTimesOrig.PreparationDateTime       != _rentalDateTimesModified.PreparationDateTime
+        ||  _rentalDateTimesOrig.RequestedDeliveryDateTime != _rentalDateTimesModified.RequestedDeliveryDateTime
+        ||  _rentalDateTimesOrig.RequestedPickupDateTime   != _rentalDateTimesModified.RequestedPickupDateTime
+        ||  _rentalDateTimesOrig.StrikeDateTime            != _rentalDateTimesModified.StrikeDateTime)
+        {
+            return true;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateNonSqlFields</Name>
+				<Source><![CDATA[
+    public void populateNonSqlFields() // called from the form after the utcDateTimes are prefilled from the setup
+    {
+        Timezone        userPrefTimeZone = DateTimeUtil::getUserPreferredTimeZone();
+        TransDateTime   userTransDateTime;
+
+        if (this.BuildDateTime || this.BuildDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.BuildDateTime, userPrefTimeZone);
+            this.BuildDate      = DateTimeUtil::date(userTransDateTime);
+            this.BuildTime      = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.EventEndDateTime || this.EventEndDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.EventEndDateTime, userPrefTimeZone);
+            this.EventEndDate   = DateTimeUtil::date(userTransDateTime);
+            this.EventEndTime   = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.EventStartDateTime || this.EventStartDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.EventStartDateTime, userPrefTimeZone);
+            this.EventStartDate = DateTimeUtil::date(userTransDateTime);
+            this.EventStartTime = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.ExpectedOffRentDateTime || this.ExpectedOffRentDate)
+        {
+            userTransDateTime           = DateTimeUtil::applyTimeZoneOffset(this.ExpectedOffRentDateTime, userPrefTimeZone);
+            this.ExpectedOffRentDate    = DateTimeUtil::date(userTransDateTime);
+            this.ExpectedOffRentTime    = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.InboundDateTime || this.InboundDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.InboundDateTime, userPrefTimeZone);
+            this.InboundDate    = DateTimeUtil::date(userTransDateTime);
+            this.InboundTime    = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.InspectionDateTime || this.InspectionDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.InspectionDateTime, userPrefTimeZone);
+            this.InspectionDate = DateTimeUtil::date(userTransDateTime);
+            this.InspectionTime = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.OffRentDateTime || this.OffRentDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.OffRentDateTime, userPrefTimeZone);
+            this.OffRentDate    = DateTimeUtil::date(userTransDateTime);
+            this.OffRentTime    = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.OnRentDateTime || this.OnRentDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.OnRentDateTime, userPrefTimeZone);
+            this.OnRentDate     = DateTimeUtil::date(userTransDateTime);
+            this.OnRentTime     = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.OutboundDateTime || this.OutboundDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.OutboundDateTime, userPrefTimeZone);
+            this.OutboundDate   = DateTimeUtil::date(userTransDateTime);
+            this.OutboundTime   = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.PreparationDateTime || this.PreparationDate)
+        {
+            userTransDateTime       = DateTimeUtil::applyTimeZoneOffset(this.PreparationDateTime, userPrefTimeZone);
+            this.PreparationDate    = DateTimeUtil::date(userTransDateTime);
+            this.PreparationTime    = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.RequestedDeliveryDateTime || this.RequestedDeliveryDate)
+        {
+            userTransDateTime           = DateTimeUtil::applyTimeZoneOffset(this.RequestedDeliveryDateTime, userPrefTimeZone);
+            this.RequestedDeliveryDate  = DateTimeUtil::date(userTransDateTime);
+            this.RequestedDeliveryTime  = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.RequestedPickupDateTime || this.RequestedPickupDate)
+        {
+            userTransDateTime           = DateTimeUtil::applyTimeZoneOffset(this.RequestedPickupDateTime, userPrefTimeZone);
+            this.RequestedPickupDate    = DateTimeUtil::date(userTransDateTime);
+            this.RequestedPickupTime    = DateTimeUtil::time(userTransDateTime);
+        }
+
+        if (this.StrikeDateTime || this.StrikeDate)
+        {
+            userTransDateTime   = DateTimeUtil::applyTimeZoneOffset(this.StrikeDateTime, userPrefTimeZone);
+            this.StrikeDate     = DateTimeUtil::date(userTransDateTime);
+            this.StrikeTime     = DateTimeUtil::time(userTransDateTime);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateRentalDurationDateTimes</Name>
+				<Source><![CDATA[
+    public boolean validateRentalDurationDateTimes()
+    {
+        boolean ret = true;
+
+        //Added extra validation on rental duration fields as the logic in the validatefield() method might be skipped if the record is not inserted by the UI
+        if (DateTimeUtil::date(this.OffRentDateTime) && this.OffRentDateTime <= this.OnRentDateTime)
+        {
+            ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(ROROffRentDateTime))));
+        }
+        else if (!DateTimeUtil::date(this.OffRentDateTime) && DateTimeUtil::date(this.ExpectedOffRentDateTime) && this.ExpectedOffRentDateTime <= this.OnRentDateTime)
+        {
+            ret = checkFailed(strFmt("@DNR6356", extendedTypeId2pname(extendedTypeNum(ROROnRentDateTime)), extendedTypeId2pname(extendedTypeNum(RORExpectedOffRentDateTime))));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postLoad</Name>
+				<Source><![CDATA[
+    public void postLoad()
+    {
+        super();
+
+        this.populateNonSqlFields();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insert</Name>
+				<Source><![CDATA[
+    public void insert()
+    {
+        this.cleanEmptyDateTime();
+        
+        if (!this.validateRentalDurationDateTimes())
+        {
+            throw error ("@DNR:RORDTCreationFailed");
+        }
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cleanEmptyDateTime</Name>
+				<Source><![CDATA[
+    public void cleanEmptyDateTime()
+    {
+        this.BuildDateTime = this.clearTimeWithoutDate(this.BuildDateTime);
+        if (this.BuildDateTime == DateTimeUtil::minValue())
+        {
+            this.BuildDate = dateNull();
+            this.BuildTime = 0;
+        }
+        this.EventEndDateTime = this.clearTimeWithoutDate(this.EventEndDateTime);
+        if (this.EventEndDateTime == DateTimeUtil::minValue())
+        {
+            this.EventEndDate = dateNull();
+            this.EventEndTime = 0;
+        }
+        this.EventStartDateTime = this.clearTimeWithoutDate(this.EventStartDateTime);
+        if (this.EventStartDateTime == DateTimeUtil::minValue())
+        {
+            this.EventStartDate = dateNull();
+            this.EventStartTime = 0;
+        }
+        this.ExpectedOffRentDateTime = this.clearTimeWithoutDate(this.ExpectedOffRentDateTime);
+        if (this.ExpectedOffRentDateTime == DateTimeUtil::minValue())
+        {
+            this.ExpectedOffRentDate = dateNull();
+            this.ExpectedOffRentTime = 0;
+        }
+        this.InboundDateTime = this.clearTimeWithoutDate(this.InboundDateTime);
+        if (this.InboundDateTime == DateTimeUtil::minValue())
+        {
+            this.InboundDate = dateNull();
+            this.InboundTime = 0;
+        }
+        this.InspectionDateTime = this.clearTimeWithoutDate(this.InspectionDateTime);
+        if (this.InspectionDateTime == DateTimeUtil::minValue())
+        {
+            this.InspectionDate = dateNull();
+            this.InspectionTime = 0;
+        }
+        this.OffRentDateTime = this.clearTimeWithoutDate(this.OffRentDateTime);
+        if (this.OffRentDateTime == DateTimeUtil::minValue())
+        {
+            this.OffRentDate = dateNull();
+            this.OffRentTime = 0;
+        }
+        this.OnRentDateTime = this.clearTimeWithoutDate(this.OnRentDateTime);
+        if (this.OnRentDateTime == DateTimeUtil::minValue())
+        {
+            this.OnRentDate = dateNull();
+            this.OnRentTime = 0;
+        }
+        this.OutboundDateTime = this.clearTimeWithoutDate(this.OutboundDateTime);
+        if (this.OutboundDateTime == DateTimeUtil::minValue())
+        {
+            this.OutboundDate = dateNull();
+            this.OutboundTime = 0;
+        }
+        this.PreparationDateTime = this.clearTimeWithoutDate(this.PreparationDateTime);
+        if (this.PreparationDateTime == DateTimeUtil::minValue())
+        {
+            this.PreparationDate = dateNull();
+            this.PreparationTime = 0;
+        }
+        this.RequestedDeliveryDateTime = this.clearTimeWithoutDate(this.RequestedDeliveryDateTime);
+        if (this.RequestedDeliveryDateTime == DateTimeUtil::minValue())
+        {
+            this.RequestedDeliveryDate = dateNull();
+            this.RequestedDeliveryTime = 0;
+        }
+        this.RequestedPickupDateTime = this.clearTimeWithoutDate(this.RequestedPickupDateTime);
+        if (this.RequestedPickupDateTime == DateTimeUtil::minValue())
+        {
+            this.RequestedPickupDate = dateNull();
+            this.RequestedPickupTime = 0;
+        }
+        this.StrikeDateTime = this.clearTimeWithoutDate(this.StrikeDateTime);
+        if (this.StrikeDateTime == DateTimeUtil::minValue())
+        {
+            this.StrikeDate = dateNull();
+            this.StrikeTime = 0;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearTimeWithoutDate</Name>
+				<Source><![CDATA[
+    public TransDateTime clearTimeWithoutDate(TransDateTime _dateTime)
+    {
+        TransDateTime   ret = _dateTime;
+        ;
+        
+        if (DateTimeUtil::year(_dateTime) < 1902)
+        {
+            ret = DateTimeUtil::minValue();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLinkedToDateBaseRentalDateTimes</Name>
+				<Source><![CDATA[
+    public static RORRentalDateTimes getLinkedToDateBaseRentalDateTimes(RORRentalLine _rentalLine)
+    {
+        RORRentalDateTimes  rentalDateTimes;
+        RORRentalLine       callerRentalLineCopy;
+        Common              common;
+
+        if (_rentalLine.TableId == tableNum(SalesLine) || _rentalLine.TableId == tableNum(PurchLine))
+        {
+            boolean mustCheckReplacement;
+
+            if (_rentalLine.RORRentalLine::isExchange())
+            {
+                callerRentalLineCopy.data(_rentalLine.data());
+                mustCheckReplacement = true;
+            }
+            // check if parent was exchanged
+            else if (_rentalLine.ParentLineRecId)
+            {
+                callerRentalLineCopy.data(_rentalLine.RORGetParentLine());
+                mustCheckReplacement = true;
+            }
+
+            while (mustCheckReplacement && callerRentalLineCopy.RORGetReplacementLine())
+            {
+                common = callerRentalLineCopy.RORGetReplacementLine();
+                callerRentalLineCopy = common;
+                if (callerRentalLineCopy.AmendmentExchangeType == RORAmendmentExchangeType::Commercial)
+                {
+                    break;
+                }
+                rentalDateTimes = common.RORRentalDateTimesHost::rentalDateTimes();
+            }
+
+            if (!rentalDateTimes)
+            {
+                // if no exchange then use rentalDateTimes from caller
+                rentalDateTimes = _rentalLine.RORRentalDateTimesHost::rentalDateTimes();
+            }
+        }
+
+        return rentalDateTimes;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canSyncFromParent</Name>
+				<Source><![CDATA[
+    public static boolean canSyncFromParent(RORRentalDateTimes _rentalDateTimes, RORRentalDateTimes _parentRentalDateTimes)
+    {
+        DictTable               dictTable = new DictTable(_rentalDateTimes.TableId);
+        DictField               dictField;
+        Counter                 fieldCounter;
+        FieldId                 fieldId;
+        boolean                 ret = true;
+
+        // Loop through all the fields of the RORRentalDateTimes table
+        for (fieldCounter = 1; fieldCounter <= dictTable.fieldCnt(); fieldCounter++)
+        {
+            fieldId = dictTable.fieldCnt2Id(fieldCounter);
+            dictField = dictTable.fieldObject(fieldId);
+    
+            // When the current field is not a system field
+            // and the value is not same as of the parent Dates 
+            if (!dictField.isSystem()
+            &&  dictField.isSql()
+            &&  dictField.id() != fieldNum(RORRentalDateTimes, ParentRentalDateTimes)
+            &&  dictField.id() != fieldNum(RORRentalDateTimes, SynchronizeFromParent)
+            &&  dictField.id() != fieldNum(RORRentalDateTimes, RefTableId)
+            &&  dictField.id() != fieldNum(RORRentalDateTimes, RefRecId)
+            &&  _rentalDateTimes.(fieldId) != _parentRentalDateTimes.(fieldId))
+            {
+                ret = false;
+                break;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<ConfigurationKey>RORRentalDateTimes</ConfigurationKey>
+	<DeveloperDocumentation>@DNR7578</DeveloperDocumentation>
+	<Label>@DNR6</Label>
+	<TableGroup>Transaction</TableGroup>
+	<TitleField1>OnRentDateTime</TitleField1>
+	<TitleField2>OffRentDateTime</TitleField2>
+	<CacheLookup>NotInTTS</CacheLookup>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OnRentDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OffRentDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExpectedOffRentDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>HostReference</Name>
+			<Label>@SYS40441</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>RefRecId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RefTableId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>OnOffRent</Name>
+			<Label>@DNR6</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OnRentDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExpectedOffRentDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OffRentDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>ParentReference</Name>
+			<Label>@SYS40441</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ParentRentalDateTimes</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>PostRentalDateTimes</Name>
+			<Label>@DNR110</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>EventEndDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>StrikeDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExpectedOffRentDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OffRentDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RequestedPickupDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InboundDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InspectionDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>PreRentalDateTimes</Name>
+			<Label>@DNR100</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>PreparationDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OutboundDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RequestedDeliveryDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OnRentDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>BuildDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EventStartDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Synchronization</Name>
+			<Label>@DNR307</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>SynchronizeFromParent</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>BuildDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>BuildDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>BuildTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>EventEndDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>EventEndDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EventEndTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>EventStartDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>EventStartDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>EventStartTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>ExpectedOffRentDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ExpectedOffRentDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExpectedOffRentTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>InboundDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InboundDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InboundTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>InspectionDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InspectionDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InspectionTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>OffRentDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OffRentDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OffRentTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>OnRentDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OnRentDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OnRentTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>OutboundDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OutboundDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OutboundTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>PreparationDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>PreparationDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PreparationTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>RequestedDeliveryDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>RequestedDeliveryDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RequestedDeliveryTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>RequestedPickupDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>RequestedPickupDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RequestedPickupTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>StrikeDateTime</Name>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>StrikeDate</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>StrikeTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>BuildDateTime</Name>
+			<ExtendedDataType>RORBuildDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>EventEndDateTime</Name>
+			<ExtendedDataType>ROREventEndDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>EventStartDateTime</Name>
+			<ExtendedDataType>ROREventStartDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>ExpectedOffRentDateTime</Name>
+			<ExtendedDataType>RORExpectedOffRentDateTime</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>InboundDateTime</Name>
+			<ExtendedDataType>RORInboundDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>InspectionDateTime</Name>
+			<ExtendedDataType>RORInspectionDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>OffRentDateTime</Name>
+			<ExtendedDataType>ROROffRentDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>OnRentDateTime</Name>
+			<ExtendedDataType>ROROnRentDateTime</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>OutboundDateTime</Name>
+			<ExtendedDataType>ROROutboundDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>ParentRentalDateTimes</Name>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>PreparationDateTime</Name>
+			<ExtendedDataType>RORPreparationDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>RefRecId</Name>
+			<AllowEdit>No</AllowEdit>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>RefTableId</Name>
+			<AllowEdit>No</AllowEdit>
+			<ExtendedDataType>RefTableId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>RequestedDeliveryDateTime</Name>
+			<ExtendedDataType>RORRequestedDeliveryDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>RequestedPickupDateTime</Name>
+			<ExtendedDataType>RORRequestedPickupDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>StrikeDateTime</Name>
+			<ExtendedDataType>RORStrikeDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>SynchronizeFromParent</Name>
+			<ExtendedDataType>RORSynchronizeFromParent</ExtendedDataType>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>BuildDate</Name>
+			<ConfigurationKey>RORBuildDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3137</HelpText>
+			<Label>@DNR7568</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>EventEndDate</Name>
+			<ConfigurationKey>ROREventEndDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3138</HelpText>
+			<Label>@DNR10098</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>EventStartDate</Name>
+			<ConfigurationKey>ROREventStartDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3139</HelpText>
+			<Label>@DNR10099</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>ExpectedOffRentDate</Name>
+			<ConfigurationKey>RORExpectedOffRentDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3141</HelpText>
+			<Label>@DNR10110</Label>
+			<Mandatory>Yes</Mandatory>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>InboundDate</Name>
+			<ConfigurationKey>RORInboundDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3142</HelpText>
+			<Label>@DNR10101</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>InspectionDate</Name>
+			<ConfigurationKey>RORInspectionDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3143</HelpText>
+			<Label>@DNR10102</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>OffRentDate</Name>
+			<ConfigurationKey>ROROffRentDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3144</HelpText>
+			<Label>@DNR10103</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>OnRentDate</Name>
+			<ConfigurationKey>ROROnRentDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3145</HelpText>
+			<Label>@DNR10104</Label>
+			<Mandatory>Yes</Mandatory>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>OutboundDate</Name>
+			<ConfigurationKey>ROROutboundDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3146</HelpText>
+			<Label>@DNR10105</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>PreparationDate</Name>
+			<ConfigurationKey>RORPreparationDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3147</HelpText>
+			<Label>@DNR10106</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>RequestedDeliveryDate</Name>
+			<ConfigurationKey>RORRequestedDeliveryDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3148</HelpText>
+			<Label>@DNR10107</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>RequestedPickupDate</Name>
+			<ConfigurationKey>RORRequestedPickupDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3149</HelpText>
+			<Label>@DNR10108</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldDate">
+			<Name>StrikeDate</Name>
+			<ConfigurationKey>RORStrikeDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalDate</ExtendedDataType>
+			<HelpText>@DNR3150</HelpText>
+			<Label>@DNR10109</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>BuildTime</Name>
+			<ConfigurationKey>RORBuildDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR103</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>EventEndTime</Name>
+			<ConfigurationKey>ROREventEndDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR108</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>EventStartTime</Name>
+			<ConfigurationKey>ROREventStartDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR104</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>ExpectedOffRentTime</Name>
+			<ConfigurationKey>RORExpectedOffRentDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR120</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>InboundTime</Name>
+			<ConfigurationKey>RORInboundDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR117</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>InspectionTime</Name>
+			<ConfigurationKey>RORInspectionDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR4</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>OffRentTime</Name>
+			<ConfigurationKey>ROROffRentDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR115</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>OnRentTime</Name>
+			<ConfigurationKey>ROROnRentDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR5</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>OutboundTime</Name>
+			<ConfigurationKey>ROROutboundDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR93</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>PreparationTime</Name>
+			<ConfigurationKey>RORPreparationDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR94</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>RequestedDeliveryTime</Name>
+			<ConfigurationKey>RORRequestedDeliveryDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR129</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>RequestedPickupTime</Name>
+			<ConfigurationKey>RORRequestedPickupDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR131</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldTime">
+			<Name>StrikeTime</Name>
+			<ConfigurationKey>RORStrikeDateTime</ConfigurationKey>
+			<ExtendedDataType>RORRentalTime</ExtendedDataType>
+			<Label>@DNR112</Label>
+			<SaveContents>No</SaveContents>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>RefTableIdRecIdIdx</Name>
+			<AlternateKey>Yes</AlternateKey>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>RefTableId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>RefRecId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>ParentRentalDateTimesIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>ParentRentalDateTimes</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation>
+			<Name>CustConfirmJour</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>CustConfirmJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustConfirmTrans</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>CustConfirmTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustQuotationConfirmJour</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>CustQuotationConfirmJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustQuotationConfirmTrans</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>CustQuotationConfirmTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustQuotationJour</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>CustQuotationJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustQuotationTrans</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>CustQuotationTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustRORReturnNoteJour</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<RelatedTable>CustRORReturnNoteJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustRORReturnNoteTrans</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<RelatedTable>CustRORReturnNoteTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustRORSubStatusJour</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>CustRORSubStatusJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustRORSubStatusTrans</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>CustRORSubStatusTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>ParentRenalDateTimes</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>RORRentalDateTimes</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ParentRentalDateTimes</Name>
+					<Field>ParentRentalDateTimes</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>PurchLine</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>PurchLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>PurchLineHistory</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<RelatedTable>PurchLineHistory</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>PurchTable</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>PurchTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>RORRentalEditorHeader</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<RelatedTable>RORRentalEditorHeader</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RefRecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>RefTableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>RORRentalEditorLine</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>RORRentalEditorLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>SalesLine</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>SalesLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>SalesQuotationLine</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>SalesQuotationLine</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>SalesQuotationTable</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>SalesQuotationTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>SalesTable</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>SalesTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>VendPurchOrderJour</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<RelatedTable>VendPurchOrderJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>VendRORReturnNoteJour</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<RelatedTable>VendRORReturnNoteJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>VendRORReturnNoteTrans</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<RelatedTable>VendRORReturnNoteTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>VendRORSubStatusJour</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>VendRORSubStatusJour</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>VendRORSubStatusTrans</Name>
+			<Cardinality>ZeroOne</Cardinality>
+			<OnDelete>Cascade</OnDelete>
+			<RelatedTable>VendRORSubStatusTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

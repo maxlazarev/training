@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchLineTypeClass1_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchLineType))]
+public final class DNRPurchLineTypeClass1_Extension
+{
+    // event handler methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>PurchLineType_Post_updated</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(PurchLineType), methodStr(PurchLineType, updated))]
+    public static void PurchLineType_Post_updated(XppPrePostArgs _eventArgs)
+    {
+        PurchLineType hostObject = _eventArgs.getThis();
+        PurchLine purchLineOrig  = _eventArgs.getArg('_purchLineOrig');
+
+        PurchLineType::FINUpdateInvoicePeriod(hostObject, purchLineOrig);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>PurchLineType_Post_inserted</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(PurchLineType), methodStr(PurchLineType, inserted))]
+    public static void PurchLineType_Post_inserted(XppPrePostArgs _eventArgs)
+    {
+        PurchLineType hostObject = _eventArgs.getThis();
+        PurchLine     purchLine  = hostObject.RORParmPurchLine();
+
+        if (purchLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            PurchLineType::FINCreateRentalDates(purchLine);         
+   
+            FINRAGContractLineTier::syncContractLineTiers(purchLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVhasNoMoreLinesToInvoice_post</Name>
+				<Source><![CDATA[
+    [PostHandlerFor(classStr(PurchLineType), methodStr(PurchLineType, INVhasNoMoreLinesToInvoice))]
+    public static void INVhasNoMoreLinesToInvoice_post(XppPrePostArgs _eventArgs)
+    {
+        PurchLineType   hostObject  = _eventArgs.getThis();
+        PurchLine       purchLine   = _eventArgs.getArg('_purchLine');
+        boolean         ret         = _eventArgs.getReturnValue();
+
+        if (purchLine.PurchStatus == PurchStatus::Canceled ||
+            !FINInvoicePeriodQtyFinancial::existForCharging(purchLine.TableId, purchLine.RecId, purchLine.RORRentalLine::FINTimeZoneOrder(), FINRentalInvoiceProfile::find(purchLine.INVInvoiceProfileId).isHourlyInvoicing()))
+        {
+            ret = true;
+        }
+
+        _eventArgs.setReturnValue(ret);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINCreateRentalDates</Name>
+				<Source><![CDATA[
+    private static void FINCreateRentalDates(PurchLine _purchLine)
+    {
+        if (isConfigurationkeyEnabled(configurationKeyNum(RORRentalDateTimes)))
+        {
+            RORRentalDateTimes rentalDateTimes;
+
+            select firstonly rentalDateTimes
+            where rentalDateTimes.RefTableId == _purchLine.TableId
+            &&    rentalDateTimes.RefRecId == _purchLine.RecId;
+
+            if (!rentalDateTimes)
+            {
+                rentalDateTimes = _purchLine.RORRentalLine::createRentalDateTimes();
+            }
+            
+            FINInvoicePeriodManager_Creation invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::Creation, _purchLine);
+            invoicePeriodManager.setRentalDateTimes(rentalDateTimes);
+            invoicePeriodManager.run();
+        }
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINUpdateInvoicePeriod</Name>
+				<Source><![CDATA[
+    private static void FINUpdateInvoicePeriod(PurchLineType _purchLineType, PurchLine _purchLine)
+    {
+        if (_purchLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            INVInvoicePeriodHost invoicePeriodHost = _purchLineType.RORParmPurchLine();
+            INVInvoicePeriodHost origBuffer = _purchLine;
+
+            if (invoicePeriodHost.RentQty != origBuffer.RentQty)
+            {
+                Qty deltaQty = (invoicePeriodHost.RentQty - origBuffer.RentQty);
+                Map changesMap = new Map(Types::Enum, Types::Container);
+                changesMap.insert(FINInvoicePeriodPhysicalChange::Qty, [deltaQty]);
+                
+                FINInvoicePeriodManager_PhysicalChange invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::PhysicalChange, invoicePeriodHost);
+                invoicePeriodManager.setChanges(changesMap);
+                invoicePeriodManager.run();
+            }
+
+            boolean isKit = invoicePeriodHost.KitComponentType == RORKitComponentType::Kit || invoicePeriodHost.KitComponentType == RORKitComponentType::KitComponent;
+            boolean canChangePrice = !isKit || invoicePeriodHost.IsPriceFixed;
+            
+            if ((invoicePeriodHost.Price            != origBuffer.Price && canChangePrice)
+            ||  (invoicePeriodHost.LinePercent      != origBuffer.LinePercent && canChangePrice)
+            ||  invoicePeriodHost.RentalModeId      != origBuffer.RentalModeId
+            ||  invoicePeriodHost.CalendarId        != origBuffer.CalendarId)
+            {
+                RORRentalDateTimes rentalDateTimes = _purchLine.RORRentalDateTimes();
+                if (rentalDateTimes)
+                {
+                    FieldId onRentFieldId, expectedOffRentFieldId, offRentFieldId;
+
+                    [onRentFieldId, offRentFieldId, expectedOffRentFieldId] = RORRentalDateTimes::getPeriodFieldIds();
+
+                    TransDateTime effectiveDateTimeFrom = rentalDateTimes.(onRentFieldId);
+                    TransDateTime effectiveDateTimeTo   = rentalDateTimes.(offRentFieldId) ? rentalDateTimes.(offRentFieldId) : DateTimeUtil::maxValue();
+
+                    if (FINRentalInvoiceProfile::find(invoicePeriodHost.InvoiceProfileId).MultiplierPeriods == INVMultiplierPeriods::RangeCalendar
+                    &&  (!invoicePeriodHost.dataSource() || Box::yesNoCancel("@DNR:RangeTierRecalculation", DialogButton::Yes)))
+                    {
+                        FINPriceTierRangeRecalculate priceTierRangeRecalculate = new FINPriceTierRangeRecalculate();
+                        priceTierRangeRecalculate.parmIsManualRecalculation(true);
+                        priceTierRangeRecalculate.run(invoicePeriodHost);
+                    }
+                    else
+                    {
+                        Map changesMap = FINInvoicePeriodManager_FinancialChange::getChangesMap(invoicePeriodHost, origBuffer, effectiveDateTimeFrom, effectiveDateTimeTo);
+                        ROROrderAmendmentDialogType::runFinancialChanges(origBuffer, changesMap);
+                    }
+
+                    // ROROrderAmendmentDialogType::runFinancialChanges is updating an order line so we need to reread the value here.
+                    _purchLineType.parmPurchLine().reread();
+
+                    FINInvoicePeriodManager_FinancialChange invoicePeriodManager_Financial = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::FinancialChange, invoicePeriodHost);
+                    if (invoicePeriodManager_Financial.canProcessInvoicedPeriod(effectiveDateTimeFrom, effectiveDateTimeTo))
+                    {
+                        FINInvoicePeriodQtyFinancial::markUnMarkDateTimeForCreditWithoutSourceRecordUpdate(FINInvoiceTransPeriodStatus::PendingCredit, effectiveDateTimeFrom, effectiveDateTimeTo, invoicePeriodHost);
+                    }
+                }
+            }
+
+            if (invoicePeriodHost.InvoiceProfileId  != origBuffer.InvoiceProfileId
+             || invoicePeriodHost.CalendarId        != origBuffer.CalendarId)
+            {
+                FINRAGContractLineTier::syncContractLineTiers(_purchLineType.RORParmPurchLine());
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

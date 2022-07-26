@@ -1,0 +1,1634 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBObjectAvailabilityForm</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBObjectAvailabilityForm
+{
+    #HiGHPlanBoard
+
+    Object                              formRun;
+    BOBTmpObjectAvailability_Graphical  tmpData_Graphical;
+    BOBObjectAvailabilitySettings       settings;
+    BOBParameters                       parameters;
+    BOBPriority                         priority;
+    RORRentalLine                       callerRentalLine;
+    FromDateTime                        selectionFromDateTime;
+    ToDateTime                          selectionToDateTime;
+    Timezone                            userTimezone;
+    Map                                 rowPlannedEventsMap;
+    Map                                 rowItemsMap;
+    Map                                 conditionIconMap;
+    Map                                 priorityConditionIconMap;
+    Map                                 colorMap;
+    Set                                 inventLocationAddressSet;
+    HiGHPlanBoard                       planBoard;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>changeRentalLineDates</Name>
+				<Source><![CDATA[
+    private void changeRentalLineDates(BOBRentalTrans _rentalTrans)
+    {
+        SalesLine                   salesLine;
+        InventTransOriginSalesLine  origin;
+        Args                        args;
+        ;
+
+        if (_rentalTrans.TransType == BOBRentalTransType::Rental)
+        {
+            select firstOnly salesLine
+                exists join origin
+                where origin.SalesLineDataAreaId == salesLine.dataAreaId
+                &&    origin.SalesLineInventTransId == salesLine.InventTransId
+                &&    origin.InventTransOrigin == _rentalTrans.InventTransOrigin;
+
+            if (salesLine)
+            {
+                args = new Args();
+                args.caller(formRun);
+                args.record(salesLine);
+
+                new MenuFunction(menuitemActionStr(ROROrderAmendmentDialogType_ChangeDate), MenuItemType::Action).run(args);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPurchaseOrder_Graphical</Name>
+				<Source><![CDATA[
+    private void createPurchaseOrder_Graphical()
+    {
+        PurchTable      purchTable;
+        PurchLine       purchLine;
+        PurchTableForm  purchTableForm;
+        Args            args;
+        MenuFunction    menuFunction;
+        ;
+
+        purchTableForm = PurchTableForm::construct(PurchTableFormId::None, null);
+
+        purchTableForm.initValues();
+        purchTableForm.RORParmInventLocationId(tmpData_Graphical.InventLocationId);
+        purchTableForm.create();
+
+        purchTable = purchTableForm.purchTable();
+
+        if (purchTable)
+        {
+            InventTable inventTable = InventTable::BOBFindFromRentalType(tmpData_Graphical.RentalTypeId);
+
+            if (inventTable)
+            {
+                ttsBegin;
+
+                purchLine.clear();
+                purchLine.purchId   = purchTable.PurchId;
+                purchLine.ItemId    = inventTable.ItemId;
+                purchLine.PurchQty  = -tmpData_Graphical.Qty;
+                purchLine.itemIdChanged();
+                purchLine.createLine(NoYes::Yes, NoYes::Yes, NoYes::Yes, NoYes::Yes, NoYes::Yes, NoYes::Yes);
+
+                ttsCommit;
+            }
+
+            args = new Args();
+            args.record(purchTable);
+
+            menuFunction = new MenuFunction(menuitemDisplayStr(RORPurchTableMainTable), MenuItemType::Display);
+            menuFunction.run(args);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRentalOrder</Name>
+				<Source><![CDATA[
+    public void createRentalOrder(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        SalesTable                              salesTable;
+        SalesLine                               salesLine;
+        InventTable                             inventTable;
+        EcoResProduct                           ecoResProduct;
+        SalesTableForm                          salesTableForm;
+        BOBObjectTable                          objectTable;
+        BOBObjectAssignmentEngine               objectAssignmentEngine;
+        Args                                    args;
+        MenuFunction                            menuFunction;
+        WPPCreateAddRentalOrderQuotationEngine  createAddRentalOrderQuotationEngine;
+        RORRentalDateTimes                      rentalDateTimes;
+        boolean                                 isCreatedNew;
+
+        if (_refTableId == tableNum(BOBObjectTable))
+        {
+            objectTable = BOBObjectTable::findRecId(_refRecId);
+            inventTable = objectTable.inventTable();
+        }
+
+        if (inventTable && objectTable)
+        {
+            settings  = BOBObjectAvailabilitySettings::findOrCreate();
+
+            createAddRentalOrderQuotationEngine = new WPPCreateAddRentalOrderQuotationEngine();
+            createAddRentalOrderQuotationEngine.parmObjectTable(objectTable);
+            createAddRentalOrderQuotationEngine.parmInventTable(inventTable);
+            createAddRentalOrderQuotationEngine.parmStartDateTime(selectionFromDateTime);
+            createAddRentalOrderQuotationEngine.parmEndDateTime(selectionToDateTime);
+            createAddRentalOrderQuotationEngine.parmInventTransType(InventTransType::Sales);
+
+            if (callerRentalLine && callerRentalLine.TableId == tableNum(salesLine))
+            {
+                createAddRentalOrderQuotationEngine.parmSalesId(callerRentalLine.HeaderId);
+            }
+
+            if (!RORParameters::find().QuickOrderEntry || createAddRentalOrderQuotationEngine.prompt())
+            {
+                selectionFromDateTime   = createAddRentalOrderQuotationEngine.parmStartDateTime();
+                selectionToDateTime     = createAddRentalOrderQuotationEngine.parmEndDateTime();
+
+                if (!createAddRentalOrderQuotationEngine.parmSalesId())
+                {
+                    //Open create rental order form
+                    salesTableForm = SalesTableForm::construct(SalesTableFormId::RORRentalOrder, null);
+                    salesTableForm.RORParmSelectionFromDateTime(selectionFromDateTime);
+                    salesTableForm.RORParmSelectionToDateTime(selectionToDateTime);
+
+                    salesTableForm.create();
+
+                    salesTable = salesTableForm.salesTable();
+                    isCreatedNew = salesTable.RecId;
+                }
+                else if (createAddRentalOrderQuotationEngine.parmSalesId())
+                {
+                    salesTable = salesTable::find(createAddRentalOrderQuotationEngine.parmSalesId());
+                }
+
+                if (salesTable)
+                {
+                    try
+                    {
+                        ttsBegin;
+
+                        salesLine.initValue(salesTable.SalesType);
+                        salesLine.initFromSalesTable(salesTable);
+                        salesLine.RORTradeType = RORTradeType::Rental;
+                        salesLine.ItemId = createAddRentalOrderQuotationEngine.parmItemId() ?
+                                           createAddRentalOrderQuotationEngine.parmItemId() :
+                                           inventTable.ItemId;
+                        salesLine.itemIdChanged();
+                       
+                        if (createAddRentalOrderQuotationEngine.parmWorkOrderTemplateId())
+                        {
+                            salesLine.WPPWorkOrderTemplateId = createAddRentalOrderQuotationEngine.parmWorkOrderTemplateId();
+                        }
+
+                        salesLine.SalesQty     = 1;
+                        salesLine.SalesUnit    = inventTable.salesUnitId();
+                        salesLine.SalesPrice   = inventTable.salesPcsPrice();
+                        salesLine.setPriceDisc(salesLine.inventDim());
+                        salesLine.RORReturnInventLocationId = salesLine.RORReturnInventLocationId ?
+                                        salesLine.RORReturnInventLocationId : salesLine.inventDim().InventLocationId;
+                        salesLine.createLine();
+
+                        if (createAddRentalOrderQuotationEngine.parmSalesId())
+                        {
+                            rentalDateTimes = salesLine.RORRentalDateTimes(true);
+
+                            if (rentalDateTimes)
+                            {
+                                rentalDateTimes.SynchronizeFromParent = false;
+                                rentalDateTimes.OnRentDateTime = DateTimeUtil::removeTimeZoneOffset(selectionFromDateTime, userTimezone);
+                                rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+                                rentalDateTimes.OffRentDateTime = DateTimeUtil::removeTimeZoneOffset(selectionToDateTime, userTimezone);
+                                rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OffRentDateTime));
+                                rentalDateTimes.update();
+                            }
+                        }
+
+                        ttsCommit;
+                        RORRentalLineEditorForm::createSupplementaryItemsLines(salesLine);
+
+                        //Assign serial number
+                        if (salesLine && objectTable.InventSerialId)
+                        {
+                            salesLine.reread();  //The above call of RORRentalLineEditorForm::createSupplementaryItemsLines(salesLine) updates the buffer, hence re-reading the line
+                            objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesLine, objectTable.InventSerialId);
+                            objectAssignmentEngine.runOperation();
+                        }
+
+                        args = new args();
+                        args.record(salesTable);
+
+                        menuFunction = new MenuFunction(menuitemDisplayStr(RORSalesTable), MenuItemType::Display);
+                        menuFunction.run(args);
+
+                    }
+                    catch
+                    {
+                        if (isCreatedNew)
+                        {
+                            // You will need to set the ttsLevel as a ttsabort()
+                            // will set the level to 0 first.
+                            ttsbegin;
+                            salesTable.delete();
+                            ttscommit;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRentalQuotation</Name>
+				<Source><![CDATA[
+    public void createRentalQuotation(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        InventTable                             inventTable;
+        SalesQuotationTable                     salesQuotationTable;
+        SalesQuotationLine                      salesQuotationLine;
+        SalesQuotationTableForm                 salesQuotationTableForm;
+        BOBObjectTable                          objectTable;
+        BOBObjectAssignmentEngine               objectAssignmentEngine;
+        Args                                    args;
+        MenuFunction                            menuFunction;
+        WPPCreateAddRentalOrderQuotationEngine  createAddRentalOrderQuotationEngine;
+        RORRentalDateTimes                      rentalDateTimes;
+
+        if (_refTableId == tableNum(BOBObjectTable))
+        {
+            objectTable = BOBObjectTable::findRecId(_refRecId);
+            inventTable = objectTable.inventTable();
+        }
+
+        if (inventTable && objectTable)
+        {
+            settings  = BOBObjectAvailabilitySettings::findOrCreate();
+
+            createAddRentalOrderQuotationEngine = new WPPCreateAddRentalOrderQuotationEngine();
+            createAddRentalOrderQuotationEngine.parmObjectTable(objectTable);
+            createAddRentalOrderQuotationEngine.parmInventTable(inventTable);
+            createAddRentalOrderQuotationEngine.parmStartDateTime(selectionFromDateTime);
+            createAddRentalOrderQuotationEngine.parmEndDateTime(selectionToDateTime);
+            createAddRentalOrderQuotationEngine.parmInventTransType(InventTransType::SalesQuotation);
+
+            if (!RORParameters::find().QuickOrderEntry || createAddRentalOrderQuotationEngine.prompt())
+            {
+                selectionFromDateTime   = createAddRentalOrderQuotationEngine.parmStartDateTime();
+                selectionToDateTime     = createAddRentalOrderQuotationEngine.parmEndDateTime();
+
+                if (!createAddRentalOrderQuotationEngine.parmSalesQuotationId())
+                {
+                    //Open create rental quotation form
+                    salesQuotationTableForm = SalesQuotationTableForm::construct(QuotationType::RORRental, null);
+                    salesQuotationTableForm.RORParmSelectionFromDateTime(selectionFromDateTime);
+                    salesQuotationTableForm.RORParmSelectionToDateTime(selectionToDateTime);
+
+                    if (salesQuotationTableForm.create())
+                    {
+                        salesQuotationTable = salesQuotationTableForm.salesQuotationTable();
+                    }
+                }
+                else if (createAddRentalOrderQuotationEngine.parmSalesQuotationId())
+                {
+                    salesQuotationTable = salesQuotationTable::find(createAddRentalOrderQuotationEngine.parmSalesQuotationId());
+                }
+
+                if (salesQuotationTable)
+                {
+                    try
+                    {
+                        ttsBegin;
+
+                        salesQuotationLine.initValue();
+                        salesQuotationLine.initFromSalesQuotationTable(salesQuotationTable);
+
+                        if (salesQuotationLine.QuotationType == QuotationType::RORProjRental)
+                        {
+                            salesQuotationLine.ProjTransType    = QuotationProjTransType::Item;
+                            salesQuotationLine.RORProjTransType = RORProjTransType::Rental;
+                        }
+
+                        salesQuotationLine.RORTradeType = RORTradeType::Rental;
+
+                        if (createAddRentalOrderQuotationEngine.parmItemId())
+                        {
+                            salesQuotationLine.ItemId = createAddRentalOrderQuotationEngine.parmItemId();
+                        }
+                        else
+                        {
+                            salesQuotationLine.ItemId = inventTable.ItemId;
+                        }
+
+                        salesQuotationLine.itemIdChanged();
+
+                        if (createAddRentalOrderQuotationEngine.parmWorkOrderTemplateId())
+                        {
+                            salesQuotationLine.WPPWorkOrderTemplateId = createAddRentalOrderQuotationEngine.parmWorkOrderTemplateId();
+                        }
+
+                        salesQuotationLine.SalesQty     = 1;
+                        salesQuotationLine.SalesUnit    = inventTable.salesUnitId();
+                        salesQuotationLine.SalesPrice   = inventTable.salesPcsPrice();
+                        salesQuotationLine.setPriceDisc(salesQuotationLine.inventDim());
+                        salesQuotationLine.createLine();
+
+                        if (createAddRentalOrderQuotationEngine.parmSalesQuotationId())
+                        {
+                            rentalDateTimes = salesQuotationLine.RORRentalDateTimes(true);
+
+                            if (rentalDateTimes)
+                            {
+                                rentalDateTimes.SynchronizeFromParent = false;
+                                rentalDateTimes.OnRentDateTime = DateTimeUtil::removeTimeZoneOffset(selectionFromDateTime, userTimezone);
+                                rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OnRentDateTime));
+                                rentalDateTimes.OffRentDateTime = DateTimeUtil::removeTimeZoneOffset(selectionToDateTime, userTimezone);
+                                rentalDateTimes.modifiedField(fieldNum(RORRentalDateTimes, OffRentDateTime));
+                                rentalDateTimes.update();
+                            }
+                        }
+
+                        ttsCommit;
+                        RORRentalLineEditorForm::createSupplementaryItemsLines(salesQuotationLine);
+
+                        //Assign serial number
+                        if (salesQuotationLine && objectTable.InventSerialId)
+                        {
+                            objectAssignmentEngine = BOBObjectAssignmentEngine::construct(salesQuotationLine, objectTable.InventSerialId);
+                            objectAssignmentEngine.runOperation();
+                        }
+
+                        args = new args();
+                        args.lookupValue(salesQuotationTable.QuotationId);
+
+                        menuFunction = new MenuFunction(menuitemDisplayStr(SalesQuotationJumpRef), MenuItemType::Display);
+                        menuFunction.run(args);
+                    }
+                    catch
+                    {
+                        // Only delete the order when a new one is created
+                        if (createAddRentalOrderQuotationEngine.parmSalesQuotationId())
+                        {
+                            salesQuotationLine.reread();
+                            salesQuotationTable.delete();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRowItem_BusinessObject</Name>
+				<Source><![CDATA[
+    private HiGHPlanBoardRowItem createRowItem_BusinessObject(BOBTmpObjectAvailability_Graphical _tmpData_Graphical, Counter _rowNumber)
+    {
+        FromDateTime            highlightFromDateTime;
+        ToDateTime              highlightToDateTime;
+        String50                displayName;
+        BOBObjectTable          objectTable;
+        List                    rowPlannedEventsList;
+        HiGHPlanBoardRowItem    rowItem;
+
+        settings = BOBObjectAvailabilitySettings::findOrCreate();
+
+        switch (parameters.FleetNumber)
+        {
+            case DNRVisibleFleetNumber::AssetId:
+                displayName = _tmpData_Graphical.AssetId;
+                break;
+
+            case DNRVisibleFleetNumber::InventSerialId:
+                displayName = _tmpData_Graphical.InventSerialId;
+                break;
+            
+            case DNRVisibleFleetNumber::ObjectId:
+                displayName = _tmpData_Graphical.ObjectId;
+                break;
+            
+            case DNRVisibleFleetNumber::FleetNumber:
+                displayName = _tmpData_Graphical.FleetNumber;
+                break;
+
+            default:
+                displayName = '<none>';
+        }
+
+        rowPlannedEventsList = new List(Types::Class);
+
+        if (rowPlannedEventsMap.exists(_tmpData_Graphical.ObjectTableRecId))
+        {
+            rowPlannedEventsList = rowPlannedEventsMap.lookup(_tmpData_Graphical.ObjectTableRecId);
+        }
+
+        rowItem = HiGHPlanBoardRowItem::newParameters(int642Str(_tmpData_Graphical.ObjectTableRecId),
+                                                      displayName,
+                                                      0,
+                                                      planBoard.parmPeriods(),
+                                                      rowPlannedEventsList,
+                                                      tableNum(BOBObjectTable),
+                                                      _tmpData_Graphical.ObjectTableRecId);
+        
+        // set highlight ranges if necessary
+        if ((_tmpData_Graphical.ObjectCategory == BOBObjectCategory::Rental || _tmpData_Graphical.ObjectCategory == BOBObjectCategory::SubRental)
+        &&  _tmpData_Graphical.FirstOnRentDate)
+        {
+            if (settings.Depot)
+            {
+                highlightFromDateTime   = DateTimeUtil::newDateTime(_tmpData_Graphical.DepotStartDate, 0);
+
+                if (_tmpData_Graphical.DepotEndDate)
+                {
+                    highlightToDateTime = DateTimeUtil::newDateTime(_tmpData_Graphical.DepotEndDate + 1, 0);
+                }
+                else if (_tmpData_Graphical.LastOnRentDate)
+                {
+                    highlightToDateTime = DateTimeUtil::newDateTime(_tmpData_Graphical.LastOnRentDate + 1, 0);
+                }
+                else
+                {
+                    highlightToDateTime = DateTimeUtil::maxValue();
+                }
+            }
+            else
+            {
+                highlightFromDateTime   = DateTimeUtil::newDateTime(_tmpData_Graphical.FirstOnRentDate, 0);
+                highlightToDateTime     = ((_tmpData_Graphical.LastOnRentDate && _tmpData_Graphical.LastOnRentDate != maxDate()) ?
+                                           DateTimeUtil::newDateTime(_tmpData_Graphical.LastOnRentDate + 1, 0) :
+                                           DateTimeUtil::maxValue());
+            }
+        }
+        else if (_tmpData_Graphical.ObjectId && _tmpData_Graphical.ObjectCategory == BOBObjectCategory::External)
+        {
+            select firstOnly CreatedDateTime from objectTable
+            where objectTable.ObjectId == _tmpData_Graphical.ObjectId;
+
+            highlightFromDateTime   = DateTimeUtil::newDateTime(DateTimeUtil::date(objectTable.createdDateTime), DateTimeUtil::hour(objectTable.createdDateTime));
+            highlightToDateTime     = DateTimeUtil::maxValue();
+        }
+        
+        planBoard.openPeriod(rowItem, highlightFromDateTime, highlightToDateTime);
+
+        return rowItem;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSubRentalOrder</Name>
+				<Source><![CDATA[
+    [SysObsolete("Method createSubRentalOrder is no longer supported. Please use /Forms/BOBObjectAssignmentDialog/Methods/createSubRentalOrder instead", false)]
+    public void createSubRentalOrder(BOBObjectAssignmentEngine _engine)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSubRentalOrder_Graphical</Name>
+				<Source><![CDATA[
+    private void createSubRentalOrder_Graphical()
+    {
+        PurchTable              purchTable;
+        PurchLine               purchLine;
+        PurchTableForm          purchTableForm;
+        Args                    args;
+        MenuFunction            menuFunction;
+        TransDateTime           fromDateTime;
+        TransDateTime           toDateTime;
+        ;
+
+        fromDateTime = DateTimeUtil::applyTimeZoneOffset(tmpData_Graphical.FromDateTime, DateTimeUtil::getUserPreferredTimeZone());
+        toDateTime   = DateTimeUtil::applyTimeZoneOffset(tmpData_Graphical.ToDateTime, DateTimeUtil::getUserPreferredTimeZone());
+
+        purchTableForm = PurchTableForm::construct(PurchTableFormId::RORSubRentalOrder, null);
+
+        purchTableForm.initValues();
+        purchTableForm.RORParmSelectionFromDateTime(fromDateTime);
+        
+        if(DateTimeUtil::date(toDateTime) < dateMax())
+        {
+            purchTableForm.RORParmSelectionToDateTime(toDateTime);
+        }
+
+        purchTableForm.RORParmInventLocationId(tmpData_Graphical.InventLocationId);
+        purchTableForm.create();
+
+        purchTable = purchTableForm.purchTable();
+
+        if (purchTable)
+        {
+            try
+            {
+                InventTable inventTable = InventTable::BOBFindFromRentalType(tmpData_Graphical.RentalTypeId);
+
+                if (inventTable)
+                {
+                    ttsBegin;
+
+                    purchLine.initValue();
+                    purchLine.initFromPurchTable(purchTable);
+                    purchLine.RORTradeType  = RORTradeType::SubRental;
+                    purchLine.ItemId        = inventTable.ItemId;
+                    purchLine.itemIdChanged();
+                    purchLine.PurchQty      = -tmpData_Graphical.Qty;
+                    purchLine.createLine(true, false, false, true, false, false);
+
+                    ttsCommit;
+                }
+
+                args = new Args();
+                args.record(purchTable);
+
+                menuFunction = new MenuFunction(menuitemDisplayStr(RORPurchTableMainTable), MenuItemType::Display);
+                menuFunction.run(args);
+            }
+            catch
+            {
+                purchTable.delete();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createTransferOrder_Graphical</Name>
+				<Source><![CDATA[
+    private void createTransferOrder_Graphical()
+    {
+        InventTransferTable             inventTransferTable;
+        InventTransferLine              inventTransferLine;
+        Args                            args;
+        MenuFunction                    menuFunction;
+        BOBCreateTransferOrderEngine    createTransferOrderEngine;
+        ;
+
+        if (tmpData_Graphical.Qty < 0)
+        {
+            createTransferOrderEngine = new BOBCreateTransferOrderEngine();
+            createTransferOrderEngine.parmInventLocationIdTo(tmpData_Graphical.InventLocationId);
+            createTransferOrderEngine.parmShipDate(DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(tmpData_Graphical.FromDateTime, DateTimeUtil::getUserPreferredTimeZone())));
+            createTransferOrderEngine.parmReceiveDate(DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(tmpData_Graphical.FromDateTime, DateTimeUtil::getUserPreferredTimeZone())));
+
+            InventTable inventTable = InventTable::BOBFindFromRentalType(tmpData_Graphical.RentalTypeId);
+
+            if (inventTable)
+            {
+                createTransferOrderEngine.parmItemId(inventTable.ItemId);
+            }
+
+            if (createTransferOrderEngine.prompt())
+            {
+                inventTransferTable.clear();
+                inventTransferTable.initValue();
+                inventTransferTable.TransferId              = NumberSeq::newGetNum(InventParameters::numRefTransferId()).num();
+                inventTransferTable.InventLocationIdFrom    = createTransferOrderEngine.parmInventLocationIdFrom();
+                inventTransferTable.modifiedField(fieldNum(InventTransferTable, InventLocationIdFrom));
+                inventTransferTable.InventLocationIdTo      = createTransferOrderEngine.parmInventLocationIdTo();
+                inventTransferTable.modifiedField(fieldNum(InventTransferTable, InventLocationIdTo));
+                inventTransferTable.TransferStatus          = InventTransferStatus::Created;
+                inventTransferTable.ShipDate                = createTransferOrderEngine.parmShipDate();
+                inventTransferTable.ReceiveDate             = createTransferOrderEngine.parmReceiveDate();
+                inventTransferTable.insert();
+
+                if (inventTransferTable)
+                {
+                    inventTransferLine.clear();
+                    inventTransferLine.initValue();
+                    inventTransferLine.ItemId = createTransferOrderEngine.parmItemId();
+                    inventTransferLine.initFromInventTable(InventTable::find(createTransferOrderEngine.parmItemId()));
+                    inventTransferLine.initFromInventTableModule(InventTableModule::find(inventTransferLine.ItemId, ModuleInventPurchSales::Invent));
+                    inventTransferLine.initFromInventTransferTable(inventTransferTable, true);
+                    inventTransferLine.QtyTransfer      = -(tmpData_Graphical.Qty);
+                    inventTransferLine.QtyRemainReceive = inventTransferLine.QtyTransfer;
+                    inventTransferLine.QtyRemainShip    = inventTransferLine.QtyTransfer;
+                    inventTransferLine.QtyShipNow       = 0;
+                    inventTransferLine.QtyReceiveNow    = 0;
+                    inventTransferLine.RORTradeType     = RORTradeType::Rental;
+                    inventTransferLine.LineNum          = InventTransferLine::lastLineNum(inventTransferLine.TransferId) + 1.0;
+
+                    if (inventTransferLine.validateWrite())
+                    {
+                        inventTransferLine.insert();
+                    }
+
+                    args = new Args();
+                    args.record(inventTransferTable);
+
+                    menuFunction = new MenuFunction(menuitemDisplayStr(InventTransferOrder), MenuItemType::Display);
+                    menuFunction.run(args);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createWorkOrder</Name>
+				<Source><![CDATA[
+    private void createWorkOrder(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        Args            args;
+        MenuFunction    mfCreateWorkOrder;
+
+        select firstOnly tmpData_Graphical
+        where tmpData_Graphical.ObjectTableRecId == _refRecId;
+
+        if (tmpData_Graphical)
+        {
+            args = new Args();
+            args.record(tmpData_Graphical);
+            args.caller(this);
+
+            mfCreateWorkOrder = new MenuFunction(menuitemActionStr(WPPWorkOrderCreateFromBusinessObject), MenuItemType::Action);
+            mfCreateWorkOrder.run(args);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContextMenuBaseArgs</Name>
+				<Source><![CDATA[
+    private Object getContextMenuBaseArgs(Object _sender)
+    {
+        Object baseArgs;
+
+        switch (classIdGet(_sender))
+        {
+            case classNum(HiGHPlanBoardOnContextRowItemEventArgs):
+                HiGHPlanBoardOnContextRowItemEventArgs contextRowItemEventArgs = _sender;
+                List rowItemEventsList = contextRowItemEventArgs.parmRowItems();
+
+                if (!rowItemEventsList.empty())
+                {
+                    ListEnumerator rowItemEventsEnum = rowItemEventsList.getEnumerator();
+
+                    if (rowItemEventsList.elements() == 1)
+                    {
+                        rowItemEventsEnum.moveNext();
+                        baseArgs = rowItemEventsEnum.current();
+                    }
+                }
+                break;
+
+            case classNum(HiGHPlanBoardOnContextPeriodEventArgs):
+                baseArgs = _sender;
+                break;
+
+            case classNum(HiGHPlanBoardOnContextPlannedEventEventArgs):
+                HiGHPlanBoardOnContextPlannedEventEventArgs contextPlannedEventEventArgs = _sender;
+                List plannedEventsList = contextPlannedEventEventArgs.parmPlannedEvents();
+
+                if (!plannedEventsList.empty())
+                {
+                    ListEnumerator plannedEventsEnum = plannedEventsList.getEnumerator();
+
+                    if (plannedEventsList.elements() == 1 && plannedEventsEnum.moveNext())
+                    {
+                        baseArgs = plannedEventsEnum.current();
+                    }
+                }
+                break;
+
+            case classNum(HiGHContextHandleMenuItemClickedEventArgs):
+                baseArgs = _sender;
+                break;
+
+            default:
+                // Do nothing
+                break;
+        }
+
+        return baseArgs;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getContextMenuContent</Name>
+				<Source><![CDATA[
+    public List getContextMenuContent(Object _sender)
+    {
+        Object baseArgs = this.getContextMenuBaseArgs(_sender);
+
+        HiGHPlanboardContextMenuBuilder contextMenuBuilder = HiGHPlanboardContextMenuBuilder::construct(formRun, baseArgs);
+        contextMenuBuilder.populate();
+        return contextMenuBuilder.getMenuItemList();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRef</Name>
+				<Source><![CDATA[
+    private void jumpRef(FormName   _formName,
+                         FieldId    _lookupField,
+                         str        _lookupValue,
+                         Common     _record = null)
+    {
+        Args    args;
+        FormRun jumpRefFormRun;
+        ;
+
+        args = new Args();
+        args.name(_formName);
+        args.lookupField(_lookupField);
+        args.lookupValue(_lookupValue);
+        args.caller(formRun);
+
+        if (_record)
+        {
+            args.record(_record);
+        }
+
+        jumpRefFormRun = ClassFactory::formRunClassOnClient(args);
+        jumpRefFormRun.init();
+        jumpRefFormRun.run();
+        jumpRefFormRun.wait();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefCustVend</Name>
+				<Source><![CDATA[
+    private void jumpRefCustVend(BOBRentalTrans _rentalTrans)
+    {
+        WPPWorkOrderTable   workOrderTable;
+        WPPWorkOrderLine    workOrderLine;
+
+        select firstOnly OrganizationParty, CustVendAccountType from workOrderTable
+            exists join workOrderLine
+            where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+            &&    workOrderLine.RecId == _rentalTrans.WPPWorkOrderLineRecId;
+
+        if (workOrderTable.OrganizationParty)
+        {
+            if (workOrderTable.CustVendAccountType == CustVendACType::Cust)
+            {
+                CustTable custTable = CustTable::findByPartyRecId(workOrderTable.OrganizationParty);
+                this.jumpRef(formStr(CustTable), fieldNum(CustTable, AccountNum), '', custTable);
+            }
+            else
+            {
+                VendTable vendTable = VendTable::findByPartyRecId(workOrderTable.OrganizationParty);
+                this.jumpRef(formStr(VendTable), fieldNum(VendTable, AccountNum), '', vendTable);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefMenuItem</Name>
+				<Source><![CDATA[
+    private void jumpRefMenuItem(MenuItemNameDisplay _menuItemName, Common _record)
+    {
+        Args args = new Args();
+        args.caller(formRun);
+        args.record(_record);
+
+        // no need to test whether the _menuItemName actually exists,
+        // the run() function will throw a warning if it doesn't
+        new MenuFunction(_menuItemName, MenuItemType::Display).run(args);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefPerson</Name>
+				<Source><![CDATA[
+    private void jumpRefPerson(BOBRentalTrans _rentalTrans, TableId _tableIdJumpRef, FieldId _fieldIdJumpRef)
+    {
+        BOBRentalTrans                      rentalTrans;
+        WPPWorkOrderTable                   workOrderTable;
+        WPPWorkOrderLine                    workOrderLine;
+        SalesTable                          salesTable;
+        SalesLine                           salesLine;
+        InventTransOriginSalesLine          inventTransOriginSalesLine;
+        SalesQuotationTable                 salesQuotationTable;
+        SalesQuotationLine                  salesQuotationLine;
+        InventTransOriginSalesQuotationLine inventTransOriginSalesQuotationLine;
+        ContactPerson                       operatorSales, operatorQuote,
+                                            contactPersonSales, contactPersonQuote, contactPersonWorkOrder;
+
+        select firstOnly TableId from rentalTrans
+        where rentalTrans.RecId == _rentalTrans.RecId
+            outer join TableId from workOrderLine
+            where rentalTrans.TransType == BOBRentalTransType::WPPWorkOrder
+            &&    rentalTrans.WPPWorkOrderLineRecId == workOrderLine.RecId
+                outer join TableId from workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    outer join contactPersonWorkOrder
+                    where contactPersonWorkOrder.ContactPersonId == workOrderTable.ContactPersonId
+                        outer join TableId from inventTransOriginSalesQuotationLine
+                        where rentalTrans.TransType == BOBRentalTransType::RentalQuotation
+                        &&    rentalTrans.InventTransOrigin == inventTransOriginSalesQuotationLine.InventTransOrigin
+                            outer join TableId from salesQuotationLine
+                            where salesQuotationLine.dataAreaId == inventTransOriginSalesQuotationLine.SalesQuotationLineDataAreaId
+                            &&    salesQuotationLine.InventTransId == inventTransOriginSalesQuotationLine.SalesQuotationLineInventTransId
+                                outer join WorkerSalesResponsible from salesQuotationTable
+                                where salesQuotationTable.QuotationId == salesQuotationLine.QuotationId
+                                    outer join operatorQuote
+                                    where operatorQuote.ContactPersonId == salesQuotationTable.RORContactPersonIdOperator
+                                        outer join contactPersonQuote
+                                        where contactPersonQuote.ContactPersonId == salesQuotationTable.ContactPersonId
+                                            outer join TableId from inventTransOriginSalesLine
+                                            where rentalTrans.TransType == BOBRentalTransType::Rental
+                                            &&    rentalTrans.InventTransOrigin == inventTransOriginSalesLine.InventTransOrigin
+                                                outer join TableId from salesLine
+                                                where salesLine.dataAreaId == inventTransOriginSalesLine.SalesLineDataAreaId
+                                                &&    salesLine.InventTransId == inventTransOriginSalesLine.SalesLineInventTransId
+                                                    outer join WorkerSalesResponsible from salesTable
+                                                    where salesTable.SalesId == salesLine.SalesId
+                                                        outer join operatorSales
+                                                        where operatorSales.ContactPersonId == salesTable.RORContactPersonIdOperator
+                                                            outer join contactPersonSales
+                                                            where contactPersonSales.ContactPersonId == salesTable.ContactPersonId;
+
+        if (_tableIdJumpRef == tableNum(SalesTable) && _fieldIdJumpRef == fieldNum(SalesTable, WorkerSalesResponsible))
+        {
+            this.jumpRef(formStr(HcmWorker), fieldNum(HcmWorker, RecId), int642str(salesTable.WorkerSalesResponsible));
+        }
+        else if (_tableIdJumpRef == tableNum(SalesTable) && _fieldIdJumpRef == fieldNum(SalesTable, RORContactPersonIdOperator))
+        {
+            this.jumpRef(formStr(smmContactPerson), fieldNum(ContactPerson, ContactPersonId), '', operatorSales);
+        }
+        else if (_tableIdJumpRef == tableNum(SalesTable) && _fieldIdJumpRef == fieldNum(SalesTable, ContactPersonId))
+        {
+            this.jumpRef(formStr(smmContactPerson), fieldNum(contactPerson, ContactPersonId), '', contactPersonSales);
+        }
+        else if (_tableIdJumpRef == tableNum(SalesQuotationTable) && _fieldIdJumpRef == fieldNum(SalesQuotationTable, WorkerSalesResponsible))
+        {
+            this.jumpRef(formStr(HcmWorker), fieldNum(HcmWorker, RecId), int642str(salesQuotationTable.WorkerSalesResponsible));
+        }
+        else if (_tableIdJumpRef == tableNum(SalesQuotationTable) && _fieldIdJumpRef == fieldNum(SalesQuotationTable, RORContactPersonIdOperator))
+        {
+            this.jumpRef(formStr(smmContactPerson), fieldNum(ContactPerson, ContactPersonId), '', operatorQuote);
+        }
+        else if (_tableIdJumpRef == tableNum(SalesQuotationTable) && _fieldIdJumpRef == fieldNum(SalesQuotationTable, ContactPersonId))
+        {
+            this.jumpRef(formStr(smmContactPerson), fieldNum(ContactPerson, ContactPersonId), '', contactPersonQuote);
+        }
+        else if (_tableIdJumpRef == tableNum(WPPWorkOrderTable) && _fieldIdJumpRef == fieldNum(WPPWorkOrderTable, ContactPersonId))
+        {
+            this.jumpRef(formStr(smmContactPerson), fieldNum(ContactPerson, ContactPersonId), '', contactPersonWorkOrder);
+        }
+        else
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>jumpRefRentalTrans</Name>
+				<Source><![CDATA[
+    private void jumpRefRentalTrans(Common _record)
+    {
+        Args args = new Args();
+        args.name(formStr(BOBRentalTrans));
+        args.caller(formRun);
+        args.record(_record);
+
+        FormRun jumpRefFormRun = ClassFactory::formRunClassOnClient(args);
+        jumpRefFormRun.init();
+        jumpRefFormRun.run();
+        jumpRefFormRun.wait();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(FormRun _formRun, HiGHPlanBoard _planBoard)
+    {
+        if (!_formRun || !_formRun.form() || _formRun.form().name() != formStr(BOBObjectAvailability))
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+
+        formRun         = _formRun;
+        planBoard       = _planBoard;
+        userTimezone    = DateTimeUtil::getUserPreferredTimeZone();
+        parameters      = BOBParameters::find();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onMenuItemClicked</Name>
+				<Source><![CDATA[
+    public void onMenuItemClicked(Object _sender, int _optionIdx, str _optionValue)
+    {
+        BOBRentalTrans      rentalTrans;
+        BOBObjectTable      objectTable;
+        WPPWorkOrderLine    workOrderLine;
+        RefTableId          refTableId;
+        RefRecId            refRecId;
+        Object              baseArgs = this.getContextMenuBaseArgs(_sender);
+
+        settings = BOBObjectAvailabilitySettings::findOrCreate();
+
+        switch (classIdGet(baseArgs))
+        {
+            case classNum(HiGHPlanBoardRowItemBaseArgs):
+                HiGHPlanBoardRowItemBaseArgs rowItemBaseArgs = baseArgs as HiGHPlanBoardRowItemBaseArgs;
+
+                if (settings.GraphicalAggregation == BOBGraphicalAggregation::BusinessObject)
+                {
+                    refTableId  = rowItemBaseArgs.parmRefTableId();
+                    refRecId    = rowItemBaseArgs.parmRefRecId();
+
+                    select firstOnly objectTable
+                        exists join tmpData_Graphical
+                        where tmpData_Graphical.ObjectId == objectTable.ObjectId
+                        &&    tmpData_Graphical.ObjectTableRecId == refRecId;
+                }
+                break;
+
+            case classNum(HiGHPlanBoardOnContextRowItemEventArgs):
+                // Do nothing
+                break;
+
+            case classNum(HiGHPlanBoardOnContextPeriodEventArgs):
+                HiGHPlanBoardOnContextPeriodEventArgs periodEventArgs = baseArgs as HiGHPlanBoardOnContextPeriodEventArgs;
+
+                refTableId              = periodEventArgs.parmRowItemRefTableId();
+                refRecId                = periodEventArgs.parmRowItemRefRecId();
+                selectionFromDateTime   = periodEventArgs.parmStartDateTime();
+                selectionToDateTime     = periodEventArgs.parmEndDateTime();
+                break;
+
+            case classNum(HiGHPlanBoardPlannedEventBaseArgs):
+                HiGHPlanBoardPlannedEventBaseArgs plannedEventBaseArgs = baseArgs as HiGHPlanBoardPlannedEventBaseArgs;
+                
+                refTableId  = plannedEventBaseArgs.parmRefTableId();
+                refRecId    = plannedEventBaseArgs.parmRefRecId();
+                
+                select firstOnly tmpData_Graphical
+                where tmpData_Graphical.RefRecId == refRecId
+                    outer join rentalTrans
+                    where rentalTrans.RecId == tmpData_Graphical.RefRecId;
+                break;
+
+            case classNum(HiGHPlanBoardOnContextPlannedEventEventArgs):
+                // Do nothing
+                break;
+
+            case classNum(HiGHContextHandleMenuItemClickedEventArgs):
+                break;
+
+            default:
+                // Do nothing
+                break;
+        }
+
+        switch (_OptionIdx)
+        {
+            case #JumpRefRentalTrans:
+                Common buffer = tmpData_Graphical;
+
+                if (rentalTrans.RecId)
+                {
+                    buffer = rentalTrans;
+                }
+
+                this.jumpRefRentalTrans(buffer);
+                break;
+
+            case #JumpRefRentalOrder:
+                this.jumpRef(formStr(RORSalesTable), fieldNum(SalesTable, SalesId), tmpData_Graphical.OrderNumber);
+                break;
+
+            case #JumpRefSubRentalOrder:
+                this.jumpRef(formStr(RORPurchTable), fieldNum(PurchTable, PurchId), tmpData_Graphical.OrderNumber);
+                break;
+
+            case #JumpRefSalesOrder:
+                this.jumpRef(formStr(SalesTable), fieldNum(SalesTable, SalesId), tmpData_Graphical.OrderNumber);
+                break;
+
+            case #JumpRefPurchOrder:
+                this.jumpRef(formStr(PurchTable), fieldNum(PurchTable, PurchId), tmpData_Graphical.OrderNumber);
+                break;
+
+            case #JumpRefSalesQuote:
+                this.jumpRef(formStr(SalesQuotationTable), fieldNum(SalesQuotationTable, QuotationId), tmpData_Graphical.OrderNumber);
+                break;
+
+            case #JumpRefRentalQuote:
+                this.jumpRef(formStr(RORSalesQuotationTable), fieldNum(SalesQuotationTable, QuotationId), tmpData_Graphical.OrderNumber);
+                break;
+
+            case #JumpRefWorkOrder:
+                select firstOnly WorkOrderId from workOrderLine
+                    exists join rentalTrans
+                    where rentalTrans.WPPWorkOrderLineRecId == workOrderLine.RecId
+                    &&    rentalTrans.RecId == refRecId;
+
+                this.jumpRef(formStr(WPPWorkOrderTable), fieldNum(WPPWorkOrderTable, WorkOrderId), workOrderLine.WorkOrderId);
+                break;
+
+            case #JumpRefRentalTypeAssigned:
+                this.jumpRef(formStr(BOBRentalType), fieldNum(BOBRentalType, RentalTypeId), _optionValue);
+                break;
+
+            case #JumpRefBusinessObject:
+                this.jumpRef(formStr(BOBObjectTable), fieldNum(BOBObjectTable, ObjectId), _optionValue);
+                break;
+
+            case #JumpRefSerialNumber:
+                this.jumpRef(formStr(InventSerial), fieldNum(InventSerial, InventSerialId), _optionValue);
+                break;
+
+            case #JumpRefFixedAsset:
+                this.jumpRef(formStr(AssetTable), fieldNum(AssetTable, AssetId), _optionValue);
+                break;
+
+            case #JumpRefItem:
+                this.jumpRef(formStr(EcoResProductDetailsExtended), fieldNum(InventTable, ItemId), _optionValue);
+                break;
+
+            case #JumpRefResponsible:
+                switch (rentalTrans.TransType)
+                {
+                    case BOBRentalTransType::Rental:
+                        this.jumpRefPerson(rentalTrans, tableNum(SalesTable), fieldNum(SalesTable, WorkerSalesResponsible));
+                        break;
+
+                    case BOBRentalTransType::RentalQuotation:
+                        this.jumpRefPerson(rentalTrans, tableNum(SalesQuotationTable), fieldNum(SalesQuotationTable, WorkerSalesResponsible));
+                        break;
+
+                    default:
+                        // Do nothing
+                        break;
+                }
+                break;
+
+            case #JumpRefRentalTypeRequested:
+                this.jumpRef(formStr(BOBRentalType), fieldNum(BOBRentalType, RentalTypeId), _optionValue);
+                break;
+
+            case #JumpRefContactPerson:
+                switch (rentalTrans.TransType)
+                {
+                    case BOBRentalTransType::Rental:
+                        this.jumpRefPerson(rentalTrans, tableNum(SalesTable), fieldNum(SalesTable, ContactPersonId));
+                        break;
+
+                    case BOBRentalTransType::RentalQuotation:
+                        this.jumpRefPerson(rentalTrans, tableNum(SalesQuotationTable), fieldNum(SalesQuotationTable, ContactPersonId));
+                        break;
+
+                    case BOBRentalTransType::WPPWorkOrder:
+                        this.jumpRefPerson(rentalTrans, tableNum(WPPWorkOrderTable), fieldNum(WPPWorkOrderTable, ContactPersonId));
+                        break;
+
+                    default:
+                        // Do nothing
+                        break;
+                }
+                break;
+
+            case #JumpRefOperator:
+                switch (rentalTrans.TransType)
+                {
+                    case BOBRentalTransType::Rental:
+                        this.jumpRefPerson(rentalTrans, tableNum(SalesTable), fieldNum(SalesTable, RORContactPersonIdOperator));
+                        break;
+
+                    case BOBRentalTransType::RentalQuotation:
+                        this.jumpRefPerson(rentalTrans, tableNum(SalesQuotationTable), fieldNum(SalesQuotationTable, RORContactPersonIdOperator));
+                        break;
+
+                    default:
+                        // Do nothing
+                        break;
+                }
+                break;
+
+            case #JumpRefWorkLocation:
+                this.jumpRef(formStr(RORVenueTable), fieldNum(RORVenueTable, VenueCode), _optionValue);
+                break;
+
+            case #JumpRefTaskId:
+                this.jumpRef(formStr(WPPWorkOrderTaskTable), fieldNum(WPPWorkOrderTaskTable, TaskId), _optionValue);
+                break;
+
+            case #JumpRefInventLocationId:
+                this.jumpRef(formStr(InventLocation), fieldNum(InventLocation, InventLocationId), _optionValue);
+                break;
+
+            case #JumpRefCustomer:
+                this.jumpRefCustVend(rentalTrans);
+                break;
+
+            case #JumpRefExecutionGroup:
+                this.jumpRef(formStr(WPPExecutionGroup), fieldNum(WPPExecutionGroup, ExecutionGroupId), _optionValue);
+                break;
+
+            case #JumpRefInventLocation:
+                this.jumpRef(formStr(InventLocation), fieldNum(InventLocation, InventLocationId), _optionValue);
+                break;
+
+            case #ChangeRentalDates:
+                this.changeRentalLineDates(rentalTrans);
+                break;
+
+            case #JumpRefResourcePlanning:
+                select firstOnly workOrderLine
+                    exists join rentalTrans
+                    where rentalTrans.WPPWorkOrderLineRecId == workOrderLine.RecId
+                    &&    rentalTrans.RecId == refRecId;
+
+                this.jumpRef(formStr(WPPWorkOrderLineResource), 0, '', workOrderLine);
+                break;
+
+            case #CreateSubRentalOrder:
+                this.createSubRentalOrder_Graphical();
+                break;
+
+            case #CreatePurchaseOrder:
+                this.createPurchaseOrder_Graphical();
+                break;
+
+            case #CreateTransferOrder:
+                this.createTransferOrder_Graphical();
+                break;
+
+            case #CreateRentalQuotation:
+                this.createRentalQuotation(refTableId, refRecId);
+                break;
+
+            case #CreateRentalOrder:
+                this.createRentalOrder(refTableId, refRecId);
+                break;
+
+            case #CreateWorkOrder:
+                this.createWorkOrder(refTableId, refRecId);
+                break;
+
+            case #ViewBusinessObject:
+                this.jumpRef(formStr(BOBObjectTable), fieldNum(BOBObjectTable, ObjectId), objectTable.ObjectId);
+                break;
+
+            case #ViewDelayedMaintenance:
+                this.jumpRefMenuItem(menuitemDisplayStr(BOBMaintenanceTask_Delayed), objectTable);
+                break;
+
+            case #ViewFutureMaintenance:
+                this.jumpRefMenuItem(menuitemDisplayStr(BOBMaintenanceTask_Future), objectTable);
+                break;
+
+            case #ViewMaintenanceLog:
+                this.jumpRefMenuItem(menuitemDisplayStr(BOBMaintenanceHistory), objectTable);
+                break;
+
+            case #ViewResourcePlanning:
+                this.jumpRefMenuItem(menuitemDisplayStr(WPPWorkOrderLineResource), objectTable);
+                break;
+
+            case #ViewRentalTrans:
+                this.jumpRefMenuItem(menuitemDisplayStr(BOBRentalTrans), objectTable);
+                break;
+
+            case #RefreshEntity:
+                //formRun.refreshEntity(entityHit); TODO
+                break;
+
+            case #RefreshAll:
+                formRun.refreshData();
+                break;
+
+            case #AssignObject:
+                formRun.doAssignObject(objectTable.InventSerialId);
+                break;
+
+            default:
+                error("@SYS104118");
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmCallerRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine parmCallerRentalLine(RORRentalLine _callerRentalLine = callerRentalLine)
+    {
+        callerRentalLine = _callerRentalLine;
+        return callerRentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTmpData_Graphical</Name>
+				<Source><![CDATA[
+    public BOBTmpObjectAvailability_Graphical parmTmpData_Graphical(BOBTmpObjectAvailability_Graphical _tmpData_Graphical)
+    {
+        tmpData_Graphical.linkPhysicalTableInstance(_tmpData_Graphical);
+        return tmpData_Graphical;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getTmpData_Graphical</Name>
+				<Source><![CDATA[
+    public BOBTmpObjectAvailability_Graphical getTmpData_Graphical()
+    {
+        return tmpData_Graphical;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populatePlanboard</Name>
+				<Source><![CDATA[
+    public void populatePlanboard(BOBObjectAvailabilitySettings _settings)
+    {
+        settings = _settings;
+
+        switch(BOBObjectAvailabilitySettings::findOrCreate().GraphicalAggregation)
+        {
+            case BOBGraphicalAggregation::BusinessObject:
+                this.populatePlanboard_BusinessObject();
+                break;
+
+            case BOBGraphicalAggregation::RentalType:
+                this.populatePlanboard_RentalType();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populatePlanboard_BusinessObject</Name>
+				<Source><![CDATA[
+    private void populatePlanboard_BusinessObject()
+    {
+        System.Exception    exception;
+        FromDateTime        minDateTime, itemFromDateTime;
+        ToDateTime          maxDateTime, itemToDateTime;        
+        List                rowPlannedEventsList;
+        Counter             keyValue;
+        Set                 objectRecIdSet;
+
+        rowItemsMap         = new Map(Types::Integer, Types::Record);
+        rowPlannedEventsMap = new Map(Types::Int64, Types::Class);
+        objectRecIdSet      = new Set(Types::Int64);
+
+        minDateTime         = DateTimeUtil::newDateTime(dateNull() + 1, 0); // the planboard doesn't accept empty dates
+        maxDateTime         = DateTimeUtil::maxValue();
+        //topBusObjNum        = calendar.get_TopDisplayedEntityName();
+
+        try
+        {
+            while select tmpData_Graphical
+            order by ObjectTableRecId
+            {
+                if (!objectRecIdSet.in(tmpData_Graphical.ObjectTableRecId))
+                {
+                    keyValue += 1;
+                    objectRecIdSet.add(tmpData_Graphical.ObjectTableRecId);
+                    rowItemsMap.insert(keyValue, tmpData_Graphical);
+                }                
+                
+                HiGHPlanBoardPlannedEvent rowPlannedEvent;
+
+                if (tmpData_Graphical.RefRecId)
+                {
+                    itemFromDateTime = (tmpData_Graphical.FromDateTime ?
+                                        DateTimeUtil::applyTimeZoneOffset(tmpData_Graphical.FromDateTime, userTimezone) :
+                                        minDateTime);
+
+                    itemToDateTime   = (tmpData_Graphical.ToDateTime ?
+                                        DateTimeUtil::applyTimeZoneOffset(tmpData_Graphical.ToDateTime, userTimezone) :
+                                        maxDateTime);
+
+                    rowPlannedEvent = HiGHPlanBoardPlannedEvent::newParameters(tmpData_Graphical.ObjectId,
+                                                                               tmpData_Graphical.ObjectId,
+                                                                               itemFromDateTime,
+                                                                               itemToDateTime,
+                                                                               planBoard.parmPeriods(),
+                                                                               tmpData_Graphical.RefTableId,
+                                                                               tmpData_Graphical.RefRecId);
+                }
+
+                if (rowPlannedEvent)
+                {
+                    rowPlannedEvent.parmAllowDrag(false);
+                    rowPlannedEvent.parmAllowResize(false);
+
+                    this.setItemContent(rowPlannedEvent, tmpData_Graphical, itemFromDateTime, itemToDateTime);
+
+                    if (rowPlannedEventsMap.exists(tmpData_Graphical.ObjectTableRecId))
+                    {
+                        rowPlannedEventsList = rowPlannedEventsMap.lookup(tmpData_Graphical.ObjectTableRecId);
+                        rowPlannedEventsList.addEnd(rowPlannedEvent);
+                    }
+                    else
+                    {
+                        rowPlannedEventsList = new List(Types::Class);
+                        rowPlannedEventsList.addEnd(rowPlannedEvent);
+                        rowPlannedEventsMap.insert(tmpData_Graphical.ObjectTableRecId, rowPlannedEventsList);
+                    }
+                }
+            }
+
+            HiGHPlanBoardRowItem    rowItem;
+            List                    rowItems    = new List(Types::Class);
+            MapEnumerator           rowItemsEnum = rowItemsMap.getEnumerator();
+            Counter                 rowNumber = 0;
+            
+            while (rowItemsEnum.moveNext())
+            {
+                rowItem = this.createRowItem_BusinessObject(rowItemsEnum.currentValue(), rowNumber);
+                rowItems.addEnd(rowItem);
+                rowNumber = rowNumber + 1;
+            }
+
+            planBoard.refresh(rowItems);
+
+            //calendar.set_TopDisplayedEntityName(topBusObjNum);
+        }
+        catch(Exception::CLRError)
+        {
+            exception = CLRInterop::getLastException();
+
+            while(exception)
+            {
+                error(exception.get_Message());
+                exception = exception.get_InnerException();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populatePlanboard_RentalType</Name>
+				<Source><![CDATA[
+    private void populatePlanboard_RentalType()
+    {
+        System.Exception        exception;
+        container               con;        
+        FromDateTime            minDateTime, itemFromDateTime;
+        ToDateTime              maxDateTime, itemToDateTime;
+        List                    rowPlannedEventsList;
+
+        rowItemsMap         = new Map(Types::Container, Types::String);
+        rowPlannedEventsMap = new Map(Types::Container, Types::Class);
+
+        minDateTime         = DateTimeUtil::newDateTime(dateNull() + 1, 0); // the planboard doesn't accept empty dates
+        maxDateTime         = DateTimeUtil::maxValue();
+
+        try
+        {
+            while select tmpData_Graphical
+            order by RentalTypeId, InventLocationId, FromDateTime, ToDateTime
+            {
+                con = [ tmpData_Graphical.RentalTypeId, tmpData_Graphical.InventLocationId ];
+
+                if (!rowItemsMap.exists(con))
+                {                    
+                    rowItemsMap.insert(con, con2Str(con, '/'));
+                }
+                
+                // initialze cell dates
+                itemFromDateTime = (tmpData_Graphical.FromDateTime ?
+                                    DateTimeUtil::applyTimeZoneOffset(tmpData_Graphical.FromDateTime, userTimezone) :
+                                    minDateTime);
+
+                itemToDateTime   = (tmpData_Graphical.ToDateTime ?
+                                    DateTimeUtil::applyTimeZoneOffset(tmpData_Graphical.ToDateTime, userTimezone) :
+                                    maxDateTime);
+
+                HiGHPlanBoardPlannedEvent rowPlannedEvent = HiGHPlanBoardPlannedEvent::newParameters(tmpData_Graphical.RentalTypeId,
+                                                                                                     tmpData_Graphical.RentalTypeId,
+                                                                                                     itemFromDateTime,
+                                                                                                     itemToDateTime,
+                                                                                                     planBoard.parmPeriods(),
+                                                                                                     tmpData_Graphical.TableId,
+                                                                                                     tmpData_Graphical.RecId);
+                if (rowPlannedEvent)
+                {
+                    rowPlannedEvent.parmAllowDrag(false);
+                    rowPlannedEvent.parmAllowResize(false);
+
+                    this.setItemContent(rowPlannedEvent, tmpData_Graphical, itemFromDateTime, itemToDateTime);                
+
+                    if (rowPlannedEventsMap.exists([ tmpData_Graphical.RentalTypeId, tmpData_Graphical.InventLocationId ]))
+                    {
+                        rowPlannedEventsList = rowPlannedEventsMap.lookup([ tmpData_Graphical.RentalTypeId, tmpData_Graphical.InventLocationId ]);
+                        rowPlannedEventsList.addEnd(rowPlannedEvent);
+                    }
+                    else
+                    {
+                        rowPlannedEventsList = new List(Types::Class);
+                        rowPlannedEventsList.addEnd(rowPlannedEvent);
+                        rowPlannedEventsMap.insert([ tmpData_Graphical.RentalTypeId, tmpData_Graphical.InventLocationId ], rowPlannedEventsList);
+                    }
+                }
+            }
+
+            HiGHPlanBoardRowItem    rowItem;
+            List                    rowItems    = new List(Types::Class);
+            MapEnumerator           rowItemsEnum = rowItemsMap.getEnumerator();
+            Counter                 rowNumber = 0;
+            
+            while (rowItemsEnum.moveNext())
+            {
+                rowPlannedEventsList = new List(Types::Class);
+
+                if (rowPlannedEventsMap.exists(rowItemsEnum.currentKey()))
+                {
+                    rowPlannedEventsList = rowPlannedEventsMap.lookup(rowItemsEnum.currentKey());
+                }
+
+                rowItem = HiGHPlanBoardRowItem::newParameters(con2Str(rowItemsEnum.currentKey()),
+                                                              rowItemsEnum.currentValue(),
+                                                              0,
+                                                              planBoard.parmPeriods(),
+                                                              rowPlannedEventsList, 0, 0);
+                rowItems.addEnd(rowItem);
+                rowNumber = rowNumber + 1;
+            }
+
+            planBoard.refresh(rowItems);
+        }
+        catch(Exception::CLRError)
+        {
+            exception = CLRInterop::getLastException();
+
+            while(exception)
+            {
+                error(exception.get_Message());
+                exception = exception.get_InnerException();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setItemContent</Name>
+				<Source><![CDATA[
+    private void setItemContent(HiGHPlanBoardPlannedEvent           _plannedEvent, 
+                                BOBTmpObjectAvailability_Graphical  _tmpData_Graphical, 
+                                FromDateTime                        _itemFromDateTime,
+                                ToDateTime                          _itemToDateTime)
+    {
+        int     backgroundColor;
+        str     html;
+    
+        #define.Space('  ')
+        #define.LineBreak('<br>')
+    
+        if (settings.GraphicalAggregation == BOBGraphicalAggregation::BusinessObject)
+        {
+            // set texts            
+            html = _tmpData_Graphical.CustName;
+            html = html ?  (html + #Space + _tmpData_Graphical.OrderNumber) : _tmpData_Graphical.OrderNumber;
+    
+            switch(_tmpData_Graphical.RentalTransType)
+            {
+                case BOBRentalTransType::WPPWorkOrder:
+                    html = html ?  (html + #Space + _tmpData_Graphical.WPPTaskId) : _tmpData_Graphical.WPPTaskId;
+                    html = html + #LineBreak;
+                    html = html ?  (html + #Space + strFmt("%1", _tmpData_Graphical.WPPLineStatus)) : strFmt("%1", tmpData_Graphical.WPPLineStatus);
+                    break;
+    
+                case BOBRentalTransType::Rental,
+                     BOBRentalTransType::RentalQuotation,
+                     BOBRentalTransType::Sales,
+                     BOBRentalTransType::SalesQuotation,
+                     BOBRentalTransType::SubRental,
+                     BOBRentalTransType::Purch:
+                    
+                    html = html ?  (html + #Space + _tmpData_Graphical.RORVenueCode) : _tmpData_Graphical.RORVenueCode;
+                    html = html + #LineBreak;
+    
+                    if (_tmpData_Graphical.RentalTransType == BOBRentalTransType::Rental || _tmpData_Graphical.RentalTransType == BOBRentalTransType::RentalQuotation)
+                    {
+                        html = html ?  (html + #Space + _tmpData_Graphical.RentalTypeIdRequested) : _tmpData_Graphical.RentalTypeIdRequested;
+                        html = html ?  (html + #Space + _tmpData_Graphical.RentalTypeId) : _tmpData_Graphical.RentalTypeId;
+                    }
+    
+                    html = html ?  (html + #Space + strFmt("%1", _tmpData_Graphical.RentalSubStatus)) : strFmt("%1", _tmpData_Graphical.RentalSubStatus);
+                    break;
+    
+                case BOBRentalTransType::Asset:
+                    html = html ?  (html + #Space + "@SYS14834") : "@SYS14834";
+                    break;
+    
+                default:
+                    // don't add any additional texts
+                    break;
+            }
+    
+            _plannedEvent.parmCellContent(strFmt(@'<div style="text-align: left;"><b>%1</b></div>', html));
+    
+            // set background color
+            backgroundColor = this.rentalTransType2Color(_tmpData_Graphical.RentalTransType);
+            _plannedEvent.parmEventColor(backgroundColor);
+        }
+        else
+        {
+            // set texts
+            html = strFmt(@'<table style="table-layout: fixed; width: 100%; border: 0;">
+                                <tr>
+                                    <td width="40%" style="text-align:left; overflow: hidden; white-space: nowrap"><b>%1</b></td>
+                                    <td width="20%">&nbsp</td>
+                                    <td width="40%" style="text-align:right; overflow: hidden; white-space: nowrap"><b>%2</b></td>
+                                </tr>
+                                <tr>
+                                    <td colspan="3" style="text-align:center;">%3</td>
+                                </tr>
+                            </table>',
+                            _tmpData_Graphical.FromDateTime ? datetime2Str(_itemFromDateTime) : '<<<',
+                            _tmpData_Graphical.ToDateTime == DateTimeUtil::maxValue() ? '>>>' : datetime2Str(_itemToDateTime),
+                            _tmpData_Graphical.Qty);
+    
+            _plannedEvent.parmCellContent(html);
+    
+            // set background color
+            if (_tmpData_Graphical.Qty < 0)
+            {
+                _plannedEvent.parmEventColor(#ColorRed);
+            }
+            else if (_tmpData_Graphical.Qty > 0)
+            {
+                _plannedEvent.parmEventColor(#ColorGreen);
+            }
+            else
+            {
+                _plannedEvent.parmEventColor(#ColorPowderBlue);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalTransType2Color</Name>
+				<Source><![CDATA[
+    private int rentalTransType2Color(BOBRentalTransType _transType)
+    {
+        switch(_transType)
+        {
+            case BOBRentalTransType::Rental:            return #ColorBlue;
+            case BOBRentalTransType::WPPWorkOrder:      return #ColorGold;
+            case BOBRentalTransType::RentalQuotation:   return #ColorGreen;
+            case BOBRentalTransType::Sales:             return #ColorRed;
+            case BOBRentalTransType::SalesQuotation:    return #ColorOrange;
+            case BOBRentalTransType::SubRental:         return #ColorPowderBlue;
+            case BOBRentalTransType::Purch:             return #ColorPurple;
+            default:                                    return #ColorLightGray;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSelectionFromDateTime</Name>
+				<Source><![CDATA[
+    public void setSelectionFromDateTime(FromDateTime _fromDateTime)
+    {
+        selectionFromDateTime = _fromDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSelectionToDateTime</Name>
+				<Source><![CDATA[
+    public void setSelectionToDateTime(ToDateTime _toDateTime)
+    {
+        selectionToDateTime = _toDateTime;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

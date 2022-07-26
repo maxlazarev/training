@@ -1,0 +1,779 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINJournalizedInvoicePeriod</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class FINJournalizedInvoicePeriod extends common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getPeriodStatus</Name>
+				<Source><![CDATA[
+    public FINInvoiceTransPeriodStatus getPeriodStatus()
+    {
+        FINInvoiceTransPeriodStatus ret;
+
+        switch (this.RefTableId)
+        {
+            case tableNum(CustInvoiceTrans):
+                FINCustInvoiceTrans finCustInvoiceTrans;
+
+                select firstonly PeriodStatus from finCustInvoiceTrans
+                where finCustInvoiceTrans.CustInvoiceTransRecId == this.RefRecId;
+
+                ret = finCustInvoiceTrans.PeriodStatus;
+                break;
+
+            case tableNum(VendInvoiceTrans):
+                FINVendInvoiceTrans finVendInvoiceTrans;
+
+                select firstonly PeriodStatus from finVendInvoiceTrans
+                where finVendInvoiceTrans.VendInvoiceTransRecId == this.RefRecId;
+
+                ret = finVendInvoiceTrans.PeriodStatus;
+                break;
+                
+            case tableNum(ProjInvoiceItem):
+                FINProjInvoiceItem finProjInvoiceItem;
+
+                select firstonly PeriodStatus from finProjInvoiceItem
+                where finProjInvoiceItem.ProjInvoiceItemRecId == this.RefRecId;
+
+                ret = finProjInvoiceItem.PeriodStatus;
+                break;
+
+            case tableNum(ProjJournalTrans):
+                FINProjJournalTrans finProjJournalTrans;
+
+                select firstonly PeriodStatus from finProjJournalTrans
+                where finProjJournalTrans.ProjJournalTransRecId == this.RefRecId;
+
+                ret = finProjJournalTrans.PeriodStatus;
+                break;
+
+            default:
+                break; // do nothing
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromPeriodQtyFinancial</Name>
+				<Source><![CDATA[
+    public void initFromPeriodQtyFinancial(FINInvoicePeriodQtyFinancial _invPeriodFinancial)
+    {
+        this.QtyInvoiced                = _invPeriodFinancial.QtyInvoiced;
+        this.PeriodStartDateTime        = _invPeriodFinancial.PeriodStartDateTime;
+        this.PeriodEndDateTime          = _invPeriodFinancial.PeriodEndDateTime;
+        this.NumOfChargeablePeriods     = _invPeriodFinancial.NumOfChargeablePeriods;
+        this.NumOfCalendarPeriods       = _invPeriodFinancial.NumOfCalendarPeriods;
+        this.LineAmount                 = _invPeriodFinancial.LineAmount;
+        this.DiscAmount                 = _invPeriodFinancial.DiscAmount;
+        this.InvoiceId                  = _invPeriodFinancial.InvoiceId;
+        this.InvPeriodQtyPhysicalRecId  = _invPeriodFinancial.InvPeriodQtyPhysicalRecId;
+        this.SourceRefRecId             = _invPeriodFinancial.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCreditFromOrigJournalizedInvoicePeriod</Name>
+				<Source><![CDATA[
+    public void initCreditFromOrigJournalizedInvoicePeriod(InvoiceId _invoiceId, FINJournalizedInvoicePeriod _journalizedInvoicePeriodPrevious)
+    {
+        this.QtyInvoiced                = _journalizedInvoicePeriodPrevious.QtyInvoiced;
+        this.PeriodStartDateTime        = _journalizedInvoicePeriodPrevious.PeriodStartDateTime;
+        this.PeriodEndDateTime          = _journalizedInvoicePeriodPrevious.PeriodEndDateTime;
+        this.NumOfChargeablePeriods     = _journalizedInvoicePeriodPrevious.NumOfChargeablePeriods;
+        this.NumOfCalendarPeriods       = _journalizedInvoicePeriodPrevious.NumOfCalendarPeriods;
+        this.LineAmount                 = - _journalizedInvoicePeriodPrevious.LineAmount;
+        this.DiscAmount                 = - _journalizedInvoicePeriodPrevious.DiscAmount;
+        // You can recognize that it is just a credit without debit by seeing that this.InvoiceId != _journalizedInvoicePeriodPrevious.InvoiceId.
+        // It might be needed to control what was credited so far and how much you still can credit.
+        this.InvoiceId                  = _invoiceId;
+        this.InvPeriodQtyPhysicalRecId  = _journalizedInvoicePeriodPrevious.InvPeriodQtyPhysicalRecId;
+        this.SourceRefRecId             = _journalizedInvoicePeriodPrevious.SourceRefRecId;        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertJournalizedInvoicePeriods</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInsertMethodInLoop", "Cannot be refactored without altering functionality of method")]
+    public static void insertJournalizedInvoicePeriods(FINInvoiceCalculatorParm _invoiceCalculatorParm, RefTableId _refTableIdJourTrans, RefRecId _refRecIdJourTrans, InvoiceId _invoiceId)
+    {
+        RefTableId refTableIdOrderLine = _invoiceCalculatorParm.OrderLineTableId;
+        RefRecId refRecIdOrderLine = _invoiceCalculatorParm.OrderLineRecId;
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+        FINJournalizedInvoicePeriodLink journalizedInvoicePeriodLink;
+        FINInvoicePeriodQtyFinancial invPeriodFinancial;
+        FINInvoicePeriodQtyPhysical invPeriodPhysical;
+        boolean hasDebitPeriods;
+      
+        // Debit periods
+        while select invPeriodFinancial
+        where invPeriodFinancial.InvoiceId == _invoiceId
+            exists join invPeriodPhysical
+            where invPeriodPhysical.RecId == invPeriodFinancial.InvPeriodQtyPhysicalRecId
+            &&    invPeriodPhysical.RefTableId == refTableIdOrderLine
+            &&    invPeriodPhysical.RefRecId == refRecIdOrderLine
+        {
+            journalizedInvoicePeriod.clear();
+            journalizedInvoicePeriod.initFromPeriodQtyFinancial(invPeriodFinancial);
+            journalizedInvoicePeriod.RefTableId = _refTableIdJourTrans;
+            journalizedInvoicePeriod.RefRecId = _refRecIdJourTrans;
+            journalizedInvoicePeriod.insert();
+
+            journalizedInvoicePeriodLink.clear();
+            journalizedInvoicePeriodLink.InvoiceTransTableId = _refTableIdJourTrans;
+            journalizedInvoicePeriodLink.InvoiceTransRecId = _refRecIdJourTrans;
+            journalizedInvoicePeriodLink.JournalizedPeriodRecId = journalizedInvoicePeriod.RecId;
+            journalizedInvoicePeriodLink.insert();
+
+            hasDebitPeriods = true;
+        }
+
+        // Credit periods
+        if (_invoiceCalculatorParm.CreditCalcPacked)
+        {
+            FINCreditJournalizer creditJournalizer = new FINCreditJournalizer();
+            creditJournalizer.unpack(_invoiceCalculatorParm.CreditCalcPacked);
+            Set invoiceTransRefdSet = creditJournalizer.getSetOfCreditedJournalTransRef();
+            SetEnumerator enumerator = invoiceTransRefdSet.getEnumerator();
+            
+            while (enumerator.moveNext())
+            {
+                RefRecId    recIdRef;
+                RefTableId  tableIdRef;
+            
+                [tableIdRef, recIdRef] = enumerator.current();
+
+                if (hasDebitPeriods)
+                {
+                    FINJournalizedInvoicePeriod::journalizeCreditPeriodForDebitCredit(_invoiceCalculatorParm, _refTableIdJourTrans, _refRecIdJourTrans, _invoiceId, tableIdRef, recIdRef);
+                }
+                else
+                {
+                    FINJournalizedInvoicePeriod::journalizeCreditPeriodForCreditOnly(_invoiceCalculatorParm, _refTableIdJourTrans, _refRecIdJourTrans, _invoiceId, tableIdRef, recIdRef);
+                }                
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalizeCreditPeriodForDebitCredit</Name>
+				<Source><![CDATA[
+    private static void journalizeCreditPeriodForDebitCredit(FINInvoiceCalculatorParm _invoiceCalculatorParm, 
+        RefTableId  _refTableIdJourTrans, 
+        RefRecId    _refRecIdJourTrans, 
+        InvoiceId   _invoiceId, 
+        RefTableId  _refTableId, 
+        RefRecId    _refRecId)
+    {
+        FINJournalizedInvoicePeriod journalizedInvoicePeriodPrevious;
+
+        switch (_invoiceCalculatorParm.OrderLineTableId)
+        {
+            case tableNum(SalesLine), tableNum(SalesParmLine), tableNum(ProjProposalItem):
+                CustInvoiceTrans custInvoiceTrans;
+                FINCustInvoiceTrans finCustInvoiceTrans;
+
+                while select RecId from journalizedInvoicePeriodPrevious
+                where journalizedInvoicePeriodPrevious.RefTableId == tableNum(CustInvoiceTrans)
+                &&    journalizedInvoicePeriodPrevious.RefRecId == _refRecId
+                    join TableId from custInvoiceTrans
+                    where custInvoiceTrans.TableId == journalizedInvoicePeriodPrevious.RefTableId
+                    &&    custInvoiceTrans.RecId == journalizedInvoicePeriodPrevious.RefRecId
+                        join TableId from finCustInvoiceTrans
+                        where finCustInvoiceTrans.CustInvoiceTransRecId == custInvoiceTrans.RecId
+                        &&    finCustInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit
+                {
+                    FINJournalizedInvoicePeriod::createJorunalizedLink(journalizedInvoicePeriodPrevious.RecId, _refTableIdJourTrans, _refRecIdJourTrans);
+                }
+                                     
+                ProjInvoiceItem projInvoiceItem;
+                FINProjInvoiceItem finProjInvoiceItem;
+
+                while select RecId from journalizedInvoicePeriodPrevious
+                where journalizedInvoicePeriodPrevious.RefTableId == tableNum(ProjInvoiceItem)
+                &&    journalizedInvoicePeriodPrevious.RefRecId == _refRecId
+                    join TableId from projInvoiceItem
+                    where projInvoiceItem.TableId == journalizedInvoicePeriodPrevious.RefTableId
+                    &&    projInvoiceItem.RecId == journalizedInvoicePeriodPrevious.RefRecId
+                        join TableId from finProjInvoiceItem
+                        where finProjInvoiceItem.ProjInvoiceItemRecId == projInvoiceItem.RecId
+                        &&    finProjInvoiceItem.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit
+                {
+                    FINJournalizedInvoicePeriod::createJorunalizedLink(journalizedInvoicePeriodPrevious.RecId, _refTableIdJourTrans, _refRecIdJourTrans);
+                }
+
+                ProjJournalTrans    projJournalTrans;
+                FINProjJournalTrans finProjJournalTrans;
+
+                while select journalizedInvoicePeriodPrevious
+                where journalizedInvoicePeriodPrevious.RefTableId   == tableNum(ProjJournalTrans)
+                &&    journalizedInvoicePeriodPrevious.RefRecId     == _refRecId
+                    join TableId from projJournalTrans
+                    where projJournalTrans.TableId  == journalizedInvoicePeriodPrevious.RefTableId
+                    &&    projJournalTrans.RecId    == journalizedInvoicePeriodPrevious.RefRecId
+                        join TableId from finProjJournalTrans
+                        where finProjJournalTrans.ProjJournalTransRecId == projJournalTrans.RecId
+                        &&    finProjJournalTrans.PeriodStatus          == FINInvoiceTransPeriodStatus::PendingCredit
+                {
+                    FINJournalizedInvoicePeriod::createJorunalizedLink(journalizedInvoicePeriodPrevious.RecId, _refTableIdJourTrans, _refRecIdJourTrans);
+                }
+
+                break;
+
+            case tableNum(PurchLine), tableNum(VendInvoiceInfoLine):
+                VendInvoiceTrans vendInvoiceTrans;
+                FINVendInvoiceTrans finVendInvoiceTrans;
+
+                while select RecId from journalizedInvoicePeriodPrevious
+                where journalizedInvoicePeriodPrevious.RefTableId == tableNum(VendInvoiceTrans)
+                &&    journalizedInvoicePeriodPrevious.RefRecId == _refRecId
+                    join TableId from vendInvoiceTrans
+                    where vendInvoiceTrans.TableId == journalizedInvoicePeriodPrevious.RefTableId
+                    &&    vendInvoiceTrans.RecId == journalizedInvoicePeriodPrevious.RefRecId
+                        join TableId from finVendInvoiceTrans
+                        where finVendInvoiceTrans.VendInvoiceTransRecId == vendInvoiceTrans.RecId
+                        &&    finVendInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit
+                {
+                    FINJournalizedInvoicePeriod::createJorunalizedLink(journalizedInvoicePeriodPrevious.RecId, _refTableIdJourTrans, _refRecIdJourTrans);
+                }
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJorunalizedLink</Name>
+				<Source><![CDATA[
+    private static void createJorunalizedLink(RefRecId _journalizedInvoicePeriodRecId,
+        RefTableId  _refTableIdJourTrans,
+        RefRecId    _refRecIdJourTrans)
+    {
+        FINJournalizedInvoicePeriodLink journalizedInvoicePeriodLink;
+
+        journalizedInvoicePeriodLink.clear();
+        journalizedInvoicePeriodLink.InvoiceTransTableId = _refTableIdJourTrans;
+        journalizedInvoicePeriodLink.InvoiceTransRecId = _refRecIdJourTrans;
+        journalizedInvoicePeriodLink.JournalizedPeriodRecId = _journalizedInvoicePeriodRecId;
+        journalizedInvoicePeriodLink.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalizeCreditPeriodForCreditOnly</Name>
+				<Source><![CDATA[
+    private static void journalizeCreditPeriodForCreditOnly(FINInvoiceCalculatorParm _invoiceCalculatorParm,
+        RefTableId  _refTableIdJourTrans,
+        RefRecId    _refRecIdJourTrans,
+        InvoiceId   _invoiceId,
+        RefTableId  _refTableId,
+        RefRecId    _refRecId)
+    {
+        FINJournalizedInvoicePeriod journalizedInvoicePeriodPrevious;
+
+        switch (_invoiceCalculatorParm.OrderLineTableId)
+        {
+            case tableNum(SalesLine), tableNum(SalesParmLine), tableNum(ProjProposalItem):
+                CustInvoiceTrans custInvoiceTrans;
+                FINCustInvoiceTrans finCustInvoiceTrans;
+                FINCustInvoiceTrans finCustInvoiceTransCurrent;
+                boolean mustUpdateFINCustInvoiceTrans = true;               
+
+                while select journalizedInvoicePeriodPrevious
+                where journalizedInvoicePeriodPrevious.RefTableId == tableNum(CustInvoiceTrans)
+                &&    journalizedInvoicePeriodPrevious.RefRecId == _refRecId
+                    join TableId from custInvoiceTrans
+                    where custInvoiceTrans.TableId == journalizedInvoicePeriodPrevious.RefTableId
+                    &&    custInvoiceTrans.RecId == journalizedInvoicePeriodPrevious.RefRecId
+                        join finCustInvoiceTrans
+                        where finCustInvoiceTrans.CustInvoiceTransRecId == custInvoiceTrans.RecId
+                        &&    finCustInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit                           
+                {
+                    FINJournalizedInvoicePeriod::createJorunalizedPeriodWithLink(journalizedInvoicePeriodPrevious, _refTableIdJourTrans, _refRecIdJourTrans, _invoiceId);
+
+                    select firstonly forupdate finCustInvoiceTransCurrent
+                    where finCustInvoiceTransCurrent.CustInvoiceTransRecId == _refRecIdJourTrans;
+
+                    if (finCustInvoiceTransCurrent && mustUpdateFINCustInvoiceTrans)
+                    {
+                        FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+                        invoiceCalculatorParm.initFromFINCustInvoiceTrans(finCustInvoiceTrans);
+                        invoiceCalculatorParm.resetAmountsForCredit();
+
+                        // Copy RentalCalc to show periods in details grid.
+                        finCustInvoiceTransCurrent.RentalCalcPacked = invoiceCalculatorParm.RentalCalcPacked;    
+
+                        //Setting status to Credited will avoid double credititng in future
+                        finCustInvoiceTransCurrent.PeriodStatus = FINInvoiceTransPeriodStatus::Credited;
+                        finCustInvoiceTransCurrent.update();
+
+                        mustUpdateFINCustInvoiceTrans = false;
+                    }
+                }
+
+                ProjInvoiceItem projInvoiceItem;
+                FINProjInvoiceItem finProjInvoiceItem;
+                FINProjInvoiceItem finProjInvoiceItemCurrent;
+                boolean mustUpdateFINProjInvoiceItem = true;
+
+                while select journalizedInvoicePeriodPrevious
+                where journalizedInvoicePeriodPrevious.RefTableId == tableNum(ProjInvoiceItem)
+                &&    journalizedInvoicePeriodPrevious.RefRecId == _refRecId
+                    join TableId from projInvoiceItem
+                    where projInvoiceItem.TableId == journalizedInvoicePeriodPrevious.RefTableId
+                    &&    projInvoiceItem.RecId == journalizedInvoicePeriodPrevious.RefRecId
+                        join finProjInvoiceItem
+                        where finProjInvoiceItem.ProjInvoiceItemRecId == projInvoiceItem.RecId
+                        &&    finProjInvoiceItem.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit
+                {
+                    FINJournalizedInvoicePeriod::createJorunalizedPeriodWithLink(journalizedInvoicePeriodPrevious, _refTableIdJourTrans, _refRecIdJourTrans, _invoiceId);
+                    
+                    select firstonly forupdate finProjInvoiceItemCurrent
+                    where finProjInvoiceItemCurrent.ProjInvoiceItemRecId == _refRecIdJourTrans;
+
+                    if (finProjInvoiceItemCurrent && mustUpdateFINProjInvoiceItem)
+                    {
+                        FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+                        invoiceCalculatorParm.initFromFINProjInvoiceItem(finProjInvoiceItem);
+                        invoiceCalculatorParm.resetAmountsForCredit();
+
+                        // Copy rentalCalc to show periods in details grid.
+                        finProjInvoiceItemCurrent.RentalCalcPacked = invoiceCalculatorParm.RentalCalcPacked;
+                        finProjInvoiceItemCurrent.update();
+
+                        mustUpdateFINProjInvoiceItem = false;
+                    }
+                }
+
+                ProjJournalTrans        projJournalTrans;
+                FINProjJournalTrans     finProjJournalTrans;
+                FINProjJournalTrans     finProjJournalTransCurrent;
+                boolean                 mustUpdateFINProjJournalTrans = true;
+
+                while select journalizedInvoicePeriodPrevious
+                where journalizedInvoicePeriodPrevious.RefTableId   == tableNum(ProjJournalTrans)
+                &&    journalizedInvoicePeriodPrevious.RefRecId     == _refRecId
+                    join TableId from projJournalTrans
+                    where projJournalTrans.TableId  == journalizedInvoicePeriodPrevious.RefTableId
+                    &&    projJournalTrans.RecId    == journalizedInvoicePeriodPrevious.RefRecId
+                        join finProjJournalTrans
+                        where finProjJournalTrans.ProjJournalTransRecId == projJournalTrans.RecId
+                        &&    finProjJournalTrans.PeriodStatus          == FINInvoiceTransPeriodStatus::PendingCredit
+                {
+                    FINJournalizedInvoicePeriod::createJorunalizedPeriodWithLink(journalizedInvoicePeriodPrevious, _refTableIdJourTrans, _refRecIdJourTrans, _invoiceId);
+
+                    select firstonly forupdate finProjJournalTransCurrent
+                    where finProjJournalTransCurrent.ProjJournalTransRecId == _refRecIdJourTrans;
+
+                    if (finProjJournalTransCurrent && mustUpdateFINProjJournalTrans)
+                    {
+                        FINInvoiceCalculatorParm invoiceCalculatorParm;
+
+                        invoiceCalculatorParm.initFromFINProjJournalTrans(finProjJournalTrans);
+                        invoiceCalculatorParm.resetAmountsForCredit();
+
+                        // Copy 'PeriodSpecification' and 'RentalCalc' to show periods in details grid.
+                        finProjJournalTransCurrent.PeriodSpecificationPacked    = invoiceCalculatorParm.PeriodSpecificationPacked;
+                        finProjJournalTransCurrent.RentalCalcPacked             = invoiceCalculatorParm.RentalCalcPacked;
+
+                        // Setting status to 'Credited' will avoid double credititng in future.
+                        finProjJournalTransCurrent.PeriodStatus = FINInvoiceTransPeriodStatus::Credited;
+                        finProjJournalTransCurrent.update();
+
+                        mustUpdateFINProjJournalTrans = false;
+                    }
+                }
+
+                break;
+
+            case tableNum(PurchLine), tableNum(VendInvoiceInfoLine):
+                VendInvoiceTrans vendInvoiceTrans;
+                FINVendInvoiceTrans finVendInvoiceTrans;
+                FINVendInvoiceTrans finVendInvoiceTransCurrent;
+                boolean mustUpdateFINVendInvoiceTrans = true;
+
+                while select journalizedInvoicePeriodPrevious
+                where journalizedInvoicePeriodPrevious.RefTableId == tableNum(VendInvoiceTrans)
+                &&    journalizedInvoicePeriodPrevious.RefRecId == _refRecId
+                    join TableId from vendInvoiceTrans
+                    where vendInvoiceTrans.TableId == journalizedInvoicePeriodPrevious.RefTableId
+                    &&    vendInvoiceTrans.RecId == journalizedInvoicePeriodPrevious.RefRecId
+                        join finVendInvoiceTrans
+                        where finVendInvoiceTrans.VendInvoiceTransRecId == vendInvoiceTrans.RecId
+                        &&    finVendInvoiceTrans.PeriodStatus == FINInvoiceTransPeriodStatus::PendingCredit
+                {
+                    FINJournalizedInvoicePeriod::createJorunalizedPeriodWithLink(journalizedInvoicePeriodPrevious, _refTableIdJourTrans, _refRecIdJourTrans, _invoiceId);
+
+                    select firstonly forupdate finVendInvoiceTransCurrent
+                    where finVendInvoiceTransCurrent.VendInvoiceTransRecId == _refRecIdJourTrans;
+
+                    if (finVendInvoiceTransCurrent && mustUpdateFINVendInvoiceTrans)
+                    {
+                        FINInvoiceCalculatorParm    invoiceCalculatorParm;
+                        invoiceCalculatorParm.initFromFINVendInvoiceTrans(finVendInvoiceTrans);
+                        invoiceCalculatorParm.resetAmountsForCredit();
+
+                        // Copy rentalCalc to show periods in details grid.
+                        finVendInvoiceTransCurrent.RentalCalcPacked = invoiceCalculatorParm.RentalCalcPacked;
+                        finVendInvoiceTransCurrent.update();
+
+                        mustUpdateFINVendInvoiceTrans = false;
+                    }
+                }
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJorunalizedPeriodWithLink</Name>
+				<Source><![CDATA[
+    private static void createJorunalizedPeriodWithLink(FINJournalizedInvoicePeriod _journalizedInvoicePeriodPrevious,
+        RefTableId  _refTableIdJourTrans,
+        RefRecId    _refRecIdJourTrans,
+        InvoiceId   _invoiceId)
+    {        
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+        FINJournalizedInvoicePeriodLink journalizedInvoicePeriodLink;
+
+        // Copy values for credit only
+        journalizedInvoicePeriod.clear();
+        journalizedInvoicePeriod.initCreditFromOrigJournalizedInvoicePeriod(_invoiceId, _journalizedInvoicePeriodPrevious);
+        journalizedInvoicePeriod.RefTableId = _refTableIdJourTrans;
+        journalizedInvoicePeriod.RefRecId = _refRecIdJourTrans;
+        journalizedInvoicePeriod.insert();
+
+        journalizedInvoicePeriodLink.clear();
+        journalizedInvoicePeriodLink.InvoiceTransTableId = _refTableIdJourTrans;
+        journalizedInvoicePeriodLink.InvoiceTransRecId = _refRecIdJourTrans;
+        journalizedInvoicePeriodLink.JournalizedPeriodRecId = journalizedInvoicePeriod.RecId;
+        journalizedInvoicePeriodLink.insert();
+                    
+        // Create a link to oryginal invoice
+        journalizedInvoicePeriodLink.clear();
+        journalizedInvoicePeriodLink.InvoiceTransTableId = _refTableIdJourTrans;
+        journalizedInvoicePeriodLink.InvoiceTransRecId = _refRecIdJourTrans;
+        journalizedInvoicePeriodLink.JournalizedPeriodRecId = _journalizedInvoicePeriodPrevious.RecId;
+        journalizedInvoicePeriodLink.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getInvoiceStartEndDate</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Calculates the start and end period dates for a given invoice 
+    /// </summary>
+    /// <param name = "_invoiceId"> Invoice Id</param>
+    /// <param name = "_refTableId"> The referecing table</param>
+    /// <param name = "_refRecId">The reference record of the trans table</param>
+    /// <returns></returns>
+    public static container getInvoiceStartEndDate(InvoiceId _invoiceId, RefTableId _refTableId, RefRecId _refRecId)
+    {
+        container con;
+        FINJournalizedInvoicePeriod invoicePeriod;
+
+        if (_invoiceId && _refTableId && _refRecId)
+        {
+            select minof(PeriodStartDateTime), maxof(PeriodEndDateTime) from invoicePeriod
+            where invoicePeriod.RefTableId == _refTableId
+            &&    invoicePeriod.RefRecId == _refRecId
+            &&    invoicePeriod.InvoiceId == _invoiceId;
+
+            con = [invoicePeriod.PeriodStartDateTime, invoicePeriod.PeriodEndDateTime];
+        }
+
+        return con;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR:FINJournalizedInvoicePeriodDevDoc</DeveloperDocumentation>
+	<Label>DNR:JournalizedInvoicePeriod</Label>
+	<TableGroup>TransactionLine</TableGroup>
+	<CacheLookup>NotInTTS</CacheLookup>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Overview</Name>
+			<Label>@SYS110757</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>PeriodStartDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PeriodEndDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>NumOfChargeablePeriods</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>NumOfCalendarPeriods</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LineAmount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>DiscAmount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>QtyInvoiced</Name>
+			<ExtendedDataType>INVRentQtyInvoiced</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>PeriodStartDateTime</Name>
+			<ExtendedDataType>INVPeriodStartDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>PeriodEndDateTime</Name>
+			<ExtendedDataType>INVPeriodEndDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>NumOfChargeablePeriods</Name>
+			<ExtendedDataType>INVChargedPeriods</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>NumOfCalendarPeriods</Name>
+			<ExtendedDataType>INVChargePeriodCalendarPeriods</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>LineAmount</Name>
+			<ExtendedDataType>INVLineAmountInvoiced</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>DiscAmount</Name>
+			<ExtendedDataType>INVDiscAmountInvoiced</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InvoiceId</Name>
+			<ExtendedDataType>InvoiceId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>InvPeriodQtyPhysicalRecId</Name>
+			<ExtendedDataType>FINInvoicePeriodQtyPhysicalRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>RefRecId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>RefTableId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RefTableId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>SourceRefRecId</Name>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>DateTimeIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>RefTableId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>RefRecId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>InvPeriodQtyPhysicalRecId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>PeriodStartDateTime</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>PeriodEndDateTime</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation>
+			<Name>FININvoicePeriodQtyPhysical</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>FININvoicePeriodQtyPhysical</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InvPeriodQtyPhysicalRecId</Name>
+					<Field>InvPeriodQtyPhysicalRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>FINInvoicePeriodQtyFinancial</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>FINInvoicePeriodQtyFinancial</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>SourceRefRecId</Name>
+					<Field>SourceRefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustInvoiceTrans</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>CustInvoiceTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Role>CustInvoiceTrans</Role>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>VendInvoiceTrans</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>VendInvoiceTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Role>VendInvoiceTrans</Role>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>ProjInvoiceItem</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>ProjInvoiceItem</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Role>ProjInvoiceItem</Role>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>ProjJournalTrans</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>ProjJournalTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Role>ProjJournalTrans</Role>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

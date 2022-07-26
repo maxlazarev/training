@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRInventTableTable_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(tableStr(InventTable))]
+public final class DNRInventTableTable_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>insertInventItemOrderSetup</Name>
+				<Source><![CDATA[
+    protected void insertInventItemOrderSetup()
+    {
+        next insertInventItemOrderSetup();
+
+        // Insert default records for Rental and Sub-rental
+        if (!RORInventItemRentalSetup::findDefault(this.ItemId))
+        {
+            RORInventItemRentalSetup::insertDefault(this.ItemId);
+        }
+
+        if (!RORInventItemSubRentalSetup::findDefault(this.ItemId))
+        {
+            RORInventItemSubRentalSetup::insertDefault(this.ItemId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    public void modifiedField(FieldId _fieldId)
+    {
+        next modifiedField(_fieldId);
+
+        if(_fieldId == fieldNum(InventTable, ProjCategoryId) && !this.projCategoryId)
+        {
+            this.RORProjCategoryIdRental = '';
+            this.RORProjCategoryIdSubRental = '';
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkRentalType</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    public boolean checkRentalType()
+    {
+        boolean ret = true;
+        ;
+    
+        if (this.RORItemTradeType != RORItemTradeType::SalesPurch && !this.BOBRentalType().RentalTypeId)
+        {
+            ret = checkFailed(strFmt("@DNR8611", RORItemTradeType::RentalSubRental, RORItemTradeType::FromOrder));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkStockedModelGroup</Name>
+				<Source><![CDATA[
+    public boolean checkStockedModelGroup()
+    {
+        boolean                 ret;
+        InventModelGroup        inventModelGroup;
+        InventModelGroupItem    inventModelGroupItem;
+        InventTable             inventTable_orig;
+    
+        ret = true;
+        inventTable_orig = this.orig();
+        BOBRentalTypeId rentalTypeId_orig = inventTable_orig.BOBRentalType().RentalTypeId;
+    
+        select firstOnly RecId from inventModelGroupItem
+        where inventModelGroupItem.ItemId == this.ItemId
+            exists join inventModelGroup
+            where inventModelGroup.ModelGroupId == InventModelGroupItem.ModelGroupId
+            &&    !inventModelGroup.StockedProduct;
+    
+        if (inventModelGroupItem.RecId)
+        {
+            BOBRentalTypeId rentalTypeId = this.BOBRentalType().RentalTypeId;
+
+            if (this.RORItemTradeType != RORItemTradeType::SalesPurch)
+            {
+                ret = checkFailed(strFmt("@DNR6935",
+                                         fieldId2pname(tableNum(InventTable), fieldNum(InventTable, RORItemTradeType)),
+                                         new DictEnum(enumNum(RORItemTradeType)).value2Label(RORItemTradeType::SalesPurch)));
+            }
+            else if (rentalTypeId && rentalTypeId != rentalTypeId_orig)
+            {
+                warning(strFmt("@DNR6936", fieldId2pname(tableNum(BOBRentalType), fieldNum(BOBRentalType, RentalTypeId))));
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBIsBulkRentalItem</Name>
+				<Source><![CDATA[
+    public boolean BOBIsBulkRentalItem()
+    {
+        BOBRentalType rentalType = this.BOBRentalType();
+        return (rentalType.RecId && rentalType.Classification == BOBRentalTypeClassification::Bulk);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBIsSerializedRentalItem</Name>
+				<Source><![CDATA[
+    public boolean BOBIsSerializedRentalItem()
+    {
+        BOBRentalType rentalType = this.BOBRentalType();
+        return (rentalType.RecId && rentalType.Classification == BOBRentalTypeClassification::Serialized);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBDisplayRentalTypeId</Name>
+				<Source><![CDATA[
+    display BOBRentalTypeId BOBDisplayRentalTypeId()
+    {
+        return this.BOBRentalType().RentalTypeId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBRentalType</Name>
+				<Source><![CDATA[
+    public BOBRentalType BOBRentalType(boolean _forUpdate = false)
+    {
+        return BOBRentalType::findFromItemId(this.ItemId, _forUpdate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORGetItemTradeType</Name>
+				<Source><![CDATA[
+    public RORTradeType RORGetItemTradeType(RORTradeType _tradeTypeFromOrder)
+    {
+        RORTradeType tradeType;
+    
+        switch (this.RORItemTradeType)
+        {
+            case RORItemTradeType::FromOrder:
+                tradeType = _tradeTypeFromOrder;
+                break;
+    
+            case RORItemTradeType::SalesPurch:
+                tradeType = RORTradeType::SalesPurch;
+                break;
+    
+            case RORItemTradeType::RentalSubRental:
+                tradeType = RORTradeType::Rental;
+                break;
+        }
+    
+        return tradeType;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORValidateSerialNumberControl</Name>
+				<Source><![CDATA[
+    public boolean RORValidateSerialNumberControl()
+    {
+        boolean                                 ret = true;
+        EcoResTrackingDimensionGroupItem        dimensionGroupItem;
+        EcoResTrackingDimensionGroupFldSetup    dimensionGroupFldSetup;
+        BOBRentalType                           rentalType = this.BOBRentalType();
+
+        if (rentalType && rentalType.Classification == BOBRentalTypeClassification::Serialized)
+        {
+            select firstonly TableId from dimensionGroupItem
+            where dimensionGroupItem.ItemDataAreaId == this.dataAreaId
+            &&    dimensionGroupItem.ItemId         == this.ItemId
+                join isActive from dimensionGroupFldSetup
+                where dimensionGroupFldSetup.TrackingDimensionGroup == dimensionGroupItem.TrackingDimensionGroup
+                &&    dimensionGroupFldSetup.DimensionFieldId       == fieldNum(InventDim, InventSerialId);
+    
+            if (dimensionGroupFldSetup && !dimensionGroupFldSetup.isActive)
+            {
+                ret = checkFailed("@DNR6687");
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateFieldValue</Name>
+				<Source><![CDATA[
+    public boolean validateFieldValue(FieldName _fieldName, int _arrayIndex)
+    {
+        boolean ret = next validateFieldValue(_fieldName, _arrayIndex);
+
+        if (ret 
+        &&  _fieldName == fieldStr(InventTable, RORBasePriceOnDistance)
+        &&  this.RORBasePriceOnDistance
+        &&  this.BOBRentalType().RecId) // Only rental item's can have rentalType filled-in
+        {
+            ret = checkFailed("@DNR10173");
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBFindFromRentalType</Name>
+				<Source><![CDATA[
+    public static InventTable BOBFindFromRentalType(BOBRentalTypeId _rentalTypeId, boolean _forUpdate = false)
+    {
+        InventTable ret;
+        EcoResProduct ecoResProduct;
+
+        if (_rentalTypeId)
+        {
+            if (_forUpdate)
+            {
+                ret.selectForUpdate(_forUpdate);
+            }
+
+            select firstonly TableId from ecoResProduct
+            where ecoResProduct.DisplayProductNumber == ecoResProduct.BOBRentalTypeId
+            &&    ecoResProduct.BOBRentalTypeId      == _rentalTypeId
+                join ret 
+                where ret.Product == ecoResProduct.RecId;
+
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBLookupRentalItem</Name>
+				<Source><![CDATA[
+    public static client void BOBLookupRentalItem(FormStringControl _callerControl, boolean _serializedOnly)
+    {
+        Query query = new Query();
+        QueryBuildDataSource qbdsInventTable = query.addDataSource(tableNum(InventTable));
+        qbdsInventTable.addSelectionField(fieldNum(InventTable, ItemId));
+        qbdsInventTable.addSelectionField(fieldNum(InventTable, NameAlias));
+        qbdsInventTable.addSelectionField(fieldNum(InventTable, ItemType));
+        qbdsInventTable.addSelectionField(fieldNum(InventTable, Product));
+    
+        QueryBuildDataSource qbdsEcoResProduct = qbdsInventTable.addDataSource(tableNum(EcoResProduct));
+        qbdsEcoResProduct.joinMode(JoinMode::InnerJoin);
+        qbdsEcoResProduct.relations(true);
+        qbdsEcoResProduct.addRange(fieldNum(EcoResProduct, BOBRentalTypeId)).value(SysQuery::valueNotEmptyString());
+        qbdsEcoResProduct.addSelectionField(fieldNum(EcoResProduct, BOBRentalTypeId));
+
+        if (_serializedOnly)
+        {
+            QueryBuildDataSource qbdsRentalType = qbdsEcoResProduct.addDataSource(tableNum(BOBRentalType));
+            qbdsRentalType.joinMode(JoinMode::ExistsJoin);
+            qbdsRentalType.relations(false);
+            qbdsRentalType.addLink(fieldNum(EcoResProduct, BOBRentalTypeId), fieldNum(BOBRentalType, RentalTypeId));
+            qbdsRentalType.addRange(fieldNum(BOBRentalType, Classification)).value(SysQuery::value(BOBRentalTypeClassification::Serialized));
+        }
+    
+        SysTableLookup lookup = SysTableLookup::newParameters(tableNum(InventTable), _callerControl);
+        lookup.addLookupfield(fieldNum(InventTable, ItemId), true);
+        lookup.addLookupfield(fieldNum(InventTable, NameAlias));
+        lookup.addLookupfield(fieldNum(InventTable, ItemType));
+        lookup.addLookupfield(fieldNum(InventTable, Product));
+        lookup.addLookupfield(fieldNum(EcoResProduct, BOBRentalTypeId));
+    
+        lookup.parmQuery(query);
+        lookup.performFormLookup();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBLookupWithItemTradeType</Name>
+				<Source><![CDATA[
+    public static void BOBLookupWithItemTradeType(FormStringControl _ctrl, RORItemTradeType _tradeType, boolean _equals = true)
+    {
+        Query                   query   = new Query();
+        QueryBuildDataSource    qbds    = query.addDataSource(tableNum(InventTable));
+        QueryBuildRange         qbr     = qbds.addRange(fieldNum(InventTable, RORItemTradeType));
+        
+        qbr.value(_equals ? SysQuery::value(_tradeType) : SysQuery::valueNot(_tradeType));
+    
+        SysTableLookup lookup = SysTableLookup::newParameters(tableNum(InventTable), _ctrl);
+        lookup.addLookupfield(fieldNum(InventTable, ItemId), true);
+        lookup.addLookupfield(fieldNum(InventTable, NameAlias));
+        lookup.addLookupfield(fieldNum(InventTable, ItemType));
+        lookup.addLookupfield(fieldNum(InventTable, Product));
+        lookup.parmQuery(query);
+        lookup.performFormLookup();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNREvent_OnValidatedWrite</Name>
+				<Source><![CDATA[
+    // event handler methods
+
+    [DataEventHandler(tableStr(InventTable), DataEventType::ValidatedWrite)]
+    public static void DNREvent_OnValidatedWrite(Common _sender, DataEventArgs _eventArgs)
+    {
+        ValidateEventArgs   validateArgs    = _eventArgs as ValidateEventArgs;
+        boolean             ret             = validateArgs.parmValidateResult();
+        
+        if (ret)
+        {
+            InventTable hostObject  = _sender as InventTable;
+            
+            ret = hostObject.RORValidateSerialNumberControl();
+            ret = ret && hostObject.DNRCheckTradeType();
+            ret = ret && FINDimValueController::eventValidateWrite(hostObject);
+
+            validateArgs.parmValidateResult(ret);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRCheckTradeType</Name>
+				<Source><![CDATA[
+    private boolean DNRCheckTradeType()
+    {
+        boolean ret = true;
+        ;
+    
+        if (this.RORItemTradeType != RORItemTradeType::SalesPurch && !this.BOBRentalType().RentalTypeId)
+        {
+            ret = checkFailed(strFmt("@DNR8611", RORItemTradeType::RentalSubRental, RORItemTradeType::FromOrder));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

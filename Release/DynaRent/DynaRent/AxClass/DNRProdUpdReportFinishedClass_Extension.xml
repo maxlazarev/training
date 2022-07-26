@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRProdUpdReportFinishedClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(ProdUpdReportFinished))]
+public final class DNRProdUpdReportFinishedClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    void run()
+    {
+        next run();
+
+        this.BOBObjectSynchronize();
+        this.BOBUpdateObjects();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBObjectSynchronize</Name>
+				<Source><![CDATA[
+    // extension methods
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "prodTableLocal is updated by the BOBRentalTransManager class hierarchy")]
+    private void BOBObjectSynchronize()
+    {          
+        InventTrans inventTrans;
+        ProdTable prodTableLocal;
+        InventTransOriginProdTable originProdTable;
+
+        // Check if serial number was assigned during reporting as finished.
+        InventDim inventDim = InventDim::find(prodParmReportFinished.inventDimId);
+        if (inventDim.inventSerialId)
+        {
+            prodTable.BOBCreateSerialNum(prodParmReportFinished.InventDimId, inventDim);
+        }
+
+        while select forUpdate prodTableLocal
+        where prodTableLocal.RecId == prodTable.RecId
+            join TableId from originProdTable
+            where originProdTable.ProdOrderDataAreaId == prodTableLocal.dataAreaId
+            &&    originProdTable.ProdOrderId == prodTableLocal.ProdId
+                join  inventTrans
+                where inventTrans.InventTransOrigin == originProdTable.InventTransOrigin
+        {
+            InventMovement inventMovement = InventMovement::construct(prodTableLocal);
+            BOBRentalTransManager transManager = BOBRentalTransManager::newInventMovement(inventMovement, inventTrans, BOBRentalSubStatus::Delivered);
+            transManager.parmDoUpdateBuffer(false);
+    
+            transManager.synchronize();
+                
+            transManager.updateSubStatus(inventTrans.Qty);
+        }        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateObjects</Name>
+				<Source><![CDATA[
+    private void BOBUpdateObjects()
+    {        
+        InventDim                           inventDim;
+        BOBObjectTable                      objectTable;
+        TransDateTime                       postingDateTime;
+        LogisticsPostalAddressRecId         postalAddress;
+        boolean                             updateLocationLog = true;
+    
+        select firstOnly InventLocationId from inventDim
+        where inventDim.inventDimId == prodParmReportFinished.InventDimId
+        &&    inventDim.inventSerialId // serialized items only
+            join objectTable
+            where objectTable.InventSerialId == inventDim.inventSerialId;
+
+        if (prodParmReportFinished && objectTable)
+        {
+            InventLocation                      inventLocation;
+            LogisticsEntityPostalAddressView    addressView;
+
+            select firstOnly TableId from inventLocation
+            where inventLocation.InventLocationId == inventDim.InventLocationId
+                outer join PostalAddress from addressView
+                where addressView.IsPrimary
+                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                &&    addressView.Entity == inventLocation.RecId;
+    
+            postalAddress = addressView.PostalAddress;
+                           
+            postingDateTime = DateTimeUtil::newDateTime(prodParmReportFinished.TransDate,
+                                                    0, //prodParmReportFinished.BOBTransTime,
+                                                    DateTimeUtil::getUserPreferredTimeZone());
+            if ((prodParmReportFinished.QtyGood + prodParmReportFinished.QtyError) > 0)
+            {
+                BOBObjectManager::reportAsFinishedProdTable(objectTable, prodParmReportFinished, 
+                                                postingDateTime,
+                                                prodTable,
+                                                postalAddress,
+                                                updateLocationLog);
+            }            
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

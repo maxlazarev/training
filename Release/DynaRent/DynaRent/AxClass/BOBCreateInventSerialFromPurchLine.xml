@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBCreateInventSerialFromPurchLine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBCreateInventSerialFromPurchLine extends RunBase
+{
+    DialogField             dfInventSerialId;
+    DialogField             dfProductionDate;
+    DialogField             dfDescription;
+    DialogField             dfFleetNum;
+
+    InventSerialId          newInventSerialId;
+    InventSerialProdDate    newProductionDate;
+    InventSerialText        newDescription;
+    BOBFleetNumber          fleetNum;
+
+    PurchLine               purchLine;
+    InventDim               inventDim;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    [Replaceable(true)]
+    public Object dialog()
+    {
+        DialogRunbase dialog = super();
+    
+        dialog.caption("@SYS18245");
+        dfInventSerialId = dialog.addFieldValue(extendedTypeStr(InventSerialId), inventDim.inventSerialId);
+        dfInventSerialId.lookupButton(FormLookupButton::Never);
+        dfInventSerialId.displayLength(20);
+
+        dfFleetNum       = dialog.addField(extendedTypeStr(BobFleetNumber));
+        dfProductionDate = dialog.addField(extendedTypeStr(InventSerialProdDate));
+        dfDescription    = dialog.addField(extendedTypeStr(InventSerialText), "@SYS25589");
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        newInventSerialId   = dfInventSerialId.value();
+        newProductionDate   = dfProductionDate.value();
+        newDescription      = dfDescription.value();
+        fleetNum            = dfFleetNum.value();
+    
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        #OCCRetryCount
+    
+        if(this.validate())
+        {
+            try
+            {
+                ttsbegin;
+    
+                BOBObjectManager::newSerialNumFromPurchLine(purchLine, newInventSerialId, newProductionDate, newDescription,fleetNum);
+                this.updateSalesLine();
+                this.updatePurchLine();
+
+                BOBObjectTable objectTable = BOBObjectTable::findInventSerialId(newInventSerialId);
+                PurchLineDlvDate dlvDate = purchLine.deliveryDate();
+                PurchLine::WPPupdateWorkOrder(objectTable, purchLine, objectTable.assetId(dlvDate ? dlvDate : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone())));
+    
+                ttscommit;
+    
+                info(strFmt("@DNR4076", "@SYS477", newInventSerialId, PurchLine.purchTable().PurchaseType == PurchaseType::RORSubRental ? "@DNR6058" : "@SYS22957", purchLine.InventTransId));
+            }
+            catch (Exception::Deadlock)
+            {
+                retry;
+            }
+            catch (Exception::UpdateConflict)
+            {
+                if (appl.ttsLevel() == 0)
+                {
+                    if (xSession::currentRetryCount() >= #RetryNum)
+                    {
+                        throw Exception::UpdateConflictNotRecovered;
+                    }
+                    else
+                    {
+                        retry;
+                    }
+                }
+                else
+                {
+                    throw Exception::UpdateConflict;
+                }
+            }
+        }
+        else
+        {
+            throw error(strFmt("@SYS96792", "@SYS477"));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setPurchLine</Name>
+				<Source><![CDATA[
+    public void setPurchLine(PurchLine _purchLine)
+    {
+        purchLine = _purchLine;
+        inventDim = _purchLine.inventDim();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePurchLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void updatePurchLine()
+    {
+        InventDim       newInventDim;
+        FormDataSource  dataSource;
+        purchLine       purchLineUpd;
+        ;
+    
+        // create new inventory dimension
+        inventDim.inventSerialId = newInventSerialId;
+        newInventDim = InventDim::findOrCreate(inventDim);
+    
+        // stamp the new inventory dimension on the purchase line
+        if(FormDataUtil::isFormDataSource(purchLine))
+        {
+            purchLine.InventDimId = newInventDim.inventDimId;
+            purchLine.IsModified = NoYes::Yes;
+            purchLine.update();
+    
+            purchLine.reread();
+
+            dataSource = FormDataUtil::getFormDataSource(purchLine);
+    
+            if (dataSource && dataSource.joinSourceDataSource())
+            {
+                FormLetter::reFreshCallerDataSource(dataSource.joinSourceDataSource(), true, false);
+            }
+    
+            dataSource.research(true);
+        }
+        else
+        {
+            update_recordset purchLineUpd
+            setting InventDimId = newInventDim.inventDimId,
+                    IsModified = NoYes::Yes
+            where   purchLineUpd.InventTransId == purchLine.InventTransId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSalesLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method"),
+     SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Cannot be refactored without altering functionality of method") ]
+    private void updateSalesLine()
+    {
+        SalesLine                   salesLine;
+        InventTrans                 inventTrans;
+        InventTransOriginPurchLine  originPurchLine;
+        InventUpdate                inventUpdate;
+    
+        if (purchLine.RORTradeType == RORTradeType::SubRental)
+        {
+            select firstOnly forUpdate salesLine
+            where salesLine.InventRefType    == InventRefType::Purch
+            &&    salesLine.InventRefId      == purchLine.PurchId
+            &&    salesLine.InventRefTransId == purchLine.InventTransId;
+    
+            if (salesLine)
+            {
+                // assign the new business object to the caller SalesLine
+                BOBObjectAssignmentEngine::construct(salesLine, newInventSerialId).runOperation();
+    
+                // for some reason the serial number on the new PurchLine's compensating
+                // InventTrans is not populated correctly, so we need to do it ourselves
+                select firstOnly forUpdate inventTrans
+                where inventTrans.inventDimId != purchLine.InventDimId
+                    exists join originPurchLine
+                    where originPurchLine.PurchLineDataAreaId == purchLine.dataAreaId
+                    &&    originPurchLine.PurchLineInventTransId == purchLine.InventTransId
+                    &&    originPurchLine.InventTransOrigin == inventTrans.InventTransOrigin;
+    
+                if (inventTrans)
+                {
+                    inventUpdate = InventUpdate::newChangeTransDim(InventMovement::construct(purchLine));
+                    inventUpdate.BOBParmIsCompensatingTrans(true);
+                    inventUpdate.updateTransDimReceipt(inventTrans, inventTrans.inventDim(), purchLine.inventDim(), inventTrans.Qty);
+                }
+    
+                // Set the reference, because this gets cleared
+                salesLine.reread();
+                salesLine.InventRefType    = InventRefType::Purch;
+                salesLine.InventRefId      = purchLine.PurchId;
+                salesLine.InventRefTransId = purchLine.InventTransId;
+                salesLine.update();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean ret = super(_calledFrom);
+        ;
+    
+        if(ret)
+        {
+            if(!newInventSerialId)
+            {
+                ret = checkFailed(strFmt("@SYS50104", "@SYS477"));
+            }
+    
+            if (BOBObjectTable::existInventSerialId(newInventSerialId))
+            {
+                ret = checkFailed(strFmt("@DNR10174", newInventSerialId));
+            }
+            if(fleetNum)
+            {
+                ret = ret && BOBObjectTable::validateFleetNum(fleetNum);
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    static void main(Args _args)
+    {
+        BOBCreateInventSerialFromPurchLine createSerialNumber;
+        ;
+    
+        if(_args.record() && _args.dataset() == tableNum(PurchLine))
+        {
+            if(BOBCreateInventSerialFromPurchLine::validatePurchLine(_args.record(), true))
+            {
+                createSerialNumber = new BOBCreateInventSerialFromPurchLine();
+                createSerialNumber.setPurchLine(_args.record());
+    
+                if(createSerialNumber.prompt())
+                {
+                    createSerialNumber.runOperation();
+                }
+            }
+            else
+            {
+                throw error(strFmt("@SYS96792", "@SYS477"));
+            }
+        }
+        else
+        {
+            throw error(strFmt("@SYS25821", classStr(BOBCreateInventSerialFromPurchLine), tablePName(PurchLine), tableStr(PurchLine)));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validatePurchLine</Name>
+				<Source><![CDATA[
+    public static boolean validatePurchLine(PurchLine _purchLine, boolean _showWarnings)
+    {
+        boolean         ret         = true;
+        InventDim       inventDim   = _purchLine.inventDim();
+        BOBRentalType   rentalType  = BOBRentalType::findFromItemId(_purchLine.ItemId);
+    
+        if(!_purchLine.ItemId)
+        {
+            ret = (_showWarnings ? checkFailed("@DNR6073") : false);
+        }
+        else if(!_purchLine.ConfirmedDlv && !_purchLine.DeliveryDate)
+        {
+            ret = (_showWarnings ? checkFailed(strFmt("@SYS50087", fieldPName(PurchLine, ConfirmedDlv), fieldPName(PurchLine, DeliveryDate))) : false);
+        }
+        else if(!rentalType || rentalType.Classification != BOBRentalTypeClassification::Serialized)
+        {
+            ret = (_showWarnings ? checkFailed(strFmt("@DNR5945", _purchLine.ItemId)) : false);
+        }
+        else if(inventDim.inventSerialId && BOBObjectTable::existInventSerialId(inventDim.inventSerialId))
+        {
+            ret = (_showWarnings ? checkFailed(strFmt("@DNR4074", "@SYS22957", "@SYS477")) : false);
+        }
+        else if (!_purchLine.isOpenOrder())
+        {
+            ret = (_showWarnings ? checkFailed(strFmt("@DNR4526", "@SYS477", "@SYS22957", _purchLine.InventTransId, _purchLine.PurchStatus)) : false);
+        }
+        else
+        {
+            InventTrans                 inventTrans;
+            InventTransOriginPurchLine  inventTransOrigin;
+
+            select firstonly RecId from inventTrans
+            where inventTrans.StatusReceipt == StatusReceipt::Registered
+                exists join inventTransOrigin
+                where inventTransOrigin.InventTransOrigin == inventTrans.InventTransOrigin
+                &&    inventTransOrigin.PurchLineInventTransId == _purchLine.InventTransId
+                &&    inventTransOrigin.PurchLineDataAreaId == curext();
+    
+            if(inventTrans.RecId)
+            {
+                ret = (_showWarnings ? checkFailed(strFmt("@DNR4526", "@SYS477", "@SYS22957", _purchLine.InventTransId, "@SYS50316")) : false);
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

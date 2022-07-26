@@ -1,0 +1,336 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalTransMgr_WPPWorkOrder</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBRentalTransMgr_WPPWorkOrder extends BOBRentalTransManager
+{
+    WPPWorkOrderTable   workOrderTable;
+    WPPWorkOrderLine    workOrderLine;
+    BOBObjectTable      objectTable;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>certaintyFrom</Name>
+				<Source><![CDATA[
+    protected BOBDateTimeCertainty certaintyFrom()
+    {
+        return BOBDateTimeCertainty::Firm;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyTo</Name>
+				<Source><![CDATA[
+    protected BOBDateTimeCertainty certaintyTo(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+        return BOBDateTimeCertainty::Firm;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>companyId</Name>
+				<Source><![CDATA[
+    protected SelectableDataArea companyId()
+    {
+        return workOrderTable.CompanyId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteWorkOrderLine</Name>
+				<Source><![CDATA[
+    public void deleteWorkOrderLine()
+    {
+        BOBRentalTrans rentalTrans;
+        ;
+    
+        ttsBegin;
+    
+        rentalTrans = BOBRentalTrans::WPPFindByWorkOrderLineRecId(workOrderLine.RecId, true);
+    
+        if(rentalTrans)
+        {
+            rentalTrans.delete();
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fromDateTime</Name>
+				<Source><![CDATA[
+    protected FromDateTime fromDateTime()
+    {
+        WPPWorkOrderLineResource    resourcePlanning;
+        FromDateTime                ret;
+        ;
+    
+        select minOf(PlannedDate), minOf(PlannedFromDateTime), minOf(ActualFromDateTime) from resourcePlanning
+        where resourcePlanning.WorkOrderLineRecId == workOrderLine.RecId
+        &&   (resourcePlanning.PlannedDate || resourcePlanning.PlannedFromDateTime || resourcePlanning.ActualFromDateTime);
+    
+        if(resourcePlanning.ActualFromDateTime)
+        {
+            ret = resourcePlanning.ActualFromDateTime;
+        }
+        else if(resourcePlanning.PlannedFromDateTime)
+        {
+            ret = resourcePlanning.PlannedFromDateTime;
+        }
+        else if(resourcePlanning.PlannedDate)
+        {
+            ret = DateTimeUtil::newDateTime(resourcePlanning.PlannedDate, DateTimeUtil::time(workOrderLine.RequestedStartDateTime));
+        }
+        else
+        {
+            ret = workOrderLine.RequestedStartDateTime;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromBuffer</Name>
+				<Source><![CDATA[
+    protected void initFromBuffer()
+    {
+        switch(buffer.TableId)
+        {
+            case tableNum(WPPWorkOrderTable):
+                workOrderTable = buffer as WPPWorkOrderTable;
+                objectTable = workOrderTable.BOBObjectTable();
+                break;
+    
+            case tableNum(WPPWorkOrderLine):
+                workOrderLine = buffer as WPPWorkOrderLine;
+    
+                select firstOnly workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    outer join objectTable
+                    where objectTable.RecId == workOrderTable.BOBObjectTableRecId;
+    
+                break;
+    
+            default:
+                throw error(strFmt("@SYS31187", tableId2name(buffer.TableId)));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventLocationId</Name>
+				<Source><![CDATA[
+    protected InventLocationId inventLocationId()
+    {
+        return workOrderTable.InventLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustMaintainRentalTrans</Name>
+				<Source><![CDATA[
+    protected boolean mustMaintainRentalTrans()
+    {
+        return workOrderLine.workOrderTaskTable().SynchronizeRentalTransaction;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>objectTable</Name>
+				<Source><![CDATA[
+    protected BOBObjectTable objectTable()
+    {
+        return objectTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalTypeId</Name>
+				<Source><![CDATA[
+    protected BOBRentalTypeId rentalTypeId()
+    {
+        return objectTable.RentalTypeId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>synchronize</Name>
+				<Source><![CDATA[
+    public void synchronize()
+    {
+        if(workOrderLine)
+        {
+            this.syncWorkOrderLine();
+        }
+        else
+        {
+            this.syncWorkOrderTable();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>syncWorkOrderLine</Name>
+				<Source><![CDATA[
+    protected void syncWorkOrderLine()
+    {
+        BOBRentalTrans                      rentalTrans;
+        WPPWorkOrderRentalTransStatusSetup  statusSetup;
+        ;
+    
+        if(this.mustMaintainRentalTrans())
+        {
+            ttsBegin;
+    
+            rentalTrans = BOBRentalTrans::WPPFindByWorkOrderLineRecId(workOrderLine.RecId, true);
+            statusSetup = WPPWorkOrderRentalTransStatusSetup::find(workOrderLine.TaskId, workOrderLine.Status);
+    
+            if(rentalTrans)
+            {
+                rentalTrans.FromDateTime            = this.fromDateTime();
+                rentalTrans.Qty                     = -workOrderLine.ObjectQty;
+                rentalTrans.ToDateTime              = this.toDateTime();
+                rentalTrans.Active                  = (statusSetup && rentalTrans.FromDateTime && rentalTrans.ToDateTime ?
+                                                       BOBRentalTransActive::Active :
+                                                       BOBRentalTransActive::Inactive);
+                if(statusSetup)
+                {
+                    rentalTrans.SubStatus           = statusSetup.RentalTransSubStatus;
+                }
+    
+                rentalTrans.update();
+            }
+            else
+            {
+                rentalTrans.AssetId                 = workOrderTable.AssetId;
+                rentalTrans.CertaintyFrom           = this.certaintyFrom();
+                rentalTrans.CertaintyTo             = this.certaintyTo();
+                rentalTrans.CompanyId               = this.companyId();
+                rentalTrans.FromDateTime            = this.fromDateTime();
+                rentalTrans.InventLocationId        = this.inventLocationId();
+                rentalTrans.ObjectId                = objectTable.ObjectId;
+                rentalTrans.Qty                     = -workOrderLine.ObjectQty;
+                rentalTrans.RentalTypeId            = this.rentalTypeId();
+                rentalTrans.SubStatus               = statusSetup.RentalTransSubStatus;
+                rentalTrans.ToDateTime              = this.toDateTime();
+                rentalTrans.TransType               = this.transType();
+                rentalTrans.WPPWorkOrderLineRecId   = workOrderLine.RecId;
+                rentalTrans.Active                  = (statusSetup && rentalTrans.FromDateTime && rentalTrans.ToDateTime ?
+                                                       BOBRentalTransActive::Active :
+                                                       BOBRentalTransActive::Inactive);
+                rentalTrans.insert();
+            }
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>syncWorkOrderTable</Name>
+				<Source><![CDATA[
+    protected void syncWorkOrderTable()
+    {
+        BOBRentalTrans          rentalTrans;
+        WPPWorkOrderTaskTable   taskTable;
+        ;
+    
+        ttsBegin;
+    
+        while select forUpdate rentalTrans
+        where rentalTrans.TransType == this.transType()
+            join ObjectQty from workOrderLine
+            where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+            &&    workOrderLine.RecId == rentalTrans.WPPWorkOrderLineRecId
+                exists join taskTable
+                where taskTable.TaskId == workOrderLine.TaskId
+                &&    taskTable.SynchronizeRentalTransaction
+        {
+            rentalTrans.AssetId             = workOrderTable.AssetId;
+            rentalTrans.CompanyId           = this.companyId();
+            rentalTrans.InventLocationId    = this.inventLocationId();
+            rentalTrans.ObjectId            = objectTable.ObjectId;
+            rentalTrans.Qty                 = -workOrderLine.ObjectQty;
+            rentalTrans.RentalTypeId        = this.rentalTypeId();
+            rentalTrans.update();
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>toDateTime</Name>
+				<Source><![CDATA[
+    protected ToDateTime toDateTime(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+        WPPWorkOrderLineResource    resourcePlanning;
+        FromDateTime                ret;
+        ;
+    
+        select maxOf(PlannedDate), maxOf(PlannedToDateTime), maxOf(ActualToDateTime) from resourcePlanning
+        where resourcePlanning.WorkOrderLineRecId == workOrderLine.RecId
+        &&   (resourcePlanning.PlannedDate || resourcePlanning.PlannedToDateTime || resourcePlanning.ActualToDateTime);
+    
+        if(resourcePlanning.ActualToDateTime)
+        {
+            ret = resourcePlanning.ActualToDateTime;
+        }
+        else if(resourcePlanning.PlannedToDateTime)
+        {
+            ret = resourcePlanning.PlannedToDateTime;
+        }
+        else if(resourcePlanning.PlannedDate)
+        {
+            ret = DateTimeUtil::newDateTime(resourcePlanning.PlannedDate, DateTimeUtil::time(workOrderLine.RequestedEndDateTime));
+        }
+        else
+        {
+            ret = workOrderLine.RequestedEndDateTime;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transType</Name>
+				<Source><![CDATA[
+    protected BOBRentalTransType transType()
+    {
+        return BOBRentalTransType::WPPWorkOrder;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBuffer</Name>
+				<Source><![CDATA[
+    protected void updateBuffer(boolean _doUpdateBuffer)
+    {
+        // do nothing
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

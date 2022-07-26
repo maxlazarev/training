@@ -1,0 +1,640 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoicePeriodManager_Invoice</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[FINInvoicePeriodManagerAttribute(FINInvoicePeriodAction::Invoice)]
+class FINInvoicePeriodManager_Invoice extends FINInvoicePeriodManager
+{
+    FINInvoiceCalculatorParm invoiceCalculatorParm;
+    InvoiceId invoiceId;
+    RefTableId invoiceTransRefTableId;
+    RefRecId invoiceTransRefRecId;
+    boolean calculatedExpectedPeriods;
+    Map expectedPeriodLinkMap = new Map(Types::Int64, Types::Int64);
+    boolean isProformaInvoice;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setIsProformaInvoice</Name>
+				<Source><![CDATA[
+    public void setIsProformaInvoice(boolean _isProformaInvoice)
+    {
+        isProformaInvoice = _isProformaInvoice;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInvoiceCalculatorParm</Name>
+				<Source><![CDATA[
+    public void setInvoiceCalculatorParm(FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        invoiceCalculatorParm = _invoiceCalculatorParm;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInvoiceId</Name>
+				<Source><![CDATA[
+    public void setInvoiceId(InvoiceId _invoiceId)
+    {
+        invoiceId = _invoiceId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCalculatedExpectedPeriods</Name>
+				<Source><![CDATA[
+    public void setCalculatedExpectedPeriods(boolean _calculatedExpectedPeriods)
+    {
+        calculatedExpectedPeriods = _calculatedExpectedPeriods;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setExpectedPeriodLinkMap</Name>
+				<Source><![CDATA[
+    public void setExpectedPeriodLinkMap(Map _expectedPeriodLinkMap)
+    {
+        expectedPeriodLinkMap = _expectedPeriodLinkMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInvoiceTransReference</Name>
+				<Source><![CDATA[
+    public void setInvoiceTransReference(RefTableId _refTableId, RefRecId _refRecId)
+    {
+        invoiceTransRefTableId = _refTableId;
+        invoiceTransRefRecId = _refRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>stampInvoiceIdOnProjTrans</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void stampInvoiceIdOnProjTrans()
+    {
+        ProjInvoiceEmpl projInvoiceEmpl;
+        ProjInvoiceJour projInvoiceJour;
+        SalesLine salesLine = invoicePeriodHost as SalesLine;
+        ProjEmplTrans projEmplTrans;
+
+        if (salesLine)
+        {
+            update_recordset projEmplTrans
+            setting WPPInvoiceId = invoiceId
+            where projEmplTrans.INVRefTableId == salesLine.TableId
+            &&    projEmplTrans.INVRefRecId == salesLine.RecId
+            &&    !projEmplTrans.WPPInvoiceId
+                join RecId from projInvoiceEmpl
+                where projInvoiceEmpl.TransId == projEmplTrans.TransId
+                    join RecId from projInvoiceJour
+                    where projInvoiceJour.InvoiceDate == projInvoiceEmpl.InvoiceDate
+                    &&    projInvoiceJour.ProjInvoiceId == projInvoiceEmpl.ProjInvoiceId
+                    &&    projInvoiceJour.ProposalId == invoiceCalculatorParm.ParmId;
+            
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        // Map( [InvoicePeriodQtyRecId, qtyInvoiced], Map([ FromDateTime, ToDateTime ] , List(FINPeriodSpecification)))
+        Map specificationMap = Map::create(invoiceCalculatorParm.PeriodSpecificationPacked);
+        
+        if (!specificationMap.empty())
+        {
+            ttsbegin;
+
+            MapEnumerator enumerator = specificationMap.getEnumerator();
+
+            while (enumerator.moveNext())
+            {
+                RecId invoicePeriodQtyRecId;
+                Qty invoiceQty;
+                // qty is also stamped on periodSpec.lineQty so no need to pass the value here.
+                [invoicePeriodQtyRecId, invoiceQty] = enumerator.currentKey();
+
+                Map periodDefinitionMap = enumerator.currentValue();
+
+                if (calculatedExpectedPeriods && expectedPeriodLinkMap && expectedPeriodLinkMap.exists(invoicePeriodQtyRecId))
+                {
+                    // Use reference to duplicated periods
+                    invoicePeriodQtyRecId = expectedPeriodLinkMap.lookup(invoicePeriodQtyRecId);
+                }
+                this.processSingleDelivery(invoicePeriodQtyRecId, periodDefinitionMap);
+            }
+            
+            this.stampInvoiceIdOnProjTrans();
+
+            ttscommit;
+        }
+
+        if (invoiceTransRefTableId && invoiceTransRefRecId)
+        {
+            FINJournalizedInvoicePeriod::insertJournalizedInvoicePeriods(invoiceCalculatorParm, invoiceTransRefTableId, invoiceTransRefRecId, invoiceId);
+        }
+        
+        if (!calculatedExpectedPeriods)
+        {
+            this.updatePendingCredit(invoiceTransRefTableId, invoiceTransRefRecId, invoiceId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSingleDelivery</Name>
+				<Source><![CDATA[
+    public void processSingleDelivery(RecId _invPeriodQtyPhysicalRecId, Map  _periodDefinitionMap)
+    {
+        MapEnumerator specificationEnumerator = _periodDefinitionMap.getEnumerator();
+        FINInvoicePeriodQtyFinancial uninvoicedPeriodFinancial;
+        FINInvoicePeriodQtyPhysical uninvoicedPeriodPhysical;
+             
+        while (specificationEnumerator.moveNext())
+        {
+            TransDateTime fromDateTimeInTimeZone;
+            TransDateTime toDateTimeInTimeZone;
+            TransDateTime fromDateTime;
+            TransDateTime toDateTime;
+            // DateTimes are in order line site specific timezone
+            [fromDateTimeInTimeZone, toDateTimeInTimeZone] = specificationEnumerator.currentKey();
+            fromDateTime = DateTimeUtil::removeTimeZoneOffset(fromDateTimeInTimeZone, invoiceCalculatorParm.Timezone);
+            toDateTime = DateTimeUtil::removeTimeZoneOffset(toDateTimeInTimeZone, invoiceCalculatorParm.Timezone);
+
+            List specificationList = specificationEnumerator.currentValue();
+
+            if (!uninvoicedPeriodFinancial.RecId)
+            {
+                if (invoiceCalculatorParm.CreditJourRefRecId)
+                {
+                    SalesLine salesLine = invoicePeriodHost as SalesLine;
+                    PurchLine purchLine = invoicePeriodHost as PurchLine;
+                    
+                    if (salesLine)
+                    {                    
+                        [uninvoicedPeriodFinancial, uninvoicedPeriodPhysical] = FINCustInvoiceTrans::getInvoicePeriodQtyForCredit(salesLine.inventTransId, _invPeriodQtyPhysicalRecId, fromDateTime, toDateTime, invoiceCalculatorParm.CreditJourRefRecId);
+                    }
+                    else if (purchLine)
+                    {
+                        [uninvoicedPeriodFinancial, uninvoicedPeriodPhysical] = FINVendInvoiceTrans::getInvoicePeriodQtyForCredit(purchLine.inventTransId, _invPeriodQtyPhysicalRecId, fromDateTime, toDateTime, invoiceCalculatorParm.CreditJourRefRecId);
+                    }
+
+                    // For some reason it is not possible to update a record passed via a container so it needs to be reselected.
+                    RecId periodFinanicalRecId = uninvoicedPeriodFinancial.RecId;
+                    RecId periodPhysicalRecId = uninvoicedPeriodPhysical.RecId;
+
+                    select firstonly uninvoicedPeriodFinancial where uninvoicedPeriodFinancial.RecId == periodFinanicalRecId;
+                    select firstonly uninvoicedPeriodPhysical where uninvoicedPeriodPhysical.RecId == periodPhysicalRecId;
+                }
+                else
+                {
+                    uninvoicedPeriodFinancial = this.getUninvoicedPeriodFinancial(_invPeriodQtyPhysicalRecId, fromDateTime, toDateTime);
+                }
+            }
+
+            if (uninvoicedPeriodFinancial.RecId)
+            {
+                // update invoice periods per delivery
+                uninvoicedPeriodFinancial = this.processSinglePeriod(uninvoicedPeriodPhysical, uninvoicedPeriodFinancial, fromDateTime, toDateTime, specificationList);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getUninvoicedPeriodFinancial</Name>
+				<Source><![CDATA[
+    protected FINInvoicePeriodQtyFinancial getUninvoicedPeriodFinancial(RecId _invPeriodQtyPhysicalRecId, TransDateTime _fromDateTime, TransDateTime _toDateTime)
+    {
+        FINInvoicePeriodQtyFinancial uninvoicedPeriodFinancial;
+
+        select count(RecId) from uninvoicedPeriodFinancial
+        where uninvoicedPeriodFinancial.InvPeriodQtyPhysicalRecId == _invPeriodQtyPhysicalRecId
+        &&    (invoiceCalculatorParm.PostInvoiceProposal || !uninvoicedPeriodFinancial.InvoiceId)
+        &&    uninvoicedPeriodFinancial.PeriodStartDateTime < _toDateTime
+        &&    uninvoicedPeriodFinancial.PeriodEndDateTime > _fromDateTime;
+
+        if (uninvoicedPeriodFinancial.RecId == 0)
+        {
+            return uninvoicedPeriodFinancial;
+        }
+        else if (uninvoicedPeriodFinancial.RecId == 1)
+        {
+            select firstOnly uninvoicedPeriodFinancial
+            where uninvoicedPeriodFinancial.InvPeriodQtyPhysicalRecId == _invPeriodQtyPhysicalRecId
+            &&    (invoiceCalculatorParm.PostInvoiceProposal || !uninvoicedPeriodFinancial.InvoiceId)
+            &&    uninvoicedPeriodFinancial.PeriodStartDateTime < _toDateTime
+            &&    uninvoicedPeriodFinancial.PeriodEndDateTime > _fromDateTime;
+        }
+        else //merge all open periods
+        {
+            utcdatetime openPeriodStartDateTime, openPeriodEndDateTime;
+            RecId firstOpenInvoicedPeriodFinancial;
+            boolean keep;
+
+            while select forUpdate uninvoicedPeriodFinancial
+            where uninvoicedPeriodFinancial.InvPeriodQtyPhysicalRecId == _invPeriodQtyPhysicalRecId
+            &&    (invoiceCalculatorParm.PostInvoiceProposal || !uninvoicedPeriodFinancial.InvoiceId)
+            &&    uninvoicedPeriodFinancial.PeriodStartDateTime < _toDateTime
+            &&    uninvoicedPeriodFinancial.PeriodEndDateTime > _fromDateTime
+            {
+                if (!openPeriodStartDateTime)
+                {
+                    firstOpenInvoicedPeriodFinancial = uninvoicedPeriodFinancial.RecId;
+                }
+
+                keep = !openPeriodStartDateTime;
+
+                openPeriodStartDateTime = openPeriodStartDateTime ? min(openPeriodStartDateTime, uninvoicedPeriodFinancial.PeriodStartDateTime) : uninvoicedPeriodFinancial.PeriodStartDateTime;
+
+                openPeriodEndDateTime = openPeriodEndDateTime == DateTimeUtil::minValue() ? max(openPeriodEndDateTime, uninvoicedPeriodFinancial.PeriodEndDateTime) : uninvoicedPeriodFinancial.PeriodEndDateTime;
+
+                if (!keep)
+                {
+                    uninvoicedPeriodFinancial.delete();
+                }
+            }
+
+            select firstonly forupdate uninvoicedPeriodFinancial
+            where uninvoicedPeriodFinancial.RecId == firstOpenInvoicedPeriodFinancial;
+
+            uninvoicedPeriodFinancial.PeriodStartDateTime = openPeriodStartDateTime;
+            uninvoicedPeriodFinancial.PeriodEndDateTime = openPeriodEndDateTime;
+            uninvoicedPeriodFinancial.update();
+        }
+
+        return uninvoicedPeriodFinancial;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSinglePeriod</Name>
+				<Source><![CDATA[
+    protected FINInvoicePeriodQtyFinancial processSinglePeriod(FINInvoicePeriodQtyPhysical _uninvoicedPeriodPhysical, FINInvoicePeriodQtyFinancial _uninvoicedPeriodFinancial, TransDateTime _fromDateTime, TransDateTime _toDateTime, List _specificationList)
+    {
+        FINInvoicePeriodQtyFinancial uninvoicedPeriodFinancial;
+        FINInvoicePeriodQtyFinancial invoicedPeriodFinancial = _uninvoicedPeriodFinancial;
+        ListEnumerator listEnumerator = _specificationList.getEnumerator();
+        DiscAmount discAmount;
+        LineAmount lineAmount;
+        int numOfCalendarPeriods;
+        int numOfChargeablePeriods;
+        Qty qtyInvoiced;
+        UnitOfMeasure rateCode;
+
+        while (listEnumerator.moveNext())
+        {
+            FINPeriodSpecification periodSpec = listEnumerator.current();
+            discAmount += periodSpec.periodDisc;
+            lineAmount += periodSpec.invoiceAmountCur;
+            numOfCalendarPeriods += periodSpec.numOfCalendarPeriods;
+            numOfChargeablePeriods += periodSpec.numOfChargedPeriods;
+            qtyInvoiced += periodSpec.lineQty;
+        }
+
+        if (!qtyInvoiced && _specificationList.empty()
+        && (invoicePeriodHost.TableId == tableNum(SalesLine) ||
+            invoicePeriodHost.TableId == tableNum(SalesParmLine) ||
+            invoicePeriodHost.TableId == tableNum(ProjInvoiceItem) ||
+            invoicePeriodHost.TableId == tableNum(ProjProposalItem)))
+        {
+            boolean isInvoiceProjectHours;
+            SalesLine salesLine;
+            
+            if (invoicePeriodHost.TableId == tableNum(ProjInvoiceItem) || invoicePeriodHost.TableId == tableNum(ProjProposalItem))
+            {
+                ProjProposalItem projProposalItem = invoicePeriodHost as ProjProposalItem;
+                ProjInvoiceItem projInvoiceItem = invoicePeriodHost as ProjInvoiceItem;
+                salesLine = SalesLine::findInventTransId(projInvoiceItem.InventTransId ? projInvoiceItem.InventTransId : projProposalItem.InventTransId);
+                rateCode = UnitOfMeasure::find(salesLine.RORPriceTimeUnit);            
+                isInvoiceProjectHours = rateCode.FINInvoiceProjectEngine;
+            }
+            else if (invoicePeriodHost.TableId == tableNum(SalesLine) || invoicePeriodHost.TableId == tableNum(SalesParmLine))
+            {
+                if (invoicePeriodHost.TableId == tableNum(SalesLine))
+                {
+                    salesLine = invoicePeriodHost as SalesLine;
+                }
+                else
+                {
+                    SalesParmLine salesParmLine = invoicePeriodHost as SalesParmLine;
+                    salesLine = SalesLine::findInventTransId(salesParmLine.InventTransId);
+                }
+
+                rateCode = UnitOfMeasure::find(salesLine.RORPriceTimeUnit);
+                isInvoiceProjectHours = rateCode.FINInvoiceProjectEngine;
+            }
+            
+            if (isInvoiceProjectHours && this.hasProjHourToInvoice(salesLine))
+            {            
+                qtyInvoiced = _uninvoicedPeriodPhysical.QtyRented;
+            }
+        }
+
+        if (qtyInvoiced)
+        {
+            ttsbegin;
+
+            if (qtyInvoiced < _uninvoicedPeriodPhysical.QtyRented)
+            {
+                // partial invoicing
+                this.splitPartialInvoicing(_uninvoicedPeriodPhysical, _uninvoicedPeriodFinancial, qtyInvoiced);
+            }
+
+            if (_uninvoicedPeriodFinancial.PeriodEndDateTime > _toDateTime)
+            {
+                // Not fully invoiced yet
+                uninvoicedPeriodFinancial.data(_uninvoicedPeriodFinancial);
+                uninvoicedPeriodFinancial.PeriodStartDateTime = _toDateTime;
+                uninvoicedPeriodFinancial.insert();
+            }
+
+            invoicedPeriodFinancial.selectForUpdate(true);
+            // Compare dateTimes from period definition to avoid extending periods during invoicing.
+            if (invoicedPeriodFinancial.PeriodStartDateTime < _fromDateTime)
+            {
+                invoicedPeriodFinancial.PeriodStartDateTime = _fromDateTime;
+            }
+            if (invoicedPeriodFinancial.PeriodEndDateTime == DateTimeUtil::minValue()
+            || invoicedPeriodFinancial.PeriodEndDateTime > _toDateTime)
+            {
+                invoicedPeriodFinancial.PeriodEndDateTime = _toDateTime;
+            }
+            invoicedPeriodFinancial.InvoiceId = invoiceId;
+            invoicedPeriodFinancial.IsProformaInvoice = isProformaInvoice;
+            invoicedPeriodFinancial.DiscAmount = discAmount;
+            invoicedPeriodFinancial.LineAmount = lineAmount;
+            invoicedPeriodFinancial.NumOfCalendarPeriods = numOfCalendarPeriods;
+            invoicedPeriodFinancial.NumOfChargeablePeriods = numOfChargeablePeriods;
+            invoicedPeriodFinancial.QtyInvoiced = qtyInvoiced;
+            invoicedPeriodFinancial.update();
+
+            ttscommit;
+        }
+        
+        // Returns empty buffer if fully invoiced or nothing invoiced
+        return uninvoicedPeriodFinancial;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>hasProjHourToInvoice</Name>
+				<Source><![CDATA[
+    private boolean hasProjHourToInvoice(SalesLine _salesLine)
+    {
+        boolean ret;
+
+        ProjEmplTrans projEmplTrans;
+
+        select firstonly RecId from projEmplTrans
+        where projEmplTrans.INVRefTableId == _salesLine.TableId
+        &&    projEmplTrans.INVRefRecId == _salesLine.RecId
+        &&    !projEmplTrans.WPPInvoiceId;
+
+        if (projEmplTrans)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>splitPartialInvoicing</Name>
+				<Source><![CDATA[
+    protected void splitPartialInvoicing(FINInvoicePeriodQtyPhysical _uninvoicedPeriodPhysical, FINInvoicePeriodQtyFinancial _uninvoicedPeriodFinancial, Qty _qtyInvoiced)
+    {
+        FINInvoicePeriodQtyPhysical uninvoicedPeriodPhysicalNew;
+        FINInvoicePeriodQtyFinancial uninvoicedPeriodFinancialNew;
+
+        uninvoicedPeriodPhysicalNew.data(_uninvoicedPeriodPhysical);
+        uninvoicedPeriodPhysicalNew.QtyRented -= _qtyInvoiced;
+        uninvoicedPeriodPhysicalNew.insert();
+
+        uninvoicedPeriodFinancialNew.initFromInvoicePeriodQtyPhysical(uninvoicedPeriodPhysicalNew);
+        // Already invoiced periods will stay linked to the original record.
+        uninvoicedPeriodFinancialNew.PeriodStartDateTime = _uninvoicedPeriodFinancial.PeriodStartDateTime;
+        uninvoicedPeriodFinancialNew.insert();
+
+        _uninvoicedPeriodPhysical.selectForUpdate(true);
+        _uninvoicedPeriodPhysical.QtyRented = _qtyInvoiced;
+        _uninvoicedPeriodPhysical.update();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updatePendingCredit</Name>
+				<Source><![CDATA[
+    protected void updatePendingCredit(RefTableId _refTableIdJourTrans, RefRecId _refRecIdJourTrans, InvoiceId _invoiceId)
+    {
+        FINCreditJournalizer creditJournalizer = new FINCreditJournalizer();
+
+        if (invoiceCalculatorParm.CreditCalcPacked)
+        {
+            creditJournalizer.unpack(invoiceCalculatorParm.CreditCalcPacked);
+        }
+
+        Set             recIdSet    = creditJournalizer.getSetOfCreditedJournalTransRef();
+        SetEnumerator   enumerator  = recIdSet.getEnumerator();
+
+        while (enumerator.moveNext())
+        {
+            RecId   recIdRef;
+            TableId tableIdRef;
+            
+            [tableIdRef, recIdRef] = enumerator.current();
+
+            switch (tableIdRef)
+            {
+                case tableNum(CustInvoiceTrans):
+                    FINCustInvoiceTrans finCustInvoiceTrans;
+
+                    update_recordset finCustInvoiceTrans
+                    setting PeriodStatus = FINInvoiceTransPeriodStatus::Credited
+                    where finCustInvoiceTrans.CustInvoiceTransRecId == recIdRef
+                    &&    finCustInvoiceTrans.PeriodStatus          == FINInvoiceTransPeriodStatus::PendingCredit;
+                    
+                    CustInvoiceTrans custInvoiceTrans;
+                    select firstonly InvoiceId from custInvoiceTrans
+                    where custInvoiceTrans.RecId == recIdRef;
+                     
+                    FINCreditPeriodLink::createLink(_refTableIdJourTrans, _refRecIdJourTrans, _invoiceId, tableIdRef, recIdRef, custInvoiceTrans.InvoiceId);
+
+                    break;
+
+                case tableNum(VendInvoiceTrans):
+                    FINVendInvoiceTrans finVendInvoiceTrans;
+
+                    update_recordset finVendInvoiceTrans
+                    setting PeriodStatus = FINInvoiceTransPeriodStatus::Credited
+                    where finVendInvoiceTrans.VendInvoiceTransRecId == recIdRef
+                    &&    finVendInvoiceTrans.PeriodStatus          == FINInvoiceTransPeriodStatus::PendingCredit;
+
+                    VendInvoiceTrans vendInvoiceTrans;
+                    select firstonly InvoiceId from vendInvoiceTrans
+                    where vendInvoiceTrans.RecId == recIdRef;
+
+                    FINCreditPeriodLink::createLink(_refTableIdJourTrans, _refRecIdJourTrans, _invoiceId, tableIdRef, recIdRef, vendInvoiceTrans.InvoiceId);
+
+                    break;
+
+                case tableNum(ProjInvoiceItem):
+                    FINProjInvoiceItem finProjInvoiceItem;
+
+                    update_recordset finProjInvoiceItem
+                    setting PeriodStatus = FINInvoiceTransPeriodStatus::Credited
+                    where finProjInvoiceItem.ProjInvoiceItemRecId   == recIdRef
+                    &&    finProjInvoiceItem.PeriodStatus           == FINInvoiceTransPeriodStatus::PendingCredit;
+
+                    ProjInvoiceItem projInvoiceItem;
+
+                    select firstOnly ProjInvoiceId from projInvoiceItem
+                    where projInvoiceItem.RecId == recIdRef;
+
+                    FINCreditPeriodLink::createLink(_refTableIdJourTrans, _refRecIdJourTrans, _invoiceId, tableIdRef, recIdRef, projInvoiceItem.ProjInvoiceId);
+
+                    break;
+
+                case tableNum(ProjJournalTrans):
+                    FINProjJournalTrans finProjJournalTrans;
+
+                    update_recordset finProjJournalTrans
+                    setting PeriodStatus = FINInvoiceTransPeriodStatus::Credited
+                    where finProjJournalTrans.ProjJournalTransRecId == recIdRef
+                    &&    finProjJournalTrans.PeriodStatus          == FINInvoiceTransPeriodStatus::PendingCredit;
+
+                    ProjJournalTrans projJournalTrans;
+                    
+                    select firstOnly JournalId from ProjJournalTrans
+                    where projJournalTrans.RecId == recIdRef;
+
+                    FINCreditPeriodLink::createLink(_refTableIdJourTrans, _refRecIdJourTrans, _invoiceId, tableIdRef, recIdRef, projJournalTrans.JournalId);
+
+                    break;
+            }
+
+            FINCreditLine creditParmLine;
+
+            update_recordset creditParmLine
+            setting DocumentState = VersioningDocumentState::Finalized
+            where creditParmLine.RefTableId == tableIdRef
+            &&    creditParmLine.RefRecId == recIdRef;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createExpectedPeriods</Name>
+				<Source><![CDATA[
+    public server static void createExpectedPeriods(ParmId _parmId, Common _orderLine, Common _parmLine)
+    {
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+
+        ttsbegin;
+
+        //Remove records from previous selection
+        delete_from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId == _parmLine.TableId
+        && invoicePeriodQtyPhysical.RefRecId == _parmLine.RecId;
+           
+        Common orderLineReference = _orderLine;
+        Common orderLine = _orderLine;
+
+        if (_orderLine.TableId == tableNum(ProjProposalItem))
+        {
+            ProjProposalItem projProposalItem = _orderLine;
+            orderLine = projProposalItem.salesLine();
+        }
+
+        Map expectedPeriodLinkMap = FINInvoicePeriodManager::duplicatePeriods(orderLine, _parmLine);
+               
+        select firstonly invoiceCalculatorParm
+        where invoiceCalculatorParm.ParmId == _parmId
+        && invoiceCalculatorParm.OrderLineRecId == orderLineReference.RecId
+        && invoiceCalculatorParm.OrderLineTableId == orderLineReference.TableId;
+                
+        FINInvoicePeriodManager_Invoice invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::Invoice, _parmLine);
+        invoiceCalculatorParm.OrderLineTableId = _parmLine.TableId;
+        invoiceCalculatorParm.OrderLineRecId = _parmLine.RecId;
+        invoicePeriodManager.setInvoiceCalculatorParm(invoiceCalculatorParm);
+        // There is no invoiceId yet so just use parmId as a dummy value
+        invoicePeriodManager.setInvoiceId(_parmId);
+        invoicePeriodManager.setInvoiceTransReference(_parmLine.TableId, _parmLine.RecId);
+        invoicePeriodManager.setCalculatedExpectedPeriods(true);
+        invoicePeriodManager.setExpectedPeriodLinkMap(expectedPeriodLinkMap);
+        invoicePeriodManager.run();
+
+        //leave only records that should be displayed
+        FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+
+        delete_from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId  == _parmLine.TableId
+        && invoicePeriodQtyPhysical.RefRecId       == _parmLine.RecId
+            notexists join invoicePeriodQtyFinancial
+            where invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId == invoicePeriodQtyPhysical.RecId
+            &&    invoicePeriodQtyFinancial.InvoiceId == _parmId;
+   
+        ttscommit;
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteExpectedPeriods</Name>
+				<Source><![CDATA[
+    public server static void deleteExpectedPeriods(Common _parmLine)
+    {
+        ttsbegin;
+
+        FINInvoicePeriodQtyPhysical invoicePeriodQtyPhysical;
+
+        delete_from invoicePeriodQtyPhysical
+        where invoicePeriodQtyPhysical.RefTableId  == _parmLine.TableId
+        && invoicePeriodQtyPhysical.RefRecId       == _parmLine.RecId;
+
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+
+        delete_from journalizedInvoicePeriod
+        where journalizedInvoicePeriod.RefTableId  == _parmLine.TableId
+        && journalizedInvoicePeriod.RefRecId       == _parmLine.RecId;
+
+        FINJournalizedInvoicePeriodLink journalizedInvoicePeriodLink;
+
+        delete_from journalizedInvoicePeriodLink
+        where journalizedInvoicePeriodLink.InvoiceTransTableId  == _parmLine.TableId
+        && journalizedInvoicePeriodLink.InvoiceTransRecId       == _parmLine.RecId;
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRPurchPackingSlipJournalPostClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(PurchPackingSlipJournalPost))]
+public final class DNRPurchPackingSlipJournalPostClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkSourceLine</Name>
+				<Source><![CDATA[
+    protected void checkSourceLine()
+    {
+        next checkSourceLine();
+
+        if (purchLine.RORTradeType == RORTradeType::SubRental  
+        &&  BOBRentalType::find(purchLine.BOBRentalTypeId).Classification == BOBRentalTypeClassification::Serialized)
+        {
+            InventDim       inventDim;
+            BOBObjectTable  objectTable;
+            InventSerial    inventSerial;
+
+            select firstOnly InventSerialId from inventDim
+            where inventDim.inventDimId == purchLine.InventDimId
+                outer join RecId from inventSerial
+                where inventSerial.InventSerialId == inventDim.inventSerialId
+                &&    inventSerial.ItemId == purchLine.ItemId
+                    outer join RecId from objectTable
+                    where objectTable.InventSerialId == inventDim.InventSerialId;
+    
+            // validations
+            if (!inventDim.inventSerialId)
+            {
+                throw error("@DNR156");
+            }
+            if (!inventSerial.RecId && !purchLine.InterCompanyInventTransId)
+            {
+                throw error(strFmt("@DNR6089", inventDim.inventSerialId, fieldPName(inventDim, InventSerialId), tablePName(inventSerial)));
+            }
+            if (!objectTable)
+            {
+                throw error(strFmt("@DNR6375", inventDim.InventSerialId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLineBeforePosting</Name>
+				<Source><![CDATA[
+    protected void updateSourceLineBeforePosting()
+    {
+        next updateSourceLineBeforePosting();
+
+        AssetId assetIdLocal = purchParmLine.purchParmLine_Asset().AssetId;
+
+        if(assetIdLocal)
+        {
+            if(purchParmLine.ReceiveNow > 0)
+            {
+                BOBObjectManager::newFixedAssetFromPurchLine(purchParmLine.PurchLineRecId, assetIdLocal, purchParmLine.InventNow);
+            }
+    
+            BOBRentalTransManager::newAssetUpdate().createAssetFromPurchPackingSlip(purchParmLine, assetIdLocal);
+        }
+
+        if(!this.isProforma())
+        {
+            this.BOBUpdateObjects();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceLine</Name>
+				<Source><![CDATA[
+    protected void updateSourceLine()
+    {
+        if (purchLine.RORTradeType == RORTradeType::Rental || purchLine.RORTradeType == RORTradeType::SubRental)
+        {
+            purchLine.RORRemainPurchReturn += purchParmLine.ReceiveNow;
+            purchLine.RORRemainInventReturn += purchParmLine.InventNow;
+        }
+
+        next updateSourceLine();
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postInventory</Name>
+				<Source><![CDATA[
+    protected void postInventory()
+    {
+        next postInventory();
+        
+        if (purchLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            // also 'receive' the compensating transaction
+            inventMovement = InventMovement::construct(purchLine, InventMovSubType::BOBCompensatingTrans);
+            inventMovement.BOBParmTransSign(inventMovement.transSign());
+            inventMovement.BOBParmTransDate(purchParmTable.Transdate);
+            inventMovement.BOBParmTransTime(purchParmTable.BOBTransTime);
+
+            InventUpd_Physical inventUpd_Physical = InventUpd_Physical::newPurchPackingSlip(inventMovement,
+                vendPackingSlipTrans,
+                purchParmTable.Num ? purchParmTable.Num : vendPackingSlipJour.PackingSlipId,
+                previousVendPackingSlipTransHistory,
+                purchParmLine.InventDimId);
+            /*InventUpd_Physical inventUpd_Physical = InventUpd_Physical::newInventMovement(inventMovement);
+            inventUpd_Physical.parmPhysical(purchParmLine.InventNow);
+            inventUpd_Physical.parmPhysicalUnit(purchParmLine.ReceiveNow);*/
+            inventUpd_Physical.updateNow(ledgerVoucher);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>constructPhysicalInventoryUpdate</Name>
+				<Source><![CDATA[
+    protected InventUpd_Physical constructPhysicalInventoryUpdate()
+    {
+        inventMovement.BOBParmTransDate(purchParmTable.Transdate);
+        inventMovement.BOBParmTransTime(purchParmTable.BOBTransTime);
+
+        InventUpd_Physical ret = next constructPhysicalInventoryUpdate();
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateObjects</Name>
+				<Source><![CDATA[
+    // extension methods
+
+    private void BOBUpdateObjects()
+    {
+        PurchParmTable                      purchParmTable;
+        PurchParmLine_Asset                 purchParmLineAsset;
+        PurchTable                          purchTable;
+        InventDim                           inventDim;
+        BOBObjectTable                      objectTable;
+        AssetTable                          assetTable;
+        AssetGroup                          assetGroup, assetGroupCategory;
+        BOBAssetObjectCategory              assetCategory;
+        WPPWorkOrderTable                   workOrderTable;
+        WPPWorkOrderLine                    workOrderLine;
+        WPPWorkOrderTaskTable               workOrderTaskTable;
+        WPPParameters                       parameters;
+        InventLocation                      inventLocation;
+        LogisticsEntityPostalAddressView    addressView;
+        TransDateTime                       postingDateTime;
+        LogisticsPostalAddressRecId         postalAddress;
+        boolean                             updateLocationLog = true;
+        
+        select firstOnly TransDate, BOBTransTime from purchParmTable
+        where purchParmTable.ParmId == purchParmLine.ParmId
+        &&    purchParmTable.TableRefId == purchParmLine.TableRefId
+        &&    purchParmTable.ParmJobStatus == ParmJobStatus::Waiting
+            join RecId from purchTable
+            where purchTable.PurchId == purchParmLine.OrigPurchId
+                join InventLocationId from inventDim
+                where inventDim.inventDimId == purchParmLine.InventDimId
+                &&    inventDim.inventSerialId // serialized items only
+                join  objectTable
+                    where objectTable.InventSerialId == inventDim.inventSerialId
+                        outer join CreateFixedAsset, AssetId, AssetGroup from purchParmLineAsset
+                        where purchParmLineAsset.PurchParmLineRecId == purchParmLine.RecId
+                            outer join BOBObjectCategory from assetGroup
+                            where assetGroup.GroupId == purchParmLineAsset.AssetGroup
+                                outer join RecId from workOrderTable
+                                where (workOrderTable.OrderTableId == purchLine.TableId && workOrderTable.OrderRecId == purchLine.RecId)
+                                ||    (workOrderTable.OrderTableId == purchTable.TableId && workOrderTable.OrderRecId == purchTable.RecId)
+                                    outer join TableId from workOrderLine
+                                    where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+                                        outer join TaskId, TaskType from workOrderTaskTable
+                                        where workOrderTaskTable.TaskId == workOrderLine.TaskId
+                                        &&    workOrderTaskTable.TaskType == WPPTaskType::Delivery;
+        if(purchParmTable)
+        {
+            // When the purchase line is linked to a work order and the task on the work order line
+            // is set up as a delivery task, then the object is updated when the packing slip is
+            // posted from the work order line status update
+            if(workOrderTable.RecId || WPPWorkOrderTable::workOrderLinkedToOrderLineParent(purchLine.RORParentLineRecId, tableNum(PurchLine)))
+            {
+                if(!workOrderTaskTable.RecId)
+                {
+                    workOrderTaskTable = WPPWorkOrderTable::findTaskTableLinkedToOrderLineParent(purchLine.RORParentLineRecId, tableNum(PurchLine));
+                }
+    
+                if(workOrderTaskTable.TaskId == parameters.InternalLoadTaskId || workOrderTaskTable.TaskType == WPPTaskType::Load)
+                {
+                    postalAddress = parameters.InTransitAddress;
+                }
+                else if(workOrderTaskTable.TaskId == parameters.InternalDeliveryTaskId)
+                {
+                    select firstOnly TableId from inventLocation
+                    where inventLocation.InventLocationId == inventDim.InventLocationId
+                        outer join PostalAddress from addressView
+                        where addressView.IsPrimary
+                        &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                        &&    addressView.Entity == inventLocation.RecId;
+    
+                    postalAddress = addressView.PostalAddress;
+                }
+                else if(workOrderTaskTable.TaskType == WPPTaskType::Delivery)
+                {
+                    postalAddress = purchParmLine.DeliveryPostalAddress;
+                }
+                else
+                {
+                    updateLocationLog = false;
+                }
+            }
+            else
+            {
+                postalAddress = purchParmLine.DeliveryPostalAddress;
+            }
+    
+            postingDateTime = DateTimeUtil::newDateTime(purchParmTable.TransDate,
+                                                        purchParmTable.BOBTransTime,
+                                                        DateTimeUtil::getUserPreferredTimeZone());
+            if(purchParmLine.ReceiveNow > 0)
+            {
+                assetCategory = (purchParmLineAsset.CreateFixedAsset ? assetGroup.BOBObjectCategory : BOBAssetObjectCategory::None);
+    
+                if(assetCategory == BOBAssetObjectCategory::None && purchLine.AssetId)
+                {
+                    select firstOnly BOBObjectCategory from assetGroupCategory
+                        exists join assetTable
+                        where assetTable.AssetGroup == assetGroupCategory.GroupId
+                        &&    assetTable.AssetId    == purchLine.AssetId;
+    
+                    assetCategory = assetGroupCategory.BOBObjectCategory;
+                }
+    
+                BOBObjectManager::receivePurchLine(objectTable,
+                                                   purchParmLine,
+                                                   assetCategory,
+                                                   purchParmLineAsset.CreateFixedAsset,
+                                                   postingDateTime,
+                                                   purchTable,
+                                                   postalAddress,
+                                                   updateLocationLog);
+            }
+            else
+            {
+                BOBObjectManager::unReceivePurchLine(objectTable, purchLine.RORTradeType, postingDateTime, purchTable);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPMustDuplicateTask</Name>
+				<Source><![CDATA[
+    public void WPPMustDuplicateTask()
+    {
+        if(!this.WPPParmMustDuplicateWorkOrderLine()
+        && purchParmTable.WPPDuplTaskOnPartialFormLetterPosting)
+        ///&&   chainFormletterContract.WPPParmMustDuplicateTask()
+        {
+            this.WPPParmMustDuplicateWorkOrderLine(true);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

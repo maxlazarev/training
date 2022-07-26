@@ -1,0 +1,527 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>InventUpd_RORReturnNote</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class InventUpd_RORReturnNote extends InventUpdate
+{
+    RORRentalDateTime   statusDateTime;
+    Integer             returnMode;
+    InventQty           qtyPhysical;
+    InventDim           inventDimCriteria;
+    InventDimParm       inventDimParmCriteria;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initReturnMode</Name>
+				<Source><![CDATA[
+    protected void initReturnMode()
+    {
+        switch(movement.transType())
+        {
+            case InventTransType::Sales:
+                if(qtyPhysical > 0) // 'normal' rental return note
+                {
+                    returnMode = 0;
+                }
+                else // rental return note reversal or correction
+                {
+                    returnMode = InventUpdate::physicalReturn();
+                }
+                break;
+    
+            case InventTransType::Purch:
+                if(qtyPhysical < 0) // 'normal' sub rental return note
+                {
+                    returnMode = 0;
+                }
+                else // sub rental return note reversal or correction
+                {
+                    returnMode = InventUpdate::physicalReturn();
+                }
+                break;
+    
+            default:
+                throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmQtyPhysical</Name>
+				<Source><![CDATA[
+    public InventQty parmQtyPhysical(InventQty _qtyPhysical = qtyPhysical)
+    {
+        qtyPhysical = _qtyPhysical;
+        return qtyPhysical;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmStatusDateTime</Name>
+				<Source><![CDATA[
+    public RORRentalDateTime parmStatusDateTime(RORRentalDateTime _statusDateTime = statusDateTime)
+    {
+        statusDateTime = _statusDateTime;
+        return statusDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateIssue</Name>
+				<Source><![CDATA[
+    protected void updateIssue()
+    {
+        InventTrans             inventTrans;
+        InventQty               qtyNow;
+        InventQty               addQty;
+        InventDim               inventDimJoin;
+        BOBRentalTransManager   rentalTransManager;
+        BOBRentalSubStatus      prevStatusFrom, prevStatusTo;
+        StatusIssue             statusIssueFrom, statusIssueTo;
+        RefRecId                postingPolicyRecId;
+        ;
+    
+        addQty = -qtyPhysical;
+        postingPolicyRecId = BOBRentalType::findFromItemId(movement.itemId()).PostingPolicyRecId;
+        [ prevStatusFrom, prevStatusTo ] = BOBPostingPolicyRule::getPreviousSubStatusFromTo(InventDirection::Issue, postingPolicyRecId, BOBRentalSubStatus::Returned);
+        statusIssueFrom = BOBPostingPolicyRule::subStatus2StatusIssue(postingPolicyRecId, prevStatusFrom);
+        statusIssueTo = BOBPostingPolicyRule::subStatus2StatusIssue(postingPolicyRecId, prevStatusTo);
+    
+        if(inventDimParmCriteria.isAllFlagNo())
+        {
+            select forupdate inventTrans
+            order by StatusIssue, DatePhysical, InventDimId
+            where inventTrans.InventTransOrigin         == movement.inventTransOriginId()
+            &&    inventTrans.StatusReceipt             == StatusReceipt::None
+            &&    inventTrans.StatusIssue               <= statusIssueFrom
+            &&    inventTrans.StatusIssue               >= statusIssueTo
+            &&    inventTrans.TransChildType            == movement.transChildType()
+            &&    inventTrans.TransChildRefId           == movement.transChildRefId()
+            &&    inventTrans.BOBIsCompensatingTrans    == NoYes::No
+            &&   !inventTrans.BOBReturnNoteUpdDateTime;
+        }
+        else if(inventDimCriteria.InventDimId && inventDimParmCriteria.isAllFlagYes())
+        {
+            select forupdate inventTrans
+            order by StatusIssue, DatePhysical, InventDimId
+            where inventTrans.InventTransOrigin         == movement.inventTransOriginId()
+            &&    inventTrans.StatusReceipt             == StatusReceipt::None
+            &&    inventTrans.StatusIssue               <= statusIssueFrom
+            &&    inventTrans.StatusIssue               >= statusIssueTo
+            &&    inventTrans.TransChildType            == movement.transChildType()
+            &&    inventTrans.TransChildRefId           == movement.transChildRefId()
+            &&    inventTrans.InventDimId               == inventDimCriteria.InventDimId
+            &&    inventTrans.BOBIsCompensatingTrans    == NoYes::No
+            &&   !inventTrans.BOBReturnNoteUpdDateTime;
+        }
+        else
+        {
+            select forupdate inventTrans
+            order by StatusIssue, DatePhysical, InventDimId
+            where inventTrans.InventTransOrigin         == movement.inventTransOriginId()
+            &&    inventTrans.StatusReceipt             == StatusReceipt::None
+            &&    inventTrans.StatusIssue               <= statusIssueFrom
+            &&    inventTrans.StatusIssue               >= statusIssueTo
+            &&    inventTrans.TransChildType            == movement.transChildType()
+            &&    inventTrans.TransChildRefId           == movement.transChildRefId()
+            &&    inventTrans.BOBIsCompensatingTrans    == NoYes::No
+            &&   !inventTrans.BOBReturnNoteUpdDateTime
+            #InventDimExistsJoin(InventTrans.inventDimId, inventDimJoin, inventDimCriteria, inventDimParmCriteria);
+        }
+    
+        while(inventTrans.RecId)
+        {
+            qtyNow = (addQty <= inventTrans.Qty ? inventTrans.Qty : addQty);
+    
+            if(qtyNow)
+            {
+                if(qtyNow > inventTrans.Qty)
+                {
+                    inventTrans.updateSplit(qtyNow);
+                }
+    
+                inventTrans.BOBReturnNoteUpdDateTime = this.BOBParmFormLetterUpdDateTime();
+                inventTrans.update();
+    
+                rentalTransManager = BOBRentalTransManager::newInventMovement(movement, inventTrans, BOBRentalSubStatus::Returned);
+                qtyNow = rentalTransManager.updateSubStatus(qtyNow);
+                addQty -= qtyNow;
+    
+                if(!addQty)
+                {
+                    break;
+                }
+            }
+    
+            next inventTrans;
+        }
+    
+        if(addQty)
+        {
+            throw error(strfmt("@DNR1752", addQty, statusIssueFrom, statusIssueTo));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateNow</Name>
+				<Source><![CDATA[
+    public void updateNow(LedgerVoucher _ledgerVoucher)
+    {
+        if(!this.BOBParmIsCompensatingTrans())
+        {
+            if(qtyPhysical > 0)
+            {
+                if(returnMode)
+                {
+                    this.updateReturnIssue();
+                }
+                else
+                {
+                    this.updateIssue();
+                }
+            }
+            else if(qtyPhysical < 0)
+            {
+                if(returnMode)
+                {
+                    this.updateReturnReceipt();
+                }
+                else
+                {
+                    this.updateReceipt();
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateReceipt</Name>
+				<Source><![CDATA[
+    protected void updateReceipt()
+    {
+        InventTrans             inventTrans;
+        InventQty               qtyNow;
+        InventQty               addQty;
+        InventDim               inventDimJoin;
+        BOBRentalTransManager   rentalTransManager;
+        BOBRentalSubStatus      prevStatusFrom, prevStatusTo;
+        StatusReceipt           statusReceiptFrom, statusReceiptTo;
+        RefRecId                postingPolicyRecId;
+        ;
+    
+        addQty = -qtyPhysical;
+        postingPolicyRecId = BOBRentalType::findFromItemId(movement.itemId()).PostingPolicyRecId;
+        [ prevStatusFrom, prevStatusTo ] = BOBPostingPolicyRule::getPreviousSubStatusFromTo(InventDirection::Receipt, postingPolicyRecId, BOBRentalSubStatus::Returned);
+        statusReceiptFrom = BOBPostingPolicyRule::subStatus2StatusReceipt(postingPolicyRecId, prevStatusFrom);
+        statusReceiptTo = BOBPostingPolicyRule::subStatus2StatusReceipt(postingPolicyRecId, prevStatusTo);
+    
+        if(inventDimParmCriteria.isAllFlagNo())
+        {
+            select forupdate inventTrans
+            order by StatusReceipt, DatePhysical, InventDimId
+            where inventTrans.InventTransOrigin == movement.inventTransOriginId()
+            &&    inventTrans.StatusIssue       == StatusIssue::None
+            &&    inventTrans.StatusReceipt     <= statusReceiptFrom
+            &&    inventTrans.StatusReceipt     >= statusReceiptTo
+            &&    inventTrans.TransChildType    == movement.transChildType()
+            &&    inventTrans.TransChildRefId   == movement.transChildRefId()
+            &&   !inventTrans.BOBReturnNoteUpdDateTime;
+        }
+        else if(inventDimCriteria.InventDimId && inventDimParmCriteria.isAllFlagYes())
+        {
+            select forupdate inventTrans
+            order by StatusReceipt, DatePhysical, InventDimId
+            where inventTrans.InventTransOrigin == movement.inventTransOriginId()
+            &&    inventTrans.StatusIssue       == StatusIssue::None
+            &&    inventTrans.StatusReceipt     <= statusReceiptFrom
+            &&    inventTrans.StatusReceipt     >= statusReceiptTo
+            &&    inventTrans.TransChildType    == movement.transChildType()
+            &&    inventTrans.TransChildRefId   == movement.transChildRefId()
+            &&    inventTrans.InventDimId       == inventDimCriteria.InventDimId
+            &&   !inventTrans.BOBReturnNoteUpdDateTime;
+        }
+        else
+        {
+            select forupdate inventTrans
+            order by StatusReceipt, DatePhysical, InventDimId
+            where inventTrans.InventTransOrigin == movement.inventTransOriginId()
+            &&    inventTrans.StatusIssue       == StatusIssue::None
+            &&    inventTrans.StatusReceipt     <= statusReceiptFrom
+            &&    inventTrans.StatusReceipt     >= statusReceiptTo
+            &&    inventTrans.TransChildType    == movement.transChildType()
+            &&    inventTrans.TransChildRefId   == movement.transChildRefId()
+            &&   !inventTrans.BOBReturnNoteUpdDateTime
+            #InventDimExistsJoin(InventTrans.inventDimId, inventDimJoin, inventDimCriteria, inventDimParmCriteria);
+        }
+    
+        while(inventTrans.RecId)
+        {
+            qtyNow = (addQty > inventTrans.Qty ? inventTrans.Qty : addQty);
+    
+            if(qtyNow)
+            {
+                if(qtyNow < inventTrans.Qty)
+                {
+                    inventTrans.updateSplit(qtyNow);
+                }
+    
+                inventTrans.BOBReturnNoteUpdDateTime = this.BOBParmFormLetterUpdDateTime();
+                inventTrans.update();
+    
+                rentalTransManager = BOBRentalTransManager::newInventMovement(movement, InventTrans, BOBRentalSubStatus::Returned);
+                qtyNow = rentalTransManager.updateSubStatus(qtyNow);
+                addQty -= qtyNow;
+    
+                if(!addQty)
+                {
+                    break;
+                }
+            }
+    
+            next inventTrans;
+        }
+    
+        if(addQty)
+        {
+            throw error(strfmt("@DNR1752", addQty, statusReceiptFrom, statusReceiptTo));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateReturnIssue</Name>
+				<Source><![CDATA[
+    protected void updateReturnIssue()
+    {
+        InventTrans             inventTrans;
+        InventQty               qtyNow;
+        InventQty               addQty;
+        InventDim               inventDimJoin;
+        BOBRentalTransManager   rentalTransManager;
+        BOBRentalSubStatus      prevStatusFrom, prevStatusTo;
+        StatusIssue             statusIssueFrom, statusIssueTo;
+        RefRecId                postingPolicyRecId;
+        ;
+    
+        addQty = -qtyPhysical;
+        postingPolicyRecId = BOBRentalType::findFromItemId(movement.itemId()).PostingPolicyRecId;
+        [ prevStatusFrom, prevStatusTo ] = BOBPostingPolicyRule::getPreviousSubStatusFromTo(InventDirection::Issue, postingPolicyRecId, BOBRentalSubStatus::Returned);
+        statusIssueFrom = BOBPostingPolicyRule::subStatus2StatusIssue(postingPolicyRecId, prevStatusFrom);
+        statusIssueTo = BOBPostingPolicyRule::subStatus2StatusIssue(postingPolicyRecId, prevStatusTo);
+    
+        if(inventDimParmCriteria.isAllFlagNo())
+        {
+            select forupdate inventTrans
+            order by StatusIssue, InventDimId
+            where inventTrans.InventTransOrigin         == movement.inventTransOriginId()
+            &&    inventTrans.StatusReceipt             == StatusReceipt::None
+            &&    inventTrans.StatusIssue               <= statusIssueFrom
+            &&    inventTrans.StatusIssue               >= statusIssueTo
+            &&    inventTrans.TransChildType            == movement.transChildType()
+            &&    inventTrans.TransChildRefId           == movement.transChildRefId()
+            &&    inventTrans.BOBIsCompensatingTrans    == NoYes::No
+            &&    inventTrans.BOBReturnNoteUpdDateTime;
+        }
+        else if(inventDimCriteria.InventDimId && inventDimParmCriteria.isAllFlagYes())
+        {
+            select forupdate inventTrans
+            order by StatusIssue, InventDimId
+            where inventTrans.InventTransOrigin         == movement.inventTransOriginId()
+            &&    inventTrans.StatusReceipt             == StatusReceipt::None
+            &&    inventTrans.StatusIssue               <= statusIssueFrom
+            &&    inventTrans.StatusIssue               >= statusIssueTo
+            &&    inventTrans.TransChildType            == movement.transChildType()
+            &&    inventTrans.TransChildRefId           == movement.transChildRefId()
+            &&    inventTrans.InventDimId               == inventDimCriteria.InventDimId
+            &&    inventTrans.BOBIsCompensatingTrans    == NoYes::No
+            &&    inventTrans.BOBReturnNoteUpdDateTime;
+        }
+        else
+        {
+            select forupdate inventTrans
+            order by StatusIssue, InventDimId
+            where inventTrans.InventTransOrigin         == movement.inventTransOriginId()
+            &&    inventTrans.StatusReceipt             == StatusReceipt::None
+            &&    inventTrans.StatusIssue               <= statusIssueFrom
+            &&    inventTrans.StatusIssue               >= statusIssueTo
+            &&    inventTrans.TransChildType            == movement.transChildType()
+            &&    inventTrans.TransChildRefId           == movement.transChildRefId()
+            &&    inventTrans.BOBIsCompensatingTrans    == NoYes::No
+            &&    inventTrans.BOBReturnNoteUpdDateTime
+            #InventDimExistsJoin(InventTrans.inventDimId, inventDimJoin, inventDimCriteria, inventDimParmCriteria);
+        }
+    
+        while(inventTrans.RecId)
+        {
+            qtyNow = (addQty <= inventTrans.Qty ? inventTrans.Qty : addQty);
+    
+            if(qtyNow)
+            {
+                inventTrans.BOBReturnNoteUpdDateTime = utcDateTimeNull();
+                inventTrans.update();
+    
+                rentalTransManager = BOBRentalTransManager::newInventMovement(movement, InventTrans, BOBRentalSubStatus::Delivered);
+                qtyNow = rentalTransManager.updateSubStatus(qtyNow);
+                addQty -= qtyNow;
+    
+                if(!addQty)
+                {
+                    break;
+                }
+            }
+    
+            next inventTrans;
+        }
+    
+        if(addQty)
+        {
+            throw error(strfmt("@DNR1752", addQty, statusIssueFrom, statusIssueTo));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateReturnReceipt</Name>
+				<Source><![CDATA[
+    protected void updateReturnReceipt()
+    {
+        InventTrans             inventTrans;
+        InventQty               qtyNow;
+        InventQty               addQty;
+        InventDim               inventDimJoin;
+        BOBRentalTransManager   rentalTransManager;
+        BOBRentalSubStatus      prevStatusFrom, prevStatusTo;
+        StatusReceipt           statusReceiptFrom, statusReceiptTo;
+        RefRecId                postingPolicyRecId;
+        ;
+    
+        addQty = qtyPhysical;
+        postingPolicyRecId = BOBRentalType::findFromItemId(movement.itemId()).PostingPolicyRecId;
+        [ prevStatusFrom, prevStatusTo ] = BOBPostingPolicyRule::getPreviousSubStatusFromTo(InventDirection::Receipt, postingPolicyRecId, BOBRentalSubStatus::Returned);
+        statusReceiptFrom = BOBPostingPolicyRule::subStatus2StatusReceipt(postingPolicyRecId, prevStatusFrom);
+        statusReceiptTo = BOBPostingPolicyRule::subStatus2StatusReceipt(postingPolicyRecId, prevStatusTo);
+    
+        if(inventDimParmCriteria.isAllFlagNo())
+        {
+            select forupdate inventTrans
+            order by StatusReceipt, InventDimId
+            where inventTrans.InventTransOrigin == movement.inventTransOriginId()
+            &&    inventTrans.StatusIssue       == StatusIssue::None
+            &&    inventTrans.StatusReceipt     <= statusReceiptFrom
+            &&    inventTrans.StatusReceipt     >= statusReceiptTo
+            &&    inventTrans.TransChildType    == movement.transChildType()
+            &&    inventTrans.TransChildRefId   == movement.transChildRefId();
+        }
+        else if(inventDimCriteria.InventDimId && inventDimParmCriteria.isAllFlagYes())
+        {
+            select forupdate inventTrans
+            order by StatusReceipt, InventDimId
+            where inventTrans.InventTransOrigin == movement.inventTransOriginId()
+            &&    inventTrans.StatusIssue       == StatusIssue::None
+            &&    inventTrans.StatusReceipt     <= statusReceiptFrom
+            &&    inventTrans.StatusReceipt     >= statusReceiptTo
+            &&    inventTrans.TransChildType    == movement.transChildType()
+            &&    inventTrans.TransChildRefId   == movement.transChildRefId()
+            &&    inventTrans.InventDimId       == inventDimCriteria.InventDimId;
+        }
+        else
+        {
+            select forupdate inventTrans
+            order by StatusReceipt, InventDimId
+            where inventTrans.InventTransOrigin == movement.inventTransOriginId()
+            &&    inventTrans.StatusIssue       == StatusIssue::None
+            &&    inventTrans.StatusReceipt     <= statusReceiptFrom
+            &&    inventTrans.StatusReceipt     >= statusReceiptTo
+            &&    inventTrans.TransChildType    == movement.transChildType()
+            &&    inventTrans.TransChildRefId   == movement.transChildRefId()
+            #InventDimExistsJoin(InventTrans.inventDimId, inventDimJoin, inventDimCriteria, inventDimParmCriteria);
+        }
+    
+        while(inventTrans.RecId)
+        {
+            qtyNow = (addQty > inventTrans.Qty ? inventTrans.Qty : addQty);
+    
+            if(qtyNow)
+            {
+                inventTrans.BOBReturnNoteUpdDateTime = utcDateTimeNull();
+                inventTrans.update();
+    
+                rentalTransManager = BOBRentalTransManager::newInventMovement(movement, InventTrans, BOBRentalSubStatus::Returned);
+                qtyNow = rentalTransManager.updateSubStatus(qtyNow);
+                addQty -= qtyNow;
+    
+                if(!addQty)
+                {
+                    break;
+                }
+            }
+    
+            next inventTrans;
+        }
+    
+        if(addQty)
+        {
+            throw error(strfmt("@DNR1752", addQty, statusReceiptFrom, statusReceiptTo));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static InventUpd_RORReturnNote construct(InventMovement      _inventMovement,
+                                                    Common              _salesPurchParmLine,
+                                                    BOBRentalSubStatus  _subStatus,
+                                                    int                 _transSign = 1)
+    {
+        InventUpd_RORReturnNote ret;
+        SalesParmLine           salesParmLine;
+        PurchParmLine           purchParmLine;
+        InventQty               inventNow;
+        INVInvoiceDateTime      statusDateTime;
+        ;
+    
+        switch(_salesPurchParmLine.TableId)
+        {
+            case tableNum(SalesParmLine):
+                salesParmLine   = _salesPurchParmLine as SalesParmLine;
+                inventNow       = salesParmLine.InventNow;
+                statusDateTime  = salesParmLine.INVInvoiceDateTime;
+                break;
+    
+            case tableNum(PurchParmLine):
+                purchParmLine   = _salesPurchParmLine as PurchParmLine;
+                inventNow       = purchParmLine.InventNow;
+                statusDateTime  = purchParmLine.INVInvoiceDateTime;
+                break;
+    
+            default:
+                throw error(strFmt("@SYS31187", tableId2name(_salesPurchParmLine.TableId)));
+        }
+    
+        ret = new InventUpd_RORReturnNote(_inventMovement);
+        ret.setParmAllowDefault();
+        ret.parmQtyPhysical(inventNow * _transSign);
+        ret.parmStatusDateTime(statusDateTime);
+        ret.initReturnMode();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINBatchInvoiceConfigProcessor</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// The class <c>FINBatchInvoiceConfigProcessor</c> contains all the logic to process Advanced rental batch invoice configuration.
+/// </summary>
+class FINBatchInvoiceConfigProcessor
+{
+    FINBatchInvoiceConfiguration invoiceConfiguration;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Executes the logic of the class
+    /// </summary>
+    /// <param name = "_dataContract">The datacontract associated with the controller class</param>
+    public void run(FINBatchInvoiceConfigDataContract _dataContract)
+    {
+        Query query = _dataContract.parmQuery();
+        this.modifyQuery(query);
+        
+        QueryRun queryRun = new QueryRun(query);
+        
+        while (queryRun.next())
+        {
+            invoiceConfiguration = queryRun.get(tableNum(FINBatchInvoiceConfiguration));
+            this.processConfiguration();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifyQuery</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Adjust the query to process only the records which are not processed as of today
+    /// </summary>
+    /// <param name = "_query">
+    /// Initial query from the controller class
+    /// </param>
+    protected void modifyQuery(Query _query)
+    {
+        QueryBuildDataSource qbds = _query.dataSourceTable(tableNum(FINBatchInvoiceConfiguration));
+        qbds.addRange(fieldNum(FINBatchInvoiceConfiguration, CreationDate)).value(SysQueryRangeUtil::lessThanDate(1));
+
+        QueryBuildDataSource qbdsAuditTrail = qbds.addDataSource(tableNum(FINBatchInvoiceAuditTrail));
+        qbdsAuditTrail.relations(true);
+        qbdsAuditTrail.joinMode(JoinMode::NoExistsJoin);
+        qbdsAuditTrail.addRange(fieldNum(FINBatchInvoiceAuditTrail, CreationDate)).value(SysQueryRangeUtil::greaterThanDate(-1));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processConfiguration</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Process the invoice batch configuration record.
+    /// </summary>
+    protected void processConfiguration()
+    {
+        #OCCRetryCount
+        try
+        {
+            ttsbegin;
+
+            RefRecId batchJobRecId = this.createInvoiceRunBatch();
+            
+            if (batchJobRecId)
+            {
+                FINBatchInvoiceAuditTrail auditTrail = this.createAuditTrail(batchJobRecId);
+                
+                if (invoiceConfiguration.InvoiceCheckEnabled)
+                {
+                    this.createInvoiceCheckBatch(auditTrail);
+                }
+
+                this.setNextSchedule();
+            }
+            
+            ttscommit;
+        }
+        catch(Exception::Deadlock)
+        {
+            retry;
+        }
+        catch(Exception::UpdateConflict)
+        {
+            if (appl.ttsLevel() == 0)
+            {
+                if (xSession::currentRetryCount() >= #RetryNum)
+                {
+                    throw Exception::UpdateConflictNotRecovered;
+                }
+                else
+                {
+                    retry;
+                }
+            }
+            else
+            {
+                throw Exception::UpdateConflict;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setNextSchedule</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Sets the next date time fields on the advance batch rental invoice configuration
+    /// </summary>
+    protected void setNextSchedule()
+    {
+        invoiceConfiguration.selectForUpdate(true);
+        invoiceConfiguration.setNextSchedule();
+        invoiceConfiguration.update();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInvoiceCheckBatch</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Schedules a batch for rental invoice checks
+    /// </summary>
+    /// <param name = "_auditTrail">
+    /// The RecId of audit trail record
+    /// </param>
+    protected void createInvoiceCheckBatch(FinBatchInvoiceAuditTrail _auditTrail)
+    {
+        FINBatchInvoiceCheckController controller = FINBatchInvoiceCheckController::construct();
+        controller.parmExecutionMode(SysOperationExecutionMode::ScheduledBatch);
+        
+        SysRecurrenceData   recurrenceData = SysRecurrence::defaultRecurrence();
+        recurrenceData = SysRecurrence::setRecurrenceEndAfter(recurrenceData, 1);
+        recurrenceData = SysRecurrence::setRecurrenceStartDateTime(recurrenceData, DateTimeUtil::addDays(_auditTrail.ScheduledDateTime, -invoiceConfiguration.InvoiceCheckOffset));
+        
+        BatchHeader batchHeader = controller.batchInfo().parmBatchHeader();
+        batchHeader.parmBatchGroup(invoiceConfiguration.BatchGroupId);
+        batchHeader.parmRecurrenceData(recurrenceData);
+        batchHeader.parmCaption(strFmt("@DNR:Placeholder1Placeholder2","@DNR:AdvancedRentalInvoiceCheck", invoiceConfiguration.Name));
+        batchHeader.save();
+
+        Args args = new Args();
+        args.record(_auditTrail);
+        controller.initFromArgs(args);
+        controller.runOperation();
+
+        _auditTrail.selectForUpdate(true);
+        _auditTrail.InvoiceCheckBatch = batchHeader.parmBatchHeaderId();
+        _auditTrail.update();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAuditTrail</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Creates a record in audit trail
+    /// </summary>
+    /// <param name = "_batchJobId">
+    /// The RecId of the batchJob created for rental invoice batch
+    /// </param>
+    /// <returns></returns>
+    protected FinBatchInvoiceAuditTrail createAuditTrail(RefRecId _batchJobId)
+    {
+        FinBatchInvoiceAuditTrail invoiceAuditTrail;
+
+        invoiceAuditTrail.clear();
+        invoiceAuditTrail.ConfigurationId     = invoiceConfiguration.ConfigurationId;
+        invoiceAuditTrail.InvoiceRunBatch     = _batchJobId;
+        invoiceAuditTrail.ScheduledDateTime   = invoiceConfiguration.ScheduledDateTime;
+        invoiceAuditTrail.CalculationDateTime = invoiceConfiguration.CalculationDateTime;
+        invoiceAuditTrail.CreationDate        = invoiceConfiguration.CreationDate;
+        invoiceAuditTrail.LateSelectionQuery  = new SysQueryRun(invoiceConfiguration.PackedQueryRun).query().pack();
+        invoiceAuditTrail.insert();
+        
+        return invoiceAuditTrail;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createInvoiceRunBatch</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Creates the rental invoice batch
+    /// </summary>
+    /// <returns>
+    /// Returns the RecId of the batchJob
+    /// </returns>
+    protected RefRecId createInvoiceRunBatch()
+    {
+        SalesFormLetter salesFormLetterInvoice = this.initFormLetter();
+        SysRecurrenceData recurrenceData = SysRecurrence::defaultRecurrence();
+        BatchInfo batchInfoInvoice = salesFormLetterInvoice.batchInfo();
+        BatchHeader batchHeader = batchInfoInvoice.parmBatchHeader();
+        
+        recurrenceData = SysRecurrence::setRecurrenceEndAfter(recurrenceData, 1);
+        batchHeader.parmRecurrenceData(recurrenceData);
+        batchHeader.parmStartDateTime(invoiceConfiguration.ScheduledDateTime);
+        batchHeader.parmBatchGroup(invoiceConfiguration.BatchGroupId);
+        batchHeader.parmCaption(strFmt('@DNR:Placeholder1Placeholder2', "@DNR:AdvanceRentalInvoicing", invoiceConfiguration.Name));
+        batchHeader.saveHeader(invoiceConfiguration.AutoStartInvoiceBatch ? BatchStatus::Waiting : BatchStatus::Hold);
+        batchInfoInvoice.parmBatchExecute(NoYes::Yes);
+        batchInfoInvoice.doBatch(NoYes::Yes);
+
+        RefRecId batchJobId = batchHeader.parmBatchHeaderId();
+        return batchJobId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFormLetter</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Initilizes the SalesFormLetter object for rental invoice posting
+    /// </summary>
+    /// <returns></returns>
+    protected SalesFormLetter initFormLetter()
+    {
+        SalesParmUpdate salesParmUpdate;
+
+        // create SalesParmUpdate record
+        salesParmUpdate.clear();
+        salesParmUpdate.ParmId                  = formletterParmData::getNewParmId();
+        salesParmUpdate.DocumentStatus          = DocumentStatus::Invoice;
+        salesParmUpdate.SpecQty                 = invoiceConfiguration.SpecQty;
+        salesParmUpdate.INVCalculationDateTime  = invoiceConfiguration.CalculationDateTime;
+        salesParmUpdate.INVTransdate            = DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(invoiceConfiguration.ScheduledDateTime, 
+                                                                                                       SysRecurrence::getRecurrenceTimezone(invoiceConfiguration.ScheduledDateTimeRecurrence)));
+        salesParmUpdate.lateSelection           = true;
+        salesParmUpdate.Proforma                = false;
+        salesParmUpdate.INVIncludeUninvoiced    = invoiceConfiguration.INVIncludeUninvoiced;
+        salesParmUpdate.INVIncludeCredits       = invoiceConfiguration.INVIncludeCredits;
+        salesParmUpdate.lateSelectionQuery      = new SysQueryRun(invoiceConfiguration.PackedQueryRun).query().pack();
+        salesParmUpdate.SumSalesId              = invoiceConfiguration.SumSalesId;
+        salesParmUpdate.SumBy                   = invoiceConfiguration.SumBy;
+        salesParmUpdate.insert();
+        
+        SalesFormLetterCachedArguments cachedArgs = SalesFormLetterCachedArguments::construct();
+        cachedArgs.parmEnum         = enum2int(DocumentStatus::Invoice);
+        cachedArgs.isProforma       = false;
+        cachedArgs.parmSkipPrompt   = true;
+        cachedArgs.className        = classStr(FormLetterService);
+        cachedArgs.methodName       = methodStr(FormLetterService, postSalesOrderInvoice);
+        cachedArgs.mode             = SysOperationExecutionMode::Synchronous;
+        cachedArgs.callerMenuItem   = menuItemActionStr(SalesFormLetter_RORInvoice);
+
+        SalesFormLetter salesFormLetterInvoice;
+        
+        using (SalesFormLetterConstructContext context = SalesFormLetterConstructContext::construct())
+        {
+            // Do not load from SysLastValue as we may select on the wrong criteria.
+            context.parmLoadFromSysLastValue(UnknownNoYes::No);
+            salesFormLetterInvoice = SalesFormLetter::construct(DocumentStatus::Invoice);
+        }
+
+        salesFormLetterInvoice.initParameters(salesParmUpdate.data()
+                                             ,Printout::After
+                                             ,NoYes::Yes
+                                             ,NoYes::No
+                                             ,NoYes::No
+                                             ,invoiceConfiguration.UsePrintManagement
+                                             ,NoYes::No
+                                             ,NoYes::No
+                                             ,NoYes::no
+                                             ,PlFiscalDocType::Invoice
+                                             ,NoYes::No);
+
+        salesFormLetterInvoice.parmCallerFormName(cachedArgs.callerFormName);
+        salesFormLetterInvoice.parmCallerMenuItem(cachedArgs.callerMenuItem);
+        salesFormLetterInvoice.parmId(salesParmUpdate.ParmId);
+        salesFormLetterInvoice.editLinesChanged(false);
+        salesFormLetterInvoice.reArrangeNow(false);
+        salesFormLetterInvoice.showQueryForm(false);
+        salesFormLetterInvoice.chooseLinesQuery(new SysQueryRun(invoiceConfiguration.PackedQueryRun));
+        salesFormLetterInvoice.chooseLines(false, false);
+        salesFormLetterInvoice.forceSaveLast();
+        return salesFormLetterInvoice;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

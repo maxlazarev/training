@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalSumRecalc</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBRentalSumRecalc extends RunBaseBatch
+{
+    BOBRentalTypeId     rentalTypeId;
+    InventLocationId    inventLocationId;
+
+    DialogField         dfRentalTypeId;
+    DialogField         dfInventLocationId;
+
+    #define.CurrentVersion(1)
+    #localmacro.CurrentList
+        rentalTypeId,
+        inventLocationId
+    #endmacro
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>clearExistingData</Name>
+				<Source><![CDATA[
+    private void clearExistingData()
+    {
+        BOBRentalSum rentalSum;
+        BOBRentalTransDelta rentalTransDelta;
+        ;
+    
+        delete_from rentalSum
+        where (!rentalTypeId || rentalSum.RentalTypeId == rentalTypeId)
+        &&    (!inventLocationId || rentalSum.InventLocationId == inventLocationId);
+    
+        delete_from rentalTransDelta
+        where (!rentalTypeId || rentalTransDelta.RentalTypeId == rentalTypeId)
+        &&    (!inventLocationId || rentalTransDelta.InventLocationId == inventLocationId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        DialogRunbase dialog;
+        ;
+    
+        dialog = super();
+        dialog.caption("@DNR6712");
+    
+        dfRentalTypeId = dialog.addField(extendedTypeStr(BOBRentalTypeId));
+        dfInventLocationId = dialog.addfield(extendedTypeStr(inventLocationId));
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        rentalTypeId = dfRentalTypeId.value();
+        inventLocationId = dfInventLocationId.value();
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [ #CurrentVersion, #CurrentList ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateRentalSum</Name>
+				<Source><![CDATA[
+    private void populateRentalSum()
+    {
+        BOBRentalTrans          rentalTrans, rentalTransOpening;
+        BOBRentalType           rentalType;
+        BOBRentalSum            rentalSum;
+        BOBPostingPolicy        postingPolicy;
+        BOBPostingPolicyRule    postingPolicyRule;
+    
+        container               keyCon;
+        BOBRentalQty            currQty, prevQty;
+        Map                     map;
+        MapEnumerator           enumerator;
+        RecordInsertList        insertList;
+    
+        TransDateTime           adjDateTime, minDateTime, maxDateTime;
+        InventLocationId        currInventLocationId;
+        BOBRentalTypeId         currRentalTypeId;
+        TransDateTime           currDateTime;
+        ;
+    
+        map = new Map(Types::Container, Types::Real);
+        minDateTime = 1900-01-02T00:00:00;
+        maxDateTime = DateTimeUtil::addDays(DateTimeUtil::maxValue(), -1);
+    
+        // load all fluctuations in inventory levels caused by the rental transactions into a map
+        while select RentalTypeId, InventLocationId, FromDateTime, ToDateTime, CertaintyTo, Qty from rentalTrans
+        order by RentalTypeId, InventLocationId, FromDateTime, ToDateTime
+        where   rentalTrans.Active == BOBRentalTransActive::Active
+        &&    (!rentalTypeId || rentalTrans.RentalTypeId == rentalTypeId)
+        &&    (!inventLocationId || rentalTrans.InventLocationId == inventLocationId)
+            join TableId from rentalType
+            where rentalType.RentalTypeId == rentalTrans.RentalTypeId
+                join RentalSumRounding from postingPolicy
+                where postingPolicy.RecId == rentalType.PostingPolicyRecId
+                &&    postingPolicy.IncludeInAvailabilityOverview
+                    join TableId from postingPolicyRule
+                    where postingPolicyRule.PostingPolicyRecId == postingPolicy.RecId
+                    &&    postingPolicyRule.SubStatus == rentalTrans.SubStatus
+                    &&  ((rentalTrans.TransType == BOBRentalTransType::Sales            && postingPolicyRule.IsAvailableSales)      ||
+                         (rentalTrans.TransType == BOBRentalTransType::Purch            && postingPolicyRule.IsAvailablePurchase)   ||
+                         (rentalTrans.TransType == BOBRentalTransType::Rental           && postingPolicyRule.IsAvailableRental)     ||
+                         (rentalTrans.TransType == BOBRentalTransType::SubRental        && postingPolicyRule.IsAvailableSubRental)  ||
+                         (rentalTrans.TransType == BOBRentalTransType::WPPWorkOrder     && postingPolicyRule.IsAvailableWorkOrder)  ||
+                          rentalTrans.TransType == BOBRentalTransType::Invent ||
+                          rentalTrans.TransType == BOBRentalTransType::InventCounting ||
+                          rentalTrans.TransType == BOBRentalTransType::Asset)
+                        notExists join rentalTransOpening
+                        where rentalTransOpening.RentalTypeId       == rentalTrans.RentalTypeId
+                        &&    rentalTransOpening.InventLocationId   == rentalTrans.InventLocationId
+                        &&    rentalTransOpening.TransType          == BOBRentalTransType::SummedUp
+                        &&    rentalTransOpening.FromDateTime       >  rentalTrans.FromDateTime
+        {
+            // process FromDateTime
+            if(rentalTrans.FromDateTime >= minDateTime)
+            {
+                adjDateTime = BOBRentalTrans::roundOffDateTime(rentalTrans.FromDateTime, postingPolicy.RentalSumRounding);
+                keyCon      = [ rentalTrans.RentalTypeId, rentalTrans.InventLocationId, adjDateTime ];
+                currQty     = (map.exists(keyCon) ? map.lookup(keyCon) : 0) + rentalTrans.Qty;
+                map.insert(keyCon, currQty);
+            }
+    
+            // process ToDateTime
+            if(rentalTrans.ToDateTime < maxDateTime && rentalTrans.CertaintyTo != BOBDateTimeCertainty::Tentative)
+            {
+                adjDateTime = BOBRentalTrans::roundOffDateTime(rentalTrans.ToDateTime, postingPolicy.RentalSumRounding);
+                keyCon      = [ rentalTrans.RentalTypeId, rentalTrans.InventLocationId, adjDateTime ];
+                currQty     = (map.exists(keyCon) ? map.lookup(keyCon) : 0) - rentalTrans.Qty;
+                map.insert(keyCon, currQty);
+            }
+        }
+    
+        // enumerate the fluctuations, transform them into absolute quantities, and then insert into BOBRentalSum
+        insertList = new RecordInsertList(tableNum(BOBRentalSum));
+        enumerator = map.getEnumerator();
+    
+        while(enumerator.moveNext())
+        {
+            keyCon = enumerator.currentKey();
+            currQty = enumerator.currentValue();
+            [ currRentalTypeId, currInventLocationId, currDateTime ] = keyCon;
+    
+            if(currRentalTypeId != rentalSum.RentalTypeId || currInventLocationId != rentalSum.InventLocationId)
+            {
+                prevQty = 0;
+            }
+    
+            rentalSum.clear();
+            rentalSum.RentalTypeId      = currRentalTypeId;
+            rentalSum.InventLocationId  = currInventLocationId;
+            rentalSum.TransDateTime     = currDateTime;
+            rentalSum.Available         = currQty + prevQty;
+            insertList.add(rentalSum);
+    
+            prevQty = rentalSum.Available;
+        }
+    
+        insertList.insertDatabase();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        #OCCRetryCount
+    
+        if(this.validate())
+        {
+            try
+            {
+                ttsBegin;
+    
+                this.clearExistingData();
+                this.populateRentalSum();
+    
+                ttsCommit;
+            }
+            catch (Exception::Deadlock)
+            {
+                retry;
+            }
+            catch (Exception::UpdateConflict)
+            {
+                if (appl.ttsLevel() == 0)
+                {
+                    if (xSession::currentRetryCount() >= #RetryNum)
+                    {
+                        throw Exception::UpdateConflictNotRecovered;
+                    }
+                    else
+                    {
+                        retry;
+                    }
+                }
+                else
+                {
+                    throw Exception::UpdateConflict;
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version version = RunBase::getVersion(_packedClass);
+        ;
+    
+        switch (version)
+        {
+            case #CurrentVersion:
+                [ version, #CurrentList ] = _packedClass;
+                break;
+    
+            default:
+                return false;
+        }
+    
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    public boolean validate(Object _calledFrom = null)
+    {
+        boolean ret = true;
+        ;
+    
+        if(rentalTypeId && !BOBRentalType::find(rentalTypeId).RecId)
+        {
+            ret = checkFailed(strFmt("@DNR2944", rentalTypeId, "@DNR4420", tablePName(BOBRentalType)));
+        }
+    
+        if(inventLocationId && !InventLocation::exist(inventLocationId))
+        {
+            ret = checkFailed(strFmt("@DNR2944", inventLocationId, "@SYS6437", tablePName(InventLocation)));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        BOBRentalSumRecalc recalc = new BOBRentalSumRecalc();
+    
+        if(recalc.prompt())
+        {
+            recalc.runOperation();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

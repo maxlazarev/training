@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesLineType_RORRentalProjectStrategy</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[DNRExtensionStrategyFactoryAttribute(classStr(SalesLineType_RORRentalProject))]
+class DNRSalesLineType_RORRentalProjectStrategy extends DNRSalesLineTypeStrategy
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>RORCanCreatePurchOrder</Name>
+				<Source><![CDATA[
+    public boolean RORCanCreatePurchOrder()
+    {
+        SalesLine           salesLine = this.parmSalesLineType().parmSalesLine();
+        boolean             ret;
+        InventDim           inventDim;
+        BOBRentalTrans      rentalTrans;
+        InventTrans         inventTrans;
+        InventTransOrigin   inventTransOrigin;
+    
+        if (salesLine.RORTradeType == RORTradeType::Rental
+        &&  salesLine.RORLineType == RORLineType::Normal
+        &&  salesLine.SalesType == SalesType::RORRental
+        &&  salesLine.RemainInventPhysical)
+        {
+            select firstonly RecId from rentalTrans
+            where rentalTrans.SubStatus >= BOBRentalSubStatus::Confirmed
+                exists join inventTrans
+                where inventTrans.RecId == rentalTrans.InventTransRecId
+                    join TableId from inventTransOrigin
+                    where inventTransOrigin.RecId == inventTrans.InventTransOrigin
+                    && inventTransOrigin.InventTransId == salesLine.InventTransId
+                        join TableId from inventDim
+                        where inventDim.inventDimId == salesLine.InventDimId
+                        &&   !inventDim.inventSerialId;
+    
+            ret = rentalTrans.RecId;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORDeleteChildren</Name>
+				<Source><![CDATA[
+    public boolean RORDeleteChildren()
+    {
+        SalesLine   salesLine = this.parmSalesLineType().parmSalesLine();
+        boolean     linesDeleted = false;
+    
+        // Only do this if we can legimitately delete the current line, and it has an InventTransId
+        // (ie has already been saved)
+        if (this.parmSalesLineType().validateDelete() && salesLine.RecId)
+        {
+            SalesLine salesLineDelete;
+
+            ttsBegin;
+    
+            // Try to delete children (component etc)
+            while select forUpdate salesLineDelete
+            where salesLineDelete.RORParentLineRecId == salesLine.RecId
+            {
+                if (salesLineDelete.validateDelete())
+                {
+                    salesLineDelete.type().RORDeleteChildren();
+                    salesLineDelete.delete(null, true); // Skip parent update to stop update conflicts
+                    linesDeleted = true;
+                }
+            }
+    
+            ttsCommit;
+        }
+    
+        return linesDeleted;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORMayReturnNoteBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean RORMayReturnNoteBeUpdated()
+    {
+        SalesTable salesTable = this.parmSalesLineType().parmSalesTable();
+        boolean ok = salesTable.type().RORmayReturnNoteBeUpdated();
+        SalesLine salesLine = this.parmSalesLineType().parmSalesLine();
+    
+        // Don't add the line when the Invoice start/end basis is Base on on-rent/off-rent date/time
+        // and the off-rent date/time is not filled (on-rent is always filled because it is mandatory)
+        if (ok
+        &&  salesLine.RORTradeType != RORTradeType::SalesPurch
+        &&  FINRentalInvoiceProfile::find(salesLine.INVInvoiceProfileId).InvoiceStartEndBasis == INVInvoiceStartEndBasis::OrderDates
+        &&  DateTimeUtil::year(salesLine.RORRentalDateTimesHost::rentalDateTimes().OffRentDateTime) <= DateTimeUtil::year(DateTimeUtil::minValue()))
+        {
+            ok = false;
+        }
+    
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORUpdateAmendmentLog</Name>
+				<Source><![CDATA[
+    public void RORUpdateAmendmentLog(ConfirmId _confirmId)
+    {
+        SalesLine salesLine = this.parmSalesLineType().parmSalesLine();
+        ROROrderAmendmentLog orderAmendmentLog;
+    
+        update_recordSet orderAmendmentLog
+        setting ConfirmId = _confirmId
+        where orderAmendmentLog.RefTableId == salesLine.TableId
+        &&    orderAmendmentLog.RefRecId   == salesLine.RecId
+        &&    !orderAmendmentLog.ConfirmId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

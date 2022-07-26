@@ -1,0 +1,3893 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBObjectManager</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBObjectManager
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>changeOrganizationParty</Name>
+				<Source><![CDATA[
+    public static void changeOrganizationParty(BOBObjectId _objectId, DirPartyRecId _organizationParty)
+    {
+        ttsBegin;
+    
+        BOBObjectTable objectTable = BOBObjectTable::findObjectId(_objectId, true);
+    
+        if (objectTable)
+        {
+            if (_organizationParty != objectTable.OrganizationParty)
+            {
+                objectTable.OrganizationParty = _organizationParty;
+                objectTable.update();
+    
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::Manual);
+            }
+        }
+        else
+        {
+            throw error(strFmt("@DNR5937", _objectId));
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>registerPurchLineFromWhs</Name>
+				<Source><![CDATA[
+    public static void registerPurchLineFromWhs(InventTransId _purchLineInventTransId, InventQty _qty2register)
+    {
+        BOBObjectTable                      objectTable;
+        BOBObjectView                       objectView;
+        BOBObjectOwnershipLog               ownershipParm;
+        PurchLine                           purchLine;
+        PurchTable                          purchTable;
+        InventLocation                      inventLocation;
+        InventDim                           inventDim;
+        TransDateTime                       transDateTime;
+        TransDate                           transDate;
+        AssetGroup                          assetGroup;
+        LogisticsEntityPostalAddressView    addressView;
+
+        if(!_purchLineInventTransId || _qty2register != 1)
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+
+        select firstonly objectTable
+        where objectTable.InventSerialId // serialized business objects only
+        join FirstOnRentDate from objectView
+            where objectView.ObjectId == objectTable.ObjectId
+                join TableId from inventDim
+                where inventDim.inventSerialId == objectTable.InventSerialId
+                    join DeliveryPostalAddress, CreateFixedAsset, RORTradeType, InventDimId from purchLine
+                    where purchLine.InventDimId == inventDim.inventDimId
+                    &&    purchLine.InventTransId == _purchLineInventTransId
+                        join RecId from purchTable
+                        where purchTable.PurchId == purchLine.PurchId
+                            outer join BOBObjectCategory from assetGroup
+                            where assetGroup.GroupId == purchLine.AssetGroup;
+        
+        if(objectTable)
+        {
+            transDateTime = DateTimeUtil::getSystemDateTime();
+
+            if(purchLine.RORTradeType == RORTradeType::SalesPurch)
+            {
+                transDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+                
+                if(objectTable.Category == BOBObjectCategory::Pending || objectTable.Category == BOBObjectCategory::External)
+                {
+                    ttsBegin;
+
+                    objectTable.selectForUpdate(true);
+                    objectTable.OrganizationParty = 0;
+                    objectTable.ExternalObjectId = '';
+                    objectTable.Category = (purchLine.CreateFixedAsset ?
+                                            BOBObjectTable::assetObjCatToObjCat(assetGroup.BOBObjectCategory) :
+                                            BOBObjectCategory::Inventory);
+                    objectTable.update();
+
+                    BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::PurchRegistration);
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, purchLine.DeliveryPostalAddress, transDateTime, purchTable);
+
+                    if(objectTable.Category == BOBObjectCategory::Rental && !objectView.FirstOnRentDate)
+                    {
+                        ownershipParm.ObjectId = objectTable.ObjectId;
+                        ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                        ownershipParm.FirstOnRentDate = max(transDate, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                        ownershipParm.createNewLogEntry();
+                    }
+
+                    ttsCommit;
+                }
+                else
+                {
+                    throw error(strFmt("@DNR5992",
+                                       objectTable.ObjectId,
+                                       objectTable.InventSerialId,
+                                       BOBObjectCategory::Pending,
+                                       BOBObjectCategory::External));
+                }
+            }
+            else if(objectTable.Category == BOBObjectCategory::SubRental)
+            {
+                select firstonly PostalAddress from addressView
+                where addressView.IsPrimary == NoYes::Yes
+                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                    exists join inventLocation
+                    where inventLocation.RecId == addressView.Entity
+                        join TableId from inventDim
+                        where inventDim.InventLocationId == inventLocation.InventLocationId
+                        &&    inventDim.inventDimId == purchLine.InventDimId;
+    
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, addressView.PostalAddress, transDateTime, purchTable);
+            }
+            else
+            {
+                throw error(strFmt("@DNR6000", objectTable.ObjectId, objectTable.InventSerialId, strLwr("@SYS50316"), BOBObjectCategory::SubRental));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeCategory</Name>
+				<Source><![CDATA[
+    public static void changeCategory(AssetId _assetId)
+    {
+        BOBObjectAssetLog   objectAssetLog;
+        BOBObjectTable      objectTable;
+        AssetTable          assetTable;
+        AssetGroup          assetGroup;
+        BOBObjectCategory   objectCategory;
+        ;
+    
+        if(!_assetId)
+        {
+            throw error(error::missingParameter(null));
+        }
+    
+        select firstonly TableId from assetTable
+        where assetTable.AssetId == _assetId
+            join BOBObjectCategory, RecId from assetGroup
+            where assetGroup.GroupId == assetTable.AssetGroup
+                join TableId from objectAssetLog
+                where objectAssetLog.AssetCompanyId == assetTable.DataAreaId
+                &&    objectAssetLog.AssetId == assetTable.AssetId
+                &&   (assetTable.BOBIsBulkParent 
+                || (objectAssetLog.ValidFrom <= DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()) 
+                    && (!objectAssetLog.ValidTo || objectAssetLog.ValidTo >= DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))))
+                    join objectTable
+                    where objectTable.ObjectId == objectAssetLog.ObjectId;
+    
+        if (assetGroup && assetGroup.BOBObjectCategory && objectTable)
+        {
+            objectCategory = BOBObjectTable::assetObjCatToObjCat(assetGroup.BOBObjectCategory);
+        }
+    
+        if(objectTable && objectTable.Category != objectCategory)
+        {
+            ttsBegin;
+    
+            objectTable.selectForUpdate(true);
+            objectTable.Category = objectCategory;
+            objectTable.update();
+    
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::Manual);
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeFixedAssetSerialNum</Name>
+				<Source><![CDATA[
+    public static void changeFixedAssetSerialNum(AssetId _assetId, InventSerialId _newSerialNum)
+    {
+        InventSerialId  currentSerialNum;
+        ;
+    
+        if(!_assetId)
+        {
+            throw error(error::missingParameter(null));
+        }
+    
+        currentSerialNum = BOBObjectTable::findByAssetId(_assetId).InventSerialId;
+    
+        if(!currentSerialNum && _newSerialNum)
+        {
+            BOBObjectManager::linkFixedAsset(_newSerialNum, _assetId);
+        }
+        else if(currentSerialNum && _newSerialNum && currentSerialNum != _newSerialNum)
+        {
+            ttsBegin;
+    
+            BOBObjectManager::unlinkFixedAsset(_assetId);
+            BOBObjectManager::linkFixedAsset(_newSerialNum, _assetId);
+    
+            ttsCommit;
+        }
+        else if(currentSerialNum && !_newSerialNum)
+        {
+            BOBObjectManager::unlinkFixedAsset(_assetId);
+        }
+        else // current number equals new number
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeObjectAvailability</Name>
+				<Source><![CDATA[
+    public static void changeObjectAvailability(BOBObjectId _objectId, NoYes _available, DNRReasonCode _reasonCode, WPPWorkOrderId _workOrderId = '')
+    {
+        BOBObjectAvailabilityLog::changeAvailability(_objectId, _available, _reasonCode, _workOrderId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeRentalType</Name>
+				<Source><![CDATA[
+    public static void changeRentalType(BOBObjectId _objectId, BOBRentalTypeId _newRentalTypeId, boolean _copyAttributes)
+    {
+        ttsBegin;
+    
+        BOBObjectTable objectTable = BOBObjectTable::findObjectId(_objectId, true);
+    
+        if(objectTable)
+        {
+            BOBRentalType oldRentalType, newRentalType;
+
+            select firstonly Classification from oldRentalType
+            where oldRentalType.RentalTypeId == objectTable.RentalTypeId
+                outer join Classification, Description from newRentalType
+                where newRentalType.RentalTypeId == _newRentalTypeId;
+    
+            if(oldRentalType.Classification != newRentalType.Classification)
+            {
+                throw error(strFmt("@DNR6514", _objectId, _newRentalTypeId, "@DNR152", oldRentalType.Classification));
+            }
+    
+            if (_copyAttributes)
+            {
+                objectTable.Name = newRentalType.Description;
+            }
+    
+            objectTable.RentalTypeId = _newRentalTypeId;
+            objectTable.update();
+    
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::Manual);
+        }
+        else
+        {
+            throw error(strFmt("@DNR5937", _objectId));
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeFleetNum</Name>
+				<Source><![CDATA[
+    public static void changeFleetNum(BOBObjectId _objectId, BobFleetNumber _fleetNum)
+    {
+        ttsBegin;
+    
+        BOBObjectTable objectTable = BOBObjectTable::findObjectId(_objectId, true);
+    
+        if(objectTable)
+        {
+            objectTable.FleetNumber = _fleetNum;
+            objectTable.update();
+    
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::Manual);
+        }
+        else
+        {
+            throw error(strFmt("@DNR5937", _objectId));
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>changeSubRentalDates</Name>
+				<Source><![CDATA[
+    public static void changeSubRentalDates(PurchLine _purchLine, RORRentalDateTimes _newDateTimes)
+    {
+        BOBObjectTable          objectTable;
+        InventDim               inventDim;
+        BOBObjectOwnershipLog   ownershipParm;
+        ;
+    
+        select firstOnly objectTable
+        where objectTable.Category == BOBObjectCategory::SubRental
+            exists join inventDim
+            where inventDim.inventSerialId == objectTable.InventSerialId
+            &&    inventDim.inventSerialId // serialized rental items only
+            &&    inventDim.inventDimId == _purchLine.InventDimId;
+    
+        if(objectTable)
+        {
+            ownershipParm.ObjectId = objectTable.ObjectId;
+            ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+            ownershipParm.FirstOnRentDate = DateTimeUtil::date(_newDateTimes.OnRentDateTime);
+            ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+            ownershipParm.LastOnRentDate = DateTimeUtil::date(_newDateTimes.OffRentDateTime);
+            ownershipParm.createNewLogEntry();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>confirmPurchLine</Name>
+				<Source><![CDATA[
+    public static boolean confirmPurchLine(PurchLine _purchLine, TransDate _transDate)
+    {
+        BOBRentalType       rentalType;
+        BOBObjectTable      objectTable;
+        AssetTable          parentAsset;
+        EcoResProduct       ecoResProduct;
+        InventTable         inventTable;
+        InventTableModule   inventTableModule;
+        BOBObjectAssetLog   objectAssetLog;
+        boolean             ret = false;
+        ;
+
+        select firstOnly DisplayProductNumber from ecoResProduct
+            join  inventTable
+            where inventTable.ItemId == _purchLine.ItemId
+            &&    inventTable.Product == ecoResProduct.RecId 
+                join UnitId from inventTableModule
+                where inventTableModule.ItemId == inventTable.ItemId
+                &&    inventTableModule.ModuleType == ModuleInventPurchSales::Invent
+                    join RentalTypeId, Classification, RecId from rentalType
+                    where rentalType.RentalTypeId == _purchLine.BOBRentalTypeId
+                        outer join objectTable
+                        where objectTable.RentalTypeId == rentalType.RentalTypeId
+                        &&   !objectTable.InventSerialId;
+
+        if (!inventTable.BOBAssetGroupId && rentalType.Classification == BOBRentalTypeClassification::Bulk)
+        {
+            throw error(strFmt("@DNR8588", fieldId2pname(tableNum(InventTable), fieldNum(InventTable, BOBAssetGroupId)), inventTable.ItemId));
+        }
+    
+        if(inventTable && rentalType.Classification == BOBRentalTypeClassification::Bulk)
+        {
+            //Check if there is parent bulk asset exist for the object in the current company 
+            if(objectTable)
+            {
+                select firstonly parentAsset
+                where parentAsset.BOBIsBulkParent
+                    exists join objectAssetLog
+                    where objectAssetLog.AssetCompanyId == parentAsset.DataAreaId
+                    &&    objectAssetLog.AssetId == parentAsset.AssetId
+                    &&    objectAssetLog.ObjectId == objectTable.ObjectId;
+            }
+            else
+            {
+                // create new business object
+                objectTable.initFromRentalType(rentalType);
+                objectTable.ObjectId            = BOBObjectTable::getNewObjectId();
+                objectTable.Name                = parentAsset.Name;
+                objectTable.Category            = BOBObjectCategory::Rental;
+                objectTable.AcqProductNumber    = ecoResProduct.DisplayProductNumber;
+                objectTable.RentalTypeId        = rentalType.RentalTypeId;
+                objectTable.insert();
+
+                ret = true;
+            }
+            
+            // create new parent asset 
+            if(!parentAsset)
+            {
+                parentAsset.AssetGroup          = inventTable.BOBAssetGroupId;
+                parentAsset.Name                = inventTable.itemName();
+                parentAsset.AssetId             = AssetTable::BOBNewBulkParentAssetId(inventTable.BOBAssetGroupId);
+                parentAsset.Quantity            = 0;
+                parentAsset.UnitOfMeasure       = inventTableModule.UnitId;
+                parentAsset.BOBIsBulkParent     = NoYes::Yes;
+                parentAsset.insert();
+    
+                BOBObjectAssetLog::createLink(objectTable.ObjectId, parentAsset.AssetId, parentAsset.DataAreaId, _transDate);
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::NewFixedAsset);
+                BOBObjectAvailabilityLog::changeAvailability(objectTable.ObjectId, NoYes::Yes);
+            }
+    
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>creditPurchLine</Name>
+				<Source><![CDATA[
+    public static void creditPurchLine(BOBObjectTable _objectTable)
+    {
+        // do nothing for now
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>creditSalesLine</Name>
+				<Source><![CDATA[
+    public static void creditSalesLine(BOBObjectTable _objectTable, SalesParmLine _salesParmLine)
+    {
+        InventTrans                 inventTrans;
+        InventTransOriginSalesLine  inventTransOrigin;
+
+        select firstonly RecId from inventTrans
+        where inventTrans.StatusReceipt == StatusReceipt::Received
+            exists join inventTransOrigin
+            where inventTransOrigin.InventTransOrigin == inventTrans.InventTransOrigin
+            &&    inventTransOrigin.SalesLineInventTransId == _salesParmLine.InventTransId
+            &&    inventTransOrigin.SalesLineDataAreaId == curext();
+
+        if(!inventTrans.RecId && _salesParmLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            switch (_objectTable.Category)
+            {
+                case BOBObjectCategory::Component,
+                     BOBObjectCategory::Internal,
+                     BOBObjectCategory::Pending,
+                     BOBObjectCategory::Rental,
+                     BOBObjectCategory::SubRental:
+                    throw error(strFmt("@DNR7595",
+                                        _objectTable.ObjectId,
+                                        _objectTable.InventSerialId,
+                                        strLwr("@DNR1431"),
+                                        BOBObjectCategory::External,
+                                        BOBObjectCategory::Inventory));
+    
+                default:
+                    break;
+            }
+    
+            BOBObjectView objectView = _objectTable.objectView();
+    
+            if(objectView.PhysicalOwner != curext())
+            {
+                throw error(strFmt("@DNR6001", _objectTable.ObjectId, objectView.InventSerialId, strLwr("@DNR1431"), curext()));
+            }
+    
+            ttsBegin;
+    
+            _objectTable.selectForUpdate(true);
+            _objectTable.Category = BOBObjectCategory::Inventory;
+            _objectTable.OrganizationParty = 0;
+            _objectTable.update();
+    
+            BOBObjectDetailsLog::createNewLogEntry(_objectTable, BOBObjectChangeOrigin::SalesCreditInvoice);
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deActivateFixedAsset</Name>
+				<Source><![CDATA[
+    public static void deActivateFixedAsset(AssetId _assetId)
+    {
+        if(!_assetId)
+        {
+            throw error(error::missingParameter(null));
+        }
+    
+        ttsBegin;
+    
+        BOBObjectTable  objectTable = BOBObjectTable::findByAssetId(_assetId);
+        BOBObjectView   objectView  = objectTable.objectView();
+
+        if(objectView.LastOnRentDate)
+        {
+            objectTable.Category = BOBObjectCategory::Inventory;
+            objectTable.update();
+    
+            BOBObjectAssetLog::deleteLink(objectTable.ObjectId, objectView.LastOnRentDate);
+
+            BOBObjectOwnershipLog ownershipParm;
+
+            ownershipParm.ObjectId              = objectTable.ObjectId;
+            ownershipParm.FinancialOwnerFlag    = NoYes::Yes;
+            ownershipParm.FinancialOwner        = '';
+            ownershipParm.FirstOnRentDateFlag   = NoYes::Yes;
+            ownershipParm.FirstOnRentDate       = dateNull();
+            ownershipParm.LastOnRentDateFlag    = NoYes::Yes;
+            ownershipParm.LastOnRentDate        = dateNull();
+            ownershipParm.createNewLogEntry();
+        }
+        else
+        {
+            throw error(strFmt("@DNR5997", _assetId, objectTable.ObjectId));
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>delete</Name>
+				<Source><![CDATA[
+    public static void delete(BOBObjectTable _objectTable)
+    {
+        BOBObjectTable objectTable;
+        ;
+    
+        delete_from objectTable
+        where objectTable.RecId == _objectTable.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateObjectCategory</Name>
+				<Source><![CDATA[
+    protected static SysInfoLogStr validateObjectCategory(BOBObjectTable _objectTable, SalesParmLine _salesParmLine)
+    {
+        SysInfoLogStr warningText;
+
+        switch(_salesParmLine.RORTradeType)
+        {
+            case RORTradeType::Rental:
+                if(_objectTable.Category != BOBObjectCategory::Rental)
+                {
+                    warningText = strFmt("@DNR6000", _objectTable.ObjectId, _objectTable.InventSerialId, strLwr("@SYS1316"), BOBObjectCategory::Rental);
+                }
+                break;
+    
+            case RORTradeType::SubRental:
+                if(_objectTable.Category != BOBObjectCategory::SubRental)
+                {
+                    warningText = strFmt("@DNR6000", _objectTable.ObjectId, _objectTable.InventSerialId, strLwr("@SYS1316"), BOBObjectCategory::SubRental);
+                }
+                break;
+    
+            case RORTradeType::SalesPurch:
+                if(_objectTable.Category != BOBObjectCategory::Inventory)
+                {
+                    warningText = strFmt("@DNR6000", _objectTable.ObjectId, _objectTable.InventSerialId, strLwr("@SYS1316"), BOBObjectCategory::Inventory);
+                }
+                break;
+        }
+
+        return warningText;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deliverSalesLine</Name>
+				<Source><![CDATA[
+    public static void deliverSalesLine(BOBObjectTable              _objectTable,
+                                        SalesParmLine               _salesParmLine,
+                                        LogisticsPostalAddressRecId _deliveryPostalAddress,
+                                        boolean                     _changeLocation = true)
+    {
+        SalesTable                  salesTable;
+        SalesParmTable              salesParmTable;
+        TransDateTime               dlvDateTime;
+        TransDateTime               systemDateTime;
+        WPPParameters               parameters;
+        WPPWorkOrderTable           workOrderTable;
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderTaskTable       workOrderTaskTable;
+        FromDateTime                actualFromDateTime;
+        SchedDate                   plannedDate;
+        ;
+
+        // perform validations
+        if(!_objectTable)
+        {
+            throw error(Error::missingRecord(funcName()));
+        }
+
+        SysInfoLogStr warningText = BOBObjectManager::validateObjectCategory(_objectTable, _salesParmLine);
+        
+        if (warningText)
+        {
+            throw error(warningText);
+        }
+    
+        if((select firstOnly PhysicalOwner from BOBObjectView
+            where BOBObjectView.ObjectId == _objectTable.ObjectId).PhysicalOwner != curext())
+        {
+            throw error(strFmt("@DNR6001", _objectTable.ObjectId, _objectTable.InventSerialId, strLwr("@SYS1316"), curext()));
+        }
+    
+        parameters = WPPParameters::find();
+    
+        select firstOnly RequestedStartDateTime from workOrderLine
+            exists join workOrderTaskTable
+            where workOrderTaskTable.TaskId   == workOrderLine.TaskId
+            &&    workOrderTaskTable.TaskType == WPPTaskType::Delivery
+                join TableId from workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                &&    workOrderTable.OrderTableId == tableNum(SalesLine)
+                &&    workOrderTable.OrderRecId   == _salesParmLine.SalesLineRecId;
+    
+        if (!workOrderLine)
+        {
+            select firstOnly RequestedStartDateTime from workOrderLine
+                exists join workOrderTaskTable
+                where workOrderTaskTable.TaskId   == workOrderLine.TaskId
+                &&    workOrderTaskTable.TaskType == WPPTaskType::Delivery
+                    join TableId from workOrderTable
+                    where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    &&    workOrderTable.OrderTableId == tableNum(SalesTable)
+                        join TableId from salesTable
+                        where salesTable.RecId   == workOrderTable.OrderRecId
+                        &&    salesTable.SalesId == _salesParmLine.salesParmTable().SalesId;
+        }
+    
+        if (workOrderLine)
+        {
+            systemDateTime = DateTimeUtil::getSystemDateTime();
+            plannedDate = (select minOf(PlannedDate) from WPPWorkOrderLineResource
+                           where WPPWorkOrderLineResource.WorkOrderLineRecId == workOrderLine.RecId).PlannedDate;
+            actualFromDateTime  = (select minOf(ActualToDateTime) from WPPWorkOrderLineResource
+                                   where WPPWorkOrderLineResource.WorkOrderLineRecId == workOrderLine.RecId).ActualToDateTime;
+    
+            if (actualFromDateTime)
+            {
+                dlvDateTime = systemDateTime < actualFromDateTime ? systemDateTime : actualFromDateTime;
+            }
+            else
+            if (plannedDate)
+            {
+                dlvDateTime = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()) < plannedDate ? systemDateTime : DateTimeUtil::newDateTime(plannedDate, DateTimeUtil::getTimeNow(DateTimeUtil::getUserPreferredTimeZone()), DateTimeUtil::getUserPreferredTimeZone());
+            }
+            else
+            {
+                dlvDateTime = systemDateTime < workOrderLine.RequestedStartDateTime ? systemDateTime : workOrderLine.RequestedStartDateTime;
+            }
+        }
+        else
+        {
+            // calculate delivery date/time
+            salesParmTable = _salesParmLine.salesParmTable();
+            dlvDateTime = DateTimeUtil::newDateTime(salesParmTable.Transdate, salesParmTable.BOBTransTime, DateTimeUtil::getUserPreferredTimeZone());
+            systemDateTime = DateTimeUtil::getSystemDateTime();
+            dlvDateTime = dlvDateTime < systemDateTime ? dlvDateTime : systemDateTime;
+        }
+    
+        // update business object
+        ttsBegin;
+    
+        if(_salesParmLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            _objectTable.selectForUpdate(true);
+            _objectTable.Category = BOBObjectCategory::External;
+            _objectTable.OrganizationParty = CustTable::find(_salesParmLine.CustAccount).Party;
+            _objectTable.update();
+    
+            BOBObjectDetailsLog::createNewLogEntry(_objectTable, BOBObjectChangeOrigin::SalesPackingSlip);
+        }
+    
+        if (_changeLocation)
+        {
+            BOBObjectLocationLog::changeLocation(_objectTable.ObjectId,
+                                                 _deliveryPostalAddress ? _deliveryPostalAddress : _salesParmLine.DeliveryPostalAddress,
+                                                 dlvDateTime ? dlvDateTime : DateTimeUtil::getSystemDateTime(),
+                                                 _salesParmLine.salesTable());
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getPreviousLocation</Name>
+				<Source><![CDATA[
+    private static LogisticsPostalAddressRecId getPreviousLocation(RefTableId   _refTableId,
+                                                                   RefRecId     _refRecId,
+                                                                   BOBObjectId  _objectId)
+    {
+        BOBObjectLocationLog    pckSlpLocation, previousLocation;
+    
+        select firstOnly FromDateTime, RecId from pckSlpLocation
+        order by pckSlpLocation.FromDateTime desc
+        where pckSlpLocation.ObjectId         == _objectId
+        &&    pckSlpLocation.RefTableIdOrigin == _refTableId
+        &&    pckSlpLocation.RefRecIdOrigin   == _refRecId;
+    
+        if(pckSlpLocation.FromDateTime)
+        {
+            select firstOnly PostalAddress from previousLocation
+            order by FromDateTime desc
+            where previousLocation.FromDateTime < pckSlpLocation.FromDateTime
+            &&    previousLocation.ObjectId    == _objectId
+            &&    previousLocation.RecId       != pckSlpLocation.RecId;
+        }
+    
+        return previousLocation.PostalAddress;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>invoicePurchLine</Name>
+				<Source><![CDATA[
+    public static void invoicePurchLine(BOBObjectTable              _objectTable,
+                                        RORTradeType                _tradeType,
+                                        InventTransId               _inventTransId,
+                                        LogisticsPostalAddressRecId _newAddress,
+                                        BOBAssetObjectCategory      _assetObjectCategory,
+                                        boolean                     _isAutoAssetCreation,
+                                        TransDateTime               _postingDateTime,
+                                        Common                      _origin)
+    {
+        InventTrans                 inventTransPurchLine, inventTransSalesLine;
+        InventTransOriginPurchLine  originPurchLine;
+        InventTransOriginSalesLine  originSalesLine;
+        SalesLine                   salesLine;
+        InventDim                   inventDim;
+        BOBObjectOwnershipLog       ownershipParm;
+        BOBObjectView               objectView;
+        boolean                     isCategoryOK;
+        ;
+    
+        if(!_objectTable || !_objectTable.InventSerialId)
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+        if(_tradeType != RORTradeType::SalesPurch)
+        {
+            return; // do nothing
+        }
+    
+        select firstOnly FirstOnRentDate from objectView
+        where objectView.ObjectId == _objectTable.ObjectId
+            join StatusReceipt, DateInvent, DatePhysical, RecId from inventTransPurchLine
+            where inventTransPurchLine.StatusReceipt == StatusReceipt::Registered
+            ||    inventTransPurchLine.StatusReceipt == StatusReceipt::Received
+                join TableId from originPurchLine
+                where originPurchLine.InventTransOrigin == inventTransPurchLine.InventTransOrigin
+                &&    originPurchLine.PurchLineInventTransId == _inventTransId
+                &&    originPurchLine.PurchLineDataAreaId == curext();
+    
+        if(inventTransPurchLine.RecId) // this PurchLine has already been registered/received
+        {
+            if(_objectTable.Category == BOBObjectCategory::External)
+            {
+                // In case we're dealing with a serialized business object that has already been sold
+                // since we posted its purchase order packing slip, the sales order invoice process
+                // has already moved our business object into the correct category. So in that parti-
+                // cular scenario we don't have to do anything here during the purchase order invoice.
+    
+                select firstOnly RecId from salesLine
+                where salesLine.RORTradeType == RORTradeType::SalesPurch
+                &&    salesLine.SalesStatus == SalesStatus::Invoiced
+                    exists join inventDim
+                    where inventDim.inventDimId == salesLine.InventDimId
+                    &&    inventDim.inventSerialId == _objectTable.InventSerialId
+                        join TableId from originSalesLine
+                        where originSalesLine.SalesLineDataAreaId == salesLine.dataAreaId
+                        &&    originSalesLine.SalesLineInventTransId == salesLine.InventTransId
+                            join TableId from inventTransSalesLine
+                            where inventTransSalesLine.InventTransOrigin == originSalesLine.InventTransOrigin
+                            &&    inventTransSalesLine.StatusIssue == StatusIssue::Sold
+                            &&    inventTransSalesLine.DateFinancial >= inventTransPurchLine.DateInvent
+                            &&    inventTransSalesLine.DateFinancial >= inventTransPurchLine.DatePhysical;
+    
+                if(salesLine)
+                {
+                    return; // don't do anything
+                }
+                else
+                {
+                    // In case a normal sales line which is sold and delivered 
+                    // it should be allowed for posting invoice
+                    select firstOnly RecId from salesLine
+                    where salesLine.RORTradeType == RORTradeType::SalesPurch
+                    &&    (   salesLine.SalesStatus  == SalesStatus::Delivered
+                           || salesLine.SalesStatus  == SalesStatus::Invoiced)
+                        exists join inventDim
+                        where inventDim.inventDimId    == salesLine.InventDimId
+                        &&    inventDim.inventSerialId == _objectTable.InventSerialId;
+
+                    isCategoryOK = salesLine ? true : false;
+                }
+            }
+            else
+            {
+                isCategoryOK = (_objectTable.Category == BOBObjectCategory::Inventory 
+                             || _objectTable.Category == BOBObjectCategory::Rental
+                             || _objectTable.Category == BOBObjectCategory::Internal);
+                
+                
+                if(!isCategoryOK)
+                {
+                    // In case where a PO line has a negative quantity, Object category is updated to Pending on Recieve 
+                    BOBObjectDetailsLog detailsLog;
+                    
+                    select firstonly Origin from detailsLog
+                    order by CreatedDateTime desc
+                    where detailsLog.ObjectId == _objectTable.ObjectId;
+                    
+                    if(detailsLog.Origin == BOBObjectChangeOrigin::PurchPackingSlipReversal)
+                    {
+                        isCategoryOK = (_objectTable.Category == BOBObjectCategory::Pending);
+                    }
+                }
+            }
+        }
+        else
+        {
+            isCategoryOK = (_objectTable.Category == BOBObjectCategory::Pending
+                         || _objectTable.Category == BOBObjectCategory::External);
+        }
+    
+        if(isCategoryOK)
+        {
+            ttsBegin;
+    
+            // don't do this bit if the business object has already been updated while posting the registration or product receipt
+            if(!inventTransPurchLine.RecId)
+            {
+                _objectTable.selectForUpdate(true);
+                _objectTable.OrganizationParty = 0;
+                _objectTable.ExternalObjectId = '';
+                _objectTable.Category = (_assetObjectCategory == BOBAssetObjectCategory::None ?
+                                         BOBObjectCategory::Inventory :
+                                         BOBObjectTable::assetObjCatToObjCat(_assetObjectCategory));
+                _objectTable.update();
+    
+                BOBObjectDetailsLog::createNewLogEntry(_objectTable, BOBObjectChangeOrigin::PurchInvoice);
+                BOBObjectLocationLog::changeLocation(_objectTable.ObjectId, _newAddress, _postingDateTime, _origin);
+            }
+    
+            // do this bit only if no product receipts have been posted
+            if(inventTransPurchLine.StatusReceipt != StatusReceipt::Received && _isAutoAssetCreation)
+            {
+                ownershipParm.ObjectId = _objectTable.ObjectId;
+                ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+                ownershipParm.FinancialOwner = curext();
+            }
+            if(_objectTable.Category == BOBObjectCategory::Rental && !objectView.FirstOnRentDate)
+            {
+                ownershipParm.ObjectId = _objectTable.ObjectId;
+                ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                ownershipParm.FirstOnRentDate = max(DateTimeUtil::date(_postingDateTime), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+            }
+            if(ownershipParm.ObjectId)
+            {
+                ownershipParm.createNewLogEntry();
+            }
+    
+            ttsCommit;
+        }
+        else
+        {
+            throw error(strFmt("@DNR5987",
+                                _objectTable.ObjectId,
+                                _objectTable.InventSerialId,
+                                strLwr("@SYS14205")));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>invoiceSalesLine</Name>
+				<Source><![CDATA[
+    public static void invoiceSalesLine(BOBObjectTable _objectTable, SalesParmLine _salesParmLine)
+    {
+        BOBObjectView               objectView;
+        TransDateTime               dlvDateTime;
+        SalesParmTable              salesParmTable;
+        RORRentalDateTimes          rentalDateTimes;
+        InventTrans                 inventTrans;
+        InventTransOriginSalesLine  inventTransOrigin;
+        ;
+    
+        select firstonly RecId from inventTrans
+        where inventTrans.StatusIssue == StatusIssue::Deducted
+            exists join inventTransOrigin
+            where inventTransOrigin.InventTransOrigin == inventTrans.InventTransOrigin
+            &&    inventTransOrigin.SalesLineInventTransId == _salesParmLine.InventTransId
+            &&    inventTransOrigin.SalesLineDataAreaId == curext();
+    
+        // don't do anything if the business object has already been updated while posting the packing slip
+        // for rental don't do anything at all, since the packing slip has ALWAYS already been posted
+        if(!inventTrans.RecId && _salesParmLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            // perform validations
+            if(!_objectTable)
+            {
+                throw error(Error::missingRecord(funcName()));
+            }
+            if(_objectTable.Category != BOBObjectCategory::Inventory)
+            {
+                throw error(strFmt("@DNR6000", _objectTable.ObjectId, _objectTable.InventSerialId, strLwr("@SYS10139"), BOBObjectCategory::Inventory));
+            }
+    
+            select firstOnly PhysicalOwner, InventSerialId from objectView
+            where objectView.ObjectId == _objectTable.ObjectId;
+    
+            if(objectView.PhysicalOwner != curext())
+            {
+                throw error(strFmt("@DNR6001", _objectTable.ObjectId, objectView.InventSerialId, strLwr("@SYS10139"), curext()));
+            }
+    
+            // calculate delivery date/time
+            if(_salesParmLine.RORTradeType == RORTradeType::SalesPurch)
+            {
+                salesParmTable = _salesParmLine.salesParmTable();
+                dlvDateTime = DateTimeUtil::newDateTime(salesParmTable.Transdate,
+                                                        salesParmTable.BOBTransTime,
+                                                        DateTimeUtil::getUserPreferredTimeZone());
+            }
+            else
+            {
+                select firstonly OnRentDateTime from rentalDateTimes
+                where rentalDateTimes.RefTableId == tableNum(SalesLine)
+                &&    rentalDateTimes.RefRecId == _salesParmLine.SalesLineRecId;
+    
+                dlvDateTime = rentalDateTimes.OnRentDateTime;
+            }
+    
+            // update business object
+            ttsBegin;
+    
+            _objectTable.selectForUpdate(true);
+            _objectTable.Category = BOBObjectCategory::External;
+            _objectTable.OrganizationParty = CustTable::find(_salesParmLine.CustAccount).Party;
+            _objectTable.update();
+    
+            BOBObjectDetailsLog::createNewLogEntry(_objectTable, BOBObjectChangeOrigin::SalesInvoice);
+            BOBObjectLocationLog::changeLocation(_objectTable.ObjectId,
+                                                 _salesParmLine.DeliveryPostalAddress,
+                                                 dlvDateTime,
+                                                 _salesParmLine.salesTable());
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkCategoryLinkFixedAsset</Name>
+				<Source><![CDATA[
+    public static boolean checkCategoryLinkFixedAsset(BOBObjectTable _objectTable)
+    {
+        boolean ret = (_objectTable.Category == BOBObjectCategory::Inventory);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkCategoryLinkFixedAssetError</Name>
+				<Source><![CDATA[
+    public static str checkCategoryLinkFixedAssetError()
+    {
+        return "@DNR5962";
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linkFixedAsset</Name>
+				<Source><![CDATA[
+    public static void linkFixedAsset(InventSerialId _inventSerialId, AssetId _assetId)
+    {
+        BOBObjectTable          objectTable;
+        BOBObjectView           objectView;
+        BOBObjectOwnershipLog   ownershipParm;
+    
+        AssetTable              assetTable;
+        AssetGroup              assetGroup;
+        AssetLocation           assetLocation;
+        LogisticsPostalAddress  address;
+        ;
+    
+        ttsBegin;
+    
+        select firstOnly forUpdate objectTable
+        where objectTable.InventSerialId == _inventSerialId
+            join PhysicalOwner from objectView
+            where objectView.ObjectId == objectTable.ObjectId;
+    
+        if(objectView.PhysicalOwner != curext())
+        {
+            throw error(strFmt("@DNR5961", objectTable.ObjectId, _inventSerialId, curext(), objectView.PhysicalOwner));
+        }
+        if (!BOBObjectManager::checkCategoryLinkFixedAsset(objectTable))
+        {
+            throw error(BOBObjectManager::checkCategoryLinkFixedAssetError());
+        }
+    
+        select firstonly assetTable
+        where assetTable.AssetId == _assetId
+            join BOBObjectCategory from assetGroup
+            where assetGroup.GroupId == assetTable.AssetGroup
+                outer join TableId from assetLocation
+                where assetTable.Location == assetLocation.Location
+                    outer join RecId from address
+                    where address.Location == assetLocation.LogisticsLocation;
+    
+        objectTable.Category = BOBObjectTable::assetObjCatToObjCat(assetGroup.BOBObjectCategory);
+        objectTable.update();
+    
+        if(address.RecId)
+        {
+            BOBObjectLocationLog::changeLocation(objectTable.ObjectId, address.RecId, DateTimeUtil::getSystemDateTime());
+        }
+        
+        ownershipParm.ObjectId = objectTable.ObjectId;
+        ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+        ownershipParm.FinancialOwner = curext();
+        ownershipParm.createNewLogEntry();
+    
+        BOBObjectAssetLog::createLink(objectTable.ObjectId, assetTable.AssetId, assetTable.DataAreaId, (ownershipParm.FirstOnRentDate ? ownershipParm.FirstOnRentDate : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone())));
+
+        BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::LinkFixedAsset);
+
+        // refresh financial dimensions on the fixed asset
+        FINDimValueController::eventUpdate(assetTable);
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newFixedAssetFromPurchLine</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static void newFixedAssetFromPurchLine(PurchLineRefRecId _purchLineRecId, AssetId _assetId, InventQty _inventNow)
+    {
+        PurchLine           purchLine;
+        BOBRentalType       rentalType;
+        BOBObjectTable      objectTable;
+        InventDim           inventDim;
+        InventSerial        inventSerial;
+        EcoResProduct       ecoResProduct;
+        InventTable         inventTable;
+        InventTableModule   inventTableModule;
+        AssetTable          parentAsset, childAsset;
+        BOBObjectAssetLog   objectAssetLog;
+        ;
+    
+        select firstOnly AssetTransTypePurch, RORTradeType, QtyOrdered, InterCompanyInventTransId, InventDimId, ItemId
+        from purchLine
+        where purchLine.RecId == _purchLineRecId
+            join Classification, RecId from rentalType
+            where rentalType.RentalTypeId == purchLine.BOBRentalTypeId;
+    
+        if(purchLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            throw error("@DNR6079");
+        }
+    
+        if(!_assetId || !(purchLine.AssetTransTypePurch == AssetTransTypePurch::Acquisition) || !rentalType)
+        {
+            return;
+        }
+    
+        if(rentalType.Classification == BOBRentalTypeClassification::Serialized)
+        {
+            select firstOnly InventSerialId from inventDim
+            where inventDim.inventDimId == purchLine.InventDimId
+                outer join RecId from inventSerial
+                where inventSerial.InventSerialId == inventDim.inventSerialId
+                &&    inventSerial.ItemId == purchLine.ItemId
+                    outer join objectTable
+                    where objectTable.InventSerialId == inventDim.InventSerialId;
+    
+            // validations
+            if(!inventDim.inventSerialId)
+            {
+                throw error("@DNR156");
+            }
+            if(!inventSerial.RecId && !purchLine.InterCompanyInventTransId)
+            {
+                throw error(strFmt("@DNR6089", inventDim.inventSerialId, fieldPName(inventDim, InventSerialId), tablePName(inventSerial)));
+            }
+            if(!objectTable)
+            {
+                throw error(strFmt("@DNR6171", inventDim.InventSerialId));
+            }
+            if(objectTable.Category != BOBObjectCategory::Pending
+            && objectTable.Category != BOBObjectCategory::External
+            && objectTable.Category != BOBObjectCategory::Inventory
+            && objectTable.Category != BOBObjectCategory::Internal
+            && objectTable.Category != BOBObjectCategory::Rental)
+            {
+                throw error(strFmt("@DNR6079"));
+            }
+    
+            ttsBegin;
+    
+            BOBObjectView objectView = objectTable.objectView();
+            BOBObjectAssetLog::createLink(objectTable.ObjectId, _assetId, inventSerial.DataAreaId, (objectView.FirstOnRentDate ? objectView.FirstOnRentDate : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone())));
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::NewFixedAsset);
+    
+            ttsCommit;
+        }
+        else if(rentalType.Classification == BOBRentalTypeClassification::Bulk)
+        {
+            if(purchLine.QtyOrdered != _inventNow)
+            {
+                throw error("@DNR6522");
+            }
+    
+            ttsBegin;
+
+            select firstonly inventTable
+                join UnitId from inventTableModule
+                where inventTableModule.ModuleType == ModuleInventPurchSales::Invent
+                &&    inventTableModule.ItemId == inventTable.ItemId
+                    join purchLine
+                    where purchLine.RecId  == _purchLineRecId
+                    &&    purchLine.ItemId == inventTableModule.ItemId
+                        join  rentalType
+                        where rentalType.RentalTypeId == purchLine.BOBRentalTypeId;
+
+            PurchLineDlvDate deliveryDate = purchLine.deliveryDate();
+            TransDate transDate = deliveryDate ? deliveryDate : DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+
+            select firstonly forupdate parentAsset
+            where parentAsset.BOBIsBulkParent
+                exists join objectAssetLog
+                where objectAssetLog.AssetCompanyId == parentAsset.DataAreaId
+                &&    objectAssetLog.AssetId == parentAsset.AssetId
+                    join TableId from objectTable
+                    where !objectTable.InventSerialId
+                    &&     objectTable.ObjectId == objectAssetLog.ObjectId
+                    &&     objectTable.RentalTypeId == purchLine.BOBRentalTypeId;
+
+            if(parentAsset)
+            {
+                parentAsset.Quantity += UnitOfMeasureConverter::DNRConvertFromSymbol(_inventNow, inventTableModule.UnitId, parentAsset.UnitOfMeasure, NoYes::No);
+                parentAsset.update();
+            }
+            else
+            {
+                // create new parent asset
+                parentAsset.AssetGroup          = purchLine.AssetGroup;
+                parentAsset.Name                = inventTable.itemName();
+                parentAsset.AssetId             = AssetTable::BOBNewBulkParentAssetId(purchLine.AssetGroup);
+                parentAsset.Quantity            = _inventNow;
+                parentAsset.UnitOfMeasure       = inventTableModule.UnitId;
+                parentAsset.BOBIsBulkParent     = NoYes::Yes;
+                parentAsset.insert();
+    
+                objectTable = BOBObjectTable::findBulkObject(purchLine.BOBRentalTypeId);
+
+                if (!objectTable)
+                {
+                    // create new business object
+                    objectTable.initFromRentalType(rentalType);
+                    objectTable.ObjectId            = BOBObjectTable::getNewObjectId();
+                    objectTable.Category            = BOBObjectCategory::Rental;
+                    objectTable.AcqProductNumber    = rentalType.RentalTypeId;
+                    objectTable.Name                = inventTable.itemName();
+                    objectTable.insert();
+                }
+    
+                BOBObjectAssetLog::createLink(objectTable.ObjectId, parentAsset.AssetId, parentAsset.DataAreaId);
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::NewFixedAsset);
+                BOBObjectAvailabilityLog::newObject(objectTable.ObjectId, NoYes::Yes);
+            }
+    
+            update_recordSet childAsset
+            setting MainAssetId = parentAsset.AssetId,
+                    Quantity = _inventNow,
+                    UnitOfMeasure = parentAsset.UnitOfMeasure
+            where childAsset.AssetId == _assetId;
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newObjectFromProdTable</Name>
+				<Source><![CDATA[
+    public static void newObjectFromProdTable(ProdTable _prodTable)
+    {
+        BOBRentalType rentalType = BOBRentalType::findFromItemId(_prodTable.ItemId);
+               
+        if(!rentalType)
+        {
+            return;
+        }
+    
+        if(rentalType.Classification == BOBRentalTypeClassification::Bulk)
+        {
+            ttsBegin;
+
+            InventTable         inventTable;
+            InventTableModule   inventTableModule;
+
+            select firstonly inventTable
+                join UnitId from inventTableModule
+                where inventTableModule.ModuleType == ModuleInventPurchSales::Invent
+                &&    inventTableModule.ItemId == _prodTable.ItemId;
+            
+            BOBObjectTable objectTable = BOBObjectTable::findBulkObject(rentalType.RentalTypeId);
+
+            if (!objectTable)
+            {
+                // create new business object
+                objectTable.initFromRentalType(rentalType);
+                objectTable.ObjectId            = BOBObjectTable::getNewObjectId();
+                objectTable.Category            = BOBObjectCategory::Rental;
+                objectTable.AcqProductNumber    = rentalType.RentalTypeId;
+                objectTable.Name                = inventTable.itemName();
+                objectTable.insert();                                
+            }                           
+
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::ProdReportAsFinished);
+            BOBObjectAvailabilityLog::newObject(objectTable.ObjectId, NoYes::Yes);
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newObjectManual</Name>
+				<Source><![CDATA[
+    public static BOBObjectId newObjectManual(BOBObjectCategory             _category,
+                                              Name                          _name,
+                                              InventSerialId                _inventSerialId,
+                                              ItemId                        _itemId,
+                                              DirPartyRecId                 _organizationParty,
+                                              BOBExternalObjectId           _externalObjId,
+                                              BOBWarrantyToDate             _warrantyToDate,
+                                              BOBFirstOnRentDate            _firstOnRentDate,
+                                              BOBLastOnRentDate             _lastOnRentDate,
+                                              LogisticsPostalAddressRecId   _addressRecId,
+                                              BOBFleetNumber                _fleetNum,
+                                              NoYes                         _createMaintenancePlan)
+    {
+        BOBObjectTable          objectTable;
+        BOBObjectOwnershipLog   ownershipParm;
+        BOBRentalType           rentalType;
+        InventTable             inventTable;
+        EcoResProduct           ecoResProduct;
+    
+        if(!_inventSerialId || !_itemId)
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    
+        rentalType = BOBRentalType::findFromItemId(_itemId);
+
+        if (!rentalType || rentalType.Classification != BOBRentalTypeClassification::Serialized)
+        {
+            throw error(strFmt("@DNR5945", _itemId));
+        }
+
+        rentalType.clear();
+    
+        if(_category != BOBObjectCategory::Rental
+        && _category != BOBObjectCategory::External
+        && _category != BOBObjectCategory::Internal)
+        {
+            throw error(strFmt("@DNR5949", _category));
+        }
+    
+        select firstOnly inventTable
+        where inventTable.ItemId == _itemId
+            join DisplayProductNumber from ecoResProduct
+            where ecoResProduct.RecId == inventTable.Product
+                join  rentalType
+                where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId;
+
+        if(_category == BOBObjectCategory::External)
+        {
+            ownershipParm.FinancialOwner = curext();
+        }
+    
+        ttsBegin;
+    
+        objectTable.initFromRentalType(rentalType);
+        objectTable.ObjectId                = BOBObjectTable::getNewObjectId();
+        objectTable.Category                = _category;
+        objectTable.InventSerialId          = _inventSerialId;
+        objectTable.AcqProductNumber        = ecoResProduct.DisplayProductNumber;
+        objectTable.Name                    = _name;
+        objectTable.ExternalObjectId        = _externalObjId;
+        objectTable.OrganizationParty       = _organizationParty;
+        objectTable.WarrantyToDate          = _warrantyToDate;
+        objectTable.FleetNumber             = _fleetNum;
+        objectTable.CreateMaintenancePlan   = _createMaintenancePlan;
+        objectTable.insert();
+    
+        // create related records
+        BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::Manual);
+        BOBObjectAvailabilityLog::newObject(objectTable.ObjectId);
+    
+        ownershipParm.ObjectId = objectTable.ObjectId;
+        ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+        ownershipParm.PhysicalOwnerFlag = NoYes::Yes;
+        ownershipParm.PhysicalOwner = curext();
+        ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+        ownershipParm.FirstOnRentDate = _firstOnRentDate;
+        ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+        ownershipParm.LastOnRentDate = _lastOnRentDate;
+        ownershipParm.createNewLogEntry();
+    
+        if(_addressRecId)
+        {
+            BOBObjectLocationLog::changeLocation(objectTable.ObjectId, _addressRecId, DateTimeUtil::getSystemDateTime());
+        }
+    
+        ttsCommit;
+    
+        return objectTable.ObjectId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newPendingObject</Name>
+				<Source><![CDATA[
+    public static void newPendingObject(InventSerialId _inventSerialId, ItemId _itemId,BOBFleetNumber  _fleetNum)
+    {
+        EcoResProduct           ecoResProduct;
+        InventTable             inventTable;
+        BOBObjectTable          objectTable;
+        BOBRentalType           rentalType;
+        BOBObjectOwnershipLog   ownershipParm;
+        ;
+    
+        select firstOnly inventTable
+        where inventTable.ItemId == _itemId
+            join DisplayProductNumber from ecoResProduct
+            where ecoResProduct.RecId == inventTable.Product
+                join  rentalType
+                where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId;
+    
+        if(inventTable.BOBIsSerializedRentalItem())
+        {
+            ttsBegin;
+    
+            objectTable.initFromRentalType(rentalType);
+            objectTable.ObjectId            = BOBObjectTable::getNewObjectId();
+            objectTable.Category            = BOBObjectCategory::Pending;
+            objectTable.InventSerialId      = _inventSerialId;
+            objectTable.AcqProductNumber    = ecoResProduct.DisplayProductNumber;
+            objectTable.Name                = inventTable.itemName();
+            objectTable.FleetNumber         = _fleetNum;
+            objectTable.insert();
+    
+            // create related records
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::NewSerialNumber);
+            BOBObjectAvailabilityLog::newObject(objectTable.ObjectId, NoYes::Yes);
+    
+            ownershipParm.ObjectId = objectTable.ObjectId;
+            ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+            ownershipParm.FinancialOwner = '';
+            ownershipParm.PhysicalOwnerFlag = NoYes::Yes;
+            ownershipParm.PhysicalOwner = curext();
+            ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+            ownershipParm.FirstOnRentDate = dateNull();
+            ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+            ownershipParm.LastOnRentDate = dateNull();
+            ownershipParm.createNewLogEntry();
+    
+            ttsCommit;
+        }
+        else
+        {
+            throw error(strFmt("@DNR5945", _itemId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newSerialNumFromPurchLine</Name>
+				<Source><![CDATA[
+    public static void newSerialNumFromPurchLine(PurchLine              _purchLine,
+                                                 InventSerialId         _inventSerialId,
+                                                 InventSerialProdDate   _prodDate,
+                                                 InventSerialText       _description,
+                                                 BOBFleetNumber         _fleetNum )
+    {
+        InventSerial    inventSerial;
+        BOBObjectTable  objectTable;
+        EcoResProduct   ecoResProduct;
+        InventTable     inventTable;
+        DlvDate         dlvDate;
+        ;
+    
+        if(!_inventSerialId)
+        {
+            throw error(strFmt("@DNR4370", "@SYS477"));
+        }
+    
+        inventSerial.InventSerialId         = _inventSerialId;
+        inventSerial.ProdDate               = _prodDate;
+        inventSerial.ItemId                 = _purchLine.ItemId;
+        inventSerial.Description            = _description;
+        inventSerial.BOBSkipObjectCreation  = NoYes::Yes; // object will be created below
+        inventSerial.insert();
+    
+        if(_purchLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            BOBObjectManager::newPendingObject(_inventSerialId, _purchLine.ItemId,_fleetNum);
+        }
+        else
+        {
+            BOBObjectManager::newSubRentalObject(_purchLine, _inventSerialId,_fleetNum);
+        }
+    
+        select firstOnly forUpdate objectTable
+        where objectTable.InventSerialId == _inventSerialId
+            join BOBMonthsWarranty from ecoResProduct
+            where ecoResProduct.DisplayProductNumber == ecoResProduct.BOBRentalTypeId
+            &&    ecoResProduct.BOBRentalTypeId == objectTable.RentalTypeId
+                exists join inventTable
+                where inventTable.Product == ecoResProduct.RecId;
+    
+        if(_prodDate && ecoResProduct.BOBMonthsWarranty)
+        {
+            objectTable.WarrantyToDate = dateMthFwd(_prodDate, ecoResProduct.BOBMonthsWarranty);
+            objectTable.update();
+        }
+    
+        if(_purchLine.purchTable().PurchaseType == PurchaseType::RORSubRental && _purchLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            dlvDate = (_purchLine.ConfirmedDlv ? _purchLine.ConfirmedDlv : _purchLine.DeliveryDate);
+    
+            // BOBObjectAvailabilityLog::changeAvailability(objectTable.ObjectId, NoYes::Yes);
+            BOBObjectLocationLog::changeLocation(objectTable.ObjectId,
+                                                 _purchLine.DeliveryPostalAddress,
+                                                 DateTimeUtil::newDateTime(dlvDate, 0, DateTimeUtil::getUserPreferredTimeZone()),
+                                                 _purchLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newSubRentalObject</Name>
+				<Source><![CDATA[
+    public static void newSubRentalObject(PurchLine _subRentalOrderLine, InventSerialId _inventSerialId, BobFleetNumber _fleetNum)
+    {
+        BOBObjectTable              objectTable;
+        BOBObjectOwnershipLog       ownershipParm;
+        DirPartyPostalAddressView   primaryAddress;
+        VendTable                   vendTable;
+        PurchTable                  purchTable;
+        RORRentalDateTimes          rentalDateTimes;
+        BOBRentalType               rentalType;
+        EcoResProduct               ecoResProduct;
+        InventTable                 inventTable;
+        ;
+    
+        select firstOnly inventTable
+        where inventTable.ItemId == _subRentalOrderLine.ItemId
+            join DisplayProductNumber from ecoResProduct
+            where ecoResProduct.RecId == inventTable.Product
+                join  rentalType
+                where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId;
+
+        if(rentalType.Classification != BOBRentalTypeClassification::Serialized)
+        {
+            throw error(strFmt("@DNR5945", _subRentalOrderLine.ItemId));
+        }
+    
+        ttsBegin;
+    
+        objectTable.initFromRentalType(rentalType);
+        objectTable.ObjectId            = BOBObjectTable::getNewObjectId();
+        objectTable.Category            = BOBObjectCategory::SubRental;
+        objectTable.InventSerialId      = _inventSerialId;
+        objectTable.AcqProductNumber    = ecoResProduct.DisplayProductNumber;
+        objectTable.Name                = inventTable.itemName();
+        objectTable.OrganizationParty   = VendTable::find(_subRentalOrderLine.VendAccount).Party;
+        objectTable.FleetNumber         = _fleetNum;
+        objectTable.insert();
+    
+        select firstOnly RecId, PurchaseType from purchTable
+        where purchTable.PurchId == _subRentalOrderLine.PurchId
+            join TableId from vendTable
+            where vendTable.AccountNum == purchTable.OrderAccount
+                outer join PostalAddress from primaryAddress
+                where primaryAddress.IsPrimary == NoYes::Yes
+                &&    vendTable.Party == primaryAddress.Party;
+    
+        rentalDateTimes = (_subRentalOrderLine.RecId ?
+                           _subRentalOrderLine.RORRentalDateTimesHost::rentalDateTimes() :
+                           purchTable.RORRentalDateTimesHost::rentalDateTimes());
+    
+        // create related records
+        BOBObjectAvailabilityLog::changeAvailability(objectTable.ObjectId, NoYes::Yes);
+        BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::NewSubRental);
+        if (purchTable.PurchaseType == PurchaseType::RORSubRental)
+        {
+            BOBObjectLocationLog::changeLocation(objectTable.ObjectId,
+                                                 primaryAddress.PostalAddress,
+                                                 DateTimeUtil::getSystemDateTime(),
+                                                 purchTable);
+        }
+        ownershipParm.ObjectId = objectTable.ObjectId;
+        ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+        ownershipParm.FinancialOwner = '';
+        ownershipParm.PhysicalOwnerFlag = NoYes::Yes;
+        ownershipParm.PhysicalOwner = curext();
+        ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+        ownershipParm.FirstOnRentDate = DateTimeUtil::date(rentalDateTimes.OnRentDateTime);
+        ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+        ownershipParm.LastOnRentDate = DateTimeUtil::date(rentalDateTimes.OffRentDateTime);
+        ownershipParm.createNewLogEntry();
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postConvJourTransA2I</Name>
+				<Source><![CDATA[
+    public static void postConvJourTransA2I(InventJournalTrans _inventJournalTrans)
+    {
+        BOBObjectTable                      objectTable;
+        BOBObjectOwnershipLog               ownershipParm;
+        BOBRentalType                       rentalType;
+        EcoResProduct                       ecoResProduct;
+        InventTable                         inventTable;
+        InventDim                           inventDim;
+        InventLocation                      inventLocation;
+        LogisticsEntityPostalAddressView    addressView;
+        SalesLine                           salesLine;
+        boolean                             skipInsert;
+        ;
+    
+        rentalType = BOBRentalType::findFromItemId(_inventJournalTrans.ItemId);
+
+        if(rentalType.Classification == BOBRentalTypeClassification::Serialized)
+        {
+            select firstOnly InventSerialId from inventDim
+            where inventDim.inventDimId == _inventJournalTrans.InventDimId
+                join TableId from inventLocation
+                where inventLocation.InventLocationId == inventDim.InventLocationId
+                    outer join PostalAddress from addressView
+                    where addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                    &&    addressView.Entity == inventLocation.RecId
+                    &&    addressView.IsPrimary == NoYes::Yes;
+    
+            if(!inventDim.InventSerialId)
+            {
+                throw error("@DNR7644");
+            }
+    
+            // other validations should already have been performed by the conversion journal posting class
+    
+            select firstOnly RecId, InterCompanyInventTransId, SalesStatus from salesLine
+            where salesLine.BOBConversionJourId == _inventJournalTrans.JournalId;
+    
+            if(salesLine)
+            {
+                // in case the journal being posted is linked to a SalesLine, the only step left to do
+                // here is unlinking the fixed asset from the business object -- all other updates to
+                // the BO have already been taken care of during the SalesLine's delivery and/or invoice
+                objectTable = BOBObjectTable::findInventSerialId(inventDim.inventSerialId);
+
+                AssetId assetId = objectTable.assetId(_inventJournalTrans.TransDate);
+
+                if (!assetId)
+                {
+                    // AssetId may be already removed from BO. In such case use number set on journal line.
+                    assetId = _inventJournalTrans.AssetId;
+                }
+
+                BOBObjectCategory objectCategory = BOBObjectCategory::Inventory;
+                
+                // For InterCompany Orders or delivered/Invoiced sales Lines don't change the object category
+                if(salesLine.InterCompanyInventTransId || salesLine.SalesStatus == SalesStatus::Delivered || salesLine.SalesStatus == SalesStatus::Invoiced)
+                {
+                    objectCategory = objectTable.Category;
+                }
+
+
+                BOBObjectManager::unlinkFixedAsset(assetId, objectCategory, _inventJournalTrans.TransDate);
+            }
+            else
+            {
+                BOBObjectCategory origObjectCategory;
+                
+                ttsBegin;
+
+                // update business object
+                objectTable = BOBObjectTable::findInventSerialId(inventDim.inventSerialId, true);
+                origObjectCategory = objectTable.Category;
+                objectTable.OrganizationParty = 0;
+                objectTable.Category = BOBObjectCategory::Inventory;
+                objectTable.update();
+    
+                BOBObjectAssetLog::deleteLink(objectTable.ObjectId, _inventJournalTrans.TransDate);
+
+                // create new records in related tables
+                if(addressView.PostalAddress)
+                {
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, addressView.PostalAddress, DateTimeUtil::getSystemDateTime());
+                }
+    
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::UnlinkFixedAsset);
+    
+                if (objectTable.ObjectId)
+                {
+                    select firstOnly LastOnRentDate, RecId from ownershipParm
+                    order by CreatedDateTime desc
+                    where ownershipParm.ObjectId == objectTable.ObjectId;
+    
+                    skipInsert = (ownershipParm.RecId != 0 && ownershipParm.FinancialOwner == '' && (!AssetParameters::find().BOBAutoFillPostingDates || ownershipParm.LastOnRentDate == _inventJournalTrans.TransDate));
+                }
+    
+                if (!skipInsert)
+                {
+                    ownershipParm.ObjectId = objectTable.ObjectId;
+                    ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+                    ownershipParm.FinancialOwner = '';
+    
+                    if(AssetParameters::find().BOBAutoFillPostingDates && origObjectCategory != BOBObjectCategory::Internal)
+                    {
+                        ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+                        ownershipParm.LastOnRentDate = _inventJournalTrans.TransDate;
+                    }
+    
+                    ownershipParm.createNewLogEntry();
+                }
+    
+                ttsCommit;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postConvJourTransI2A</Name>
+				<Source><![CDATA[
+    public static void postConvJourTransI2A(InventJournalTrans _inventJournalTrans)
+    {
+        AssetTable                          assetTable, assetTableParent, assetTableChild;
+        AssetGroup                          assetGroup;
+        NumberSeq                           assetIdNumberSeq;
+        EcoResProduct                       ecoResProduct;
+        InventTable                         inventTable;
+        InventDim                           inventDim;
+        InventLocation                      inventLocation;
+        NumberSequenceTable                 numberSequenceTable;
+        BOBRentalType                       rentalType;
+        BOBObjectTable                      objectTable;
+        BOBObjectOwnershipLog               ownershipParm;
+        LogisticsEntityPostalAddressView    addressView;
+        BOBObjectAssetLog                   objectAssetLog;
+        ;
+    
+        if(!_inventJournalTrans.ItemId || !_inventJournalTrans.AssetId)
+        {
+            throw error(Error::missingParameter(null));
+        }
+    
+        select firstOnly inventTable
+        where inventTable.ItemId == _inventJournalTrans.ItemId
+            join DisplayProductNumber from ecoResProduct
+            where ecoResProduct.RecId == inventTable.Product
+                join  rentalType
+                where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId;
+    
+        switch(rentalType.Classification)
+        {
+            case BOBRentalTypeClassification::Serialized:
+    
+                select firstOnly BOBObjectCategory from assetGroup
+                    join  assetTable
+                    where assetTable.AssetId == _inventJournalTrans.AssetId
+                    &&    assetTable.AssetGroup == assetGroup.GroupId
+                        join InventSerialId from inventDim
+                        where inventDim.inventDimId == _inventJournalTrans.InventDimId
+                            join TableId from inventLocation
+                            where inventLocation.InventLocationId == inventDim.InventLocationId
+                                outer join PostalAddress from addressView
+                                where addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                                &&    addressView.Entity == inventLocation.RecId
+                                &&    addressView.IsPrimary == NoYes::Yes;
+    
+                if(!inventDim.InventSerialId)
+                {
+                    throw error("@DNR6403");
+                }
+    
+                ttsBegin;
+    
+                objectTable = BOBObjectTable::findInventSerialId(inventDim.InventSerialId, true);
+                objectTable.Category = BOBObjectTable::assetObjCatToObjCat(assetGroup.BOBObjectCategory);
+                objectTable.update();
+    
+                BOBObjectAssetLog::createLink(objectTable.ObjectId, _inventJournalTrans.AssetId, _inventJournalTrans.DataAreaId, _inventJournalTrans.TransDate);
+
+                if(addressView.PostalAddress)
+                {
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, addressView.PostalAddress, DateTimeUtil::getSystemDateTime());
+                }
+    
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::LinkFixedAsset);
+    
+                ownershipParm.ObjectId = objectTable.ObjectId;
+                ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+                ownershipParm.FinancialOwner = curext();
+    
+                if(AssetParameters::find().BOBAutoFillPostingDates)
+                {
+                    ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                    ownershipParm.FirstOnRentDate = _inventJournalTrans.TransDate;
+                    ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+                    ownershipParm.LastOnRentDate = dateNull();
+                }
+    
+                ownershipParm.createNewLogEntry();
+    
+                // refresh financial dimensions on the fixed asset
+                FINDimValueController::eventUpdate(assetTable);
+    
+                ttsCommit;
+                break;
+    
+            case BOBRentalTypeClassification::Bulk:
+    
+                ttsBegin;
+    
+                select firstOnly Continuous from numberSequenceTable
+                    join GroupId from assetGroup
+                    where assetGroup.AutoNumberSequenceTable == numberSequenceTable.RecId
+                        join forUpdate assetTableParent
+                        where assetTableParent.AssetId == _inventJournalTrans.AssetId
+                        &&    assetTableParent.AssetGroup == assetGroup.GroupId
+                            outer join TableId from objectAssetLog
+                            where objectAssetLog.AssetCompanyId == assetTableParent.DataAreaId
+                            &&    objectAssetLog.AssetId == assetTableParent.AssetId
+                                outer join ObjectId from objectTable
+                                where objectTable.ObjectId == objectAssetLog.ObjectId;
+    
+                // create a new child asset
+                assetTableChild.AssetGroup      = assetGroup.GroupId;
+                assetTableChild.initFromAssetGroupId(assetGroup.GroupId);
+    
+                // validate number sequence and retrieve a new AssetId value
+                if(numberSequenceTable.Continuous == NoYes::No)
+                {
+                    warning("@SYS116327");
+                    throw error("@DNR6403");
+                }
+    
+                assetIdNumberSeq = assetTableChild.initAssetNumberSeq();
+    
+                if(assetIdNumberSeq)
+                {
+                    assetTableChild.AssetId     = assetIdNumberSeq.num();
+                    assetIdNumberSeq.used();
+                }
+                else
+                {
+                    warning(strFmt("@SYS131763", "@SYS67376"));
+                    throw error("@DNR6403");
+                }
+    
+                assetTableChild.Name            = inventTable.itemName();
+                assetTableChild.Quantity        = _inventJournalTrans.Qty;
+                assetTableChild.UnitOfMeasure   = inventTable.inventUnitId();
+                assetTableChild.MainAssetId     = assetTableParent.AssetId;
+                assetTableChild.insert();
+    
+                // update the parent asset's quantity
+                assetTableParent.Quantity += UnitOfMeasureConverter::DNRConvertFromSymbol(assetTableChild.Quantity,
+                                                                                          assetTableChild.UnitOfMeasure,
+                                                                                          assetTableParent.UnitOfMeasure,
+                                                                                          NoYes::No);
+                assetTableParent.update();
+    
+                // create a new business object if necessary
+                if(!objectTable)
+                {
+                    objectTable.initFromRentalType(rentalType);
+                    objectTable.ObjectId                = BOBObjectTable::getNewObjectId();
+                    objectTable.Category                = BOBObjectCategory::Rental;
+                    objectTable.AcqProductNumber        = ecoResProduct.DisplayProductNumber;
+                    objectTable.Name                    = inventTable.itemName();
+                    objectTable.insert();
+    
+                    BOBObjectAssetLog::createLink(objectTable.ObjectId, assetTableParent.AssetId, assetTableParent.DataAreaId);
+                    BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::NewFixedAsset);
+                    BOBObjectAvailabilityLog::newObject(objectTable.ObjectId, NoYes::Yes);
+                }
+    
+                // we want the inventory journal to acquire the new child asset instead of the parent asset
+                _inventJournalTrans.AssetId = assetTableChild.AssetId;
+                _inventJournalTrans.update();
+    
+                ttsCommit;
+                break;
+    
+            default:
+                // do nothing
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postFreeTextInvoiceLine</Name>
+				<Source><![CDATA[
+    public static void postFreeTextInvoiceLine(CustInvoiceTrans _custInvoiceTrans)
+    {
+        AssetTable              assetTable;
+        BOBObjectTable          objectTable;
+        BOBObjectView           objectView;
+        BOBRentalType           rentalType;
+        BOBObjectOwnershipLog   ownershipParm;
+        BOBRentalTrans          rentalTrans;
+        CustInvoiceJour         custInvoiceJour;
+        CustInvoiceTable        custInvoiceTable;
+        BOBObjectAssetLog       objectAssetLog;
+        ;
+    
+        if(_custInvoiceTrans.AssetId)
+        {
+            select firstOnly assetTable
+            where AssetTable.AssetId == _custInvoiceTrans.AssetId
+                join TableId from objectAssetLog
+                where objectAssetLog.AssetCompanyId == assetTable.DataAreaId
+                &&    objectAssetLog.AssetId == assetTable.AssetId
+                &&   (assetTable.BOBIsBulkParent || (objectAssetLog.ValidFrom <= _custInvoiceTrans.InvoiceDate && (!objectAssetLog.ValidTo || objectAssetLog.ValidTo >= _custInvoiceTrans.InvoiceDate)))
+                    join objectTable
+                    where objectTable.ObjectId == objectAssetLog.ObjectId
+                        join PhysicalOwner, FirstOnRentDate, LastOnRentDate from objectView
+                        where objectView.ObjectId == objectTable.ObjectId
+                            join Classification from rentalType
+                            where rentalType.RentalTypeId == objectView.RentalTypeId
+                                outer join firstOnly RecId from rentalTrans
+                                where rentalTrans.ObjectId == objectTable.ObjectId
+                                &&    rentalTrans.TransType == BOBRentalTransType::Rental
+                                &&    rentalTrans.SubStatus < BOBRentalSubStatus::Returned
+                                &&    rentalTrans.AssetId == assetTable.AssetId;
+    
+            if(objectTable)
+            {
+                if(rentalType.Classification != BOBRentalTypeClassification::Serialized)
+                {
+                    throw error(strFmt("@DNR8191", _custInvoiceTrans.AssetId, objectTable.ObjectId));
+                }
+                if(_custInvoiceTrans.Qty != 1)
+                {
+                    throw error(strFmt("@GLS115432"));
+                }
+                if(objectTable.Category != BOBObjectCategory::Rental && objectTable.Category != BOBObjectCategory::Internal)
+                {
+                    throw error(strFmt("@DNR6534", objectTable.ObjectId, objectTable.InventSerialId, BOBObjectCategory::Rental, BOBObjectCategory::Internal));
+                }
+                if(objectView.PhysicalOwner != curext())
+                {
+                    throw error(strFmt("@DNR6001", objectTable.ObjectId, objectTable.InventSerialId, strLwr("@SYS10139"), curext()));
+                }
+                if(!objectView.FirstOnRentDate && objectTable.Category != BOBObjectCategory::Internal)
+                {
+                    throw error(strFmt("@DNR8190", objectTable.ObjectId, objectTable.InventSerialId));
+                }
+                if(!objectView.LastOnRentDate && objectTable.Category != BOBObjectCategory::Internal)
+                {
+                    throw error(strFmt("@DNR7282", objectTable.ObjectId, objectTable.InventSerialId));
+                }
+                if(rentalTrans)
+                {
+                    throw error(strFmt("@DNR8192", _custInvoiceTrans.AssetId, objectTable.ObjectId));
+                }
+    
+                select firstonly OrderAccount, DeliveryPostalAddress from custInvoiceJour
+                where custInvoiceJour.InvoiceId             == _custInvoiceTrans.InvoiceId
+                &&    custInvoiceJour.InvoiceDate           == _custInvoiceTrans.InvoiceDate
+                &&    custInvoiceJour.NumberSequenceGroup   == _custInvoiceTrans.numberSequenceGroup
+                &&    custInvoiceJour.SalesId               == _custInvoiceTrans.SalesId
+                    join RecId from custInvoiceTable
+                    where custInvoiceTable.InvoiceId            == custInvoiceJour.InvoiceId
+                    &&    custInvoiceTable.InvoiceDate          == custInvoiceJour.InvoiceDate
+                    &&    custInvoiceTable.numberSequenceGroup  == custInvoiceJour.numberSequenceGroup;
+    
+                ttsBegin;
+    
+                objectTable.selectForUpdate(true);
+                objectTable.Category = BOBObjectCategory::External;
+                objectTable.OrganizationParty = CustTable::find(custInvoiceJour.OrderAccount).Party;
+                objectTable.update();
+    
+                // create new records in related tables
+                BOBObjectAssetLog::deleteLink(objectTable.ObjectId, custInvoiceJour.InvoiceDate);
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, custInvoiceJour.DeliveryPostalAddress, DateTimeUtil::getSystemDateTime(), custInvoiceTable);
+                BOBObjectAvailabilityLog::changeAvailability(objectTable.ObjectId, NoYes::No);
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::FreeTextInvoice);
+    
+                ownershipParm.ObjectId = objectTable.ObjectId;
+                ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+                ownershipParm.FinancialOwner = '';
+                ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                ownershipParm.FirstOnRentDate = dateNull();
+                ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+                ownershipParm.LastOnRentDate = dateNull();
+                ownershipParm.createNewLogEntry();
+    
+                // refresh financial dimensions on the fixed asset
+                FINDimValueController::eventUpdate(assetTable);
+    
+                ttsCommit;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postInventoryJournal</Name>
+				<Source><![CDATA[
+    public static void postInventoryJournal(InventSerialId _inventSerialId, LogisticsPostalAddressRecId _addressRecId)
+    {
+        if (!_inventSerialId)
+        {
+            throw error(error::missingParameter(null));
+        }
+    
+        // other validations should already have been performed by the conversion journal posting class
+        BOBObjectTable objectTable = BOBObjectTable::findInventSerialId(_inventSerialId, true);
+    
+        if (objectTable.Category != BOBObjectCategory::Inventory)
+        {
+            ttsBegin;
+
+            // update business object
+            objectTable.OrganizationParty = 0;
+            objectTable.Category            = BOBObjectCategory::Inventory;
+            objectTable.update();
+    
+            // create new records in related tables
+            if (_addressRecId)
+            {
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, _addressRecId, DateTimeUtil::getSystemDateTime());
+            }
+    
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::ItemArrivalPost);
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkCategoryReceivePurchLine</Name>
+				<Source><![CDATA[
+    public static boolean checkCategoryReceivePurchLine(BOBObjectTable              _objectTable,
+                                                        InventTrans                 _inventTrans)
+    {
+        boolean ret;
+
+        if (_inventTrans) // has this PurchLine been registered?
+        {
+            ret = (_objectTable.Category == BOBObjectCategory::Inventory
+                    || _objectTable.Category == BOBObjectCategory::Rental
+                    || _objectTable.Category == BOBObjectCategory::Internal);
+        }
+        else
+        {
+            ret = (_objectTable.Category == BOBObjectCategory::Pending
+                    || _objectTable.Category == BOBObjectCategory::External);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkCategoryReportAsFinishedProdTable</Name>
+				<Source><![CDATA[
+    public static boolean checkCategoryReportAsFinishedProdTable(BOBObjectTable _objectTable, InventTrans _inventTrans)
+    {
+        boolean ret;
+
+        if (_inventTrans) // has this ProdTable been registered?
+        {
+            ret = (_objectTable.Category == BOBObjectCategory::Inventory
+                    || _objectTable.Category == BOBObjectCategory::Rental
+                    || _objectTable.Category == BOBObjectCategory::Internal);
+        }
+        else
+        {
+            ret = (_objectTable.Category == BOBObjectCategory::Pending
+                    || _objectTable.Category == BOBObjectCategory::External);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reportAsFinishedProdTable</Name>
+				<Source><![CDATA[
+    public static void reportAsFinishedProdTable(BOBObjectTable _objectTable,
+        ProdParmReportFinished      _prodParmReportFinished,
+        TransDateTime               _postingDateTime,
+        Common                      _origin,
+        LogisticsPostalAddressRecId _deliveryPostalAddress,
+        boolean                     _changeLocation = true)
+    {
+        ProdTable                           prodTable;
+        InventTrans                         inventTrans;
+        InventTransOriginProdTable          inventTransOrigin;
+        BOBObjectOwnershipLog               ownershipParm;
+        BOBObjectView                       objectView;
+        InventDim                           inventDim;
+        InventLocation                      inventLocation;
+        LogisticsEntityPostalAddressView    addressView;
+        boolean                             isCategoryOK;
+        TransDateTime                       systemDateTime;
+        ;
+    
+        if(!_objectTable)
+        {
+            throw error(Error::missingRecord(funcName()));
+        }
+    
+        select firstOnly FirstOnRentDate, LastOnRentDate from objectView
+        where objectView.ObjectId == _objectTable.ObjectId
+            join RecId from prodTable
+            where prodTable.ProdId == _prodParmReportFinished.ProdId
+                join TableId from inventTransOrigin
+                where inventTransOrigin.ProdOrderDataAreaId == prodTable.dataAreaId
+                &&    inventTransOrigin.ProdOrderId == prodTable.ProdId
+                    outer join RecId from inventTrans
+                    where inventTrans.StatusReceipt == StatusReceipt::Registered
+                    &&    inventTrans.InventTransOrigin == inventTransOrigin.InventTransOrigin;
+            
+        isCategoryOK = BOBObjectManager::checkCategoryReportAsFinishedProdTable(_objectTable, inventTrans);
+    
+        if(isCategoryOK)
+        {
+            ttsBegin;
+    
+            if(_objectTable.Category == BOBObjectCategory::External)
+            {
+                ownershipParm.ObjectId = _objectTable.ObjectId;
+                ownershipParm.PhysicalOwnerFlag = NoYes::Yes;
+                ownershipParm.PhysicalOwner = curext();
+            }
+
+            // don't do this bit if the business object has already been updated while posting the registration
+            if(!inventTrans.RecId)
+            {
+                _objectTable.selectForUpdate(true);
+                _objectTable.OrganizationParty = 0;
+                _objectTable.ExternalObjectId = '';
+                _objectTable.Category = BOBObjectCategory::Inventory;
+                _objectTable.update();
+    
+                BOBObjectDetailsLog::createNewLogEntry(_objectTable, BOBObjectChangeOrigin::ProdReportAsFinished);
+    
+                if (_changeLocation)
+                {
+                    BOBObjectLocationLog::changeLocation(_objectTable.ObjectId,
+                                                            _deliveryPostalAddress,
+                                                            _postingDateTime,
+                                                            _origin,
+                                                            true);
+                }
+            }
+                
+            if(_objectTable.Category == BOBObjectCategory::Rental && !objectView.FirstOnRentDate)
+            {
+                ownershipParm.ObjectId = _objectTable.ObjectId;
+                ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                ownershipParm.FirstOnRentDate = max(DateTimeUtil::date(_postingDateTime), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+            }
+                
+            if(ownershipParm.ObjectId)
+            {
+                ownershipParm.createNewLogEntry();
+            }
+    
+            ttsCommit;
+        }
+        else
+        {
+            throw error(strFmt("@DNR5987",
+                                _objectTable.ObjectId,
+                                _objectTable.InventSerialId,
+                                strLwr("@SYS4465")));
+        }
+        
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>endProdTable</Name>
+				<Source><![CDATA[
+    public static void endProdTable(BOBObjectTable              _objectTable,
+        ProdId                      _prodId,
+        LogisticsPostalAddressRecId _newAddress,
+        TransDateTime               _postingDateTime,
+        Common                      _origin)
+    {
+        InventTrans                 inventTrans;
+        InventTransOriginProdTable  originProdTable;
+        BOBObjectOwnershipLog       ownershipParm;
+        BOBObjectView               objectView;
+        boolean                     isCategoryOK;
+        
+    
+        if(!_objectTable || !_objectTable.InventSerialId)
+        {
+            throw error(Error::wrongUseOfFunction(funcName()));
+        }
+            
+        select firstOnly FirstOnRentDate from objectView
+        where objectView.ObjectId == _objectTable.ObjectId
+            join StatusReceipt, DateInvent, DatePhysical, RecId from inventTrans
+            where (inventTrans.StatusReceipt == StatusReceipt::Registered ||
+                inventTrans.StatusReceipt == StatusReceipt::Received)
+                join TableId from originProdTable
+                where originProdTable.ProdOrderId == _prodId
+                &&    originProdTable.ProdOrderDataAreaId == curext();
+    
+        if(inventTrans.RecId) // this production has already been registered/reportedAsFinished
+        {
+            if(_objectTable.Category == BOBObjectCategory::External)
+            {
+                // In case we're dealing with a serialized business object that has already been sold
+                // since we reported it as finished production, the sales order invoice process
+                // has already moved our business object into the correct category. So in that parti-
+                // cular scenario we don't have to do anything here during the production ending.
+                SalesLine salesLine;
+                InventDim inventDim;
+                InventTrans inventTransSalesLine;
+                InventTransOriginSalesLine  originSalesLine;
+        
+                select firstOnly RecId from salesLine
+                where salesLine.RORTradeType == RORTradeType::SalesPurch
+                &&    salesLine.SalesStatus == SalesStatus::Invoiced
+                    exists join inventDim
+                    where inventDim.inventDimId == salesLine.InventDimId
+                    &&    inventDim.inventSerialId == _objectTable.InventSerialId
+                        join TableId from originSalesLine
+                        where originSalesLine.SalesLineDataAreaId == salesLine.dataAreaId
+                        &&    originSalesLine.SalesLineInventTransId == salesLine.InventTransId
+                            join TableId from inventTransSalesLine
+                            where inventTransSalesLine.InventTransOrigin == originSalesLine.InventTransOrigin
+                            &&    inventTransSalesLine.StatusIssue == StatusIssue::Sold;
+                            //&&    inventTransSalesLine.DateFinancial >= inventTransPurchLine.DateInvent
+                            //&&    inventTransSalesLine.DateFinancial >= inventTransPurchLine.DatePhysical;
+    
+                if(salesLine)
+                {
+                    return; // don't do anything
+                }
+                else
+                {
+                    isCategoryOK = false;
+                }
+            }
+            else
+            {
+                isCategoryOK = (_objectTable.Category == BOBObjectCategory::Inventory
+                             || _objectTable.Category == BOBObjectCategory::Rental
+                             || _objectTable.Category == BOBObjectCategory::Internal);
+            }
+        }
+        else
+        {
+            isCategoryOK = (_objectTable.Category == BOBObjectCategory::Pending
+                         || _objectTable.Category == BOBObjectCategory::External);
+        }
+    
+        if(isCategoryOK)
+        {
+            ttsBegin;
+    
+            // don't do this bit if the business object has already been updated while posting the registration or reporting as finished
+            if(!inventTrans.RecId)
+            {
+                _objectTable.selectForUpdate(true);
+                _objectTable.OrganizationParty = 0;
+                _objectTable.ExternalObjectId = '';
+                _objectTable.Category = BOBObjectCategory::Inventory;
+                _objectTable.update();
+    
+                BOBObjectDetailsLog::createNewLogEntry(_objectTable, BOBObjectChangeOrigin::PurchInvoice);
+                BOBObjectLocationLog::changeLocation(_objectTable.ObjectId, _newAddress, _postingDateTime, _origin);
+            }
+    
+            ownershipParm.ObjectId = _objectTable.ObjectId;
+            ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+            ownershipParm.FinancialOwner = curext();
+            
+            if(_objectTable.Category == BOBObjectCategory::Rental && !objectView.FirstOnRentDate)
+            {
+                ownershipParm.ObjectId = _objectTable.ObjectId;
+                ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                ownershipParm.FirstOnRentDate = max(DateTimeUtil::date(_postingDateTime), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+            }
+            if(ownershipParm.ObjectId)
+            {
+                ownershipParm.createNewLogEntry();
+            }
+    
+            ttsCommit;
+        }
+        else
+        {
+            throw error(strFmt("@DNR5987",
+                                _objectTable.ObjectId,
+                                _objectTable.InventSerialId,
+                                strLwr("@SYS14205")));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>receivePurchLine</Name>
+				<Source><![CDATA[
+    public static void receivePurchLine(BOBObjectTable              _objectTable,
+                                        PurchParmLine               _purchParmLine,
+                                        BOBAssetObjectCategory      _assetObjectCategory,
+                                        boolean                     _isAutoAssetCreation,
+                                        TransDateTime               _postingDateTime,
+                                        Common                      _origin,
+                                        LogisticsPostalAddressRecId _deliveryPostalAddress,
+                                        boolean                     _changeLocation = true)
+    {
+        PurchLine                           purchLine;
+        InventTrans                         inventTrans;
+        InventTransOriginPurchLine          inventTransOrigin;
+        BOBObjectOwnershipLog               ownershipParm;
+        BOBObjectView                       objectView;
+        InventDim                           inventDim;
+        InventLocation                      inventLocation;
+        LogisticsEntityPostalAddressView    addressView;
+        boolean                             isCategoryOK;
+        TransDateTime                       systemDateTime;
+        ;
+    
+        if(!_objectTable)
+        {
+            throw error(Error::missingRecord(funcName()));
+        }
+    
+        select firstOnly FirstOnRentDate, LastOnRentDate from objectView
+        where objectView.ObjectId == _objectTable.ObjectId
+            join RORTradeType, AssetId, InterCompanyInventTransId, RecId from purchLine
+            where purchLine.RecId == _purchParmLine.PurchLineRecId
+                join TableId from inventTransOrigin
+                where inventTransOrigin.PurchLineDataAreaId == purchLine.dataAreaId
+                &&    inventTransOrigin.PurchLineInventTransId == purchLine.InventTransId
+                    outer join RecId from inventTrans
+                    where inventTrans.StatusReceipt == StatusReceipt::Registered
+                    &&    inventTrans.InventTransOrigin == inventTransOrigin.InventTransOrigin;
+    
+        if(purchLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            isCategoryOK = BOBObjectManager::checkCategoryReceivePurchLine(_objectTable, inventTrans);
+    
+            if(isCategoryOK)
+            {
+                ttsBegin;
+    
+                if(_objectTable.Category == BOBObjectCategory::External)
+                {
+                    ownershipParm.ObjectId = _objectTable.ObjectId;
+                    ownershipParm.PhysicalOwnerFlag = NoYes::Yes;
+                    ownershipParm.PhysicalOwner = curext();
+                }
+
+                // don't do this bit if the business object has already been updated while posting the registration
+                if(!inventTrans.RecId)
+                {
+                    _objectTable.selectForUpdate(true);
+                    _objectTable.OrganizationParty = 0;
+                    _objectTable.ExternalObjectId = '';
+                    _objectTable.Category = (_assetObjectCategory == BOBAssetObjectCategory::None ?
+                                             BOBObjectCategory::Inventory :
+                                             BOBObjectTable::assetObjCatToObjCat(_assetObjectCategory));
+                    _objectTable.update();
+    
+                    BOBObjectDetailsLog::createNewLogEntry(_objectTable, BOBObjectChangeOrigin::PurchPackingSlip);
+    
+                    if (_changeLocation)
+                    {
+                        BOBObjectLocationLog::changeLocation(_objectTable.ObjectId,
+                                                             _deliveryPostalAddress ? _deliveryPostalAddress : _purchParmLine.DeliveryPostalAddress,
+                                                             _postingDateTime,
+                                                             _origin,
+                                                             true);
+                    }
+                }
+    
+                // do this bit regardless of whether the purchase line has been registered
+                if(_isAutoAssetCreation || purchLine.AssetId)
+                {
+                    ownershipParm.ObjectId = _objectTable.ObjectId;
+                    ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+                    ownershipParm.FinancialOwner = curext();
+                }
+                if(_objectTable.Category == BOBObjectCategory::Rental && !objectView.FirstOnRentDate)
+                {
+                    ownershipParm.ObjectId = _objectTable.ObjectId;
+                    ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                    ownershipParm.FirstOnRentDate = max(DateTimeUtil::date(_postingDateTime), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                }
+                
+                if(ownershipParm.ObjectId)
+                {
+                    ownershipParm.createNewLogEntry();
+                }
+    
+                ttsCommit;
+            }
+            else
+            {
+                throw error(strFmt("@DNR5987",
+                                    _objectTable.ObjectId,
+                                    _objectTable.InventSerialId,
+                                    strLwr("@SYS4465")));
+            }
+        }
+        else if(!inventTrans.RecId)
+        {
+            if(_objectTable.Category == BOBObjectCategory::SubRental || purchLine.InterCompanyInventTransId)
+            {
+                select firstonly PostalAddress from addressView
+                where addressView.IsPrimary == NoYes::Yes
+                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                    exists join inventLocation
+                    where inventLocation.RecId == addressView.Entity
+                        join TableId from inventDim
+                        where inventDim.InventLocationId == inventLocation.InventLocationId
+                        &&    inventDim.inventDimId == _purchParmLine.InventDimId;
+    
+                systemDateTime = DateTimeUtil::getSystemDateTime();
+    
+                if (systemDateTime < _postingDateTime)
+                {
+                    _postingDateTime = systemDateTime;
+                }
+    
+                if (_changeLocation)
+                {
+                    BOBObjectLocationLog::changeLocation(_objectTable.ObjectId,
+                                                         _deliveryPostalAddress ? _deliveryPostalAddress : addressView.PostalAddress,
+                                                         _postingDateTime,
+                                                         _origin,
+                                                         true);
+                }
+                
+                if(purchLine.InterCompanyInventTransId)
+                {
+                    
+                    ownershipParm.ObjectId = _objectTable.ObjectId;
+                    
+                    if((objectView.FirstOnRentDate  && !objectView.LastOnRentDate)
+                    ||(!objectView.FirstOnRentDate  &&  objectView.LastOnRentDate))
+                    {
+                        RORRentalDateTimes rentalDates = RORRentalDateTimes::findReference(purchLine.TableId, purchLine.RecId);
+                        if(!objectView.FirstOnRentDate)
+                        {
+                            ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                            ownershipParm.FirstOnRentDate     = DateTimeUtil::date(rentalDates.OnRentDateTime);
+                        }
+                        else if(!objectView.LastOnRentDate)
+                        {
+                            ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+                            ownershipParm.LastOnRentDate     = rentalDates.OffRentDateTime ? DateTimeUtil::date(rentalDates.OffRentDate) : DateTimeUtil::date(rentalDates.ExpectedOffRentDateTime);
+                        }
+                        
+                        ownershipParm.createNewLogEntry();
+                    }
+
+                    
+
+                    ownershipParm.PhysicalOwnerFlag = NoYes::Yes;
+                    ownershipParm.PhysicalOwner = curext();
+                    ownershipParm.createNewLogEntry();
+
+
+                }
+            }
+            else
+            {
+                throw error(strFmt("@DNR6000",
+                                    _objectTable.ObjectId,
+                                    _objectTable.InventSerialId,
+                                    strLwr("@SYS4465"),
+                                    BOBObjectCategory::SubRental));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>registerConvJourTransA2I</Name>
+				<Source><![CDATA[
+    private static void registerConvJourTransA2I(BOBObjectTable                 _objectTable,
+                                                 LogisticsPostalAddressRecId    _addressRecId,
+                                                 TransDateTime                  _transDateTime,
+                                                 InventJournalTable             _convJourTable)
+    {
+        BOBObjectTable          objectTableUpdate;
+        BOBObjectView           objectView;
+        BOBRentalTrans          rentalTrans;
+        BOBObjectOwnershipLog   ownershipParm;
+        BOBObjectAssetLog       objectAssetLog;
+        AssetParameters         parameters = AssetParameters::find();
+    
+        select firstOnly PhysicalOwner, LastOnRentDate, Category from objectView
+        where objectView.ObjectId == _objectTable.ObjectId;
+    
+        if(objectView.PhysicalOwner != curext())
+        {
+            throw error(strFmt("@DNR6001", _objectTable.ObjectId, _objectTable.InventSerialId, strLwr("@SYS10139"), curext()));
+        }
+        if(_objectTable.Category != BOBObjectCategory::Rental && _objectTable.Category != BOBObjectCategory::Internal)
+        {
+            throw error(strFmt("@DNR6534", _objectTable.ObjectId, _objectTable.InventSerialId, BOBObjectCategory::Rental, BOBObjectCategory::Internal));
+        }
+        if(_objectTable.Category == BOBObjectCategory::Rental && !parameters.BOBAutoFillPostingDates && !objectView.LastOnRentDate)
+        {
+            throw error(strFmt("@DNR7282", _objectTable.ObjectId, _objectTable.InventSerialId));
+        }
+    
+        select firstOnly RecId from rentalTrans
+        where rentalTrans.ObjectId == _objectTable.ObjectId
+        &&    rentalTrans.TransType == BOBRentalTransType::Rental
+        &&    rentalTrans.SubStatus < BOBRentalSubStatus::Returned
+            exists join objectAssetLog
+            where objectAssetLog.ObjectId == _objectTable.ObjectId
+            &&  (!_objectTable.InventSerialId || (objectAssetLog.ValidFrom <= objectView.LastOnRentDate && (!objectAssetLog.ValidTo || objectAssetLog.ValidTo >= objectView.LastOnRentDate)))
+            &&    objectAssetLog.AssetId == rentalTrans.AssetId;
+    
+        if(rentalTrans)
+        {
+            throw error(strFmt("@DNR8111", _objectTable.ObjectId, _objectTable.InventSerialId));
+        }
+    
+        ttsBegin;
+    
+        objectTableUpdate = BOBObjectTable::findObjectId(_objectTable.ObjectId, true);
+        objectTableUpdate.Category = BOBObjectCategory::Inventory;
+        objectTableUpdate.update();
+    
+        BOBObjectDetailsLog::createNewLogEntry(objectTableUpdate, BOBObjectChangeOrigin::InventJourPickRegister);
+        BOBObjectLocationLog::changeLocation(objectTableUpdate.ObjectId, _addressRecId, _transDateTime, _convJourTable);
+    
+        ownershipParm.ObjectId = objectTableUpdate.ObjectId;
+        ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+        ownershipParm.FinancialOwner = '';
+    
+        if(objectView.Category == BOBObjectCategory::Rental && parameters.BOBAutoFillPostingDates && !objectView.LastOnRentDate)
+        {
+            ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+            ownershipParm.LastOnRentDate = DateTimeUtil::date(_transDateTime);
+        }
+    
+        ownershipParm.createNewLogEntry();
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>registerItemArrivalJournal</Name>
+				<Source><![CDATA[
+    public static void registerItemArrivalJournal(InventSerialId _inventSerialId, WMSJournalTrans _wmsJournalTrans)
+    {
+        BOBObjectTable                      objectTable;
+        BOBObjectView                       objectView;
+        BOBObjectOwnershipLog               ownershipParm;
+        InventTrans                         inventTrans;
+        InventTransOrigin                   inventTransOrigin;
+        PurchLine                           purchLine;
+        PurchTable                          purchTable;
+        InventDim                           inventDim;
+        InventLocation                      inventLocation;
+        LogisticsEntityPostalAddressView    addressView;
+        TransDateTime                       transDateTime;
+        AssetGroup                          assetGroup;
+        ;
+    
+        if(!_inventSerialId)
+        {
+            throw error(strFmt("@DNR4370", "@SYS477"));
+        }
+    
+        if (_wmsJournalTrans.inventTransId)
+        {
+            select firstOnly objectTable
+            where objectTable.InventSerialId == _inventSerialId
+                join FirstOnRentDate from objectView
+                where objectView.ObjectId == objectTable.ObjectId
+                    join DateInvent from inventTrans
+                        join TableId from inventTransOrigin
+                        where inventTransOrigin.InventTransId == _wmsJournalTrans.InventTransId
+                        && inventTrans.InventTransOrigin == inventTransOrigin.RecId
+                            join RecId from purchTable
+                            where purchTable.PurchId == _wmsJournalTrans.inventTransRefId
+                                join DeliveryPostalAddress, CreateFixedAsset, RORTradeType, InventDimId from purchLine
+                                where purchLine.InventTransId == _wmsJournalTrans.InventTransId
+                                &&    purchLine.dataAreaId == inventTrans.DataAreaId
+                                &&    purchLine.PurchId == purchTable.PurchId
+                                    outer join BOBObjectCategory from assetGroup
+                                    where assetGroup.GroupId == purchLine.AssetGroup;
+        }
+        else
+        {
+            select firstOnly objectTable
+            where objectTable.InventSerialId == _inventSerialId
+                join FirstOnRentDate from objectView
+                where objectView.ObjectId == objectTable.ObjectId
+                    join DateInvent from inventTrans
+                        join TableId from inventTransOrigin
+                        where inventTrans.InventTransOrigin == inventTransOrigin.RecId
+                            join RecId from purchTable
+                            where purchTable.PurchId == _wmsJournalTrans.inventTransRefId
+                                join DeliveryPostalAddress, CreateFixedAsset, RORTradeType, InventDimId from purchLine
+                                where purchLine.dataAreaId == inventTrans.DataAreaId
+                                &&    purchLine.PurchId == purchTable.PurchId
+                                    outer join BOBObjectCategory from assetGroup
+                                    where assetGroup.GroupId == purchLine.AssetGroup;
+        }
+    
+        if(objectTable)
+        {
+            transDateTime = DateTimeUtil::newDateTime(inventTrans.DateInvent, DateTimeUtil::getTimeNow(DateTimeUtil::getUserPreferredTimeZone()), DateTimeUtil::getUserPreferredTimeZone());
+    
+            if(purchLine.RORTradeType == RORTradeType::SalesPurch)
+            {
+                if(objectTable.Category == BOBObjectCategory::Pending
+                || objectTable.Category == BOBObjectCategory::External)
+                {
+                    ttsBegin;
+    
+                    objectTable.selectForUpdate(true);
+                    objectTable.OrganizationParty = 0;
+                    objectTable.ExternalObjectId = '';
+                    objectTable.Category = (purchLine.CreateFixedAsset ?
+                                            BOBObjectTable::assetObjCatToObjCat(assetGroup.BOBObjectCategory) :
+                                            BOBObjectCategory::Inventory);
+                    objectTable.update();
+    
+                    BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::ItemArrivalPost);
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, purchLine.DeliveryPostalAddress, transDateTime, purchTable);
+    
+                    if(objectTable.Category == BOBObjectCategory::Rental && !objectView.FirstOnRentDate)
+                    {
+                        ownershipParm.ObjectId = objectTable.ObjectId;
+                        ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                        ownershipParm.FirstOnRentDate = max(inventTrans.DateInvent, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                        ownershipParm.createNewLogEntry();
+                    }
+    
+                    ttsCommit;
+                }
+                else
+                {
+                    throw error(strFmt("@DNR5992",
+                                       objectTable.ObjectId,
+                                       objectTable.InventSerialId,
+                                       BOBObjectCategory::Pending,
+                                       BOBObjectCategory::External));
+                }
+            }
+            else
+            {
+                if(objectTable.Category == BOBObjectCategory::SubRental)
+                {
+                    select firstonly PostalAddress from addressView
+                    where addressView.IsPrimary == NoYes::Yes
+                    &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                        exists join inventLocation
+                        where inventLocation.RecId == addressView.Entity
+                            join TableId from inventDim
+                            where inventDim.InventLocationId == inventLocation.InventLocationId
+                            &&    inventDim.inventDimId == purchLine.InventDimId;
+    
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, addressView.PostalAddress, transDateTime, purchTable);
+                }
+                else
+                {
+                    throw error(strFmt("@DNR6000",
+                                       objectTable.ObjectId,
+                                       objectTable.InventSerialId,
+                                       strLwr("@SYS50316"),
+                                       BOBObjectCategory::SubRental));
+                }
+            }
+        }
+        else
+        {
+            throw error(Error::missingRecord(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>registerPickInventJournalTrans</Name>
+				<Source><![CDATA[
+    public static void registerPickInventJournalTrans(InventSerialId _inventSerialId, TmpInventTransWMS _tmpInventTransWMS, InventQty _updateQty)
+    {
+        BOBObjectTable                      objectTable;
+        InventLocation                      inventLocation;
+        InventTrans                         inventTrans;
+        InventTransOrigin                   inventTransOrigin;
+        InventDim                           inventDim;
+        InventJournalTable                  inventJournalTable;
+        LogisticsEntityPostalAddressView    addressView;
+        TransDateTime                       transDateTime;
+        ;
+    
+        if(!_inventSerialId)
+        {
+            return;
+        }
+    
+        select firstOnly objectTable
+        where objectTable.InventSerialId == _inventSerialId
+            join TableId from inventTransOrigin
+            where inventTransOrigin.RecId == _tmpInventTransWMS.InventTransOrigin
+                join JournalId, JournalType, BOBInventJournalType, RecId from inventJournalTable
+                where inventJournalTable.JournalId == inventTransOrigin.ReferenceId
+                    join DateInvent from inventTrans
+                    where inventTrans.RecId == _tmpInventTransWMS.InventTrans
+                        join TableId from inventDim
+                        where inventDim.inventDimId == _tmpInventTransWMS.InventDimId
+                            join TableId from inventLocation
+                            where inventLocation.InventLocationId == inventDim.InventLocationId
+                                outer join PostalAddress from addressView
+                                where addressView.IsPrimary == NoYes::Yes
+                                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                                &&    addressView.Entity == inventLocation.RecId;
+        if(!objectTable)
+        {
+            return;
+        }
+    
+        transDateTime = DateTimeUtil::newDateTime(inventTrans.DateInvent, DateTimeUtil::getTimeNow(DateTimeUtil::getUserPreferredTimeZone()), DateTimeUtil::getUserPreferredTimeZone());
+    
+        switch(inventJournalTable.JournalType)
+        {
+            case InventJournalType::Movement, InventJournalType::LossProfit:
+                if(_updateQty > 0)
+                {
+                    if(objectTable.Category != BOBObjectCategory::Pending && objectTable.Category != BOBObjectCategory::External)
+                    {
+                        throw error(strFmt("@DNR6534",
+                                            objectTable.ObjectId,
+                                            objectTable.InventSerialId,
+                                            BOBObjectCategory::Pending,
+                                            BOBObjectCategory::External));
+                    }
+    
+                    ttsBegin;
+    
+                    objectTable.selectForUpdate(true);
+                    objectTable.Category = BOBObjectCategory::Inventory;
+                    objectTable.update();
+    
+                    BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::InventJourPickRegister);
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, addressView.PostalAddress, transDateTime, inventJournalTable);
+    
+                    ttsCommit;
+                }
+                else
+                {
+                    if(objectTable.Category == BOBObjectCategory::Inventory)
+                    {
+                        ttsBegin;
+    
+                        objectTable.selectForUpdate(true);
+                        objectTable.Category = BOBObjectCategory::External;
+                        objectTable.update();
+    
+                        BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::InventJourPickRegister);
+                        BOBObjectLocationLog::changeLocation(objectTable.ObjectId, 0, transDateTime, inventJournalTable);
+    
+                        ttsCommit;
+                    }
+                    else
+                    {
+                        throw error(strFmt("@DNR6535",
+                                           objectTable.ObjectId,
+                                           objectTable.InventSerialId,
+                                           BOBObjectCategory::Inventory));
+                    }
+                }
+                break;
+    
+            case InventJournalType::Asset:
+                if(inventJournalTable.BOBInventJournalType == BOBInventJournalType::AssetToInvent)
+                {
+                    if(_updateQty > 0)
+                    {
+                        BOBObjectManager::registerConvJourTransA2I(objectTable, addressView.PostalAddress, transDateTime, inventJournalTable);
+                    }
+                    else
+                    {
+                        BOBObjectManager::unRegisterConvJourTransA2I(objectTable, inventJournalTable);
+                    }
+                }
+                break;
+    
+            case InventJournalType::Transfer:
+                // do nothing
+                break;
+    
+            default:
+                throw error(strFmt("@DNR6439", objectTable.ObjectId, _inventSerialId, inventJournalTable.JournalType));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>registerProdTable</Name>
+				<Source><![CDATA[
+    public static void registerProdTable(InventSerialId     _inventSerialId,
+                                         TmpInventTransWMS  _tmpInventTransWMS)
+    {
+        BOBObjectTable                      objectTable;
+        BOBObjectView                       objectView;
+        BOBObjectOwnershipLog               ownershipParm;
+        InventTrans                         inventTrans;
+        InventTransOriginProdTable          inventTransOrigin;
+        ProdTable                           prodTable;
+        TransDateTime                       transDateTime;
+    
+        if (!_inventSerialId)
+        {
+            throw error(strFmt("@DNR4370", "@SYS477"));
+        }
+    
+        select firstOnly objectTable
+        where objectTable.InventSerialId == _inventSerialId
+            join FirstOnRentDate from objectView
+            where objectView.ObjectId == objectTable.ObjectId
+                join DateInvent from inventTrans
+                where inventTrans.RecId == _tmpInventTransWMS.InventTrans
+                    join TableId from inventTransOrigin
+                    where inventTransOrigin.InventTransOrigin == _tmpInventTransWMS.InventTransOrigin
+                        join prodTable
+                        where prodTable.dataAreaId == inventTransOrigin.ProdOrderDataAreaId
+                        &&    prodTable.ProdId     == inventTransOrigin.ProdOrderId
+                        &&    prodTable.ProdId     == _tmpInventTransWMS.ReferenceId;
+    
+        if (objectTable)
+        {
+            transDateTime = DateTimeUtil::newDateTime(inventTrans.DateInvent, DateTimeUtil::getTimeNow(DateTimeUtil::getUserPreferredTimeZone()), DateTimeUtil::getUserPreferredTimeZone());
+    
+            if (objectTable.Category == BOBObjectCategory::Pending
+            ||  objectTable.Category == BOBObjectCategory::External)
+            {
+                ttsBegin;
+                objectTable.selectForUpdate(true);
+                objectTable.OrganizationParty = 0;
+                objectTable.ExternalObjectId = '';
+                objectTable.Category         = BOBObjectCategory::Inventory;
+                objectTable.update();
+    
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::ProdRegistration);
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, 0, DateTimeUtil::getSystemDateTime(), prodTable);
+    
+                if (objectTable.Category == BOBObjectCategory::Rental
+                && !objectView.FirstOnRentDate)
+                {
+                    ownershipParm.ObjectId            = objectTable.ObjectId;
+                    ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                    ownershipParm.FirstOnRentDate     = max(inventTrans.DateInvent, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                    ownershipParm.createNewLogEntry();
+                }
+                ttsCommit;
+            }
+            else
+            {
+                throw error(strFmt("@DNR5992",
+                                    objectTable.ObjectId,
+                                    objectTable.InventSerialId,
+                                    BOBObjectCategory::Pending,
+                                    BOBObjectCategory::External));
+            }
+        }
+        else
+        {
+            throw error(Error::missingRecord(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>registerPurchLine</Name>
+				<Source><![CDATA[
+    public static void registerPurchLine(InventSerialId _inventSerialId, TmpInventTransWMS _tmpInventTransWMS)
+    {
+        BOBObjectTable                      objectTable;
+        BOBObjectView                       objectView;
+        BOBObjectOwnershipLog               ownershipParm;
+        InventTrans                         inventTrans;
+        InventTransOriginPurchLine          inventTransOrigin;
+        PurchLine                           purchLine;
+        PurchTable                          purchTable;
+        InventDim                           inventDim;
+        InventLocation                      inventLocation;
+        LogisticsEntityPostalAddressView    addressView;
+        TransDateTime                       transDateTime;
+        AssetGroup                          assetGroup;
+        ;
+    
+        if(!_inventSerialId)
+        {
+            throw error(strFmt("@DNR4370", "@SYS477"));
+        }
+    
+        select firstOnly objectTable
+        where objectTable.InventSerialId == _inventSerialId
+            join FirstOnRentDate from objectView
+            where objectView.ObjectId == objectTable.ObjectId
+                join DateInvent from inventTrans
+                where inventTrans.RecId == _tmpInventTransWMS.InventTrans
+                    join TableId from inventTransOrigin
+                    where inventTransOrigin.InventTransOrigin == _tmpInventTransWMS.InventTransOrigin
+                        join RecId from purchTable
+                        where purchTable.PurchId == _tmpInventTransWMS.ReferenceId
+                            join DeliveryPostalAddress, CreateFixedAsset, RORTradeType, InventDimId from purchLine
+                            where purchLine.InventTransId == inventTransOrigin.PurchLineInventTransId
+                            &&    purchLine.dataAreaId == inventTransOrigin.PurchLineDataAreaId
+                            &&    purchLine.PurchId == purchTable.PurchId
+                                outer join BOBObjectCategory from assetGroup
+                                where assetGroup.GroupId == purchLine.AssetGroup;
+    
+        if(objectTable)
+        {
+            transDateTime = DateTimeUtil::newDateTime(inventTrans.DateInvent, DateTimeUtil::getTimeNow(DateTimeUtil::getUserPreferredTimeZone()), DateTimeUtil::getUserPreferredTimeZone());
+    
+            if(purchLine.RORTradeType == RORTradeType::SalesPurch)
+            {
+                if(objectTable.Category == BOBObjectCategory::Pending
+                || objectTable.Category == BOBObjectCategory::External)
+                {
+                    ttsBegin;
+    
+                    objectTable.selectForUpdate(true);
+                    objectTable.OrganizationParty = 0;
+                    objectTable.ExternalObjectId = '';
+                    objectTable.Category = (purchLine.CreateFixedAsset ?
+                                            BOBObjectTable::assetObjCatToObjCat(assetGroup.BOBObjectCategory) :
+                                            BOBObjectCategory::Inventory);
+                    objectTable.update();
+    
+                    BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::PurchRegistration);
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, purchLine.DeliveryPostalAddress, transDateTime, purchTable);
+    
+                    if(objectTable.Category == BOBObjectCategory::Rental && !objectView.FirstOnRentDate)
+                    {
+                        ownershipParm.ObjectId = objectTable.ObjectId;
+                        ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                        ownershipParm.FirstOnRentDate = max(inventTrans.DateInvent, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                        ownershipParm.createNewLogEntry();
+                    }
+    
+                    ttsCommit;
+                }
+                else
+                {
+                    throw error(strFmt("@DNR5992",
+                                       objectTable.ObjectId,
+                                       objectTable.InventSerialId,
+                                       BOBObjectCategory::Pending,
+                                       BOBObjectCategory::External));
+                }
+            }
+            else
+            {
+                if(objectTable.Category == BOBObjectCategory::SubRental)
+                {
+                    select firstonly PostalAddress from addressView
+                    where addressView.IsPrimary == NoYes::Yes
+                    &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                        exists join inventLocation
+                        where inventLocation.RecId == addressView.Entity
+                            join TableId from inventDim
+                            where inventDim.InventLocationId == inventLocation.InventLocationId
+                            &&    inventDim.inventDimId == purchLine.InventDimId;
+    
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, addressView.PostalAddress, transDateTime, purchTable);
+                }
+                else
+                {
+                    throw error(strFmt("@DNR6000",
+                                       objectTable.ObjectId,
+                                       objectTable.InventSerialId,
+                                       strLwr("@SYS50316"),
+                                       BOBObjectCategory::SubRental));
+                }
+            }
+        }
+        else
+        {
+            throw error(Error::missingRecord(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>renameFixedAsset</Name>
+				<Source><![CDATA[
+    public static void renameFixedAsset(AssetId _origAssetId, AssetId _newAssetId)
+    {
+        if(_origAssetId && _newAssetId)
+        {
+            ttsBegin;
+    
+            BOBObjectTable objectTable = BOBObjectTable::findByAssetId(_origAssetId);
+    
+            if(objectTable)
+            {
+                BOBObjectAssetLog::deleteLink(objectTable.ObjectId, DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                BOBObjectAssetLog::createLink(objectTable.ObjectId, _newAssetId, curExt(), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()));
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::RenameFixedAsset);
+            }
+
+            ttsCommit;
+        }
+        else
+        {
+            throw error(error::wrongUseOfFunction(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>returnPurchLine</Name>
+				<Source><![CDATA[
+    public static void returnPurchLine(PurchParmLine _purchParmLine)
+    {
+        LogisticsEntityPostalAddressView    addressView;
+        InventLocation                      inventLocation;
+        InventDim                           inventDim;
+        BOBObjectTable                      objectTable;
+        PurchTable                          purchTable;
+        PurchLine                           purchLine;
+        PurchParmTable                      purchParmTable;
+        TransDateTime                       returnDateTime;
+        BOBObjectLocationLog                objectLocationLog;
+        TransDateTime                       systemDateTime;
+        ;
+    
+        select firstonly TableId from purchLine
+        where purchLine.RecId == _purchParmLine.PurchLineRecId
+        &&    purchLine.RORTradeType == RORTradeType::SubRental
+            join TransDate, BOBTransTime from purchParmTable
+            where purchParmTable.ParmId == _purchParmLine.ParmId
+            &&    purchParmTable.TableRefId == _purchParmLine.TableRefId
+                join RecId from purchTable
+                where purchTable.PurchId == purchLine.PurchId
+                    join TableId from inventDim
+                    where inventDim.inventDimId == _purchParmLine.InventDimId
+                    &&    inventDim.inventSerialId // serialized rental items only
+                        join ObjectId from objectTable
+                        where objectTable.InventSerialId == inventDim.inventSerialId
+                            join TableId from inventLocation
+                            where inventLocation.InventLocationId == inventDim.InventLocationId
+                                outer join PostalAddress from addressView
+                                where addressView.IsPrimary == NoYes::Yes
+                                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                                &&    addressView.Entity == inventLocation.RecId;
+    
+        if(objectTable)
+        {
+            systemDateTime = DateTimeUtil::getSystemDateTime();
+            returnDateTime = DateTimeUtil::newDateTime(purchParmTable.Transdate,
+                                                       purchParmTable.BOBTransTime,
+                                                       DateTimeUtil::getUserPreferredTimeZone());
+    
+            select firstOnly RecId from objectLocationLog
+            where objectLocationLog.ObjectId == objectTable.ObjectId
+            &&    objectLocationLog.FromDateTime > returnDateTime;
+    
+            if (objectLocationLog
+            &&  systemDateTime > returnDateTime)
+            {
+                returnDateTime = systemDateTime;
+            }
+    
+            BOBObjectLocationLog::changeLocation(objectTable.ObjectId,
+                                                 addressView.PostalAddress,
+                                                 returnDateTime,
+                                                 purchTable);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>returnSalesLine</Name>
+				<Source><![CDATA[
+    public static void returnSalesLine(SalesParmLine _salesParmLine)
+    {
+        LogisticsEntityPostalAddressView    addressView;
+        InventLocation                      inventLocation;
+        InventDim                           inventDim;
+        BOBObjectTable                      objectTable;
+        SalesTable                          salesTable;
+        SalesLine                           salesLine;
+        SalesParmTable                      salesParmTable;
+        TransDateTime                       returnDateTime;
+        BOBObjectLocationLog                objectLocationLog;
+        TransDateTime                       systemDateTime;
+        WPPParameters                       parameters;
+        WPPWorkOrderTable                   workOrderTable;
+        WPPWorkOrderLine                    workOrderLine;
+        WPPWorkOrderTaskTable               workOrderTaskTable;
+        FromDateTime                        actualFromDateTime;
+        SchedDate                           plannedDate;
+        ;
+    
+        if(_salesParmLine.RORTradeType == RORTradeType::Rental
+        || _salesParmLine.RORTradeType == RORTradeType::SubRental)
+        {
+            select firstonly TableId, RecId from salesLine
+            where salesLine.RecId == _salesParmLine.SalesLineRecId
+                join TransDate, BOBTransTime from salesParmTable
+                where salesParmTable.ParmId == _salesParmLine.ParmId
+                &&    salesParmTable.TableRefId == _salesParmLine.TableRefId
+                    join RecId from salesTable
+                    where salesTable.SalesId == salesLine.SalesId
+                        join TableId from inventDim
+                        where inventDim.inventDimId == _salesParmLine.InventDimId
+                        &&    inventDim.inventSerialId // serialized rental items only
+                            join ObjectId from objectTable
+                            where objectTable.InventSerialId == inventDim.inventSerialId
+                                join TableId from inventLocation
+                                where inventLocation.InventLocationId == salesLine.RORReturnInventLocationId//inventDim.InventLocationId
+                                    outer join PostalAddress from addressView
+                                    where addressView.IsPrimary == NoYes::Yes
+                                    &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                                    &&    addressView.Entity == inventLocation.RecId;
+    
+            if(objectTable)
+            {
+                systemDateTime = DateTimeUtil::getSystemDateTime();
+    
+                parameters = WPPParameters::find();
+    
+                select firstOnly RequestedEndDateTime, RecId from workOrderLine
+                    exists join workOrderTaskTable
+                    where workOrderTaskTable.TaskId   == workOrderLine.TaskId
+                    &&    workOrderTaskTable.TaskType == WPPTaskType::Load
+                        join TableId from workOrderTable
+                        where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                        &&  ((workOrderTable.OrderTableId == tableNum(SalesLine)
+                        &&    workOrderTable.OrderRecId   == salesLine.RecId)
+                        ||   (workOrderTable.OrderTableId == tableNum(SalesTable)
+                        &&    workOrderTable.OrderTableId == salesTable.RecId));
+    
+                if (workOrderLine)
+                {
+                    plannedDate = (select minOf(plannedDate) from WPPWorkOrderLineResource
+                                   where WPPWorkOrderLineResource.WorkOrderLineRecId == workOrderLine.RecId).plannedDate;
+                    actualFromDateTime  = (select minOf(ActualToDateTime) from WPPWorkOrderLineResource
+                                           where WPPWorkOrderLineResource.WorkOrderLineRecId == workOrderLine.RecId).ActualToDateTime;
+    
+                    if (actualFromDateTime)
+                    {
+                        returnDateTime = systemDateTime < actualFromDateTime ? systemDateTime : actualFromDateTime;
+                    }
+                    else
+                    if (plannedDate)
+                    {
+                        returnDateTime = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()) < plannedDate ? systemDateTime : DateTimeUtil::newDateTime(plannedDate, DateTimeUtil::getTimeNow(DateTimeUtil::getUserPreferredTimeZone()), DateTimeUtil::getUserPreferredTimeZone());
+                    }
+                    else
+                    {
+                        returnDateTime = systemDateTime < workOrderLine.RequestedEndDateTime ? systemDateTime : workOrderLine.RequestedEndDateTime;
+                    }
+                }
+                else
+                {
+                    returnDateTime = DateTimeUtil::newDateTime(salesParmTable.Transdate,
+                                                               salesParmTable.BOBTransTime,
+                                                               DateTimeUtil::getUserPreferredTimeZone());
+                }
+    
+                select firstOnly RecId from objectLocationLog
+                where objectLocationLog.ObjectId == objectTable.ObjectId
+                &&    objectLocationLog.FromDateTime > returnDateTime;
+    
+                if (objectLocationLog
+                &&  systemDateTime > returnDateTime)
+                {
+                    returnDateTime = systemDateTime;
+                }
+                else
+                if (returnDateTime > systemDateTime)
+                {
+                    returnDateTime = systemDateTime;
+                }
+    
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId,
+                                                     WPPWorkOrderLine::childExists(workOrderLine.RecId) ? parameters.InTransitAddress : addressView.PostalAddress,
+                                                     returnDateTime,
+                                                     salesTable);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unDeliverSalesLine</Name>
+				<Source><![CDATA[
+    public static void unDeliverSalesLine(BOBObjectTable    _objectTable,
+                                          SalesParmLine     _salesParmLine,
+                                          Common            _origin)
+    {
+        SalesParmTable              salesParmTable;
+        RORRentalDateTimes          rentalDateTimes;
+        TransDateTime               dlvDateTime;
+        LogisticsPostalAddressRecId previousLocation;
+        ;
+    
+        // perform validation
+        if(!_objectTable)
+        {
+            throw error(Error::missingParameter(null));
+        }
+    
+        // calculate delivery date/time
+        if(_salesParmLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            salesParmTable = _salesParmLine.salesParmTable();
+            dlvDateTime    = DateTimeUtil::newDateTime(salesParmTable.Transdate,
+                                                       salesParmTable.BOBTransTime,
+                                                       DateTimeUtil::getUserPreferredTimeZone());
+        }
+        else
+        {
+            select firstOnly OnRentDateTime from rentalDateTimes
+            where rentalDateTimes.RefTableId == tableNum(SalesLine)
+            &&    rentalDateTimes.RefRecId   == _salesParmLine.SalesLineRecId;
+    
+            dlvDateTime = rentalDateTimes.OnRentDateTime;
+        }
+    
+        // select previous location -- use the log record that came just before
+        // the one that was created during the initial packing slip posting
+        previousLocation = BOBObjectManager::getPreviousLocation(_origin.TableId, _origin.RecId, _objectTable.ObjectId);
+    
+        ttsBegin;
+        if (_salesParmLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            // update business object
+            _objectTable.selectForUpdate(true);
+            _objectTable.OrganizationParty = 0;
+            _objectTable.Category         = BOBObjectCategory::Inventory;
+            _objectTable.update();
+        }
+    
+        BOBObjectLocationLog::changeLocation(_objectTable.ObjectId,
+                                             previousLocation,
+                                             dlvDateTime,
+                                             _origin);
+        BOBObjectDetailsLog::createNewLogEntry(_objectTable, BOBObjectChangeOrigin::SalesPackingSlipReversal);
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unlinkFixedAsset</Name>
+				<Source><![CDATA[
+    public static void unlinkFixedAsset(AssetId _assetId, BOBObjectCategory _objectCategory = BOBObjectCategory::Inventory, TransDate _transDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()))
+    {
+        BOBObjectTable          objectTable;
+        BOBObjectOwnershipLog   ownershipParm;
+        BOBRentalTrans          rentalTrans;
+        AssetTable              assetTable;
+        BOBObjectAssetLog       objectAssetLog;
+    
+        if(!_assetId)
+        {
+            throw error(error::missingParameter(null));
+        }
+    
+        select firstonly assetTable
+        where assetTable.AssetId == _assetId
+            join TableId from objectAssetLog
+            where objectAssetLog.AssetCompanyId == assetTable.DataAreaId
+            &&    objectAssetLog.AssetId == assetTable.AssetId
+            &&   (assetTable.BOBIsBulkParent || (objectAssetLog.ValidFrom <= _transDate && (!objectAssetLog.ValidTo || objectAssetLog.ValidTo >= _transDate)))
+                join objectTable
+                where objectTable.ObjectId == objectAssetLog.ObjectId
+                    outer join firstOnly RecId from rentalTrans
+                    where rentalTrans.ObjectId == objectTable.ObjectId
+                    &&    rentalTrans.TransType == BOBRentalTransType::Rental
+                    &&    rentalTrans.SubStatus < BOBRentalSubStatus::Returned
+                    &&    rentalTrans.AssetId == assetTable.AssetId;
+    
+        if(objectTable)
+        {
+            if(rentalTrans)
+            {
+                throw error(strFmt("@DNR5993", objectTable.InventSerialId, _assetId, objectTable.ObjectId));
+            }
+    
+            ttsBegin;
+    
+            // update business object
+            objectTable.selectForUpdate(true);
+            objectTable.OrganizationParty = 0;
+            objectTable.Category = _objectCategory;
+            objectTable.update();
+    
+            // create new records in related tables
+            BOBObjectAssetLog::deleteLink(objectTable.ObjectId, _transDate);
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::UnlinkFixedAsset);
+    
+            ownershipParm.ObjectId = objectTable.ObjectId;
+            ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+            ownershipParm.FinancialOwner = '';
+            ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+            ownershipParm.FirstOnRentDate = dateNull();
+            ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+            ownershipParm.LastOnRentDate = dateNull();
+            ownershipParm.createNewLogEntry();
+    
+            // refresh financial dimensions on the fixed asset
+            FINDimValueController::eventUpdate(assetTable);
+    
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unReceivePurchLine</Name>
+				<Source><![CDATA[
+    public static void unReceivePurchLine(BOBObjectTable    _objectTable,
+                                          RORTradeType      _tradeType,
+                                          TransDateTime     _postingDateTime,
+                                          Common            _origin)
+    {
+        BOBObjectTable              objectTable;
+        BOBObjectView               objectView;
+        BOBObjectDetailsLog         detailsLog;
+        BOBObjectOwnershipLog       ownerShipParm;
+        LogisticsPostalAddressRecId previousLocation;
+        ;
+    
+        select firstOnly objectTable
+        order by detailsLog.createdDateTime desc
+        where objectTable.ObjectId == _objectTable.ObjectId
+            join PhysicalOwner, IsAvailable from objectView
+            where objectView.ObjectId == objectTable.ObjectId
+                outer join Category, RecId from detailsLog
+                where detailsLog.ObjectId == objectView.ObjectId
+                &&   (detailsLog.Category == BOBObjectCategory::Pending || detailsLog.Category == BOBObjectCategory::External);
+    
+        if(!objectTable)
+        {
+            throw error(strFmt("@DNR5990", _objectTable.InventSerialId));
+        }
+        else
+        {
+            if(_tradeType == RORTradeType::SalesPurch)
+            {
+                if(!detailsLog)
+                {
+                    throw error(strFmt("@DNR5990", _objectTable.InventSerialId));
+                }
+    
+                if(objectTable.Category != BOBObjectCategory::Inventory
+                && objectTable.Category != BOBObjectCategory::Internal
+                && objectTable.Category != BOBObjectCategory::Rental)
+                {
+                    throw error(strFmt("@DNR6080",
+                                       objectTable.ObjectId,
+                                       objectTable.InventSerialId,
+                                       BOBObjectCategory::Inventory,
+                                       BOBObjectCategory::Internal,
+                                       BOBObjectCategory::Rental));
+                }
+                if(objectView.PhysicalOwner != curext())
+                {
+                    throw error(strFmt("@DNR6001", objectTable.ObjectId, objectTable.InventSerialId, "@DNR6081", curext()));
+                }
+    
+                // select previous location -- use the log record that came just before
+                // the one that was created during the initial receipt list posting
+                previousLocation = BOBObjectManager::getPreviousLocation(_origin.TableId, _origin.RecId, _objectTable.ObjectId);
+    
+                ttsBegin;
+                // update business object
+                objectTable.selectForUpdate(true);
+                objectTable.OrganizationParty = 0;
+                objectTable.Category = BOBObjectCategory::Pending;
+                objectTable.update();
+    
+                BOBObjectAssetLog::deleteLink(objectTable.ObjectId, DateTimeUtil::date(_postingDateTime));
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, previousLocation, _postingDateTime, _origin);
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::PurchPackingSlipReversal);
+    
+                ownershipParm.ObjectId            = _objectTable.ObjectId;
+                ownerShipParm.FirstOnRentDate     = dateNull();
+                ownerShipParm.FirstOnRentDateFlag = NoYes::Yes;
+                ownershipParm.FinancialOwnerFlag  = NoYes::Yes;
+                ownershipParm.FinancialOwner      = '';
+    
+                if (ownershipParm.ObjectId)
+                {
+                    ownershipParm.createNewLogEntry();
+                }
+    
+                ttsCommit;
+            }
+            else
+            if(_tradeType == RORTradeType::SubRental && objectTable.Category == BOBObjectCategory::SubRental)
+            {
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, 0, _postingDateTime, _origin);
+            }
+            else
+            {
+                throw error("@DNR6403");
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unRegisterConvJourTransA2I</Name>
+				<Source><![CDATA[
+    private static void unRegisterConvJourTransA2I(BOBObjectTable _objectTable, InventJournalTable _convJourTable)
+    {
+        BOBObjectTable          objectTableUpdate;
+        BOBObjectDetailsLog     detailsLogPrev;
+        BOBObjectOwnershipLog   ownershipLogPrev, ownershipLog2ndPrev, ownershipParm;
+        ;
+    
+        select firstOnly Category from detailsLogPrev
+        order by createdDateTime desc
+        where detailsLogPrev.ObjectId == _objectTable.ObjectId
+        &&   (detailsLogPrev.Category == BOBObjectCategory::Rental || detailsLogPrev.Category == BOBObjectCategory::Internal);
+    
+        // get the second last business object ownership log record (the last one was created during registration)
+        select firstOnly RecId from ownershipLogPrev
+        order by ownershipLogPrev.createdDateTime desc, ownershipLog2ndPrev.createdDateTime desc
+        where ownershipLogPrev.ObjectId == _objectTable.ObjectId
+            join FinancialOwner, LastOnRentDate from ownershipLog2ndPrev
+            where ownershipLog2ndPrev.ObjectId == ownershipLogPrev.ObjectId
+            &&    ownershipLog2ndPrev.RecId != ownershipLogPrev.RecId;
+    
+        if(detailsLogPrev && ownershipLog2ndPrev)
+        {
+            ttsBegin;
+    
+            objectTableUpdate = BOBObjectTable::findObjectId(_objectTable.ObjectId, true);
+            objectTableUpdate.Category = detailsLogPrev.Category; // restore previous category
+            objectTableUpdate.update();
+    
+            BOBObjectDetailsLog::createNewLogEntry(objectTableUpdate, BOBObjectChangeOrigin::InventJourPickRegister);
+            BOBObjectLocationLog::changeLocation(objectTableUpdate.ObjectId, 0, DateTimeUtil::getSystemDateTime(), _convJourTable);
+    
+            ownershipParm.ObjectId = objectTableUpdate.ObjectId;
+            ownershipParm.FinancialOwnerFlag = NoYes::Yes;
+            ownershipParm.FinancialOwner = ownershipLog2ndPrev.FinancialOwner;
+    
+            if(detailsLogPrev.Category == BOBObjectCategory::Rental
+            && !ownershipLog2ndPrev.LastOnRentDate
+            && AssetParameters::find().BOBAutoFillPostingDates)
+            {
+                ownershipParm.LastOnRentDateFlag = NoYes::Yes;
+                ownershipParm.LastOnRentDate = dateNull();
+            }
+    
+            ownershipParm.createNewLogEntry();
+    
+            ttsCommit;
+        }
+        else
+        {
+            throw error("@DNR6403");
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unRegisterProdTable</Name>
+				<Source><![CDATA[
+    public static void unRegisterProdTable(InventSerialId _inventSerialId, TmpInventTransWMS _tmpInventTransWMS)
+    {
+        BOBObjectTable              objectTable;
+        BOBObjectView               objectView;
+        BOBObjectDetailsLog         detailsLog;
+        BOBObjectOwnershipLog       ownershipParm;
+        BOBObjectCategory           prevCategory;
+    
+        InventTransOriginProdTable  inventTransOrigin;
+        ProdTable                   prodTable;
+    
+        select firstOnly TableId from inventTransOrigin
+        where inventTransOrigin.InventTransOrigin == _tmpInventTransWMS.InventTransOrigin
+            join firstOnly RecId from prodTable
+            where prodTable.dataAreaId == inventTransOrigin.ProdOrderDataAreaId
+            &&    prodTable.ProdId     == inventTransOrigin.ProdOrderId
+                join firstOnly objectTable
+                where objectTable.InventSerialId == _inventSerialId
+                    join firstonly PhysicalOwner from objectView
+                    where objectView.ObjectId == objectTable.ObjectId
+                        join firstOnly Category from detailsLog
+                        order by createdDateTime desc
+                        where detailsLog.ObjectId == objectView.ObjectId
+                        &&   (detailsLog.Category == BOBObjectCategory::Pending  ||
+                              detailsLog.Category == BOBObjectCategory::External ||
+                              detailsLog.Category == BOBObjectCategory::SubRental);
+    
+        if (objectTable)
+        {
+            if (objectView.PhysicalOwner != curext())
+            {
+                throw error(strFmt("@DNR6001", objectTable.ObjectId, objectTable.InventSerialId, "@DNR5989", curext()));
+            }
+    
+            if (objectTable.Category != BOBObjectCategory::Inventory
+            &&  objectTable.Category != BOBObjectCategory::Internal
+            &&  objectTable.Category != BOBObjectCategory::Rental)
+            {
+                throw error(strFmt("@DNR5988",
+                                    objectTable.ObjectId,
+                                    objectTable.InventSerialId,
+                                    BOBObjectCategory::Inventory,
+                                    BOBObjectCategory::Internal,
+                                    BOBObjectCategory::Rental));
+            }
+    
+            prevCategory = objectTable.Category;
+    
+            ttsBegin;
+            objectTable.selectForUpdate(true);
+            objectTable.OrganizationParty = 0;
+            objectTable.Category         = BOBObjectCategory::Inventory;
+            objectTable.update();
+    
+            BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::ProdRegistrationReversal);
+            BOBObjectLocationLog::changeLocation(objectTable.ObjectId, 0, DateTimeUtil::getSystemDateTime(), prodTable);
+    
+            if (prevCategory == BOBObjectCategory::Rental)
+            {
+                ownershipParm.ObjectId            = objectTable.ObjectId;
+                ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                ownershipParm.FirstOnRentDate     = dateNull();
+                ownershipParm.createNewLogEntry();
+            }
+            ttsCommit;
+        }
+        else
+        {
+            throw error(strFmt("@DNR5990", _inventSerialId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unRegisterPurchLine</Name>
+				<Source><![CDATA[
+    public static void unRegisterPurchLine(InventSerialId _inventSerialId, TmpInventTransWMS _tmpInventTransWMS)
+    {
+        BOBObjectTable              objectTable;
+        BOBObjectView               objectView;
+        BOBObjectDetailsLog         detailsLog;
+        BOBObjectOwnershipLog       ownershipParm;
+        BOBObjectCategory           prevCategory;
+    
+        InventTransOriginPurchLine  inventTransOrigin;
+        PurchLine                   purchLine;
+        ;
+    
+        select firstOnly TableId from inventTransOrigin
+        where inventTransOrigin.InventTransOrigin == _tmpInventTransWMS.InventTransOrigin
+            join firstOnly RORTradeType, RecId from purchLine
+            where purchLine.InventTransId == inventTransOrigin.PurchLineInventTransId
+            &&    purchLine.dataAreaId == inventTransOrigin.PurchLineDataAreaId
+                join firstOnly objectTable
+                where objectTable.InventSerialId == _inventSerialId
+                    join firstonly PhysicalOwner from objectView
+                    where objectView.ObjectId == objectTable.ObjectId
+                        join firstOnly Category from detailsLog
+                        order by createdDateTime desc
+                        where detailsLog.ObjectId == objectView.ObjectId
+                        &&   (detailsLog.Category == BOBObjectCategory::Pending  ||
+                              detailsLog.Category == BOBObjectCategory::External ||
+                              detailsLog.Category == BOBObjectCategory::SubRental);
+    
+        if(objectTable)
+        {
+            if(objectView.PhysicalOwner != curext())
+            {
+                throw error(strFmt("@DNR6001", objectTable.ObjectId, objectTable.InventSerialId, "@DNR5989", curext()));
+            }
+    
+            if(purchLine.RORTradeType == RORTradeType::SalesPurch)
+            {
+                if(objectTable.Category != BOBObjectCategory::Inventory
+                && objectTable.Category != BOBObjectCategory::Internal
+                && objectTable.Category != BOBObjectCategory::Rental)
+                {
+                    throw error(strFmt("@DNR5988",
+                                       objectTable.ObjectId,
+                                       objectTable.InventSerialId,
+                                       BOBObjectCategory::Inventory,
+                                       BOBObjectCategory::Internal,
+                                       BOBObjectCategory::Rental));
+                }
+    
+                prevCategory = objectTable.Category;
+    
+                ttsBegin;
+    
+                objectTable.selectForUpdate(true);
+                objectTable.Category = detailsLog.Category;
+                objectTable.update();
+    
+                BOBObjectDetailsLog::createNewLogEntry(objectTable, BOBObjectChangeOrigin::PurchRegistrationReversal);
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, 0, DateTimeUtil::getSystemDateTime(), purchLine);
+    
+                if(prevCategory == BOBObjectCategory::Rental)
+                {
+                    ownershipParm.ObjectId = objectTable.ObjectId;
+                    ownershipParm.FirstOnRentDateFlag = NoYes::Yes;
+                    ownershipParm.FirstOnRentDate = dateNull();
+                    ownershipParm.createNewLogEntry();
+                }
+    
+                ttsCommit;
+            }
+            else if(purchLine.RORTradeType == RORTradeType::SubRental && objectTable.Category == BOBObjectCategory::SubRental)
+            {
+                BOBObjectLocationLog::changeLocation(objectTable.ObjectId, 0, DateTimeUtil::getSystemDateTime(), purchLine);
+            }
+            else
+            {
+                throw error("@DNR6403");
+            }
+        }
+        else
+        {
+            throw error(strFmt("@DNR5990", _inventSerialId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateDelete</Name>
+				<Source><![CDATA[
+    public static boolean validateDelete(BOBObjectTable _objectTable, boolean _verbose = false)
+    {
+        BOBRentalTrans rentalTrans;
+        boolean ret = true;
+    
+        //Check if object has rental transactions
+        select firstOnly RecId, ObjectId from rentalTrans
+        where rentalTrans.ObjectId == _objectTable.ObjectId;
+
+        ret = ret && !rentalTrans.RecId;
+    
+        if (_verbose && rentalTrans.RecId)
+        {
+            checkFailed(strFmt("@DNR8636", rentaltrans.ObjectId));
+        }
+    
+        //Check if object has a related Asset
+        AssetId objectAssetId = _objectTable.assetId();
+
+        ret = ret && !objectAssetId;
+    
+        if (_verbose && objectAssetId)
+        {
+            checkFailed(strFmt("@DNR8637", objectAssetId));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPChangeObjectLocation_Sales</Name>
+				<Source><![CDATA[
+    private static void WPPChangeObjectLocation_Sales(WPPWorkOrderTaskTable _workOrderTaskTable,
+                                                      SalesLine             _salesLine,
+                                                      BOBObjectTable        _objectTable,
+                                                      WPPWorkOrderLine      _workOrderLine,
+                                                      WPPWorkOrderTable     _workOrderTable,
+                                                      TransDateTime         _transDateTime)
+    {
+        WPPParameters       parameters;
+        RORRentalDateTimes  rentalDateTimes;
+        TransDateTime       systemDateTime;
+    
+        switch (_workOrderTaskTable.TaskType)
+        {
+            case WPPTaskType::InternalLoad:
+                parameters = WPPParameters::find();
+    
+                // Create new entry in business object location log
+                if (parameters.InTransitAddress)
+                {
+                    BOBObjectLocationLog::changeLocation(_objectTable.ObjectId, parameters.InTransitAddress, _transDateTime, _workOrderLine);
+                }
+                break;
+    
+            case WPPTaskType::Load:
+                if (!_workOrderLine.workOrderTable().OrderRecId)
+                {
+                    parameters = WPPParameters::find();
+                    if (WPPWorkOrderLine::childExists(_workOrderLine.RecId))
+                    {
+                        // Create new entry in business object location log
+                        if (parameters.InTransitAddress)
+                        {
+                            BOBObjectLocationLog::changeLocation(_objectTable.ObjectId, parameters.InTransitAddress, _transDateTime, _workOrderLine);
+                        }
+                    }
+                    else
+                    {
+                        rentalDateTimes = _salesLine.RORRentalDateTimes();
+                        systemDateTime = DateTimeUtil::getSystemDateTime();
+    
+                        BOBObjectLocationLog::changeLocation(_objectTable.ObjectId,
+                                                                InventLocation::RORFindAddressByLocation(_salesLine.RORReturnInventLocationId).PostalAddress,
+                                                                rentalDateTimes.OffRentDateTime < systemDateTime ? rentalDateTimes.OffRentDateTime : systemDateTime,
+                                                                _workOrderLine);
+                    }
+                }
+                break;
+    
+            case WPPTaskType::InternalDelivery:
+                // Create new entry in business object location log
+                BOBObjectLocationLog::changeLocation(_objectTable.ObjectId,
+                                                     InventLocation::RORFindAddressByLocation(_workOrderTable.RORReturnInventLocationId).PostalAddress,
+                                                     _transDateTime,
+                                                     _workOrderLine);
+                break;
+    
+            default:
+                // Do nothing
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPChangeObjectLocation_Shipment</Name>
+				<Source><![CDATA[
+    private static void WPPChangeObjectLocation_Shipment(
+        WPPWorkOrderTaskTable   _workOrderTaskTable,
+        WMSOrderTrans           _orderTrans,
+        BOBObjectTable          _objectTable,
+        WPPWorkOrderLine        _workOrderLine,
+        TransDateTime           _transDateTime)
+    {
+        WPPParameters                       parameters;
+        WPPWorkOrderTable                   workOrderTable;
+    
+        if (_workOrderTaskTable.TaskType == WPPTaskType::Delivery)
+        {
+            workOrderTable = _workOrderLine.workOrderTable();
+            BOBObjectLocationLog::changeLocation(_objectTable.ObjectId, workOrderTable.LogisticsLocationRecId, _transDateTime, _workOrderLine);
+        }
+        else
+        if (_workOrderTaskTable.TaskType == WPPTaskType::InternalLoad
+        ||  _workOrderTaskTable.TaskType == WPPTaskType::Load)
+        {
+            parameters = WPPParameters::find();
+    
+            // Create new entry in business object location log
+            if (parameters.InTransitAddress)
+            {
+                BOBObjectLocationLog::changeLocation(_objectTable.ObjectId, parameters.InTransitAddress, _transDateTime, _workOrderLine);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPUpdateWorkOrderLineStatus</Name>
+				<Source><![CDATA[
+    public static void WPPUpdateWorkOrderLineStatus(WPPWorkOrderLine _workOrderLine)
+    {
+        WPPParameters                       parameters;
+        BOBObjectTable                      objectTable, objectTableChild;
+        WPPWorkOrderTable                   workOrderTable;
+        WPPWorkOrderTaskTable               workOrderTaskTable;
+        WPPWorkOrderLineResource            workOrderLineResource;
+        WPPWorkOrderLineStatusHistory       workOrderLineStatusHistory, workOrderLineStatusHistoryPrev;
+        InventDim                           inventDim;
+        TransDateTime                       transDateTime;
+        LogisticsLocationRecId              postalAddress;
+        boolean                             updateLocationLog;
+        LogisticsPostalAddressRecId         previousLocation;
+        SalesLine                           salesLine, salesLineChild;
+        SalesTable                          salesTable;
+        TransDateTime                       systemDateTime;
+    
+        if (!_workOrderLine.TaskId)
+        {
+            throw error(Error::missingRecord(funcName()));
+        }
+    
+        select firstOnly OrderTableId, OrderRecId, LogisticsLocationRecId, RORReturnInventLocationId from workOrderTable
+        where workOrderTable.WorkOrderId == _workOrderLine.WorkOrderId
+            join TaskId, TaskType from workOrderTaskTable
+            where workOrderTaskTable.TaskId == _workOrderLine.TaskId
+                outer join ObjectId from objectTable
+                where objectTable.RecId == workOrderTable.BOBObjectTableRecId;
+    
+        parameters = WPPParameters::find();
+    
+        // Determine location log transaction date/time
+        select firstOnly ActualToDateTime, PlannedDate from workOrderLineResource
+        order by ActualToDateTime desc, PlannedToDateTime desc
+        where workOrderLineResource.WorkOrderLineRecId == _workOrderLine.RecId;
+    
+        systemDateTime = DateTimeUtil::getSystemDateTime();
+        transDateTime  = workOrderLineResource.ActualToDateTime ? workOrderLineResource.ActualToDateTime :
+                         workOrderLineResource.PlannedDate ? DateTimeUtil::newDateTime(workOrderLineResource.PlannedDate, DateTimeUtil::getTimeNow(DateTimeUtil::getUserPreferredTimeZone()), DateTimeUtil::getUserPreferredTimeZone()) :
+                         _workOrderLine.RequestedStartDateTime;
+    
+        transDateTime = systemDateTime < transDateTime ? systemDateTime : transDateTime;
+    
+        // Set the new address from the parameters or from the work order
+        if (!workOrderTable.OrderTableId
+        &&  !workOrderTable.OrderRecId)
+        {
+            if (_workOrderLine.Status == WPPWorkOrderLineStatus::Completed)
+            {
+                switch (workOrderTaskTable.TaskType)
+                {
+                    case WPPTaskType::Load,
+                         WPPTaskType::InternalLoad:
+                        postalAddress = parameters.InTransitAddress;
+                        updateLocationLog = true;
+                        break;
+    
+                    case WPPTaskType::Delivery:
+                        postalAddress = workOrderTable.LogisticsLocationRecId;
+                        updateLocationLog = true;
+                        break;
+    
+                    case WPPTaskType::InternalDelivery:
+                        // determine location log transaction date/time
+                        postalAddress = InventLocation::RORFindAddressByLocation(workOrderTable.RORReturnInventLocationId).PostalAddress;
+                        updateLocationLog = true;
+                        break;
+    
+                    default:
+                        break;
+                }
+    
+                // Create new entry in business object location log
+                if (updateLocationLog)
+                {
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, postalAddress, transDateTime, _workOrderLine);
+                }
+            }
+            else
+            if (_workOrderLine.Status < WPPWorkOrderLineStatus::Completed
+            &&  workOrderTaskTable.TaskType > WPPTaskType::Transport)
+            {
+                select firstOnly TableId from workOrderLineStatusHistory
+                order by workOrderLineStatusHistory.createdDateTime desc, workOrderLineStatusHistoryPrev.createdDateTime desc
+                where workOrderLineStatusHistory.WorkOrderLineRecId == _workOrderLine.RecId
+                    join StatusNew from workOrderLineStatusHistoryPrev
+                    where workOrderLineStatusHistoryPrev.WorkOrderLineRecId == workOrderLineStatusHistory.WorkOrderLineRecId
+                    &&    workOrderLineStatusHistoryPrev.createdDateTime    <  workOrderLineStatusHistory.createdDateTime;
+    
+                if (workOrderLineStatusHistoryPrev.StatusNew >= WPPWorkOrderLineStatus::Completed)
+                {
+                    // Select the previous location -- use the log record that came just before
+                    // the one that was created during the completion of a work order line
+                    previousLocation = BOBObjectManager::getPreviousLocation(_workOrderLine.TableId, _workOrderLine.RecId, objectTable.ObjectId);
+    
+                    BOBObjectLocationLog::changeLocation(objectTable.ObjectId, previousLocation, systemDateTime, _workOrderLine);
+                }
+            }
+        }
+        else
+        if (workOrderTable.OrderTableId == tableNum(SalesLine)
+        &&  _workOrderLine.Status == WPPWorkOrderLineStatus::Completed)
+        {
+            salesLine = SalesLine::findRecId(workOrderTable.OrderRecId);
+    
+            BOBObjectManager::WPPChangeObjectLocation_Sales(workOrderTaskTable, salesLine, objectTable, _workOrderLine, workOrderTable, transDateTime);
+    
+            if (salesLine.RORKitComponentType == RORKitComponentType::Kit)
+            {
+                while select salesLineChild
+                where salesLineChild.RORParentLineRecId == salesLine.RecId
+                    join TableId from inventDim
+                    where inventDim.inventDimId == salesLineChild.InventDimId
+                    &&    inventDim.inventSerialId
+                        join ObjectId from objectTableChild
+                        where objectTableChild.InventSerialId == inventDim.inventSerialId
+                {
+                    BOBObjectManager::WPPChangeObjectLocation_Sales(workOrderTaskTable, salesLineChild, objectTableChild, _workOrderLine, workOrderTable, transDateTime);
+                }
+            }
+        }
+        else
+        if (workOrderTable.OrderTableId == tableNum(SalesTable)
+        &&  _workOrderLine.Status == WPPWorkOrderLineStatus::Completed)
+        {
+            while select objectTable
+            where objectTable.InventSerialId
+                join TableId from inventDim
+                where inventDim.inventSerialId == objectTable.InventSerialId
+                    join salesLine
+                    where salesLine.InventDimId == inventDim.inventDimId
+                        join TableId from salesTable
+                        where salesTable.SalesId == salesLine.SalesId
+                        &&    salesTable.RecId == workOrderTable.OrderRecId
+            {
+                BOBObjectManager::WPPChangeObjectLocation_Sales(workOrderTaskTable, salesLine, objectTable, _workOrderLine, workOrderTable, transDateTime);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

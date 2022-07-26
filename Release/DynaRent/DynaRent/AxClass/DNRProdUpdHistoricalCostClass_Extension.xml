@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRProdUpdHistoricalCostClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(ProdUpdHistoricalCost))]
+public final class DNRProdUpdHistoricalCostClass_Extension
+{
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>updateProduction</Name>
+				<Source><![CDATA[
+    void updateProduction(LedgerVoucher _ledgerVoucher)
+    {
+        next updateProduction(_ledgerVoucher);
+
+        this.BOBObjectSynchronize();
+        this.BOBUpdateObjects();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBObjectSynchronize</Name>
+				<Source><![CDATA[
+    // extension methods
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "prodTableLocal is updated by the BOBRentalTransManager class hierarchy")]
+    private void BOBObjectSynchronize()
+    {
+        InventTrans inventTrans;
+        ProdTable prodTableLocal;
+        InventTransOriginProdTable originProdTable;
+
+        while select forUpdate prodTableLocal
+        where prodTableLocal.RecId == prodTable.RecId
+            join TableId from originProdTable
+            where originProdTable.ProdOrderDataAreaId == prodTableLocal.dataAreaId
+            &&    originProdTable.ProdOrderId == prodTableLocal.ProdId
+                join  inventTrans
+                where inventTrans.InventTransOrigin == originProdTable.InventTransOrigin
+        {
+            InventMovement inventMovement = InventMovement::construct(prodTableLocal);
+            BOBRentalTransManager transManager = BOBRentalTransManager::newInventMovement(inventMovement, inventTrans, BOBRentalSubStatus::Invoiced);
+            transManager.parmDoUpdateBuffer(false);
+    
+            transManager.synchronize();
+                
+            transManager.updateSubStatus(inventTrans.Qty);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateObjects</Name>
+				<Source><![CDATA[
+    private void BOBUpdateObjects()
+    {
+        InventDim                   inventDim;
+        BOBObjectTable              objectTable;
+        TransDateTime               postingDateTime;
+        LogisticsPostalAddressRecId postalAddress;
+        InventTrans                 inventTrans;
+        InventTransOriginProdTable  transOriginProdTable;
+        WPPParameters               parameters = WPPParameters::find();
+        InventTable                 inventTable;
+        EcoResProduct               ecoResProduct;
+            
+        while select inventTrans
+            join transOriginProdTable
+            where transOriginProdTable.InventTransOrigin == inventTrans.InventTransOrigin
+            &&    transOriginProdTable.ProdOrderId == prodTableJour.ProdId
+            &&    transOriginProdTable.ProdOrderDataAreaId == prodTableJour.DataAreaId
+                join InventLocationId from inventDim
+                where inventDim.inventDimId == inventTrans.InventDimId
+                &&    inventDim.inventSerialId // serialized items only
+                    join TableId from inventTable
+                    where inventTable.ItemId == inventTrans.ItemId
+                        join TableId from ecoResProduct
+                        where ecoResProduct.RecId == inventTable.Product
+                        &&    ecoResProduct.BOBRentalTypeId
+                            join objectTable
+                            where objectTable.InventSerialId == inventDim.inventSerialId
+                            &&    objectTable.AcqProductNumber == ecoResProduct.DisplayProductNumber
+        {
+            InventLocation                      inventLocation;
+            LogisticsEntityPostalAddressView    addressView;
+
+            select firstOnly TableId from inventLocation
+            where inventLocation.InventLocationId == inventDim.InventLocationId
+                outer join PostalAddress from addressView
+                where addressView.IsPrimary
+                &&    addressView.EntityType == LogisticsLocationEntityType::Warehouse
+                &&    addressView.Entity == inventLocation.RecId;
+    
+            postalAddress = addressView.PostalAddress;
+
+            postingDateTime = DateTimeUtil::newDateTime(prodTableJour.TransDate,
+                                                        0,
+                                                        DateTimeUtil::getUserPreferredTimeZone());
+            if((prodTableJour.QtyGood + prodTableJour.QtyError) > 0)
+            {
+                BOBObjectManager::endProdTable(objectTable,
+                                                   prodTableJour.ProdId,
+                                                   postalAddress,
+                                                   postingDateTime,
+                                                   prodTable);
+            }            
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,649 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>SalesTableType_RORRental</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[SalesLineTypeFactoryAttribute(SalesType::RORRental, NoYes::No)]
+class SalesTableType_RORRental extends SalesTableType_Sales
+{
+    UnknownNoYes existUnconfirmedAmendments, existUnconfirmedChanges;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>canConfirmationBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean canConfirmationBeUpdated(DocumentStatus _documentStatus = DocumentStatus::Confirmation)
+    {
+        boolean ok;
+    
+        if (this.RORexistUnConfirmedAmendments() || this.RORexistUnConfirmedChanges())
+        {
+            ok = true;
+    
+            this.RORParmConfirmationRequired(true);
+    
+            if (_documentStatus == DocumentStatus::Confirmation)
+            {
+                ok = this.mayConfirmationBeUpdated();
+            }
+    
+            if (!salesTable.canCustomerBeUpdated(_documentStatus))
+            {
+                ok = false;
+            }
+    
+            if (ok)
+            {
+                ok = salesTable.checkCreditCard();
+            }
+        }
+        else
+        {
+            ok = super(_documentStatus);
+        }
+    
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCreateDropShipment</Name>
+				<Source><![CDATA[
+    boolean canCreateDropShipment()
+    {
+        return (select firstOnly RecId from PurchTable
+            where PurchTable.InterCompanyOriginalSalesId == salesTable.SalesId).RecId == 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canReturnNoteUpdated</Name>
+				<Source><![CDATA[
+    boolean canReturnNoteUpdated()
+    {
+        boolean                 ok;
+        SalesQuantity           salesQuantity;
+        TradeCommonIEnumerable  salesLineEnumerable;
+        TradeCommonIEnumerator  salesLineEnumerator;
+        SalesLine               salesLine;
+        container               con;
+    
+        ok                  = false;
+        salesLineEnumerable = this.parmDefaultSalesLineEnumerable();
+        salesLineEnumerator = salesLineEnumerable.getEnumerator();
+        salesQuantity       = SalesQuantity::construct(DocumentStatus::RORReturnNote);
+    
+        while (salesLineEnumerator.moveNext())
+        {
+            salesLine = salesLineEnumerator.current();
+            if (salesLine.RecId)
+            {
+                // We need to make sure that record has current values 
+                // otherwise during autorefresh after posting documents some buttons are not enabled/disabled correctly.
+                salesLine = salesLine::findRecId(salesLine.RecId);
+            }
+            
+            con       = salesQuantity.qtySales(salesLine);
+    
+            if (conPeek(con, 2))
+            {
+                ok = true;
+                break;
+            }
+        }
+    
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canSubStatusBeUpdatedContainer</Name>
+				<Source><![CDATA[
+    private container canSubStatusBeUpdatedContainer(container  _con, SalesTableCheckIfUpdateContract _checkIfUpdateContract)
+    {
+        container                   ret = _con;
+        Set                         setPotentialStatus = new Set(Types::Enum);
+        Set                         setAvailableStatus = new Set(Types::Enum);
+        BOBRentalType               rentalType;
+        BOBRentalTrans              rentalTrans;
+        InventTransOriginSalesLine  inventTransOriginSalesLine;
+        SalesLine                   salesLine;
+        RefRecId                    postingPolicyRecIdPrev;
+        SalesLineType               salesLineType;
+        boolean                     updateFromSales;
+    
+        // Enable sub status postings regardless if no unconfirmed amendments exist. Only check posting policy.
+        // Find all statuses that exist for this order
+        // where the order lines are not SalesPurch
+        while select PostingPolicyRecId from rentalType
+        group by PostingPolicyRecId
+            join SubStatus from rentalTrans
+            group by SubStatus
+            where rentalTrans.RentalTypeId == rentalType.RentalTypeId
+                join TableId from inventTransOriginSalesLine
+                where inventTransOriginSalesLine.InventTransOrigin == rentalTrans.InventTransOrigin
+                    join TableId from salesLine
+                    where salesLine.SalesId       == salesTable.SalesId
+                    &&    salesLine.dataAreaId    == inventTransOriginSalesLine.SalesLineDataAreaId
+                    &&    salesLine.InventTransId == inventTransOriginSalesLine.SalesLineInventTransId
+                    &&    salesLine.RORTradeType  != RORTradeType::SalesPurch
+        {
+            if (rentalType.PostingPolicyRecId != postingPolicyRecIdPrev)
+            {
+                if (postingPolicyRecIdPrev)
+                {
+                    // Union existing set with that from this status group
+                    setPotentialStatus = Set::union(setPotentialStatus, BOBPostingPolicyRule::getPossibleStatuses(InventDirection::Issue, setAvailableStatus, postingPolicyRecIdPrev));
+                }
+    
+                postingPolicyRecIdPrev = rentalType.PostingPolicyRecId;
+                setAvailableStatus = new Set(Types::Enum);
+            }
+    
+            setAvailableStatus.add(rentalTrans.SubStatus);
+        }
+    
+        if (postingPolicyRecIdPrev)
+        {
+            // Union existing set with that from this status group
+            setPotentialStatus = Set::union(setPotentialStatus, BOBPostingPolicyRule::getPossibleStatuses(InventDirection::Issue, setAvailableStatus, postingPolicyRecIdPrev));
+        }
+            
+        if (enum2int(salesTable.DocumentStatus) >= enum2int(DocumentStatus::Confirmation))
+        {
+    
+            if (_checkIfUpdateContract.parmCheckPickingList() && !setPotentialStatus.in(BOBRentalSubStatus::Picked) && this.canPickingListBeUpdated())
+            {
+                setPotentialStatus.add(BOBRentalSubStatus::Picked);
+            }
+    
+            if (_checkIfUpdateContract.parmCheckPackingSlip() && !setPotentialStatus.in(BOBRentalSubStatus::Delivered) && this.canPackingslipBeUpdated())
+            {
+                setPotentialStatus.add(BOBRentalSubStatus::Delivered);
+            }
+    
+            if (_checkIfUpdateContract.parmCheckInvoice() && !setPotentialStatus.in(BOBRentalSubStatus::Invoiced) && this.canInvoiceBeUpdated())
+            {
+                setPotentialStatus.add(BOBRentalSubStatus::Invoiced);
+            }
+        }
+    
+        // Position 1 to 9 is occupied by standard Ax flags
+        ret = conIns(ret, SalesTableType::posQuotation(),               setPotentialStatus.in(BOBRentalSubStatus::Quotation));  
+        ret = conIns(ret, SalesTableType::posConfirmation(),            setPotentialStatus.in(BOBRentalSubStatus::Confirmed));
+        ret = conIns(ret, SalesTableType::posPickingList(),             setPotentialStatus.in(BOBRentalSubStatus::Picked));
+        ret = conIns(ret, SalesTableType::posPackingSlip(),             setPotentialStatus.in(BOBRentalSubStatus::Delivered));
+        ret = conIns(ret, SalesTableType::posInvoice(),                 setPotentialStatus.in(BOBRentalSubStatus::Invoiced));
+        ret = conIns(ret, SalesTableType::posPickingListRegistration(), setPotentialStatus.in(BOBRentalSubStatus::Picked));
+        ret = conIns(ret, SalesTableType::posProjectPackingSlip(),      this.canProjectPackingSlipBeUpdated());
+        ret = conIns(ret, SalesTableType::posInvoice4Paym_RU(),         false);
+        ret = conIns(ret, SalesTableType::posFacture_RU(),              false);
+    
+        ret = conIns(ret, SalesTableType::RORPosPreperation(),      setPotentialStatus.in(BOBRentalSubStatus::Prepared));
+        ret = conIns(ret, SalesTableType::RORPosOutbound(),         setPotentialStatus.in(BOBRentalSubStatus::Outbound));
+        ret = conIns(ret, SalesTableType::RORPosBuild(),            setPotentialStatus.in(BOBRentalSubStatus::Built));
+        ret = conIns(ret, SalesTableType::RORPosEventStart(),       setPotentialStatus.in(BOBRentalSubStatus::EventStarted));
+        ret = conIns(ret, SalesTableType::RORPosEventEnd(),         setPotentialStatus.in(BOBRentalSubStatus::EventEnded));
+        ret = conIns(ret, SalesTableType::RORPosStrike(),           setPotentialStatus.in(BOBRentalSubStatus::Strike));
+        ret = conIns(ret, SalesTableType::RORPosInbound(),          setPotentialStatus.in(BOBRentalSubStatus::Inbound));
+        ret = conIns(ret, SalesTableType::RORPosReturned(),         setPotentialStatus.in(BOBRentalSubStatus::Returned));
+        ret = conIns(ret, SalesTableType::RORPosReturnInspection(), setPotentialStatus.in(BOBRentalSubStatus::ReturnInspected));
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkIfUpdate</Name>
+				<Source><![CDATA[
+    public container checkIfUpdate(container _packedCheckIfUpdateContract)
+    {
+        if (!SalesTableType_RORRental::DNRmustCheckEnableActionButtons())
+        {
+            return this.DNRcheckIfUpdateNoValidation(_packedCheckIfUpdateContract);
+        }
+        else
+        {
+            SalesTableCheckIfUpdateContract checkIfUpdateContract;
+            SalesTableCanBeUpdatedContract  canBeUpdatedContract;
+            container                       canSubStatusUpdatedContainer;
+            boolean                         localAllowSalesLineCaching = this.parmAllowSalesLineCaching();
+    
+            canBeUpdatedContract = SalesTableCanBeUpdatedContract::construct();
+    
+            if (_packedCheckIfUpdateContract == conNull())
+            {
+                checkIfUpdateContract = SalesTableCheckIfUpdateContract::newCheckAll();
+            }
+            else
+            {
+                checkIfUpdateContract = SalesTableCheckIfUpdateContract::create(_packedCheckIfUpdateContract);
+            }
+            this.parmAllowSalesLineCaching(true);
+    
+            canSubStatusUpdatedContainer = this.canSubStatusBeUpdatedContainer(canSubStatusUpdatedContainer, checkIfUpdateContract);
+    
+            if (checkIfUpdateContract.parmCheckConfirmation())
+            {
+                canBeUpdatedContract.parmCanConfirmationBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::posConfirmation()) || this.canConfirmationBeUpdated(DocumentStatus::Confirmation));
+            }
+            if (checkIfUpdateContract.parmCheckPickingList())
+            {
+                canBeUpdatedContract.parmCanPickingListBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::posPickingList()));
+            }
+            if (checkIfUpdateContract.parmCheckPickingListRegistration())
+            {
+                canBeUpdatedContract.parmCanPickingListBeRegistrated(conPeek(canSubStatusUpdatedContainer, SalesTableType::posPickingListRegistration()));
+            }
+            if (checkIfUpdateContract.parmCheckPackingSlip())
+            {
+                canBeUpdatedContract.parmCanPackingSlipBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::posPackingSlip()));
+            }
+            if (checkIfUpdateContract.parmCheckInvoice())
+            {
+                canBeUpdatedContract.parmCanInvoiceBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::posInvoice()));
+            }
+            if (checkIfUpdateContract.parmCheckProjectPackingSlip())
+            {
+                canBeUpdatedContract.parmCanProjectPackingSlipBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::posProjectPackingSlip()));
+            }
+
+            if (checkIfUpdateContract.RORparmCheckPreparation())
+            {
+                canBeUpdatedContract.RORparmCanPreparationBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosPreperation()));
+            }
+            if (checkIfUpdateContract.RORparmCheckOutbound())
+            {
+                canBeUpdatedContract.RORparmCanOutboundBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosOutbound()));
+            }
+            if (checkIfUpdateContract.RORparmCheckBuild())
+            {
+                canBeUpdatedContract.RORparmCanBuildBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosBuild()));
+            }
+            if (checkIfUpdateContract.RORparmCheckEventStart())
+            {
+                canBeUpdatedContract.RORparmCanEventStartBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosEventStart()));
+            }
+            if (checkIfUpdateContract.RORparmCheckEventEnd())
+            {
+                canBeUpdatedContract.RORparmCanEventEndBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosEventEnd()));
+            }
+            if (checkIfUpdateContract.RORparmCheckStrike())
+            {
+                canBeUpdatedContract.RORparmCanStrikeBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosStrike()));
+            }
+            if (checkIfUpdateContract.RORparmCheckInbound())
+            {
+                canBeUpdatedContract.RORparmCanInboundBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosInbound()));
+            }
+            if (checkIfUpdateContract.RORparmCheckReturnNote())
+            {
+                canBeUpdatedContract.RORparmCanReturnNoteBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosReturned()) && this.canReturnNoteUpdated());
+            }
+            if (checkIfUpdateContract.RORparmCheckInspection())
+            {
+                canBeUpdatedContract.RORparmCanInspectionBeUpdated(conPeek(canSubStatusUpdatedContainer, SalesTableType::RORPosReturnInspection()));
+            }
+
+            this.parmAllowSalesLineCaching(localAllowSalesLineCaching);
+
+            return canBeUpdatedContract.pack();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    public void  initValue()
+    {
+        super();
+    
+        salesTable.SalesType = SalesType::RORRental;
+        salesTable.RORIsModified = NoYes::Yes;
+        salesTable.InterCompanyDirectDelivery = NoYes::Yes;
+        salesTable.DeliveryDateControlType = SalesDeliveryDateControlType::None;
+        salesTable.WPPIsRentalProject = (salesTable.WPPIsRentalProject ? salesTable.WPPIsRentalProject : RORParameters::find().AutoCreateRentalProject);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mayConfirmationBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean mayConfirmationBeUpdated()
+    {
+        boolean             ret = true;
+        smmBusRelAccount    busRelAccount;
+    
+        if ((this.RORexistUnConfirmedAmendments() || this.RORexistUnConfirmedChanges()) && !this.FINparmIgnoreCustCreditCheck())
+        {
+            if (CustParameters::find().FINCustCreditCheckType == FINCustCreditCheckType::Balance)
+            {
+                busRelAccount = smmBusRelTable::findCust(salesTable.CustAccount).BusRelAccount;
+                ret = (FINCreditInsurancePeriodTable::exist(busRelAccount)
+                    || FINCreditLimitException::exist(busRelAccount, salesTable.SalesId, FINModule::RentalOrder));
+            }
+        }
+        else
+        {
+            ret = super();
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    public void modifiedField(FieldId _fieldId, TableId _tableId = tableNum(SalesTable), boolean _uiEnabled = true)
+    {
+        SalesTable salesTable_Orig = salesTable.orig();
+
+        super(_fieldId, _tableId);
+    
+        switch(_fieldId)
+        {
+            case fieldNum(SalesTable, RORVenueCode):
+                // Only copy the venue proj info when the order is not yet confirmed
+                salesTable.RORinitFromVenueTable(RORVenueTable::find(salesTable.RORVenueCode), !CustConfirmJour::exist(salesTable.SalesId) && !this.WPPParmProjId());
+                SalesTable::WPPupdateWorkOrder(salesTable);
+                ProjPriceGroupID projPriceGroupID = ProjTable::findPriceGroup(salesTable.ProjId);
+                if (projPriceGroupID)
+                {
+                    salesTable.PriceGroupId = projPriceGroupID;
+                }
+                break;
+    
+            case fieldNum(SalesTable, DNRCalendarId):
+                // Check dates against calendar.
+                // If this is the first time entering a calendar then auto-update dates when blocked
+                salesTable.RORRentalDateTimesHost::checkUpdateRentalDates(!salesTable.orig().DNRCalendarId);
+                break;
+    
+            case fieldNum(SalesTable, CustAccount):
+                salesTable.RORContactPersonIdOperator = '';
+                break;
+    
+            case fieldNum(SalesTable, ProjId):
+                if (salesTable_Orig.ProjId
+                &&  salesTable_Orig.ProjId != salesTable.ProjId)
+                {
+                    if (Box::yesNo("@DNR6563", DialogButton::Yes))
+                    {
+                        WPPWorkOrderLine::deleteLinkedRecords(salesTable_Orig.ProjId);
+                    }
+                    else
+                    {
+                        salesTable.ProjId = salesTable_Orig.ProjId;
+                    }
+                }
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(SalesTable _salesTable)
+    {
+        super(_salesTable);
+    
+        existUnconfirmedAmendments = UnknownNoYes::Unknown;
+        existUnconfirmedChanges = UnknownNoYes::Unknown;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORexistUnConfirmedAmendments</Name>
+				<Source><![CDATA[
+    public boolean RORexistUnConfirmedAmendments()
+    {
+        ROROrderAmendmentLog    orderAmendmentLog;
+        SalesLine               salesLine;
+        ;
+    
+        if(existUnconfirmedAmendments == UnknownNoYes::Unknown)
+        {
+            // First try to find an amendment log that is linked to the SalesTable
+            // and is not confirmed yet
+            select firstOnly RecId from orderAmendmentLog
+            where !orderAmendmentLog.ConfirmId
+            &&     orderAmendmentLog.RefTableId == salesTable.TableId
+            &&     orderAmendmentLog.RefRecId   == salesTable.RecId;
+    
+            if (!orderAmendmentLog.RecId)
+            {
+                // If no record is found then try to find an amendment log that is linked to SalesLine
+                select firstOnly RecId from orderAmendmentLog
+                where !orderAmendmentLog.ConfirmId
+                &&     orderAmendmentLog.RefTableId == tableNum(SalesLine)
+                    exists join salesLine
+                    where salesLine.RecId   == orderAmendmentLog.RefRecId
+                    &&    salesLine.SalesId == salesTable.SalesId;
+            }
+    
+            existUnconfirmedAmendments = (orderAmendmentLog.RecId == 0 ? UnknownNoYes::No : UnknownNoYes::Yes);
+        }
+    
+        return (existUnconfirmedAmendments == UnknownNoYes::Yes);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORmayReturnNoteBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean RORmayReturnNoteBeUpdated()
+    {
+        boolean ok = true;
+    
+        if (ok && salesCycle)
+        {
+            salesPurchCycle = SalesPurchCycle::findBySalesPurchaseCycle(salesPurchCycleAction::RORReturnNote, SalesPurchCycleModuleParameter::Cust, salesTable.CustAccount);
+    
+            if (salesPurchCycle)
+            {
+                if (!salesPurchCycle.Active)
+                {
+                    ok = false;
+                }
+            }
+            else
+            if (!SalesPurchCycle::findBySalesPurchaseCycle(salesPurchCycleAction::RORReturnNote, SalesPurchCycleModuleParameter::CustParameter, '').Active)
+            {
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateField</Name>
+				<Source><![CDATA[
+    public boolean validateField(FieldId _fieldId, TableId _tableId = tableNum(SalesTable))
+    {
+        boolean     ret;
+        SalesTable  salesTable_Orig = salesTable.orig();
+    
+        ret = super(_fieldId, _tableId);
+    
+        if (ret)
+        {
+            switch (_fieldId)
+            {
+                case fieldNum(SalesTable, WPPIsRentalProject):
+                    if (!salesTable.WPPIsRentalProject && salesTable.ProjId)
+                    {
+                        if (Box::yesNo("@DNR6711", DialogButton::Yes))
+                        {
+                            salesTable.ProjId = '';
+                        }
+                        else
+                        {
+                            salesTable.WPPIsRentalProject = salesTable_Orig.WPPIsRentalProject;
+                            ret = false;
+                        }
+                    }
+                    break;
+    
+                case fieldNum(SalesTable, DNRCalendarId):
+                    if (salesTable.DNRCalendarId && DNRCalendarTable::isSpecialCalendar(salesTable.DNRCalendarId))
+                    {
+                        ret = checkFailed(strFmt("@DNR8692", salesTable.DNRCalendarId));
+                      }
+                    break;
+    
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    static SalesTableType  construct(SalesTable salesTable)
+    {
+        return new SalesTableType_RORRental(salesTable);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>purchaseType</Name>
+				<Source><![CDATA[
+    public PurchaseType purchaseType()
+    {
+        return PurchaseType::RORSubRental;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmExistUnconfirmedChanges</Name>
+				<Source><![CDATA[
+    public UnknownNoYes DNRParmExistUnconfirmedChanges(UnknownNoYes _existUnconfirmedChanges = existUnconfirmedChanges)
+    {
+        existUnconfirmedChanges = _existUnconfirmedChanges;
+        return existUnconfirmedChanges;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRmustCheckEnableActionButtons</Name>
+				<Source><![CDATA[
+    public static boolean DNRmustCheckEnableActionButtons()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRcheckIfUpdateNoValidation</Name>
+				<Source><![CDATA[
+    public container DNRcheckIfUpdateNoValidation(container _packedCheckIfUpdateContract)
+    {
+        SalesTableCheckIfUpdateContract checkIfUpdateContract;
+        SalesTableCanBeUpdatedContract  canBeUpdatedContract;
+        container                       canSubStatusUpdatedContainer;
+    
+        canBeUpdatedContract = SalesTableCanBeUpdatedContract::construct();
+    
+        if (_packedCheckIfUpdateContract == conNull())
+        {
+            checkIfUpdateContract = SalesTableCheckIfUpdateContract::newCheckAll();
+        }
+        else
+        {
+            checkIfUpdateContract = SalesTableCheckIfUpdateContract::create(_packedCheckIfUpdateContract);
+        }            
+    
+        if (checkIfUpdateContract.parmCheckConfirmation())
+        {
+            canBeUpdatedContract.parmCanConfirmationBeUpdated(true);
+        }
+        if (checkIfUpdateContract.parmCheckPickingList())
+        {
+            canBeUpdatedContract.parmCanPickingListBeUpdated(true);
+        }
+        if (checkIfUpdateContract.parmCheckPickingListRegistration())
+        {
+            canBeUpdatedContract.parmCanPickingListBeRegistrated(true);
+        }
+        if (checkIfUpdateContract.parmCheckPackingSlip())
+        {
+            canBeUpdatedContract.parmCanPackingSlipBeUpdated(true);
+        }
+        if (checkIfUpdateContract.parmCheckInvoice())
+        {
+            canBeUpdatedContract.parmCanInvoiceBeUpdated(true);
+        }
+        if (checkIfUpdateContract.parmCheckProjectPackingSlip())
+        {
+            canBeUpdatedContract.parmCanProjectPackingSlipBeUpdated(true);
+        }
+    
+        if (checkIfUpdateContract.RORparmCheckPreparation())
+        {
+            canBeUpdatedContract.RORparmCanPreparationBeUpdated(true);
+        }
+        if (checkIfUpdateContract.RORparmCheckOutbound())
+        {
+            canBeUpdatedContract.RORparmCanOutboundBeUpdated(true);
+        }
+        if (checkIfUpdateContract.RORparmCheckBuild())
+        {
+            canBeUpdatedContract.RORparmCanBuildBeUpdated(true);
+        }
+        if (checkIfUpdateContract.RORparmCheckEventStart())
+        {
+            canBeUpdatedContract.RORparmCanEventStartBeUpdated(true);
+        }
+        if (checkIfUpdateContract.RORparmCheckEventEnd())
+        {
+            canBeUpdatedContract.RORparmCanEventEndBeUpdated(true);
+        }
+        if (checkIfUpdateContract.RORparmCheckStrike())
+        {
+            canBeUpdatedContract.RORparmCanStrikeBeUpdated(true);
+        }
+        if (checkIfUpdateContract.RORparmCheckInbound())
+        {
+            canBeUpdatedContract.RORparmCanInboundBeUpdated(true);
+        }
+        if (checkIfUpdateContract.RORparmCheckReturnNote())
+        {
+            canBeUpdatedContract.RORparmCanReturnNoteBeUpdated(true);
+        }
+        if (checkIfUpdateContract.RORparmCheckInspection())
+        {
+            canBeUpdatedContract.RORparmCanInspectionBeUpdated(true);
+        }
+    
+        return canBeUpdatedContract.pack();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

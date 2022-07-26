@@ -1,0 +1,479 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRDateEffectivenessFormController</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+///    Controls the visual appearance and behavior of a form data source and the associated controls.
+/// </summary>
+class DNRDateEffectivenessFormController
+{
+    FormDataSource              formDataSource;
+    FormStaticTextControl       textControl;
+    FormControl                 viewAllButton;
+    FormControl                 viewCurrentButton;
+    FormControl                 deleteButton;
+    FormControl                 editButton;
+
+    DateEffectivenessViewState  viewState;
+
+    fieldId                     validFromFieldId;
+    fieldId                     validToFieldId;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>active</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Determines the state of the data source and control when a record selection changes.
+    /// </summary>
+    /// <remarks>
+    ///    This method should be called from the active method of the main data source.
+    /// </remarks>
+    public void active()
+    {
+        Common      currentRecord   = formDataSource.cursor();
+    
+        if (currentRecord.RecId && currentRecord.(validToFieldId) < DateTimeUtil::getSystemDateTime())
+        {
+            formDataSource.allowEdit(false);
+            deleteButton.enabled(false);
+            editButton.enabled(false);
+        }
+        else
+        {
+            formDataSource.allowEdit(true);
+            editButton.enabled(true);
+    
+            // Only enable the delete button if the active record is actually allowed to be deleted
+            deleteButton.enabled(this.allowDelete());
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>allowDelete</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Determines whether the current selected record may be deleted.
+    /// </summary>
+    /// <returns>
+    ///    true if the current selected record is allowed to be deleted; otherwise, false.
+    /// </returns>
+    protected boolean allowDelete()
+    {
+        Common      currentRecord   = formDataSource.cursor();
+        boolean     ret             = true;
+        utcDateTime todaysDateTime  = DateTimeUtil::getSystemDateTime();
+    
+        if (currentRecord.RecId)
+        {
+            // Prevent deletion if ValidTo is in the past (applies to both view modes)
+            // or if viewed in All mode and the ValidFrom is in the past
+            if (currentRecord.(validToFieldId) < todaysDateTime
+                || (viewState == DateEffectivenessViewState::All && currentRecord.(validFromFieldId) < todaysDateTime))
+            {
+                ret = false;
+            }
+        }
+    
+        return ret;
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>delete</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Deletes the currently selected record.
+    /// </summary>
+    /// <remarks>
+    ///    Depending on of the state the currently selected record, it is either expired or physically deleted.
+    /// </remarks>
+    public void delete()
+    {
+        Common      currentRecord = formDataSource.cursor();
+        Common      externalRecord;
+        DictTable   dictTable;
+        int         pos;
+    
+        if (!this.validateDelete())
+        {
+            return;
+        }
+    
+        if (viewState == DateEffectivenessViewState::All
+            || !currentRecord.RecId
+            || currentRecord.(validFromFieldId) >= DateTimeUtil::getSystemDateTime())
+        {
+            // Just perform the delete
+            currentRecord.delete();
+        }
+        else
+        {
+            // Update the ValidTo field to yesterday's date
+            // This must be done in an other buffer since in ValidTo field cannot be changed on a buffer that is not in Revision mode
+    
+            dictTable = new DictTable(currentRecord.TableId);
+            externalRecord = dictTable.makeRecord();
+    
+            ttsbegin;
+    
+            select forupdate externalRecord
+                where externalRecord.RecId == currentRecord.RecId;
+    
+            externalRecord.validTimeStateUpdateMode(ValidTimeStateUpdate::Correction);
+            externalRecord.(validToFieldId) = DateTimeUtil::addSeconds(DateTimeUtil::getSystemDateTime(), -1);
+            externalRecord.update();
+    
+            ttscommit;
+        }
+    
+        // Perform a refresh where the posistion is kept
+        pos = formDataSource.getPosition();
+        formDataSource.executeQuery();
+        formDataSource.setPosition(pos);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>editRecord</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Creates a duplicate of the record and places the cursor on the new record.
+    /// </summary>
+    public void editRecord()
+    {
+        Common      origRecord;
+        Common      newRecord;
+        DictTable   dictTable;
+    
+        if (viewState == DateEffectivenessViewState::All
+            && formDataSource.cursor().RecId
+            && formDataSource.cursor().(validFromFieldId) < DateTimeUtil::getSystemDateTime())
+        {
+            // Save original data
+            dictTable = new DictTable(formDataSource.table());
+            origRecord = dictTable.makeRecord();
+            origRecord.data(formDataSource.cursor());
+    
+            // Create new record
+            formDataSource.create();
+            newRecord = formDataSource.cursor();
+    
+            // Copy data from original record to the new record and adjust ValidFrom
+            buf2Buf(origRecord, newRecord);
+            newRecord.(validFromFieldId) = DateTimeUtil::getSystemDateTime();
+    
+            // Make sure any reference fields are visually updated
+            formDataSource.rereadReferenceDataSources();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Initializes the interval variables.
+    /// </summary>
+    protected void init()
+    {
+        DictTable   dictTable   = new DictTable(formDataSource.table());
+    
+        validFromFieldId        = dictTable.getValidTimeStateValidFromFieldId();
+        validToFieldId          = dictTable.getValidTimeStateValidToFieldId();
+    
+        deleteButton.enabled(false);
+        editButton.enabled(false);
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new()
+    {
+        viewState = DateEffectivenessViewState::Current;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDeleteButton</Name>
+				<Source><![CDATA[
+    public FormControl parmDeleteButton(FormControl _deleteButton = deleteButton)
+    {
+        deleteButton = _deleteButton;
+        return deleteButton;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmEditButton</Name>
+				<Source><![CDATA[
+    public FormControl parmEditButton(FormControl _editButton = editButton)
+    {
+        editButton = _editButton;
+        return editButton;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmFormDataSource</Name>
+				<Source><![CDATA[
+    public FormDataSource parmFormDataSource(FormDataSource _formDataSource = formDataSource)
+    {
+        formDataSource = _formDataSource;
+        return formDataSource;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTextControl</Name>
+				<Source><![CDATA[
+    public FormStaticTextControl parmTextControl(FormStaticTextControl _textControl = textControl)
+    {
+        textControl = _textControl;
+        return textControl;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmViewAllButton</Name>
+				<Source><![CDATA[
+    public FormControl parmViewAllButton(FormControl _viewAllButton = viewAllButton)
+    {
+        viewAllButton = _viewAllButton;
+        return viewAllButton;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmViewCurrentButton</Name>
+				<Source><![CDATA[
+    public FormControl parmViewCurrentButton(FormControl _viewCurrentButton = viewCurrentButton)
+    {
+        viewCurrentButton = _viewCurrentButton;
+        return viewCurrentButton;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setViewState</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Changes the behavior and appearance to match a view state.
+    /// </summary>
+    /// <param name="_viewState">
+    ///    The view state to which to change.
+    /// </param>
+    public void setViewState(DateEffectivenessViewState _viewState)
+    {
+        DictTable   dictTable = new DictTable(formDataSource.table());
+        boolean     validFromEnabled;
+    
+        viewState = _viewState;
+        formDataSource.query().resetValidTimeStateQueryType();
+    
+        switch(viewState)
+        {
+            case DateEffectivenessViewState::All:
+                validFromEnabled = true;
+    
+                formDataSource.validTimeStateAutoQuery(ValidTimeStateAutoQuery::DateRange);
+                formDataSource.query().validTimeStateDateTimeRange(DateTimeUtil::minValue(), DateTimeUtil::maxValue());
+                formDataSource.validTimeStateUpdate(ValidTimeStateUpdate::Correction);
+    
+                viewAllButton.enabled(false);
+                viewCurrentButton.enabled(true);
+    
+                textControl.text("@SYS313257");
+    
+                break;
+    
+            case DateEffectivenessViewState::Current:
+                validFromEnabled = false;
+    
+                formDataSource.validTimeStateAutoQuery(ValidTimeStateAutoQuery::AsOfDate);
+                formDataSource.validTimeStateUpdate(ValidTimeStateUpdate::CreateNewTimePeriod);
+    
+                viewAllButton.enabled(true);
+                viewCurrentButton.enabled(false);
+    
+                textControl.text("@SYS313238");
+    
+                break;
+        }
+    
+        // Change visibility of the ValidFrom column
+        formDataSource.object(dictTable.getValidTimeStateValidFromFieldId()).visible(validFromEnabled);
+    
+        // Make the data source refresh
+        formDataSource.executeQuery();
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateDelete</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Validates whether the current selected record may be deleted.
+    /// </summary>
+    /// <returns>
+    ///    true if the record may be deleted; otherwise, false.
+    /// </returns>
+    /// <remarks>
+    ///    This method should be called by the <c>validateDelete</c> method of the form data source.
+    /// </remarks>
+    public boolean validateDelete()
+    {
+        boolean ret = this.allowDelete();
+    
+        if (!ret)
+        {
+            ret = checkFailed("@SYS78374");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateFieldValue</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Validates if the value of a field is valid based on the time state fields.
+    /// </summary>
+    /// <param name="_fieldId">
+    ///    The ID of the field to validate.
+    /// </param>
+    /// <returns>
+    ///    true if the value is valid; otherwise, false.
+    /// </returns>
+    /// <remarks>
+    ///    This method should be used as an addition to the checks performed by the server. This method
+    ///    applies to the tables where the <c>Revision</c> setting is too restrictive and where the
+    ///    <c>Correction</c> setting is too loose.
+    /// </remarks>
+    public boolean validateFieldValue(fieldId _fieldId)
+    {
+        boolean     ret             = true;
+        Common      currentRecord   = formDataSource.cursor();
+        Common      orig;
+        utcDateTime todaysDate;
+    
+        if (viewState == DateEffectivenessViewState::Current)
+        {
+            return true;
+        }
+    
+        orig                = currentRecord.orig();
+        todaysDate          = DateTimeUtil::getSystemDateTime();
+    
+        if (currentRecord.RecId && orig.(validFromFieldId) < todaysDate && _fieldId != validToFieldId )
+        {
+            ret = checkFailed(strfmt("@SYS183755", fieldId2pname(currentRecord.TableId, validToFieldId)));
+        }
+    
+        if (ret && _fieldId == validToFieldId && currentRecord.(validToFieldId) < (DateTimeUtil::addDays(todaysDate, -1)))
+        {
+            ret = checkFailed(strfmt("@SYS183756", fieldId2pname(currentRecord.TableId, validToFieldId)));
+        }
+    
+        if (ret && _fieldId == validFromFieldId && currentRecord.(validFromFieldId) < todaysDate)
+        {
+            ret = checkFailed(strfmt("@SYS183759", fieldId2pname(currentRecord.TableId, validFromFieldId)));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>viewState</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Gets the current view state.
+    /// </summary>
+    /// <returns>
+    ///    The current view state.
+    /// </returns>
+    public DateEffectivenessViewState viewState()
+    {
+        return viewState;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newFormControls</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Creates a new instance of the <c>DateEffectivenessFormController</c> class.
+    /// </summary>
+    /// <param name="_formDataSource">
+    ///    The form data source with date effectiveness enabled.
+    /// </param>
+    /// <param name="_viewStateTextControl">
+    ///    A text control to be used to display help messages.
+    /// </param>
+    /// <param name="_viewAllButton">
+    ///    A button for setting the view state to all.
+    /// </param>
+    /// <param name="_viewCurrentButton">
+    ///    A button for setting the view state to current.
+    /// </param>
+    /// <param name="_deleteButton">
+    ///    A button for deleting the currently selected record.
+    /// </param>
+    /// <param name="_editButton">
+    ///    A button for editing the currently selected record.
+    /// </param>
+    /// <returns>
+    ///    A new instance of the <c>DateEffectivenessFormController</c> class.
+    /// </returns>
+    public static DNRDateEffectivenessFormController newFormControls(FormDataSource        _formDataSource,
+                                                                     FormStaticTextControl _viewStateTextControl,
+                                                                     FormButtonControl     _viewAllButton,
+                                                                     FormButtonControl     _viewCurrentButton,
+                                                                     FormControl           _deleteButton,
+                                                                     FormControl           _editButton)
+    {
+        DNRDateEffectivenessFormController controller = new DNRDateEffectivenessFormController();
+    
+        controller.parmFormDataSource(_formDataSource);
+        controller.parmTextControl(_viewStateTextControl);
+        controller.parmViewAllButton(_viewAllButton);
+        controller.parmViewCurrentButton(_viewCurrentButton);
+        controller.parmDeleteButton(_deleteButton);
+        controller.parmEditButton(_editButton);
+    
+        controller.init();
+    
+        return controller;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

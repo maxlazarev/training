@@ -1,0 +1,247 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINSalesInvoiceProformaJournalCancel</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINSalesInvoiceProformaJournalCancel
+{
+    FINCustInvoiceJourProForma  custInvoiceJourProForma;
+    FINCustInvoiceTransProForma custInvoiceTransProForma;
+    SalesLine salesLine;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>parmCustInvoiceJourProForma</Name>
+				<Source><![CDATA[
+    public FINCustInvoiceJourProForma parmCustInvoiceJourProForma(FINCustInvoiceJourProForma _custInvoiceJourProForma = custInvoiceJourProForma)
+    {
+        if (!prmIsDefault(_custInvoiceJourProForma))
+        {
+            custInvoiceJourProForma = _custInvoiceJourProForma;
+        }
+
+        return custInvoiceJourProForma;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cancelMarkupTransAssosiationCustJour</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void cancelMarkupTransAssosiationCustJour()
+    {
+        MarkupTrans markupTrans;
+        SalesTable  salesTable;
+
+        select firstonly TableId from salesTable where salesTable.SalesId == salesLine.SalesId;
+
+        update_recordset markupTrans
+        setting TransTableId = markupTrans.OrigTableId, TransRecId = markupTrans.OrigRecId,
+        OrigTableId = 0, OrigRecId = 0
+        where markupTrans.TransRecId   == custInvoiceJourProForma.RecId
+        &&    markupTrans.TransTableId == custInvoiceJourProForma.TableId
+        &&    markupTrans.OrigTableId  == salesTable.TableId
+        &&    markupTrans.OrigRecId    == salesTable.RecId
+        &&    markupTrans.Keep         == NoYes::No
+        &&    markupTrans.IsDeleted    == NoYes::No;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cancelMarkupTransAssosiationCustTrans</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void cancelMarkupTransAssosiationCustTrans()
+    {
+        MarkupTrans MarkupTrans;
+
+        update_recordset markupTrans
+        setting TransTableId = markupTrans.OrigTableId, TransRecId = markupTrans.OrigRecId,
+        OrigTableId = 0, OrigRecId = 0
+        where markupTrans.TransRecId   == custInvoiceTransProForma.RecId
+        &&    markupTrans.TransTableId == custInvoiceTransProForma.TableId
+        &&    markupTrans.OrigTableId  == salesLine.TableId
+        &&    markupTrans.OrigRecId    == salesLine.RecId
+        &&    markupTrans.Keep         == NoYes::No
+        &&    markupTrans.IsDeleted    == NoYes::No;
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        //    After canceling proposal (invoice periods have canceled invoiceId):
+        //    1. Update; IsProformaActive to No
+        //    FINCustInvoiceJourProForma
+        //    2. Don't do anything
+        //    FINCustInvoiceTransProForma
+        //    FINCustInvoiceTransProFormaInvoiceTrans
+        //    FINJournalizedInvoicePeriod
+        //    FINJournalizedInvoicePeriodLink
+        //    3. Update; Active to No
+        //    FINOrderLineComponentInvoiceLog
+
+        container conSalesId;
+
+        if (this.validateCancelProforma())
+        {
+            ttsbegin;
+            this.setCustInvoiceProformaToCancel();
+
+            while select custInvoiceTransProForma
+            where custInvoiceTransProForma.InvoiceId == custInvoiceJourProForma.InvoiceId
+            && custInvoiceTransProForma.InvoiceDate == custInvoiceJourProForma.InvoiceDate
+            && custInvoiceTransProForma.NumberSequenceGroup == custInvoiceJourProForma.NumberSequenceGroup
+            && custInvoiceTransProForma.SalesId == custInvoiceJourProForma.SalesId
+                join salesLine
+                where salesLine.InventTransId == custInvoiceTransProForma.InventTransId
+            {
+                if (!conFind(conSalesId, salesLine.SalesId))
+                {
+                    this.cancelMarkupTransAssosiationCustJour();
+                    conSalesId += salesLine.SalesId;
+                }
+
+                this.cancelLine();
+            }
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>cancelLine</Name>
+				<Source><![CDATA[
+    private void cancelLine()
+    {
+        this.cancelMarkupTransAssosiationCustTrans();
+        this.updateInvoicePeriod();
+        this.updateOrderLineConmonentLog();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateCancelProforma</Name>
+				<Source><![CDATA[
+    private boolean validateCancelProforma()
+    {
+        boolean ret;
+
+        if (custInvoiceJourProForma)
+        {
+            ret = true;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCustInvoiceProformaToCancel</Name>
+				<Source><![CDATA[
+    private void setCustInvoiceProformaToCancel()
+    {
+        custInvoiceJourProForma.selectForUpdate(true);
+        custInvoiceJourProForma.IsProFormaInvoiceActive = NoYes::No;
+        custInvoiceJourProForma.update();
+
+        this.updateStatus();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateStatus</Name>
+				<Source><![CDATA[
+    protected void updateStatus()
+    {
+        FINCustInvoiceJourProformaStatusManager::changeStatus(custInvoiceJourProForma.RecId, FINCustInvoiceJourProformaStatus::Canceled);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInvoicePeriod</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void updateInvoicePeriod()
+    {
+        FINJournalizedInvoicePeriod journalizedInvoicePeriod;
+        FINInvoicePeriodQtyFinancial invoicePeriodQtyFinancial;
+
+        // Clear invoiceId on periods linked to salesLine.
+        update_recordset invoicePeriodQtyFinancial
+            setting InvoiceId = '',  QtyInvoiced = 0, NumOfCalendarPeriods = 0, NumOfChargeablePeriods = 0, LineAmount = 0, DiscAmount = 0
+                exists join journalizedInvoicePeriod
+                where journalizedInvoicePeriod.SourceRefRecId == invoicePeriodQtyFinancial.RecId
+                &&    journalizedInvoicePeriod.RefTableId == custInvoiceTransProForma.TableId
+                &&    journalizedInvoicePeriod.RefRecId == custInvoiceTransProForma.RecId
+                &&    journalizedInvoicePeriod.InvPeriodQtyPhysicalRecId == invoicePeriodQtyFinancial.InvPeriodQtyPhysicalRecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateOrderLineConmonentLog</Name>
+				<Source><![CDATA[
+    private void updateOrderLineConmonentLog()
+    {
+        if (FINOrderLineComponentInvoiceLog::isDeliveryReturnInvoiceIdCharged(salesLine, FINOrderLineComponent::DeliveryTransport, custInvoiceJourProForma.InvoiceId))
+        {
+            FINOrderLineComponentInvoiceLog::setComponentInvoiceLog(salesLine, custInvoiceJourProForma.InvoiceId, FINOrderLineComponent::DeliveryTransport, false);
+        }
+
+        if (FINOrderLineComponentInvoiceLog::isDeliveryReturnInvoiceIdCharged(salesLine, FINOrderLineComponent::ReturnTransport, custInvoiceJourProForma.InvoiceId))
+        {
+            FINOrderLineComponentInvoiceLog::setComponentInvoiceLog(salesLine, custInvoiceJourProForma.InvoiceId, FINOrderLineComponent::ReturnTransport, false);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newCustInvoiceJourProForma</Name>
+				<Source><![CDATA[
+    public static FINSalesInvoiceProformaJournalCancel newCustInvoiceJourProForma(FINCustInvoiceJourProForma _custInvoiceJourProForma)
+    {
+        FINSalesInvoiceProformaJournalCancel ret = new FINSalesInvoiceProformaJournalCancel();
+
+        ret.parmCustInvoiceJourProForma(_custInvoiceJourProForma);
+                
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        FINSalesInvoiceProformaJournalCancel ret;
+
+        if (_args.dataset() == tableNum(FINCustInvoiceJourProForma))
+        {
+            ttsbegin;
+            ret = FINSalesInvoiceProformaJournalCancel::newCustInvoiceJourProForma(_args.record());
+            ret.run();
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

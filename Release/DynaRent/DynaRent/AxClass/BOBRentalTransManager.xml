@@ -1,0 +1,1114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalTransManager</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class BOBRentalTransManager
+{
+    Common              buffer;
+    InventMovement      inventMovement;
+    InventTrans         inventTrans;
+    BOBRentalSubStatus  subStatus;
+
+    boolean             mustDoUpdateBuffer;
+    boolean             mustUpdateRentalSum;
+    InventLocationId    bufferLocationId;
+    InventLocationId    bufferReturnLocationId;
+
+    Set                 locationIdSet;
+    Map                 transactions2transfer;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>active</Name>
+				<Source><![CDATA[
+    protected BOBRentalTransActive active()
+    {
+        // For Conversion Journal related to a Sales Order , only one of the Rental trasaction either from the sales order or 
+        // from the conversion journal shall remain active.
+        if(inventMovement is InventMov_Jour_Loss_Asset)
+        {
+            SalesLine           salesLine;
+            BOBRentalTrans      rentalTrans;
+            InventTransOrigin   inventTransOrigin;
+            InventJournalTrans  inventJournalTrans;
+            
+            inventJournalTrans = inventMovement.buffer();
+            
+            if(inventJournalTrans.RORRefRecId)
+            {
+                select firstonly Active from rentalTrans
+                where rentalTrans.ObjectId == this.objectTable().ObjectId
+                    join TableId from inventTransOrigin
+                    where inventTransOrigin.RecId == rentalTrans.InventTransOrigin
+                        join TableId from salesLine
+                        where salesLine.InventTransId == inventTransOrigin.InventTransId
+                        &&    salesLine.RecId == inventJournalTrans.RORRefRecId
+                        &&    salesLine.BOBConversionJourId == inventJournalTrans.JournalId;
+            
+
+                if(rentalTrans.Active == BOBRentalTransActive::Active)
+                {
+                    return BOBRentalTransActive::Inactive;
+                }
+            }
+        }
+            
+        return BOBRentalTransActive::Active;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addTransaction2transfer</Name>
+				<Source><![CDATA[
+    private void addTransaction2transfer(BOBRentalTrans _rentalTrans, TransDateTime _toDateTime)
+    {
+        if (subStatus == BOBRentalSubStatus::Returned
+        && bufferReturnLocationId
+        && _rentalTrans.Qty)
+        {
+            if (!transactions2transfer)
+            {
+                transactions2transfer = new Map(Types::Int64, Types::Container);
+            }
+    
+            if (transactions2transfer.exists(_rentalTrans.RecId))
+            {
+                throw error(strFmt("@DNR7251", _rentalTrans.Qty, _rentalTrans.RecId));
+            }
+    
+            transactions2transfer.insert(_rentalTrans.RecId, [_rentalTrans.RentalTypeId, _rentalTrans.Qty, _rentalTrans.InventLocationId, bufferReturnLocationId, _toDateTime]);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>allowDisabledSubStatus</Name>
+				<Source><![CDATA[
+    protected boolean allowDisabledSubStatus()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyFrom</Name>
+				<Source><![CDATA[
+    protected abstract BOBDateTimeCertainty certaintyFrom()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyTo</Name>
+				<Source><![CDATA[
+    protected abstract BOBDateTimeCertainty certaintyTo(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>companyId</Name>
+				<Source><![CDATA[
+    protected SelectableDataArea companyId()
+    {
+        return curext();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteInventTrans</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")] 
+    public void deleteInventTrans()
+    {
+        if(this.mustMaintainRentalTrans())
+        {
+            BOBRentalTrans rentalTrans;
+
+            delete_from rentalTrans
+            where rentalTrans.InventTransRecId == inventTrans.RecId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fromDateTime</Name>
+				<Source><![CDATA[
+    protected abstract FromDateTime fromDateTime()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ignoreMandatorySubStatuses</Name>
+				<Source><![CDATA[
+    protected boolean ignoreMandatorySubStatuses()
+    {
+        return (inventMovement is InventMov_Virtuel || inventMovement is InventMov_Jour_Loss_Asset);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromBuffer</Name>
+				<Source><![CDATA[
+    protected abstract void initFromBuffer()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventLocationId</Name>
+				<Source><![CDATA[
+    protected abstract InventLocationId inventLocationId()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustMaintainRentalTrans</Name>
+				<Source><![CDATA[
+    protected boolean mustMaintainRentalTrans()
+    {
+        boolean ret = false;
+        ;
+    
+        if(!inventTrans.BOBIsCompensatingTrans && BOBRentalType::findFromItemId(inventTrans.ItemId).RentalTypeId)
+        {
+            ret = (inventMovement is InventMov_Sales                        ||
+                   inventMovement is InventMov_RORRentalSales               ||
+                   inventMovement is InventMov_RORRentalSales_Issue         ||
+                   inventMovement is InventMov_RORRentalSales_Receipt       ||
+                   inventMovement is InventMov_Purch                        ||
+                   inventMovement is InventMov_RORRentalPurch               ||
+                   inventMovement is InventMov_RORRentalPurch_Issue         ||
+                   inventMovement is InventMov_RORRentalPurch_Receipt       ||
+                   inventMovement is InventMov_SalesQuotation               ||
+                   inventMovement is InventMov_RORRentalSalesQuotation      ||
+                   inventMovement is InventMov_RORRentalSalesQuotat_Issue   ||
+                   inventMovement is InventMov_RORRentalSalesQuotat_Receipt ||
+                   inventMovement is InventMov_Journal                      ||
+                   inventMovement is InventMov_WMSOrder                     ||
+                   inventMovement is InventMov_Prod                         ||
+                   inventMovement is InventMov_TransferFrom                 ||
+                   inventMovement is InventMov_TransferTo                   ||
+                   inventMovement is InventMov_TransferTransitFrom          ||
+                   inventMovement is InventMov_TransferTransitTo);
+
+            // Don't create rental transactions for items of production picking list.
+            if (inventMovement is InventMov_Prod && inventTrans.StatusReceipt == StatusReceipt::None)
+            {
+                ret = false;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new(Common _buffer, InventMovement _movement, InventTrans _inventTrans)
+    {
+        buffer = _buffer;
+        inventMovement = _movement;
+        inventTrans = _inventTrans;
+        mustUpdateRentalSum = isConfigurationkeyEnabled(configurationKeyNum(BOBRentalSum));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>objectTable</Name>
+				<Source><![CDATA[
+    protected BOBObjectTable objectTable()
+    {
+        BOBObjectTable  objectTable;
+        InventDim       inventDim;
+        BOBRentalType   rentalType = BOBRentalType::findFromItemId(inventTrans.ItemId);
+    
+        switch(rentalType.Classification)
+        {
+            case BOBRentalTypeClassification::Serialized:
+                select firstOnly objectTable
+                where objectTable.InventSerialId
+                    exists join inventDim
+                    where inventDim.inventDimId == inventTrans.inventDimId
+                    &&    inventDim.inventSerialId == objectTable.InventSerialId;
+                break;
+    
+            case BOBRentalTypeClassification::Bulk:
+                objectTable = BOBObjectTable::findBulkObject(rentalType.RentalTypeId);
+                break;
+    
+            default:
+                // no business object reference on the rental transaction
+                break;
+        }
+    
+        return objectTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmDoUpdateBuffer</Name>
+				<Source><![CDATA[
+    public boolean parmDoUpdateBuffer(boolean _doUpdate = mustDoUpdateBuffer)
+    {
+        mustDoUpdateBuffer = _doUpdate;
+        return mustDoUpdateBuffer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postInsertRentalTrans</Name>
+				<Source><![CDATA[
+    protected void postInsertRentalTrans(BOBRentalTrans _rentalTrans)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postUpdateRentalTrans</Name>
+				<Source><![CDATA[
+    protected void postUpdateRentalTrans()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSynchronization</Name>
+				<Source><![CDATA[
+    public static void processSynchronization(InventMovement _movement, SetEnumerator _recIdsToProcessSetEnumerator)
+    {
+        while(_recIdsToProcessSetEnumerator.moveNext())
+        {
+            InventTrans inventTrans = InventTrans::findRecId(_recIdsToProcessSetEnumerator.current());
+
+            BOBRentalTransManager::newInventMovement(_movement, inventTrans).synchronize();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>qty</Name>
+				<Source><![CDATA[
+    protected InventQty qty()
+    {
+        return inventTrans.Qty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalTransChanged</Name>
+				<Source><![CDATA[
+    protected void rentalTransChanged(BOBRentalTrans _newRentalTrans)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalTypeId</Name>
+				<Source><![CDATA[
+    protected abstract BOBRentalTypeId rentalTypeId()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSubStatus</Name>
+				<Source><![CDATA[
+    public void setSubStatus(BOBRentalSubStatus _subStatus)
+    {
+        subStatus = _subStatus;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSubStatusFromInventTrans</Name>
+				<Source><![CDATA[
+    private void setSubStatusFromInventTrans()
+    {
+        if(this.mustMaintainRentalTrans())
+        {
+            subStatus = (inventTrans.StatusIssue == StatusIssue::None ?
+                         this.statusReceipt2SubStatus(inventTrans.StatusReceipt) :
+                         this.statusIssue2SubStatus(inventTrans.StatusIssue));
+    
+            BOBPostingPolicyRule policyRule = BOBPostingPolicyRule::findByItemId(inventTrans.ItemId, subStatus);
+    
+            if (!this.allowDisabledSubStatus()
+            && ((inventTrans.StatusIssue == StatusIssue::None && policyRule.SubRentalControl == BOBSubStatusControl::Disabled) ||
+                (inventTrans.StatusReceipt == StatusReceipt::None && policyRule.RentalControl == BOBSubStatusControl::Disabled)))
+            {
+                throw error(strFmt("@DNR6428", subStatus, InventTrans.ItemId));
+            }
+        }
+        else
+        {
+            subStatus = BOBRentalSubStatus::None;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>splitInventTrans</Name>
+				<Source><![CDATA[
+    public void splitInventTrans(RecId _inventTransCopyRecId, InventQty _splitQty, BOBInventSplitReason _splitReason)
+    {
+        InventQty           splitRemainder, currentQty;
+        BOBRentalTrans      rentalTransFrom, rentalTransTo;
+        BOBRentalSubStatus  prevStatusFrom, prevStatusTo;
+        RefRecId            postingPolicyRecId;
+        boolean             forceRegressStatus;
+        ;
+    
+        if(_splitReason != BOBInventSplitReason::Unknown && this.mustMaintainRentalTrans())
+        {
+            ttsBegin;
+    
+            splitRemainder = _splitQty * this.transSignForSplit();
+            postingPolicyRecId = BOBRentalType::findFromItemId(inventMovement.itemId()).PostingPolicyRecId;
+    
+            switch(_splitReason)
+            {
+                case BOBInventSplitReason::ProgressStatus:
+                    [ prevStatusFrom, prevStatusTo ] = BOBPostingPolicyRule::getPreviousSubStatusFromTo(inventTrans.direction(),
+                                                                                                        postingPolicyRecId,
+                                                                                                        subStatus,
+                                                                                                        this.ignoreMandatorySubStatuses());
+                    break;
+    
+                case BOBInventSplitReason::RegressStatus:
+                    [ prevStatusFrom, prevStatusTo ] = BOBPostingPolicyRule::getNextSubStatusFromTo(inventTrans.direction(),
+                                                                                                    postingPolicyRecId,
+                                                                                                    subStatus,
+                                                                                                    this.ignoreMandatorySubStatuses());
+                    break;
+    
+                case BOBInventSplitReason::ModifyQty:
+                    prevStatusFrom = subStatus;
+                    if (subStatus == BOBRentalSubStatus::Ordered)
+                    {
+                        prevStatusTo = BOBRentalSubStatus::Confirmed;
+                        forceRegressStatus = true;
+                    }
+                    else
+                    {
+                        prevStatusTo = subStatus;
+                    }
+                    break;
+            }
+    
+            while select forUpdate rentalTransFrom
+            order by SubStatus desc
+            where rentalTransFrom.InventTransRecId  == inventTrans.RecId
+            &&    rentalTransFrom.TransType         == this.transType()
+            &&    rentalTransFrom.SubStatus         >= prevStatusFrom
+            &&    rentalTransFrom.SubStatus         <= prevStatusTo
+            {
+                currentQty = (rentalTransFrom.Qty >= 0 ?
+                              min(rentalTransFrom.Qty, splitRemainder) :
+                              max(rentalTransFrom.Qty, splitRemainder));
+    
+                if(currentQty)
+                {
+                    rentalTransTo.clear();
+                    rentalTransTo.data(rentalTransFrom);
+                    rentalTransTo.Qty = currentQty;
+                    rentalTransTo.InventTransRecId = _inventTransCopyRecId;
+                    if (forceRegressStatus && rentalTransTo.SubStatus == BOBRentalSubStatus::Confirmed)
+                    {
+                        rentalTransTo.SubStatus = BOBRentalSubStatus::Ordered;
+                    }
+                    rentalTransTo.insert();
+    
+                    splitRemainder -= currentQty;
+    
+                    if(splitRemainder || rentalTransFrom.Qty - currentQty == 0)
+                    {
+                        rentalTransFrom.delete();
+                    }
+                    else
+                    {
+                        rentalTransFrom.Qty -= currentQty;
+                        rentalTransFrom.InventTransRecId = inventTrans.RecId;
+                        if (forceRegressStatus && rentalTransFrom.SubStatus == BOBRentalSubStatus::Confirmed)
+                        {
+                            rentalTransFrom.SubStatus = BOBRentalSubStatus::Ordered;
+                        }
+                        rentalTransFrom.update();
+                    }
+                }
+                else
+                {
+                    rentalTransFrom.InventTransRecId = inventTrans.RecId;
+                    if (forceRegressStatus && rentalTransFrom.SubStatus == BOBRentalSubStatus::Confirmed)
+                    {
+                        rentalTransFrom.SubStatus = BOBRentalSubStatus::Ordered;
+                    }
+                    rentalTransFrom.update();
+                }
+            }
+    
+            ttscommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>splitRentalTrans</Name>
+				<Source><![CDATA[
+    private void splitRentalTrans(BOBRentalTrans _rentalTrans, InventQty _splitQty)
+    {
+        if(_splitQty * _rentalTrans.Qty < 0)
+        {
+            warning("@SYS19603");
+            throw error("@SYS18447");
+        }
+    
+        if(_splitQty == 0)
+        {
+            warning("@SYS82965");
+            throw error("@SYS18447");
+        }
+    
+        if(_rentalTrans.Qty == _splitQty || !_rentalTrans)
+        {
+            warning("@SYS13895");
+            throw error("@SYS18447");
+        }
+    
+        BOBRentalTrans transCopy = BOBRentalTrans::findRecId(_rentalTrans.RecId);
+        transCopy.Qty -= _splitQty;
+        transCopy.insert();
+    
+        _rentalTrans.selectForUpdate(true);
+        _rentalTrans.Qty = _splitQty;
+        _rentalTrans.InventTransRecId = inventTrans.RecId;
+        _rentalTrans.update();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>statusIssue2SubStatus</Name>
+				<Source><![CDATA[
+    private BOBRentalSubStatus statusIssue2SubStatus(StatusIssue _statusIssue)
+    {
+        switch(_statusIssue)
+        {
+            case StatusIssue::Sold:
+                return BOBRentalSubStatus::Invoiced;
+    
+            case StatusIssue::Deducted:
+                return BOBRentalSubStatus::Delivered;
+    
+            case StatusIssue::Picked:
+                return BOBRentalSubStatus::Picked;
+    
+            case StatusIssue::OnOrder, StatusIssue::ReservPhysical, StatusIssue::ReservOrdered:
+                return BOBRentalSubStatus::Ordered;
+    
+            case StatusIssue::QuotationIssue:
+                return BOBRentalSubStatus::Quotation;
+    
+            default:
+                return BOBRentalSubStatus::None;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>statusReceipt2SubStatus</Name>
+				<Source><![CDATA[
+    private BOBRentalSubStatus statusReceipt2SubStatus(StatusReceipt _statusReceipt)
+    {
+        switch(_statusReceipt)
+        {
+            case StatusReceipt::Purchased:
+                return BOBRentalSubStatus::Invoiced;
+    
+            case StatusReceipt::Received:
+                return BOBRentalSubStatus::Delivered;
+    
+            case StatusReceipt::Arrived:
+                return BOBRentalSubStatus::Prepared;
+    
+            case StatusReceipt::Registered:
+                return BOBRentalSubStatus::Picked;
+    
+            case StatusReceipt::Ordered, StatusReceipt::QuotationReceipt:
+                return BOBRentalSubStatus::Ordered;
+    
+            default:
+                return BOBRentalSubStatus::None;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>synchronize</Name>
+				<Source><![CDATA[
+    public void synchronize()
+    {
+        BOBRentalTrans  rentalTrans;
+        BOBObjectTable  objectTable;
+        TransDateTime   updDateTime;
+        ;
+    
+        if(!this.mustMaintainRentalTrans())
+        {
+            return;
+        }
+    
+        objectTable = this.objectTable();
+    
+        ttsBegin;
+    
+        if(BOBRentalTrans::existInventTransRecId(inventTrans.RecId))
+        {
+            while select forupdate rentalTrans
+            where rentalTrans.InventTransRecId == inventTrans.RecId
+            &&    rentalTrans.TransType == this.transType()
+            {
+                this.rentalTransChanged(rentalTrans);
+    
+                updDateTime = (rentalTrans.FromDateTime && this.fromDateTime()) ? min(this.fromDateTime(), rentalTrans.FromDateTime) : max(this.fromDateTime(), rentalTrans.FromDateTime);
+    
+                rentalTrans.Active              = this.active();
+                rentalTrans.AssetId             = objectTable.assetId();
+                rentalTrans.CertaintyFrom       = this.certaintyFrom();
+                rentalTrans.FromDateTime        = this.fromDateTime();
+                rentalTrans.InventLocationId    = this.inventLocationId();
+                rentalTrans.ObjectId            = objectTable.ObjectId;
+                rentalTrans.Qty                 = this.qty();
+                rentalTrans.RentalTypeId        = this.rentalTypeId();
+    
+                // do not allow regression of substatus, unless we're going back to 'Ordered' or 'Returned'
+                // the only exception to this rule is that we cannot go back from 'Confirmed' to 'Ordered'
+                if((rentalTrans.SubStatus < subStatus || subStatus == BOBRentalSubStatus::Ordered || subStatus == BOBRentalSubStatus::Returned)
+                && !(rentalTrans.SubStatus == BOBRentalSubStatus::Confirmed && subStatus == BOBRentalSubStatus::Ordered))
+                {
+                    rentalTrans.SubStatus       = subStatus;
+                }
+    
+                rentalTrans.ToDateTime          = max(this.toDateTime(rentalTrans.SubStatus), this.fromDateTime());
+                rentalTrans.CertaintyTo         = this.certaintyTo(rentalTrans.SubStatus);
+                rentalTrans.update();
+            }
+    
+            this.postUpdateRentalTrans();
+        }
+        else
+        {
+            rentalTrans.Active              = this.active();
+            rentalTrans.AssetId             = objectTable.assetId();
+            rentalTrans.CertaintyFrom       = this.certaintyFrom();
+            rentalTrans.CertaintyTo         = this.certaintyTo();
+            rentalTrans.CompanyId           = this.companyId();
+            rentalTrans.FromDateTime        = this.fromDateTime();
+            rentalTrans.InventLocationId    = this.inventLocationId();
+            rentalTrans.InventTransOrigin   = inventTrans.InventTransOrigin;
+            rentalTrans.InventTransRecId    = inventTrans.RecId;
+            rentalTrans.ObjectId            = objectTable.ObjectId;
+            rentalTrans.Qty                 = this.qty();
+            rentalTrans.RentalTypeId        = this.rentalTypeId();
+            rentalTrans.SubStatus           = subStatus;
+            rentalTrans.ToDateTime          = max(this.toDateTime(), this.fromDateTime());
+            rentalTrans.TransType           = this.transType();
+            rentalTrans.insert();
+    
+            // use FromDateTime if record is not created yet
+            this.postInsertRentalTrans(rentalTrans);
+        }
+    
+        this.updateBuffer(mustDoUpdateBuffer);
+        BOBRentalTrans::updateSumUp(inventTrans.InventTransOrigin);
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>toDateTime</Name>
+				<Source><![CDATA[
+    protected abstract ToDateTime toDateTime(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transferTransFromMap</Name>
+				<Source><![CDATA[
+    private void transferTransFromMap()
+    {
+        MapEnumerator       enumerator;
+        BOBRentalTypeId     rentalTypeId;
+        InventQty           qty;
+        InventLocationId    locationFrom;
+        InventLocationId    locationTo;
+        TransDateTime       transferDateTime;
+        BOBRentalTrans      rentalTrans;
+        ItemId              itemId;
+        ;
+    
+        if (transactions2transfer)
+        {
+            enumerator = transactions2transfer.getEnumerator();
+    
+            while (enumerator.moveNext())
+            {
+                rentalTrans = BOBRentalTrans::findRecId(enumerator.currentKey());
+    
+                if (!rentalTrans)
+                {
+                    warning(strFmt("@DNR7252", enumerator.currentKey()));
+                    continue;
+                }
+    
+                [rentalTypeId, qty, locationFrom, locationTo, transferDateTime] = enumerator.currentValue();
+                BOBRentalSumCorrection::runTransfer(rentalTrans, rentalTypeId, - qty, locationFrom, locationTo, transferDateTime);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transSignForSplit</Name>
+				<Source><![CDATA[
+    protected Integer transSignForSplit()
+    {
+        return 1;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transType</Name>
+				<Source><![CDATA[
+    protected abstract BOBRentalTransType transType()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBuffer</Name>
+				<Source><![CDATA[
+    protected abstract void updateBuffer(boolean _doUpdateBuffer)
+    {
+        // Set rental sub status to the calling SalesLine/PurchLine/SalesQuotationLine:
+        // use the 'lowest' rental sub status within that line's rental transactions.
+    
+        // Certain processes (e.g. picking, registration) require the caller buffer
+        // to be updated immediately. Other processes (e.g. packing slip) update the
+        // caller buffer themselves, thereby prohibiting immediate updates by this
+        // method -- we'll cause update conflicts otherwise. The _doUpdateBuffer
+        // parameter can be used to determine whether or not to immediately update.
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSubStatus</Name>
+				<Source><![CDATA[
+    public InventQty updateSubStatus(InventQty _qtyUpdate)
+    {
+        InventQty ret;
+        ;
+    
+        if(this.mustMaintainRentalTrans())
+        {
+            ttsBegin;
+    
+            switch(inventTrans.direction())
+            {
+                case InventDirection::Issue:
+                    ret = (_qtyUpdate < 0 ?
+                           this.updateSubStatusIssue(_qtyUpdate) :
+                           this.updateSubStatusReturnIssue(_qtyUpdate));
+                    break;
+    
+                case InventDirection::Receipt:
+                    ret = (_qtyUpdate > 0 ?
+                           this.updateSubStatusReceipt(_qtyUpdate) :
+                           this.updateSubStatusReturnReceipt(_qtyUpdate));
+                    break;
+    
+                default:
+                    throw error(Error::wrongUseOfFunction(funcName()));
+            }
+    
+            if(ret)
+            {
+                this.transferTransFromMap();
+                this.updateBuffer(mustDoUpdateBuffer);
+                BOBRentalTrans::updateSumUp(inventTrans.InventTransOrigin);
+            }
+    
+            ttsCommit;
+        }
+        else
+        {
+            ret = _qtyUpdate;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSubStatusIssue</Name>
+				<Source><![CDATA[
+    private InventQty updateSubStatusIssue(InventQty _qtyUpdate)
+    {
+        BOBRentalSubStatus  prevStatusFrom;
+        BOBRentalSubStatus  prevStatusTo;
+        BOBRentalTrans      rentalTrans;
+        InventQty           qtyRemainder;
+        InventQty           ret;
+        RefRecId            postingPolicyRecId;
+        ;
+    
+        qtyRemainder = _qtyUpdate;
+        postingPolicyRecId = BOBRentalType::findFromItemId(inventMovement.itemId()).PostingPolicyRecId;
+        [ prevStatusFrom, prevStatusTo ] = BOBPostingPolicyRule::getPreviousSubStatusFromTo(InventDirection::Issue,
+                                                                                            postingPolicyRecId,
+                                                                                            subStatus,
+                                                                                            this.ignoreMandatorySubStatuses());
+        while select forUpdate rentalTrans
+        order by SubStatus desc, FromDateTime asc
+        where rentalTrans.InventTransOrigin == inventTrans.InventTransOrigin
+        &&    rentalTrans.TransType         == this.transType()
+        &&    rentalTrans.SubStatus         >= prevStatusFrom
+        &&    rentalTrans.SubStatus         <= prevStatusTo
+        {
+            if(qtyRemainder)
+            {
+                if(qtyRemainder > rentalTrans.Qty)
+                {
+                    this.splitRentalTrans(rentalTrans, qtyRemainder);
+                }
+    
+                if ((subStatus == BOBRentalSubStatus::Returned && bufferReturnLocationId != rentalTrans.InventLocationId)
+                ||  (subStatus != BOBRentalSubStatus::Returned && bufferLocationId != rentalTrans.InventLocationId))
+                {
+                    this.addTransaction2transfer(rentalTrans, max(this.toDateTime(), this.fromDateTime()));
+                }
+    
+                rentalTrans.InventLocationId    = this.inventLocationId();
+                rentalTrans.CertaintyFrom       = this.certaintyFrom();
+                rentalTrans.CertaintyTo         = this.certaintyTo();
+                rentalTrans.FromDateTime        = this.fromDateTime();
+                rentalTrans.SubStatus           = subStatus;
+                rentalTrans.ToDateTime          = max(this.toDateTime(), this.fromDateTime());
+                rentalTrans.update();
+    
+                qtyRemainder -= rentalTrans.Qty;
+                ret += rentalTrans.Qty;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSubStatusReceipt</Name>
+				<Source><![CDATA[
+    private InventQty updateSubStatusReceipt(InventQty _qtyUpdate)
+    {
+        BOBRentalSubStatus  prevStatusFrom;
+        BOBRentalSubStatus  prevStatusTo;
+        BOBRentalTrans      rentalTrans;
+        InventQty           qtyRemainder;
+        InventQty           ret;
+        RefRecId            postingPolicyRecId;
+        ;
+    
+        qtyRemainder = _qtyUpdate;
+        postingPolicyRecId = BOBRentalType::findFromItemId(inventMovement.itemId()).PostingPolicyRecId;
+        [ prevStatusFrom, prevStatusTo ] = BOBPostingPolicyRule::getPreviousSubStatusFromTo(InventDirection::Receipt,
+                                                                                            postingPolicyRecId,
+                                                                                            subStatus,
+                                                                                            this.ignoreMandatorySubStatuses());
+        while select forUpdate rentalTrans
+        order by SubStatus desc, FromDateTime asc
+        where rentalTrans.InventTransOrigin == inventTrans.InventTransOrigin
+        &&    rentalTrans.TransType         == this.transType()
+        &&    rentalTrans.SubStatus         >= prevStatusFrom
+        &&    rentalTrans.SubStatus         <= prevStatusTo
+        {
+            if(qtyRemainder)
+            {
+                if(qtyRemainder < rentalTrans.Qty)
+                {
+                    this.splitRentalTrans(rentalTrans, qtyRemainder);
+                }
+    
+                if ((subStatus == BOBRentalSubStatus::Returned && bufferReturnLocationId != rentalTrans.InventLocationId)
+                ||  (subStatus != BOBRentalSubStatus::Returned && bufferLocationId != rentalTrans.InventLocationId))
+                {
+                    this.addTransaction2transfer(rentalTrans, max(this.toDateTime(), this.fromDateTime()));
+                }
+    
+                rentalTrans.CertaintyFrom       = this.certaintyFrom();
+                rentalTrans.CertaintyTo         = this.certaintyTo();
+                rentalTrans.FromDateTime        = this.fromDateTime();
+                rentalTrans.InventLocationId    = this.inventLocationId();
+                rentalTrans.SubStatus           = subStatus;
+                rentalTrans.ToDateTime          = max(this.toDateTime(), this.fromDateTime());
+                rentalTrans.update();
+    
+                qtyRemainder -= rentalTrans.Qty;
+                ret += rentalTrans.Qty;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSubStatusReturnIssue</Name>
+				<Source><![CDATA[
+    private InventQty updateSubStatusReturnIssue(InventQty _qtyUpdate)
+    {
+        // no reversals for now
+    
+        return 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSubStatusReturnReceipt</Name>
+				<Source><![CDATA[
+    private InventQty updateSubStatusReturnReceipt(InventQty _qtyUpdate)
+    {
+        // no reversals for now
+    
+        return 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newAssetUpdate</Name>
+				<Source><![CDATA[
+    public static BOBRentalTransMgr_Asset newAssetUpdate()
+    {
+        return new BOBRentalTransMgr_Asset(null, null, null);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newInventMovement</Name>
+				<Source><![CDATA[
+    public static BOBRentalTransManager newInventMovement(InventMovement        _movement,
+                                                          InventTrans           _inventTrans,
+                                                          BOBRentalSubStatus    _subStatus = BOBRentalSubStatus::None)
+    {
+        BOBRentalTransManager   ret;
+        Common                  buffer;
+        RORRentalLine           rentalLine;
+        WMSOrder                wmsOrder;
+        InventTransferLine      inventTransferLine;
+        ;
+    
+        buffer = _movement.buffer();
+    
+        if(buffer.TableId == tableNum(WMSOrder))
+        {
+            wmsOrder = buffer as WMSOrder;
+    
+            switch(wmsOrder.InventTransType)
+            {
+                case InventTransType::Sales:
+                    buffer = SalesLine::findInventTransId(wmsOrder.inventTransId);
+                    break;
+    
+                case InventTransType::Purch:
+                    buffer = PurchLine::findInventTransId(wmsOrder.inventTransId);
+                    break;
+    
+                case InventTransType::TransferOrderShip:
+                    buffer = InventTransferLine::findTransIdShip(wmsOrder.inventTransId);
+                    break;
+    
+                default:
+                    throw error(Error::wrongUseOfFunction(funcName()));
+            }
+        }
+    
+        switch(buffer.TableId)
+        {
+            case tableNum(SalesLine):
+                rentalLine = buffer as SalesLine;
+    
+                if(rentalLine.TradeType == RORTradeType::SalesPurch)
+                {
+                    ret = new BOBRentalTransMgr_Sales(rentalLine, _movement, _inventTrans);
+                }
+                else
+                {
+                    ret = new BOBRentalTransMgr_Rental(rentalLine, _movement, _inventTrans);
+                }
+                break;
+    
+            case tableNum(PurchLine):
+                rentalLine = buffer as PurchLine;
+    
+                if(rentalLine.TradeType == RORTradeType::SalesPurch)
+                {
+                    ret = new BOBRentalTransMgr_Purch(rentalLine, _movement, _inventTrans);
+                }
+                else
+                {
+                    ret = new BOBRentalTransMgr_SubRental(rentalLine, _movement, _inventTrans);
+                }
+                break;
+    
+            case tableNum(SalesQuotationLine):
+                rentalLine = buffer as SalesQuotationLine;
+    
+                if(rentalLine.TradeType == RORTradeType::SalesPurch)
+                {
+                    ret = new BOBRentalTransMgr_SalesQuotation(rentalLine, _movement, _inventTrans);
+                }
+                else
+                {
+                    ret = new BOBRentalTransMgr_RentalQuotation(rentalLine, _movement, _inventTrans);
+                }
+                break;
+    
+            case tableNum(InventJournalTrans):
+                ret = new BOBRentalTransMgr_Invent(buffer, _movement, _inventTrans);
+                break;
+    
+            case tableNum(InventTransferLine) :
+                ret = BOBRentalTransManager::newInventMovementForInventTransferLine(buffer, _movement, _inventTrans);
+                break;
+
+            case tableNum(ProdTable),
+                tableNum(ProdBOM) :
+                ret = new BOBRentalTransMgr_Prod(buffer, _movement, _inventTrans);
+                break;
+
+            case tableNum(PurchRFQCaseLine),
+                 tableNum(PurchRFQLine),
+                 tableNum(InventBlocking),
+                 tableNum(InventQuarantineOrder),
+                 tableNum(ProjItemTrans),
+                 tableNum(WHSWorkInventTrans),
+                 tableNum(WHSWorkQuarantine),
+                 tableNum(WHSContainerTrans),
+                 tableNum(ConsignmentReplenishmentOrderLine):
+                ret = new BOBRentalTransMgr_Virtual(buffer, _movement, _inventTrans);
+                break;
+
+            default:
+                if(_movement is InventMov_Virtuel)
+                {
+                    ret = new BOBRentalTransMgr_Virtual(buffer, _movement, _inventTrans);
+                }
+                else
+                {
+                    throw error(strFmt("@SYS31187", tableId2name(buffer.TableId)));
+                }
+                break;
+        }
+    
+        ret.initFromBuffer();
+    
+        if(prmisDefault(_subStatus))
+        {
+            ret.setSubStatusFromInventTrans();
+        }
+        else
+        {
+            ret.setSubStatus(_subStatus);
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newInventMovementForInventTransferLine</Name>
+				<Source><![CDATA[
+    public static BOBRentalTransManager newInventMovementForInventTransferLine(Common _buffer,      
+        InventMovement  _movement,
+        InventTrans     _inventTrans)
+    {
+        BOBRentalTransManager ret;
+        
+        ret = new BOBRentalTransMgr_Virtual(_buffer, _movement, _inventTrans);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newWorkOrder</Name>
+				<Source><![CDATA[
+    public static BOBRentalTransMgr_WPPWorkOrder newWorkOrder(Common _common)
+    {
+        BOBRentalTransManager ret;
+        ;
+    
+        if(_common is WPPWorkOrderTable || _common is WPPWorkOrderLine)
+        {
+            ret = new BOBRentalTransMgr_WPPWorkOrder(_common, null, null);
+            ret.initFromBuffer();
+            return ret;
+        }
+        else
+        {
+            throw error(strFmt("@SYS31187", tableId2name(_common.TableId)));
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,569 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORSalesFormLetter_InvoiceProj</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[DocumentStatusFactoryAttribute(DocumentStatus::RORTransferToProj)]
+class RORSalesFormLetter_InvoiceProj extends SalesFormLetter_Invoice
+{
+    Map             line2LedgerJournalId;
+    Map             line2ProjJournalId;
+    Map             journalId2ProjVoucher;
+    Map             salesLine2ProjJournalLine;
+    WPPParameters   workOrderParameters;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static RORSalesFormLetter_InvoiceProj construct(SalesFormLetterContract  _salesFormLetterContract,
+                                                           SalesParmTable           _salesParmTable)
+    {
+        RORSalesFormletter_InvoiceProj salesFormletter_InvoiceProj = new RORSalesFormletter_InvoiceProj();
+
+        salesFormletter_InvoiceProj.setNewContract(_salesFormLetterContract);
+
+        salesFormletter_InvoiceProj.setSalesParmTable(_salesParmTable);
+        salesFormletter_InvoiceProj.setWorkOrderParameters(WPPParameters::find());
+
+        return salesFormletter_InvoiceProj;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSalesParmTable</Name>
+				<Source><![CDATA[
+    private void setSalesParmTable(SalesParmTable _salesParmTable)
+    {
+        salesParmTable = _salesParmTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setWorkOrderParameters</Name>
+				<Source><![CDATA[
+    private void setWorkOrderParameters(WPPParameters _workOrderParameters)
+    {
+        workOrderParameters = _workOrderParameters;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSalesLine2ProjJournalLine</Name>
+				<Source><![CDATA[
+    public Map getSalesLine2ProjJournalLine()
+    {
+        return salesLine2ProjJournalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkJournalNames</Name>
+				<Source><![CDATA[
+    private boolean checkJournalNames()
+    {
+        boolean             ret = true;
+        ProjJournalNameId   journalNameId;
+        ProjJournalName     journalName;
+        NumberSeqScope      numberSeqScope;
+        SalesParmLine       salesParmLineLocal;
+        SalesLine           salesLineLocal;
+        SalesTable          salesTableLocal;
+        RORVenueTable       venueTable;
+        ParmId parmIdLocal = this.parmId();
+
+        select firstOnly RecId from salesLineLocal
+        where salesLineLocal.RORTradeType == RORTradeType::SubRental
+            exists join salesParmLineLocal
+            where salesParmLineLocal.ParmId         == parmIdLocal
+            &&    salesParmLineLocal.TableRefId     == salesParmTable.TableRefId
+            &&    salesParmLineLocal.InventTransId  == salesLineLocal.InventTransId
+                join TableId from salesTableLocal
+                where salesTableLocal.SalesId == salesLineLocal.salesId
+                    join TableId from venueTable
+                    where venueTable.VenueCode == salesTableLocal.RORVenueCode;
+
+        if (salesLineLocal)
+        {
+            journalNameId   = ProjParameters::find().EmplJournalNameId;
+            journalName     = ProjJournalName::find(journalNameId);
+
+            numberSeqScope = NumberSeqScope::find(NumberSequenceTable::find(journalName.VoucherNumberSequenceTable).NumberSequenceScope);
+
+            // scope should be Company
+            if (numberSeqScope.scopeType() != 1)
+            {
+                throw error(strFmt("@DNR8586", journalNameId, "@SYS342964"));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournal</Name>
+				<Source><![CDATA[
+    private boolean createJournal()
+    {
+        ProjTable           projTable;
+        ProjJournalTable    hourJournalTable;
+        SalesParmLine       salesParmLineLocal;
+        SalesLine           salesLineLocal;
+        SalesTable          salesTableLocal;
+        boolean             ret;
+        InventTable         inventTableLocal;
+        ParmId parmIdLocal = this.parmId();
+        
+        //                             projId         journalNum
+        line2LedgerJournalId = new Map(Types::String, Types::String);
+        line2ProjJournalId = new Map(Types::String, Types::String);
+        //                              journalNum      voucher
+        journalId2ProjVoucher = new Map(Types::String, Types::String);
+        salesLine2ProjJournalLine = new Map(Types::Int64, Types::Int64);
+
+        while select salesLineLocal
+        order by ProjId
+        where salesLineLocal.RORTradeType != RORTradeType::SalesPurch
+        ||   (salesLineLocal.RORTradeType == RORTradeType::SalesPurch && salesLineLocal.LineAmount)
+            join salesParmLineLocal
+            where salesParmLineLocal.ParmId == parmIdLocal
+            &&    salesParmLineLocal.TableRefId == salesParmTable.TableRefId
+            &&    salesParmLineLocal.SalesLineRecId == salesLineLocal.RecId
+                join ProjId from salesTableLocal
+                where salesTableLocal.ProjId
+                &&    salesTableLocal.SalesId == salesLineLocal.salesId
+                    join RORProjCategoryIdSubRental, RORProjCategoryIdRental from inventTableLocal
+                    where inventTableLocal.ItemId == salesLineLocal.ItemId
+        {
+            // Fetch journal - there is 1 journal per project
+            if (!hourJournalTable || hourJournalTable.ProjId != salesTableLocal.ProjId)
+            {
+                // Changing journals - update totals on the previous one
+                if (hourJournalTable)
+                {
+                    ProjJournalTable::initTotal(hourJournalTable);
+                    hourJournalTable.update();
+                }
+
+                if (line2ProjJournalId.exists(salesTableLocal.ProjId))
+                {
+                    hourJournalTable = ProjJournalTable::find(line2ProjJournalId.lookup(salesTableLocal.ProjId));
+                }
+                else
+                {
+                    hourJournalTable = this.createProjJournalTable(salesTableLocal.ProjId, salesLineLocal);
+                    line2ProjJournalId.insert(salesTableLocal.ProjId, hourJournalTable.JournalId);
+                }
+
+                projTable = ProjTable::find(hourJournalTable.ProjId);
+            }
+
+            this.createProjectJournalLine(projTable, hourJournalTable, salesLineLocal, salesParmLineLocal, inventTableLocal);
+
+            // At least one journal was created
+            ret = true;
+        }
+
+        if (ret)
+        {
+            // Update totals on the last hour journal
+            ProjJournalTable::initTotal(hourJournalTable);
+            hourJournalTable.update();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createProjectJournalLine</Name>
+				<Source><![CDATA[
+    public void createProjectJournalLine(ProjTable _projTable, ProjJournalTable _hourJournalTable, SalesLine _salesLine, SalesParmLine _salesParmLine, InventTable _inventTable)
+    {
+        #TimeConstants
+
+        ProjJournalTrans projJournalTrans;
+                   
+        projJournalTrans.clear();
+        projJournalTrans.initValue();
+        projJournalTrans.initFromProjJournalTable(_hourJournalTable);
+
+        if (journalId2ProjVoucher.exists(_hourJournalTable.JournalId))
+        {
+            projJournalTrans.voucher = journalId2ProjVoucher.lookup(_hourJournalTable.JournalId);
+        }
+        else
+        {
+            projJournalTrans.voucher = NumberSeq::newGetVoucherFromCode(_hourJournalTable.getNumberSequenceTable().NumberSequence).voucher();
+            journalId2ProjVoucher.insert(_hourJournalTable.JournalId, projJournalTrans.voucher);
+        }
+
+        if (HcmEmployment::findByWorkerLegalEntity(HcmWorker::userId2Worker(curUserId()), CompanyInfo::find().RecId, DateTimeUtil::minValue(), DateTimeUtil::utcNow()))
+        {
+            projJournalTrans.Resource = ResourceFacade::findByCurrentWorker();
+        }
+        else
+        {
+            ResourceView resourceView;
+            
+            select firstonly RecId from resourceView
+            where resourceView.Worker == workOrderParameters.DefaultHourJourWorker;
+
+            projJournalTrans.Resource = resourceView.RecId;
+        }
+
+        projJournalTrans.TransDate = _salesParmLine.salesParmTable().TransDate;
+        projJournalTrans.ProjTransDate = projJournalTrans.TransDate;
+        projJournalTrans.ProjId = _hourJournalTable.ProjId;
+        projJournalTrans.initFromProjTable(_projTable);
+
+        projJournalTrans.CategoryId = (_salesLine.RORTradeType == RORTradeType::SubRental) ? _inventTable.RORProjCategoryIdSubRental : _inventTable.RORProjCategoryIdRental;
+        
+        if (_salesLine.RORTradeType == RORTradeType::SalesPurch)
+        {
+            projJournalTrans.Txt = strFmt("@DNR:ROROrderLineItem" , _salesLine.LineNum, _salesLine.ItemId);
+        }
+        else
+        {
+            TransDateTime startDateTime, endDateTime;
+
+            [startDateTime, endDateTime] = this.setStartEndDateTime(projJournalTrans, _salesLine, _salesParmLine);
+            projJournalTrans.Txt = strFmt("@DNR8477",
+                DateTimeUtil::toStr(startDateTime),
+                DateTimeUtil::toStr(endDateTime));
+        }
+        
+        projJournalTrans.JournalId = _hourJournalTable.JournalId;
+        projJournalTrans.CurrencyId = _salesLine.CurrencyCode;
+        projJournalTrans.LinePropertyId = _salesLine.ProjLinePropertyId;
+
+        this.setSalesPrice(projJournalTrans, _salesLine, _salesParmLine);
+        this.setCostPrice(projJournalTrans, _salesLine, _salesParmLine);
+
+        projJournalTrans.Qty = 1;
+        projJournalTrans.ToTime = projJournalTrans.FromTime + #secondsPerHour;
+        
+        if (!projJournalTrans.TaxItemGroupId && projJournalTrans.CategoryId)
+        {
+            projJournalTrans.TaxItemGroupId = ProjCategory::find(projJournalTrans.CategoryId).TaxItemGroupId;
+        }
+    
+        projJournalTrans.RORBothRentalSubRental = RORBothRentalSubRental::Rental;
+        projJournalTrans.INVRefTableId = _salesLine.TableId;
+        projJournalTrans.INVRefRecId = _salesLine.RecId;
+        projJournalTrans.DefaultDimension = _salesLine.DefaultDimension;
+
+        projJournalTrans.setPeriodDate();
+        
+        if (projJournalTrans.validateWrite())
+        {
+            projJournalTrans.insert();
+        }
+    
+        salesLine2ProjJournalLine.insert(_salesLine.RecId, projJournalTrans.RecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createProjJournalLine</Name>
+				<Source><![CDATA[
+    [SysObsolete("DNRDeletedObjects07_2021. Method has been marked obsolete. Please use the createProjectJournalLine method instead.")]
+    public void createProjJournalLine(ProjJournalTable _hourJournalTable, SalesLine _salesLine, SalesParmLine _salesParmLine)
+    {
+        this.createProjectJournalLine(ProjTable::find(_hourJournalTable.ProjId), _hourJournalTable, _salesLine, _salesParmLine, _salesLine.inventTable());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setStartEndDateTime</Name>
+				<Source><![CDATA[
+    public container setStartEndDateTime(projJournalTrans _projJournalTrans, SalesLine _salesLine, SalesParmLine _salesParmLine)
+    {
+        // Implemented in 'DynarentInvoicing' model.
+
+        TransDateTime startDateTime, endDateTime;
+
+        return [startDateTime, endDateTime];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCostPrice</Name>
+				<Source><![CDATA[
+    public void setCostPrice(projJournalTrans _projJournalTrans, SalesLine _salesLine, SalesParmLine _salesParmLine)
+    {
+        // Implemented in 'DynarentInvoicing' model.
+
+        RORParameters rorParameters = RORParameters::find();
+
+        if (_salesLine.RORTradeType == RORTradeType::SalesPurch
+            || rorParameters.CostPriceRental == RORCostPriceRental::RentalRevenue
+            || (rorParameters.CostPriceRental == RORCostPriceRental::CostPriceOrRevenue && !_salesLine.CostPrice))
+        {
+            _projJournalTrans.CostPrice = _salesParmLine.LineAmount;
+        }
+        else
+        {
+            _projJournalTrans.CostPrice = _salesLine.CostPrice;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSalesPrice</Name>
+				<Source><![CDATA[
+    public void setSalesPrice(projJournalTrans _projJournalTrans, SalesLine _salesLine, SalesParmLine _salesParmLine)
+    {
+        // Implemented in 'DynarentInvoicing' model.
+
+        _projJournalTrans.SalesPrice = _salesParmLine.LineAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createProjJournalTable</Name>
+				<Source><![CDATA[
+    private ProjJournalTable createProjJournalTable(ProjId _projId, SalesLine _salesLine)
+    {
+        ProjJournalTable    hourJournalTable;
+        ProjJournalNameId   journalNameId = ProjParameters::find().EmplJournalNameId;
+        ProjJournalName     journalName;
+
+        if (journalNameId)
+        {
+            journalName = ProjJournalName::find(journalNameId);
+
+            hourJournalTable.initValue();
+            hourJournalTable.initFromProjJournalName(journalName);
+            this.RORSetProjJournalTable(hourJournalTable);
+            hourJournalTable.Description = strFmt("@DNR:RORTransferToProj", _salesLine.SalesId);
+            hourJournalTable.ProjId = _projId;
+            hourJournalTable.insert();
+        }
+    
+        return hourJournalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORSetProjJournalTable</Name>
+				<Source><![CDATA[
+    protected void RORSetProjJournalTable(ProjJournalTable _projJournalTable)
+    {
+        // Can be implemented in other model
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournal</Name>
+				<Source><![CDATA[
+    private void postJournal()
+    {
+        JournalId               journalId;
+        MapEnumerator           enumerator;
+        ProjJournalCheckPost    projJournalCheckPost;
+        boolean                 firstJournal = true;
+            
+        enumerator = line2ProjJournalId.getEnumerator();
+        while (enumerator.moveNext())
+        {
+            if (firstJournal)
+            {
+                //Amounts from rental orderwere transfered to project hour journal.
+                info("@DNR:RORProjHourJournal");
+                firstJournal = false;
+            }
+            journalId = enumerator.currentValue();
+            projJournalCheckPost = ProjJournalCheckPost::newJournalCheckPost(true, false, JournalCheckPostType::Post, tableNum(ProjJournalTable), journalId);
+    
+            if (projJournalCheckPost)
+            {
+                projJournalCheckPost.runOperation();
+                info(strFmt("@DNR:RORHourJournalPosted", journalId));
+            }
+            else
+            {
+                info(strFmt("@DNR:RORHourJournalPosted", journalId));
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transferToProjectInvoicing</Name>
+				<Source><![CDATA[
+    public void transferToProjectInvoicing()
+    {
+        // move amounts to expenses project journal
+        if (this.validateSetup() && this.createJournal())
+        {
+            ttsBegin;
+
+            SalesParmLine salesParmLineLocal;
+            SalesLine salesLineLocal;
+            SalesTable salesTableLocal;
+            ParmId parmIdLocal = this.parmId();
+
+            RORRentalDateTimes  rentalDateTimes;
+            SalesParmUpdate salesParmUpdate;
+
+            // do dummy rental invoicing
+            while select forUpdate salesLineLocal
+            where salesLineLocal.RORTradeType != RORTradeType::SalesPurch
+            ||   (salesLineLocal.RORTradeType == RORTradeType::SalesPurch && salesLineLocal.LineAmount)
+                join salesParmLineLocal
+                where salesParmLineLocal.ParmId == parmIdLocal
+                &&    salesParmLineLocal.TableRefId == salesParmTable.TableRefId
+                &&    salesParmLineLocal.SalesLineRecId == salesLineLocal.RecId
+                    join ProjId from salesTableLocal
+                    where salesTableLocal.ProjId
+                    &&    salesTableLocal.SalesId == salesLineLocal.SalesId
+                        outer join OffRentDateTime from rentalDateTimes
+                        where rentalDateTimes.RefTableId == salesLineLocal.TableId
+                        &&    rentalDateTimes.RefRecId   == salesLineLocal.RecId
+                            join INVCalculationDateTime from salesParmUpdate
+                            where salesParmUpdate.ParmId == parmIdLocal
+            {
+                if (salesLineLocal.RORTradeType != RORTradeType::SalesPurch)
+                {
+                    InvoiceId invoiceId = line2ProjJournalId.lookup(salesTableLocal.ProjId);
+                    this.updateInvoicePeriod(salesParmLineLocal, salesLineLocal, invoiceId);
+
+                    if (rentalDateTimes.OffRentDateTime 
+                    &&  rentalDateTimes.OffRentDateTime <= salesParmUpdate.INVCalculationDateTime)
+                    {
+                        salesLineLocal.update();
+                    }
+                }
+                else if (salesLineLocal.RORTradeType == RORTradeType::SalesPurch)
+                {
+                    salesLineLocal.RemainSalesFinancial -= salesParmLineLocal.DeliverNow;
+                    salesLineLocal.update();
+                }
+            }
+
+            InventTransOriginSalesLine originSalesLine;
+            InventTrans inventTrans;
+
+            while select RecId from salesParmLineLocal
+            where salesParmLineLocal.ParmId == parmIdLocal
+            &&    salesParmLineLocal.TableRefId == salesParmTable.TableRefId
+                join salesLineLocal
+                where salesLineLocal.RecId == salesParmLineLocal.SalesLineRecId
+                    join TableId, RecId, InventTransOrigin from originSalesLine
+                    where originSalesLine.SalesLineDataAreaId == salesLineLocal.dataAreaId
+                    &&    originSalesLine.SalesLineInventTransId == salesLineLocal.InventTransId
+                        join inventTrans
+                        where inventTrans.InventTransOrigin == originSalesLine.InventTransOrigin
+                        &&    !inventTrans.BOBIsCompensatingTrans
+            {
+                if (salesLineLocal.RORTradeType != RORTradeType::SalesPurch
+                || (salesLineLocal.RORTradeType == RORTradeType::SalesPurch && salesLineLocal.LineAmount))
+                {
+                    SalesLine salesLineCopy;
+                    salesLineCopy.data(salesLineLocal);
+
+                    InventMovement inventMovement = InventMovement::construct(salesLineCopy);
+
+                    InventTrans inventTransCopy;
+                    inventTransCopy.data(inventTrans);
+
+                    BOBRentalTransManager transManager = BOBRentalTransManager::newInventMovement(inventMovement, inventTransCopy);
+                    transManager.parmDoUpdateBuffer(true);
+                    transManager.synchronize();
+                }
+            }
+
+            // post journal
+            this.postJournal();
+     
+            ttsCommit;
+        }
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORSkipSalesLine</Name>
+				<Source><![CDATA[
+    [SysObsolete("DNRDeletedObjects01_2022. Method has been deprecated and the conditions have been added to the select statements themselves.")]
+    protected boolean RORSkipSalesLine(SalesLine _salesline)
+    {
+        return (_salesline.RORTradeType == RORTradeType::SalesPurch && !_salesline.LineAmount);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateInvoicePeriod</Name>
+				<Source><![CDATA[
+    public void updateInvoicePeriod(salesParmLine _salesParmLine, SalesLine _salesLine, InvoiceId _invoiceId)
+    {
+        // Implemented in 'DynarentInvoicing' model.
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateSetup</Name>
+				<Source><![CDATA[
+    private boolean validateSetup()
+    {
+        boolean ret = true;
+        ;
+    
+        ret = this.checkJournalNames();
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newInvoice</Name>
+				<Source><![CDATA[
+    static public RORSalesFormLetter_InvoiceProj newInvoice(
+        IdentifierName              _className      = classStr(FormletterService),
+        IdentifierName              _methodName     = methodStr(FormletterService, postSalesOrderInvoice),
+        SysOperationExecutionMode   _executionMode  = SysOperationExecutionMode::Synchronous)
+    {
+        RORSalesFormLetter_InvoiceProj formletter = new RORSalesFormLetter_InvoiceProj(_className, _methodName, _executionMode);
+
+        formletter.init();
+
+        return formletter;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

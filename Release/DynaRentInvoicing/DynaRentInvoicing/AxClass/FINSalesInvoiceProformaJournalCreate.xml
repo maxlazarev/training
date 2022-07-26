@@ -1,0 +1,392 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINSalesInvoiceProformaJournalCreate</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINSalesInvoiceProformaJournalCreate
+{
+    FormletterService formLetterService;
+    SalesParmTable salesParmTable;
+    FINCustInvoiceJourProForma custInvoiceJourProForma;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>parmFormLetterService</Name>
+				<Source><![CDATA[
+    public FormletterService parmFormLetterService(FormletterService _formLetterService = formLetterService)
+    {
+        if (!prmIsDefault(_formLetterService))
+        {
+            formLetterService = _formLetterService;
+        }
+
+        return formLetterService;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSalesParmTable</Name>
+				<Source><![CDATA[
+    public SalesParmTable parmSalesParmTable(SalesParmTable _salesParmTable = salesParmTable)
+    {
+        if (!prmIsDefault(_salesParmTable))
+        {
+            salesParmTable = _salesParmTable;
+        }
+
+        return salesParmTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if (this.validateProformaCreation())
+        {
+            this.transferJournalToProforma();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateProformaCreation</Name>
+				<Source><![CDATA[
+    private boolean validateProformaCreation()
+    {
+        boolean ret = false;
+
+        if (formLetterService && salesParmTable)
+        {
+            ret = SalesParmLine::existSales(salesParmTable.ParmId, salesParmTable.SalesId);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyMarkupTransForCustInvoiceTrans</Name>
+				<Source><![CDATA[
+    public void copyMarkupTransForCustInvoiceTrans(SalesLine _salesLine, CustInvoiceTrans _custInvoiceTrans, Set _recIds = new Set(Types::Int64))
+    {
+        MarkupTrans     oldMarkupTrans;
+
+        ttsbegin;
+
+        while select oldMarkupTrans
+        where oldMarkupTrans.TransTableId == _salesLine.TableId
+        &&    oldMarkupTrans.TransRecId   == _salesLine.RecId
+        &&   !oldMarkupTrans.IsDeleted
+        {
+            if (_recIds.in(oldMarkupTrans.RecId) || (oldMarkupTrans.Value == 0))
+            {
+                continue;
+            }
+
+            _recIds.add(oldMarkupTrans.RecId);
+
+            Markup::copySingleMarkupTrans(false, oldMarkupTrans, _salesLine.CurrencyCode, _salesLine, _custInvoiceTrans, false, _salesLine);
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyMarkupTransForCustInvoiceJour</Name>
+				<Source><![CDATA[
+    public void copyMarkupTransForCustInvoiceJour(SalesTable _salesTable, CustInvoiceJour _custInvoiceJour, Set _recIds)
+    {
+        MarkupTrans     oldMarkupTrans;
+
+        ttsbegin;
+
+        while select oldMarkupTrans
+        where oldMarkupTrans.TransTableId == _salesTable.TableId
+        &&    oldMarkupTrans.TransRecId   == _salesTable.RecId
+        &&   !oldMarkupTrans.IsDeleted
+        {
+            if (_recIds.in(oldMarkupTrans.RecId) || (oldMarkupTrans.Value == 0))
+            {
+                continue;
+            }
+
+            _recIds.add(oldMarkupTrans.RecId);
+
+            oldMarkupTrans.LineNum = MarkupTrans::lastLineNum(_custInvoiceJour.TableId, _custInvoiceJour.RecId) + 1;
+
+            Markup::copySingleMarkupTrans(false, oldMarkupTrans, _salesTable.CurrencyCode, _salesTable, _custInvoiceJour, false, _salesTable);
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assignMarkupTransToProforma</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void assignMarkupTransToProforma(SalesTable _salesTable, FINCustInvoiceJourProForma _custInvoiceJourProForma)
+    {
+        MarkupTrans     oldMarkupTrans;
+
+        update_recordset oldMarkupTrans
+        setting OrigTableId = oldMarkupTrans.TableId, OrigRecId = oldMarkupTrans.RecId
+        where oldMarkupTrans.TransTableId == _salesTable.TableId
+        &&    oldMarkupTrans.TransRecId   == _salesTable.RecId
+        &&    oldMarkupTrans.Keep         == NoYes::No;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transferJournalToProforma</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method"),
+     SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "Cannot be refactored without altering functionality of method") ]
+    private void transferJournalToProforma()
+    {
+        // CustInvoiceJour and CustInvoiceTrans are created by standard code
+        CustInvoiceJour custInvoiceJour;
+        CustInvoiceTrans custInvoiceTrans;
+        SalesLine salesLine;
+        SalesTable salesTable;
+        SalesParmLine salesParmLine;
+        FINInvoiceCalculatorParm invoiceCalculatorParm;
+        Set recIdSet = new Set(Types::Int64);
+        container conCustInvoiceJourRecId;
+
+        SalesParmUpdate salesParmUpdate = salesParmTable.salesParmUpdate();
+        
+        while select forupdate custInvoiceJour
+        where custInvoiceJour.ParmId == salesParmTable.ParmId
+        {
+            while select forupdate custInvoiceTrans
+            where custInvoiceTrans.InvoiceId == custInvoiceJour.InvoiceId
+            && custInvoiceTrans.InvoiceDate == custInvoiceJour.InvoiceDate
+            && custInvoiceTrans.numberSequenceGroup == custInvoiceJour.NumberSequenceGroup
+            && custInvoiceTrans.salesId == custInvoiceJour.SalesId
+                join salesLine
+                where salesLine.InventTransId == custInvoiceTrans.InventTransId
+                    join RecId, TableId from salesParmLine
+                    where salesParmLine.SalesLineRecId == salesLine.RecId
+                    &&    salesParmLine.ParmId == salesParmTable.ParmId
+                    &&    salesParmLine.TableRefId == salesParmTable.TableRefId
+                        outer join forupdate invoiceCalculatorParm
+                        where invoiceCalculatorParm.ParmId == salesParmTable.ParmId
+                        && invoiceCalculatorParm.ParmLineRecId == salesParmLine.RecId
+                        && invoiceCalculatorParm.ParmLineTableId == salesParmLine.TableId
+            {
+                recIdSet = Set::union(recIdSet, FINMarkupTransGenerator::createMarkupTransForParmIdParmLine(salesParmTable.ParmId, salesParmTable.TableId, salesParmTable.RecId));
+                this.copyMarkupTransForCustInvoiceJour(salesLine.salesTable(), custInvoiceJour, recIdSet);
+
+                FINMarkupTransGenerator::createMarkupWorkTrans(salesParmTable.ParmId, salesParmLine.TableId, salesParmLine.RecId);
+                recIdSet = Set::union(recIdSet, FINMarkupTransGenerator::createMarkupTransForParmIdParmLine(salesParmTable.ParmId, salesParmLine.TableId, salesParmLine.RecId));
+                this.copyMarkupTransForCustInvoiceTrans(salesLine, custInvoiceTrans, recIdSet);
+
+                if (!custInvoiceJourProForma)
+                {
+                    // When creating multiple invoice proposals at once (e.g. using the Select functionality), this class is instantiated for each proposal that is to be created, with the same parmid.
+                    FINCustInvoiceJourProForma custInvoiceJourProFormaPreviouslyCreated;
+                
+                    select firstonly RecId from custInvoiceJourProFormaPreviouslyCreated
+                    where custInvoiceJourProFormaPreviouslyCreated.InvoiceId == custInvoiceJour.InvoiceId;
+
+                    if (custInvoiceJourProFormaPreviouslyCreated)
+                    {
+                        continue;
+                    }
+                
+                    custInvoiceJourProForma = FINCustInvoiceJourProForma::copyFromToProforma(custInvoiceJour, custInvoiceJourProForma);
+                    custInvoiceJourProForma.IsProFormaInvoiceActive = NoYes::Yes;
+                    custInvoiceJourProForma.ApprovalStatus = FINCustInvoiceJourProformaStatus::Created;
+                    custInvoiceJourProForma.ProFormaInvoiceVersion = 1;
+                    custInvoiceJourProForma.insert();
+                
+                    CustInvoiceSalesLink custInvoiceSalesLink;
+                    RecordInsertList custInvoiceProformaSalesLinkInsertList = new RecordInsertList(tableNum(FINCustInvoiceProformaSalesLink), true, true, true, true, true);
+
+                    while select custInvoiceSalesLink
+                    where custInvoiceSalesLink.SalesId == custInvoiceJour.SalesId
+                    &&    custInvoiceSalesLink.InvoiceId == custInvoiceJour.InvoiceId
+                    &&    custInvoiceSalesLink.InvoiceDate == custInvoiceJour.InvoiceDate
+                    {
+                        FINCustInvoiceProformaSalesLink custInvoiceProformaSalesLink;
+                        custInvoiceProformaSalesLink = FINCustInvoiceProformaSalesLink::copyFromToProforma(custInvoiceSalesLink, custInvoiceProformaSalesLink);
+                        custInvoiceProformaSalesLink.InvoiceId = custInvoiceJourProForma.InvoiceId;
+
+                        custInvoiceProformaSalesLinkInsertList.add(custInvoiceProformaSalesLink);
+                    }
+
+                    custInvoiceProformaSalesLinkInsertList.insertDatabase();
+                }
+
+                this.assignMarkupTransToProforma(salesTable, custInvoiceJourProForma);
+
+                conCustInvoiceJourRecId += custInvoiceJour.RecId;
+
+                invoiceCalculatorParm.ProformaJourRefRecId = custInvoiceJourProForma.RecId;
+
+                this.transferJournalLineToProforma(custInvoiceTrans, salesLine, invoiceCalculatorParm);
+
+                // After important data is journalized FINInvoiceCalculatorParm record is not needed.
+                if (invoiceCalculatorParm)
+                {
+                    invoiceCalculatorParm.delete();
+                }
+            }
+
+            // Markup trans linked to salesTable
+            MarkupTrans markupTransHeader;
+
+            markupTransHeader.skipDataMethods(true);
+
+            for (int i = 1; i <= conLen(conCustInvoiceJourRecId); i++)
+            {
+                update_recordset markupTransHeader
+                setting TransTableId = custInvoiceJourProForma.TableId, TransRecId = custInvoiceJourProForma.RecId
+                where markupTransHeader.TransTableId == custInvoiceJour.TableId
+                &&    markupTransHeader.TransRecId   == conPeek(conCustInvoiceJourRecId, i);
+            }
+
+            //Update the amounts after all markups have been processed
+            if (custInvoiceJourProForma.RecId)
+            {
+                SalesTotals salesTotals = SalesTotals::construct(salesParmTable, salesParmUpdate.SpecQty, AccountOrder::None, salesParmTable.ParmId, '', salesParmTable.Ordering);
+                salesTotals.calc();
+                // Amount is set on the journal during actual posting so we have to call it here manually.
+                custInvoiceJour.initFromSalesTotals(salesTotals);
+                custInvoiceJour.calcMSTAmounts();
+                custInvoiceJour.update();
+                
+                custInvoiceJourProForma = FINCustInvoiceJourProForma::copyFromToProforma(custInvoiceJour, custInvoiceJourProForma);
+                custInvoiceJourProForma.IsProFormaInvoiceActive = NoYes::Yes;
+                custInvoiceJourProForma.ProFormaInvoiceVersion = 1;
+                custInvoiceJourProForma.update();
+            }
+
+            FINMarkupTransGenerator::deleteMarkupTransForSet(recIdSet);
+            recIdSet = new Set(Types::Int64);
+        }
+
+        // If not ran in batch, the user has the option to print the invoice so the cleanup happens in DNRSalesFormLetterClass2_Extension/afterOperationBody
+        if (BatchHeader::isExecutingInBatch())
+        {
+            delete_from custInvoiceJour
+            where custInvoiceJour.ParmId == salesParmTable.ParmId;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transferJournalLineToProforma</Name>
+				<Source><![CDATA[
+    private void transferJournalLineToProforma(CustInvoiceTrans _custInvoiceTrans, SalesLine _salesLine, FINInvoiceCalculatorParm _invoiceCalculatorParm)
+    {
+        FINCustInvoiceTransProForma custInvoiceTransProForma;
+
+        if (_salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            // (Sub)Rental lines are charged only via markup trans.
+            _custInvoiceTrans.LineAmount = 0;
+            _custInvoiceTrans.LineAmountMST = 0;
+            _custInvoiceTrans.LineAmountTax = 0;
+            _custInvoiceTrans.LineAmountTaxMST = 0;
+            _custInvoiceTrans.update();
+        }
+
+        custInvoiceTransProForma = FINCustInvoiceJourProForma::copyFromToProforma(_custInvoiceTrans, custInvoiceTransProForma);
+        custInvoiceTransProForma.ProFormaInvoiceVersion = custInvoiceJourProForma.ProFormaInvoiceVersion;
+        
+        custInvoiceTransProForma.insert();
+
+        if (_salesLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            _invoiceCalculatorParm.journalizeCustInvoiceTransProforma(custInvoiceTransProForma.RecId);
+
+            FINInvoicePeriodManager_Invoice invoicePeriodManager = FINInvoicePeriodManager::construct(FINInvoicePeriodAction::Invoice, _salesLine);
+            invoicePeriodManager.setInvoiceCalculatorParm(_invoiceCalculatorParm);
+            invoicePeriodManager.setInvoiceId(custInvoiceJourProForma.InvoiceId);
+            invoicePeriodManager.setInvoiceTransReference(custInvoiceTransProForma.TableId, custInvoiceTransProForma.RecId);
+            invoicePeriodManager.setIsProformaInvoice(true);
+            invoicePeriodManager.run();
+
+            FINOrderLineComponentInvoiceLog::setOrderLineComponentInvoiced(_salesLine, custInvoiceJourProForma.InvoiceId, _invoiceCalculatorParm);
+        }
+     
+        if (custInvoiceTransProForma)
+        {
+            // Markup trans from calculation engines
+            FINMarkupWorkTrans markupWorkTrans;
+            SalesParmLine salesParmLine;
+            MarkupTable markupTable;
+
+            while select markupWorkTrans
+            where markupWorkTrans.ParmId == salesParmTable.ParmId
+                join salesParmLine
+                where salesParmLine.TableId == markupWorkTrans.ParmLineTableId
+                &&    salesParmLine.RecId == markupWorkTrans.ParmLineRecId
+                &&    salesParmLine.ParmId == markupWorkTrans.ParmId
+                &&    salesParmLine.InventTransId == _salesLine.InventTransId
+                    exists join markupTable
+                    where markupTable.MarkupCode == markupWorkTrans.MarkupCode
+                    &&    markupTable.ModuleType == MarkupModuleType::Cust
+            {
+                markupWorkTrans.RefTableId = _custInvoiceTrans.TableId;
+                markupWorkTrans.RefRecId = _custInvoiceTrans.RecId;
+                FINMarkupWorkTrans::createMarkupTransFromMarkupWorkTrans(markupWorkTrans, _salesLine);
+            }
+
+            // Markup trans linked to salesLine
+            MarkupTrans markupTransLine;
+            MarkupTrans markUpTransCopied;
+            RefRecId    markUpTransCopiedRecId;
+
+            markupTransLine.skipDataMethods(true);
+            markUpTransCopied.skipDataMethods(true);
+
+            while select forupdate markupTransLine
+            where markupTransLine.TransTableId == _custInvoiceTrans.TableId
+            &&    markupTransLine.TransRecId == _custInvoiceTrans.RecId
+            {
+                markupTransLine.CalculatedAmount = Markup::calcMarkupAmount(markupTransLine, _custInvoiceTrans.Qty, _custInvoiceTrans.LineAmount, 0, false, NoYes::No, _custInvoiceTrans.CurrencyCode, custInvoiceTransProforma.InvoiceDate);
+                markupTransLine.update();
+
+                markUpTransCopiedRecId = Markup::copySingleMarkupTrans(NoYes::No, markupTransLine, markupTransLine.CurrencyCode, _custInvoiceTrans, custInvoiceTransProForma).RecId;
+                update_recordset markUpTransCopied setting OrigRecId = markupTransLine.OrigRecId, OrigTableId = markupTransLine.OrigTableId
+                    where markUpTransCopied.RecId == markUpTransCopiedRecId;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newFormLetterService</Name>
+				<Source><![CDATA[
+    public static FINSalesInvoiceProformaJournalCreate newFormLetterService(FormletterService _formLetterService, SalesParmTable _salesParmTable)
+    {
+        FINSalesInvoiceProformaJournalCreate ret = new FINSalesInvoiceProformaJournalCreate();
+
+        ret.parmFormLetterService(_formLetterService);
+        ret.parmSalesParmTable(_salesParmTable);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

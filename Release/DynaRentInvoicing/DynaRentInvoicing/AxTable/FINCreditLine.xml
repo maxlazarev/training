@@ -1,0 +1,1163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINCreditLine</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/*
+Document states when credit workflow not active :
+1. When creating credit - Approved
+2. When pressing "Confirm" button on credit form - Confirmed
+3. When posted - Finalized
+
+Document states when credit workflow active :
+1. When creating credit - Draft
+2a. Total credit amount is smaller than amount requiring approval (defined in RORParameters) - button "confirm" is active and after pressing it status change into Confirmed
+2a. Total credit amount is bigger or equal amount requiring approval - button "save for approval" is active and after pressing it status change into InReview
+3. If status is InReview credit can be approved/confirmed by reviewer - Approved/Confirmed - or not - Rejected
+4. Confirmed credit can be posted - Finalized
+*/
+public class FINCreditLine extends common
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>isCreditApproved</Name>
+				<Source><![CDATA[
+    public static boolean isCreditApproved(TableId _refTableId, RecId _refRecId)
+    {
+        boolean ret = false;
+        FINCreditLine creditParmLine;
+
+        select firstonly RecId from creditParmLine        
+        where creditParmLine.RefTableId == _refTableId
+        &&    creditParmLine.RefRecId == _refRecId
+        &&    creditParmLine.DocumentState == VersioningDocumentState::Approved;
+        
+        if (creditParmLine)
+        {
+            ret = true;
+        }
+        else
+        {
+            select firstonly RecId from creditParmLine
+            where creditParmLine.RefTableId == _refTableId
+            &&    creditParmLine.RefRecId == _refRecId;
+
+            // When changing on/off rent date or pricing element in RLE for a period that is already invoiced then such period is set as pendingCredit and no workflow credit approval or credit dialog is used
+            if (!creditParmLine)
+            {
+                ret = true;
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCreditJourBeApproved</Name>
+				<Source><![CDATA[
+    public static boolean canCreditJourBeApproved(TableId _jourTableId, RecId _jourRecId)
+    {
+        boolean ret = true;
+        FINCreditLine creditParmLine;
+
+        select firstonly RecId from creditParmLine
+        where creditParmLine.JourRefTableId == _jourTableId
+        &&    creditParmLine.JourRefRecId == _jourRecId
+        &&    creditParmLine.DocumentState != VersioningDocumentState::Rejected
+        &&    creditParmLine.DocumentState != VersioningDocumentState::Approved
+        &&    creditParmLine.DocumentState != VersioningDocumentState::Confirmed
+        &&    creditParmLine.DocumentState != VersioningDocumentState::Finalized;
+        
+        if (creditParmLine)
+        {
+            ret = false;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCreditJourBeRejected</Name>
+				<Source><![CDATA[
+    public static boolean canCreditJourBeRejected(TableId _jourTableId, RecId _jourRecId)
+    {
+        boolean ret = true;
+        FINCreditLine creditParmLine;
+
+        select firstonly RecId from creditParmLine
+        where creditParmLine.JourRefTableId == _jourTableId
+        &&    creditParmLine.JourRefRecId == _jourRecId
+        &&    creditParmLine.DocumentState != VersioningDocumentState::Rejected
+        &&    creditParmLine.DocumentState != VersioningDocumentState::Confirmed
+        &&    creditParmLine.DocumentState != VersioningDocumentState::Finalized;
+        
+        if (creditParmLine)
+        {
+            ret = false;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCreditJourBePosted</Name>
+				<Source><![CDATA[
+    public static boolean canCreditJourBePosted(TableId _jourTableId, RecId _jourRecId)
+    {
+        boolean ret;
+        FINCreditLine creditParmLine;
+
+        select firstonly RecId from creditParmLine
+        where creditParmLine.JourRefTableId == _jourTableId
+        &&    creditParmLine.JourRefRecId == _jourRecId
+        &&    (creditParmLine.DocumentState != VersioningDocumentState::Finalized ||
+               creditParmLine.DocumentState != VersioningDocumentState::Rejected);
+
+        ret = (creditParmLine.RecId ? true : false);
+
+        if (ret)
+        {
+            select firstonly RecId from creditParmLine
+            where creditParmLine.JourRefTableId == _jourTableId
+            &&    creditParmLine.JourRefRecId == _jourRecId
+            &&    creditParmLine.DocumentState == VersioningDocumentState::Draft;
+        
+            ret = (creditParmLine.RecId ? false : true);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canCreditJourBeProformaPosted</Name>
+				<Source><![CDATA[
+    public static boolean canCreditJourBeProformaPosted(TableId _jourTableId, RecId _jourRecId)
+    {
+        FINCreditLine creditParmLine;
+
+        select firstonly RecId from creditParmLine
+        where creditParmLine.JourRefTableId == _jourTableId
+        &&    creditParmLine.JourRefRecId == _jourRecId
+        &&    (creditParmLine.DocumentState != VersioningDocumentState::Finalized ||
+               creditParmLine.DocumentState != VersioningDocumentState::Rejected);
+
+        return (creditParmLine.RecId ? true : false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setRejected</Name>
+				<Source><![CDATA[
+    public void setRejected()
+    {
+        if (this.RefTableId == tableNum(CustInvoiceTrans))
+        {
+            this.setCustInvoiceTransRejected();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCustInvoiceTransRejected</Name>
+				<Source><![CDATA[
+    private void setCustInvoiceTransRejected()
+    {
+        // If pending credit for sales line then delete it if possible
+        if (this.TradeType == RORTradeType::SalesPurch)
+        {
+            SalesLine salesLine = SalesLine::findInventTransId(this.InventTransId, true);
+
+            if (salesLine && salesLine.validateDelete())
+            {
+                salesLine.delete();
+            }
+        }
+        // If pending credit for rental line then chanfe status back to Fully Invoiced
+        else
+        {
+            FINCustInvoiceTrans::changePeriodStatus(FINInvoiceTransPeriodStatus::FullyInvoiced, this.RefRecId);
+
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromCustInvoiceTrans</Name>
+				<Source><![CDATA[
+    protected void initFromCustInvoiceTrans(CustInvoiceTrans _custInvoiceTrans)
+    {
+        SalesLine   salesLine = _custInvoiceTrans.salesLine();
+        MarkupTrans markupTrans;
+        MarkupTable markupTable;
+        AmountCur markupAmount;
+
+        select sum(CalculatedAmount) from markupTrans
+        where markupTrans.TransTableId == _custInvoiceTrans.TableId
+        &&    markupTrans.TransRecId == _custInvoiceTrans.RecId
+            exists join markupTable
+            where markupTable.ModuleType == markupTrans.ModuleType
+            &&    markupTable.MarkupCode == markupTrans.MarkupCode
+            &&   (markupTable.CustType == MarkupType::CustVend
+            ||    markupTable.VendType == MarkupType::CustVend);
+
+        markupAmount = markupTrans.CalculatedAmount;
+        
+        this.ItemId         = _custInvoiceTrans.ItemId;
+        this.ItemName       = _custInvoiceTrans.itemName();
+        this.InvoicedAmount = _custInvoiceTrans.LineAmount + markupAmount;
+        this.LineDisc       = _custInvoiceTrans.LineDisc;
+        this.LinePercent    = _custInvoiceTrans.LinePercent;
+        this.Price          = _custInvoiceTrans.SalesPrice;
+        this.CurrencyCode   = _custInvoiceTrans.CurrencyCode;
+        this.HeaderId       = _custInvoiceTrans.SalesId;
+        this.InventTransId  = _custInvoiceTrans.InventTransId;
+        this.TradeType      = _custInvoiceTrans.RORTradeType;
+        this.RentQty        = _custInvoiceTrans.Qty;
+    
+        this.LineRefNum         = salesLine.LineNum;
+        this.CalendarId         = salesLine.DNRCalendarId;
+        this.RentalModeId       = salesLine.INVRentalModeId;
+        this.RateMultiplierTier = salesLine.INVRateMultiplierTier;
+        this.PriceTimeUnit      = salesLine.RORPriceTimeUnit;
+        this.KitComponentType   = salesLine.RORKitComponentType;
+        this.InvoiceProfileId   = salesLine.INVInvoiceProfileId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromJournal</Name>
+				<Source><![CDATA[
+    public void initFromJournal(Common _common)
+    {
+        this.JourRefTableId = _common.TableId;
+        this.JourRefRecId   = _common.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromOriginal</Name>
+				<Source><![CDATA[
+    public void initFromOriginal(Common _common)
+    {
+        this.RefTableId = _common.TableId;
+        this.RefRecId   = _common.RecId;
+    
+        if (_common.TableId == tableNum(CustInvoiceTrans))
+        {
+            this.initFromCustInvoiceTrans(_common);
+        }
+
+        this.initFromParameters();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromParameters</Name>
+				<Source><![CDATA[
+    protected void initFromParameters()
+    {
+        RORParameters rorParameters = RORParameters::find();
+
+        if (this.RefTableId == tableNum(CustInvoiceTrans))
+        {
+            this.DocumentState = (rorParameters.FINIsRentalCreditWorkflowActive ? VersioningDocumentState::Draft : VersioningDocumentState::Approved);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDocumentStateBasedOnCreditAmount</Name>
+				<Source><![CDATA[
+    public void setDocumentStateBasedOnCreditAmount()
+    {
+        RORParameters rorParameters = RORParameters::find();
+        Total totalCreditAmount;
+        Amount minWorkflowAmount;
+        boolean isCreditWorkflowActive;
+
+        if (this.DocumentState == VersioningDocumentState::Draft || this.DocumentState == VersioningDocumentState::Approved)
+        {
+            totalCreditAmount = - (FINCreditLine::creditAmountTotal(this.JourRefTableId, this.JourRefRecId, this.RecId) + this.CreditAmount);
+
+            if (this.RefTableId == tableNum(CustInvoiceTrans) && rorParameters.FINIsRentalCreditWorkflowActive && rorParameters.FINRentalCreditWorkflowMinAmount)
+            {
+                minWorkflowAmount = rorParameters.FINRentalCreditWorkflowMinAmount;
+                isCreditWorkflowActive = true;
+            }
+            
+            if (isCreditWorkflowActive)
+            {
+                if (this.DocumentState == VersioningDocumentState::Draft && totalCreditAmount < minWorkflowAmount)
+                {
+                    this.DocumentState = VersioningDocumentState::Approved;
+                    this.documentStateModified();
+                }
+                else if (this.DocumentState == VersioningDocumentState::Approved && totalCreditAmount > minWorkflowAmount)
+                {
+                    this.DocumentState = VersioningDocumentState::Draft;
+                    this.documentStateModified();
+                }
+            }
+            else
+            {
+                this.DocumentState = VersioningDocumentState::Approved;
+                this.documentStateModified();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>creditAmountTotal</Name>
+				<Source><![CDATA[
+    // When called for FInCreditLine that is not updated yet then exclude its recId and add credit amount outside the method.
+    public static Total  creditAmountTotal(RefTableId _jourRefTableId, RecId _jourRefRecId, RecId _excludeRecId = 0)
+    {
+        FINCreditLine           creditParmLine;
+        FINCreditLineDetails    creditParmLineDetails;
+        Total                   totalCreditAmount;
+        
+        select sum(CreditAmount) from creditParmLine
+            where creditParmLine.JourRefTableId == _jourRefTableId
+            &&    creditParmLine.JourRefRecId == _jourRefRecId
+            &&    creditParmLine.TradeType != RORTradeType::SalesPurch
+            &&    creditParmLine.RecId != _excludeRecId
+            &&    (creditParmLine.DocumentState == VersioningDocumentState::Draft       ||
+                   creditParmLine.DocumentState == VersioningDocumentState::InReview    ||
+                   creditParmLine.DocumentState == VersioningDocumentState::Approved)
+                notexists join creditParmLineDetails
+                where creditParmLineDetails.CreditLineRefRecId == creditParmLine.RecId
+                &&    creditParmLineDetails.CreditType != FINCreditType::Days
+                &&    creditParmLineDetails.DateRangeType != FINCreditDateRangeType::EntirePeriod;
+
+        totalCreditAmount = creditParmLine.CreditAmount;
+
+        select sum(AmountCurCredit) from creditParmLineDetails
+            join creditParmLine
+            where creditParmLine.RecId == creditParmLineDetails.CreditLineRefRecId
+            &&    creditParmLine.JourRefTableId == _jourRefTableId
+            &&    creditParmLine.JourRefRecId == _jourRefRecId
+            &&    creditParmLine.TradeType == RORTradeType::SalesPurch
+            &&    creditParmLine.RecId != _excludeRecId
+            &&    (creditParmLine.DocumentState == VersioningDocumentState::Draft       ||
+                   creditParmLine.DocumentState == VersioningDocumentState::InReview    ||
+                   creditParmLine.DocumentState == VersioningDocumentState::Approved);
+
+        totalCreditAmount += -creditParmLineDetails.AmountCurCredit;        
+        
+        return totalCreditAmount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isSalesPurchLineCredited</Name>
+				<Source><![CDATA[
+    public static boolean isSalesPurchLineCredited(InventTransId _inventTransId)
+    {
+        FINCreditLine creditParmLine;
+        boolean ret;
+
+        select firstonly RecId from creditParmLine
+        where creditParmLine.InventTransId == _inventTransId
+        &&    creditParmLine.DocumentState != VersioningDocumentState::Rejected;
+        
+        if (creditParmLine)
+        {
+            ret = true;
+        }
+        else
+        {
+            SalesLine salesLine;
+            select firstonly RecId from salesLine
+            where salesLine.InventTransIdReturn == _inventTransId;
+
+            if (salesLine)
+            {
+                ret = true;
+            }            
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>creditStatus</Name>
+				<Source><![CDATA[
+    public static str 10 creditStatus(RefTableId _jourRefTableId, RecId _jourRefRecId)
+    {
+        FINCreditLine creditParmLine;
+        str 10 creditStatusTxt;
+        boolean documentStateFound;
+        VersioningDocumentState documentState;
+        int documentStateMin;
+
+        while select DocumentState, RecId from creditParmLine
+        where creditParmLine.JourRefTableId == _jourRefTableId
+        &&    creditParmLine.JourRefRecId == _jourRefRecId
+        {
+            int currentDocumentState = FINCreditLine::documentState2Int(creditParmLine.DocumentState);
+            
+            if (!documentStateMin 
+            || documentStateMin > currentDocumentState)
+            {
+                documentStateMin = currentDocumentState;
+                documentState = creditParmLine.DocumentState;
+                documentStateFound = true;
+            }
+        }
+
+        if (documentStateFound)
+        {
+            creditStatusTxt = strFmt("@SYS82282", documentState);
+        }
+        
+        return creditStatusTxt;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>documentState2Int</Name>
+				<Source><![CDATA[
+    private static int documentState2Int(VersioningDocumentState _documentState)
+    {
+        int ret;
+
+        switch (_documentState)
+        {
+            case VersioningDocumentState::Draft :
+                ret = 1;
+                break;
+            case VersioningDocumentState::InReview :
+                ret = 2;
+                break;
+            case VersioningDocumentState::Approved :
+                ret = 3;
+                break;
+            case VersioningDocumentState::Rejected :
+                ret = 4;
+                break;
+            case VersioningDocumentState::InExternalReview :
+                ret = 5;
+                break;                
+            case VersioningDocumentState::Finalized :
+                ret = 6;
+                break;
+            case VersioningDocumentState::Confirmed :
+                ret = 7;
+                break;
+            default :
+                ret = 999;
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isReInvoice</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is no longer used", false)]
+    public static boolean isReInvoice(RefTableId _jourRefTableId, RecId _jourRefRecId)
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromVendInvoiceTrans</Name>
+				<Source><![CDATA[
+    [SysObsolete("The crediting functionality on sub rental orders is no longer supported", false)]
+    protected void initFromVendInvoiceTrans(VendInvoiceTrans _vendInvoiceTrans)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORTimeZoneSite</Name>
+				<Source><![CDATA[
+    public display Timezone RORTimeZoneSite()
+    {
+        Timezone ret;
+    
+        switch (this.RefTableId)
+        {
+            case tableNum(CustInvoiceTrans) :
+                ret = CustInvoiceTrans::findRecId(this.RefRecId).salesLine().RORTimeZoneSite();
+                break;
+    
+            default :
+                ret = DateTimeUtil::getUserPreferredTimeZone();
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findPendingCreditLine</Name>
+				<Source><![CDATA[
+    public static FINCreditLine findPendingCreditLine(RefTableId _refTableId, RefRecId _refRecId, boolean _update = false)
+    {
+        FINCreditLine creditParmLine;
+    
+        if (_refRecId)
+        {
+            if (_update)
+            {
+                creditParmLine.selectForUpdate(_update);
+            }
+    
+            select creditParmLine
+            where creditParmLine.RefTableId == _refTableId
+            && creditParmLine.RefRecId == _refRecId;
+        }
+    
+        return creditParmLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findRecId</Name>
+				<Source><![CDATA[
+    public static FINCreditLine findRecId(RecId _recId, boolean _update = false)
+    {
+        FINCreditLine creditParmLine;
+    
+        if (_recId)
+        {
+            if (_update)
+            {
+                creditParmLine.selectForUpdate(_update);
+            }
+    
+            select creditParmLine
+            where creditParmLine.RecId == _recId;
+        }
+    
+        return creditParmLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORgetLineNumContainer</Name>
+				<Source><![CDATA[
+    public container RORgetLineNumContainer(LineNum _lineNumCurrent, boolean _lineTypeNormal = true)
+    {
+        FINCreditLine creditParmLine;
+
+        select firstonly LineRefNum from creditParmLine
+        order by LineRefNum asc
+        where creditParmLine.HeaderId == this.HeaderId
+        &&    creditParmLine.LineRefNum > _lineNumCurrent;
+
+        return [ creditParmLine.LineRefNum, 0.0, 0.0 ];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>documentStateModified</Name>
+				<Source><![CDATA[
+    public void documentStateModified()
+    {
+        FINCreditPendingChangesReference changesReference;
+
+        ttsbegin;
+        update_recordset changesReference
+        setting DocumentState = this.DocumentState
+        where changesReference.CreditParmLineRecId == this.RecId;
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<DeveloperDocumentation>@DNR:FINCreditLineDevDoc</DeveloperDocumentation>
+	<Label>@DNR:CreditLines</Label>
+	<SubscriberAccessLevel>
+		<Read>Allow</Read>
+	</SubscriberAccessLevel>
+	<TableGroup>TransactionHeader</TableGroup>
+	<CacheLookup>NotInTTS</CacheLookup>
+	<CreatedBy>Yes</CreatedBy>
+	<CreatedDateTime>Yes</CreatedDateTime>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Identification</Name>
+			<Label>@SYS35583</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>HeaderId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InventTransId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Misc</Name>
+			<Label>@SYS73543</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>LineRefNum</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Overview</Name>
+			<Label>@SYS9039</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ItemId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ItemName</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TradeType</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>KitComponentType</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CurrencyCode</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CalendarId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoiceProfileId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RentQty</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>PriceTimeUnit</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>Price</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LineDisc</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LinePercent</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RateMultiplierTier</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RentalModeId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>InvoicedAmount</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>CreditAmount</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>References</Name>
+			<Label>@SYS14018</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>JourRefRecId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>JourRefTableId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RefRecId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RefTableId</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Blocking</Name>
+			<Label>@SYS50247</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>Locked</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>CalendarId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>CalendarId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>CreditAmount</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>LineAmount</ExtendedDataType>
+			<Label>@DNR6940</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>CurrencyCode</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>CurrencyCode</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>HeaderId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RORHeaderId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InventTransId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>InventTransId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>InvoicedAmount</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>Amount</ExtendedDataType>
+			<Label>@SYS80230</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InvoiceProfileId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>INVInvoiceProfileId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ItemId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>ItemId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ItemName</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>ItemName</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>JourRefRecId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>JourRefTableId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RefTableId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>KitComponentType</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<EnumType>RORKitComponentType</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>LineDisc</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SalesLineDisc</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>LinePercent</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SalesLinePercent</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>LineRefNum</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>LineNum</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>Price</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SalesPrice</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>PriceTimeUnit</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RORPriceTimeUnit</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>RateMultiplierTier</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>INVRateMultiplierTier</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>RefRecId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RefRecId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt">
+			<Name>RefTableId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RefTableId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>ReInvoice</Name>
+			<ConfigurationKey>DNRDeletedFINObjects</ConfigurationKey>
+			<ExtendedDataType>FINReInvoice</ExtendedDataType>
+			<HelpText> </HelpText>
+			<IsObsolete>Yes</IsObsolete>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>RentalModeId</Name>
+			<ExtendedDataType>INVRentalModeId</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>RentQty</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SalesQty</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>TradeType</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<EnumType>RORTradeType</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>DocumentState</Name>
+			<EnumType>VersioningDocumentState</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>Locked</Name>
+			<ExtendedDataType>NoYesId</ExtendedDataType>
+			<Label>@SYS10653</Label>
+			<EnumType>NoYes</EnumType>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>RefTableIdRecIdIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>RefTableId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>RefRecId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+		<AxTableIndex>
+			<Name>JourRefTableIdRecIdIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>JourRefTableId</DataField>
+				</AxTableIndexField>
+				<AxTableIndexField>
+					<DataField>JourRefRecId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>Currency</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>Currency</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>CurrencyCode</Name>
+					<SourceEDT>CurrencyCode</SourceEDT>
+					<Field>CurrencyCode</Field>
+					<RelatedField>CurrencyCode</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>CurrencyCodeIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustInvoiceJour</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustInvoiceJour</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>JourRefRecId</Name>
+					<Field>JourRefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>JourRefTableId</Name>
+					<Field>JourRefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>CustInvoiceTrans</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>CustInvoiceTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>InventTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>InventTable</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ItemId</Name>
+					<SourceEDT>ItemId</SourceEDT>
+					<Field>ItemId</Field>
+					<RelatedField>ItemId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>ItemIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>InventTransOrigin</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>InventTransOrigin</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InventTransId</Name>
+					<SourceEDT>InventTransId</SourceEDT>
+					<Field>InventTransId</Field>
+					<RelatedField>InventTransId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>InventTransIdIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>UnitOfMeasure</Name>
+			<Cardinality>ExactlyOne</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>UnitOfMeasure</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintRelatedFixed">
+					<Name>UnitOfMeasureClass</Name>
+					<RelatedField>UnitOfMeasureClass</RelatedField>
+					<ValueStr>UnitOfMeasureClass::Time</ValueStr>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>PriceTimeUnit</Name>
+					<Field>PriceTimeUnit</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>VendInvoiceJour</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>VendInvoiceJour</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>JourRefRecId</Name>
+					<Field>JourRefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>JourRefTableId</Name>
+					<Field>JourRefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>VendInvoiceTrans</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>VendInvoiceTrans</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefRecId</Name>
+					<Field>RefRecId</Field>
+					<RelatedField>RecId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>RefTableId</Name>
+					<Field>RefTableId</Field>
+					<RelatedField>TableId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>WorkCalendarTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>WorkCalendarTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>CalendarId</Name>
+					<SourceEDT>CalendarId</SourceEDT>
+					<Field>CalendarId</Field>
+					<RelatedField>CalendarId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>CalendarIdx</Index>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>FINRentalInvoiceProfile</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<EDTRelation>Yes</EDTRelation>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>FINRentalInvoiceProfile</RelatedTable>
+			<RelatedTableCardinality>ExactlyOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InvoiceProfileId</Name>
+					<SourceEDT>INVInvoiceProfileId</SourceEDT>
+					<Field>InvoiceProfileId</Field>
+					<RelatedField>InvoiceProfileId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

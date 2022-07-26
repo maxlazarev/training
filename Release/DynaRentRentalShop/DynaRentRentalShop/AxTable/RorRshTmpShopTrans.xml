@@ -1,0 +1,1285 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RorRshTmpShopTrans</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class RorRshTmpShopTrans extends common
+{
+    
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>displayQtyReturnRemainder</Name>
+				<Source><![CDATA[
+    display InventQty displayQtyReturnRemainder()
+    {
+        InventQty ret = (this.QtyAvailableForReturn - this.QtyReturnGood - this.QtyReturnDamaged - this.QtyReturnScrapped);
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>returnQuality2FieldId</Name>
+				<Source><![CDATA[
+    public static FieldId returnQuality2FieldId(RorRshReturnQuality _returnQuality)
+    {
+        FieldId ret;
+
+        switch (_returnQuality)
+        {
+            case RorRshReturnQuality::Damaged :
+                ret = fieldNum(RorRshTmpShopTrans, QtyReturnDamaged);
+                break;
+            case RorRshReturnQuality::Good :
+                ret = fieldNum(RorRshTmpShopTrans, QtyReturnGood);
+                break;
+            case RorRshReturnQuality::Scrapped :
+                ret = fieldNum(RorRshTmpShopTrans, QtyReturnScrapped);
+                break;
+            case RorRshReturnQuality::Surplus :
+                ret = fieldNum(RorRshTmpShopTrans, QtyReturnSurplus);
+                break;
+            default :
+                // return 0
+                break;
+
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    public void initValue()
+    {
+        super();
+
+        if (this.TransType == RorRshShopTransType::Delivery)
+        {
+            this.OnRentDateTime = DateTimeUtil::getSystemDateTime();
+            this.QtyDelivery = 1;
+        }
+        else if (this.TransType == RorRshShopTransType::Return)
+        {
+            this.OffRentDateTime = DateTimeUtil::getSystemDateTime();
+            this.TradeType = RorRshShopTradeType::Rental;
+        }
+
+        InventDim inventDim;
+
+        inventDim.InventLocationId = DNRWorkerDefaults::findByUserId().InventLocationId;
+        inventDim.modifiedField(fieldNum(InventDim, InventLocationId));
+        inventDim = InventDim::findDim(inventDim);
+        this.InventDimId = inventDim.inventDimId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>itemIdModified</Name>
+				<Source><![CDATA[
+    private void itemIdModified()
+    {
+        InventTableModule inventTableModule = InventTableModule::find(this.ItemId, ModuleInventPurchSales::Sales);
+        this.SalesUnit = inventTableModule.UnitId;
+
+        if (this.TransType == RorRshShopTransType::Delivery)
+        {
+            InventItemSalesSetup inventItemSalesSetup = InventItemSalesSetup::find(this.ItemId, this.InventDimId);
+
+            // Sometimes items need to be sold in multiple qty i.e 2 speakers.
+            if (inventItemSalesSetup.MultipleQty)
+            {
+                this.QtyDelivery = inventItemSalesSetup.MultipleQty;
+            }
+        }
+
+        RORItemTradeType itemTradeType = DNRRSHRentalShopDataHelper::getItemTradeType(this.ItemId);
+        this.TradeType = itemTradeType == RORItemTradeType::SalesPurch ? RorRshShopTradeType::SalesPurch : RorRshShopTradeType::Rental;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>shopCardIdModified</Name>
+				<Source><![CDATA[
+    private void shopCardIdModified()
+    {
+        RorRshShopCardTable shopCardTable;
+
+        select firstonly RentalShopType, RecId from shopCardTable
+        where shopCardTable.ShopCardId == this.ShopCardId;
+
+        if (shopCardTable.RecId && shopCardTable.RentalShopType == DNRRSHRentalShopType::Customer)
+        {
+            RorRshShopTrans rentalShopTrans = this.findDeliveryRentalShopTrans(this.ShopCardId, this.ItemId, this.inventDim().inventSerialId);
+
+            if (rentalShopTrans)
+            {
+                this.initFormRentalShopTransDeliveryForReturn(rentalShopTrans);
+            }
+        }
+
+        this.recalculateAvailableForReturn();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    public void modifiedField(FieldId _fieldId)
+    {
+        super(_fieldId);
+
+        switch (_fieldId)
+        {
+            case fieldNum(RorRshTmpShopTrans, ItemId) :
+                this.itemIdModified();
+                this.shopCardIdModified();
+                break;
+
+            case fieldNum(RorRshTmpShopTrans, InventDimId) :
+                this.createSerialNum();                           // Fall through
+                
+            case fieldNum(RorRshTmpShopTrans, ShopCardId) :
+                this.shopCardIdModified();
+                break;
+            case fieldNum(RorRshTmpShopTrans, TradeType) :
+                if (this.TransType == RorRshShopTransType::Return)
+                {
+                    this.resetReturnQty();
+                }
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSerialNum</Name>
+				<Source><![CDATA[
+    private void createSerialNum()
+    {
+        InventSerialId newSerialNum = this.inventDim().InventSerialId;
+
+        if (newSerialNum
+        && this.ItemId
+        && !InventSerial::exist(newSerialNum, this.ItemId))
+        {
+            BOBObjectTable objectTable = BOBObjectTable::findInventSerialId(newSerialNum);
+            InventTable inventTable = InventTable::find(this.ItemId);
+            BOBRentalTypeId rentalTypeId = inventTable.BOBRentalType().RentalTypeId;
+
+            // Allow using serial number of another item the same way as on rental order form but only if both items have the same rental type
+            if (rentalTypeId
+            && objectTable.RentalTypeId == rentalTypeId)
+            {
+                InventSerial::BOBFindOrCreateSerialNumber(rentalTypeId, newSerialNum);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>recalculateAvailableForReturn</Name>
+				<Source><![CDATA[
+    private void recalculateAvailableForReturn()
+    {
+        if (this.TransType == RorRshShopTransType::Return && this.ShopCardId && this.ItemId && this.InventDim().InventLocationId)
+        {
+            RorRshShopTrans dummyReturnTrans;
+            dummyReturnTrans.initReturnTransFromTmp(this, RorRshReturnQuality::Good);
+
+            this.QtyAvailableForReturn = dummyReturnTrans.getAvailableForReturn();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkShopCard</Name>
+				<Source><![CDATA[
+    public boolean checkShopCard()
+    {
+        boolean ret = true;
+
+        if (this.ShopCardId)
+        {
+            RorRshShopCardTable shopCardTable = RorRshShopCardTable::find(this.ShopCardId);
+            TransDate currentDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+
+            if (!shopCardTable
+            ||  !shopCardTable.Active
+            ||  (shopCardTable.FromDate && shopCardTable.FromDate > currentDate)
+            ||  (shopCardTable.ToDate && shopCardTable.ToDate < currentDate))
+            {
+                ret = checkFailed(strFmt("@DNR:ShopCardNotValid", this.ShopCardId));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkItemShopCardSetup</Name>
+				<Source><![CDATA[
+    public boolean checkItemShopCardSetup()
+    {
+        boolean ret = true;
+        RorRshShopItemTable rentalShopItemTable;
+        RORSalesRentalBoth salesRentalBoth;
+
+        if (this.itemId && this.ShopCardId)
+        {
+            salesRentalBoth = (this.TradeType == RorRshShopTradeType::SalesPurch ? RORSalesRentalBoth::SalesOrder : RORSalesRentalBoth::RentalOrder);
+
+            rentalShopItemTable = RorRshShopItemTable::findItemIdCard(this.itemId, RorRshShopCardTable::find(this.ShopCardId), salesRentalBoth);
+
+            if (rentalShopItemTable.RecId == 0)
+            {
+                ret = checkFailed(strFmt("@DNR:ShopCardItemIdNotValid", this.itemId, this.ShopCardId, enum2Str(salesRentalBoth)));
+            }
+        }
+
+        if (ret
+        &&  this.TransType == RorRshShopTransType::Delivery
+        &&  rentalShopItemTable
+        &&  rentalShopItemTable.MaximumQty
+        &&  salesRentalBoth == RORSalesRentalBoth::RentalOrder)
+        {
+            ret = this.checkRentalQty(rentalShopItemTable.MaximumQty);
+        }
+
+        if (ret
+        &&  this.TransType == RorRshShopTransType::Delivery
+        &&  salesRentalBoth == RORSalesRentalBoth::SalesOrder)
+        {
+            ret = this.checkQtyOnHand();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkSerialId</Name>
+				<Source><![CDATA[
+    private boolean checkSerialId()
+    {
+        InventTable inventTable = InventTable::find(this.ItemId);
+        boolean ret = true;
+
+        if (inventTable && inventTable.BOBIsSerializedRentalItem())
+        {
+            if (this.inventDim().InventSerialId)
+            {
+                ret = this.checkSerializedQty();
+                ret = ret && this.checkSerialIdDuplicates();
+            }
+            else
+            {
+                ret = checkFailed(strFmt("@DNR:ShopSerialIdValidation", this.ItemId));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkSerializedQty</Name>
+				<Source><![CDATA[
+    public boolean checkSerializedQty()
+    {
+        boolean ret = true;
+
+        if (this.QtyDelivery > 1
+        || (this.QtyReturnDamaged + this.QtyReturnGood + this.QtyReturnScrapped + this.QtyReturnSurplus) > 1)
+        {
+            ret = checkFailed(strFmt("@DNR:RentalShopSerializedItemValidation", this.ItemId));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkSerialIdDuplicates</Name>
+				<Source><![CDATA[
+    private boolean checkSerialIdDuplicates()
+    {
+        boolean ret = true;
+        InventDim inventDim = this.inventDim();
+        InventDim inventDimTempRentalShop;                
+        RorRshTmpShopTrans tmpRentalShop;
+
+        tmpRentalShop.linkPhysicalTableInstance(this);
+
+        select firstonly RecId from tmpRentalShop
+        where tmpRentalShop.RecId != this.RecId
+            exists join inventDimTempRentalShop
+            where inventDimTempRentalShop.inventDimId == tmpRentalShop.InventDimId
+            && inventDimTempRentalShop.inventSerialId == inventDim.inventSerialId
+            && inventDimTempRentalShop.inventSerialId;
+
+        if (tmpRentalShop.RecId)
+        {
+            ret = checkFailed(strFmt("@DNR:ShopSerialIdDuplicateValidation", inventDim.InventSerialId));
+        }
+
+        if (ret)
+        {
+            RorRshShopTrans rentalShopTrans;
+            InventDim inventDimRentalShopTrans; 
+            
+            select firstonly RecId from rentalShopTrans
+            where rentalShopTrans.IsProcessed == NoYes::No
+            &&    (this.TransType == RorRshShopTransType::Delivery ||
+                    // It is ok to have not processed Delivery and Return with the same serial number
+                    rentalShopTrans.TransType == RorRshShopTransType::Return)
+                    join TableId from inventDimRentalShopTrans
+                    where inventDimRentalShopTrans.InventDimId == rentalShopTrans.InventDimId
+                    && inventDimRentalShopTrans.InventSerialId == inventDim.InventSerialId
+                    && inventDimRentalShopTrans.inventSerialId;
+                
+            if (rentalShopTrans.RecId != 0)
+            {
+                ret = checkFailed(strFmt("@DNR:ShopSerialIdDuplicateValidation", inventDim.InventSerialId));
+            }
+        }
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkRentalQty</Name>
+				<Source><![CDATA[
+    private boolean checkRentalQty(RAGMaxQty _maxRentalQty)
+    {
+        boolean ret = true;
+        Qty rentedQty;
+        SalesUnit defaultSalesUnit = InventTableModule::find(this.ItemId, ModuleInventPurchSales::Sales).UnitId;
+        UnitOfMeasureToRecId defaultSalesUnitRecId = UnitOfMeasure::findBySymbol(defaultSalesUnit).RecId;
+        // _maxRentalQty is in sales unit. On rental shop transaction user can specify different unit so all quantities needs to be converted to default sales unit.
+        
+        if (defaultSalesUnit == this.SalesUnit)
+        {
+            rentedQty = this.QtyDelivery;
+        }
+        else
+        {
+            UnitOfMeasureFromRecId unitOfMeasureFromRecId = UnitOfMeasure::findBySymbol(this.SalesUnit).RecId;
+            rentedQty = UnitOfMeasureConverter::convert(this.QtyDelivery, unitOfMeasureFromRecId, defaultSalesUnitRecId, NoYes::No);
+        }
+
+        // Add rental quantity from previous transactions
+        rentedQty += RorRshShopTrans::getTotalRentedQtyForShopCard(this.ItemId, this.ShopCardId, defaultSalesUnitRecId);
+
+        if (rentedQty > _maxRentalQty)
+        {
+            FreeText logText = strFmt("@DNR:ShopCardMaxRentedQty",
+                this.ShopCardId,
+                any2Str(rentedQty),
+                defaultSalesUnit,
+                this.ItemId,
+                _maxRentalQty);
+
+            ret = checkFailed(logText);
+        }
+  
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkQtyOnHand</Name>
+				<Source><![CDATA[
+    private boolean checkQtyOnHand()
+    {
+        boolean         ret = true;
+        InventDim       inventDimCriteria = this.inventDim();
+        InventDimParm   inventDimParm;
+        ItemId          itemId = this.itemId;
+        
+        if (!InventTable::find(itemId).modelGroup().NegativePhysical)
+        {
+            RorRshTmpShopTrans tmpShopTrans;
+            tmpShopTrans.linkPhysicalTableInstance(this);
+            InventDim inventDim;
+
+            inventDimParm.initFromInventDim(inventDimCriteria);
+            inventDimParm.InventLocationIdFlag = NoYes::Yes;
+
+            // Check what is already in currently opened cockpit input
+            select sum(QtyDelivery) from tmpShopTrans
+            where tmpShopTrans.ItemId == this.ItemId
+                #InventDimExistsJoin(tmpShopTrans.InventDimId, inventDim, inventDimCriteria, inventDimParm);
+
+            // Check what is already in not processed deliveries
+            RorRshShopTrans shopTrans;
+
+            select sum(Qty) from shopTrans
+            where shopTrans.ItemId == this.ItemId
+            &&    !shopTrans.IsProcessed
+            &&    shopTrans.TransType == RorRshShopTransType::Delivery
+                #InventDimExistsJoin(tmpShopTrans.InventDimId, inventDim, inventDimCriteria, inventDimParm);
+
+            InventOnhand inventOnhand = InventOnhand::newItemDim(itemId, inventDimCriteria, inventDimParm);
+            InventTableModule inventTableModule = InventTableModule::find(this.ItemId, ModuleInventPurchSales::Invent);
+
+            EcoResProductUnitConverter ecoResConverter = EcoResProductUnitConverter::newGivenUnitSymbolsForReleasedProduct(this.ItemId,
+                    inventDimCriteria.InventDimId,
+                    inventTableModule.UnitId,
+                    this.SalesUnit,
+                    NoYes::No);
+
+            InventQty physicalQty = ecoResConverter.convertValue(inventOnhand.physicalInvent()) - shopTrans.Qty - tmpShopTrans.QtyDelivery;
+            
+            if (this.RecId)
+            {
+                physicalQty += this.orig().QtyDelivery;
+            }
+
+            if (this.QtyDelivery > physicalQty)
+            {
+                ret = checkFailed(strFmt("@DNR:ShopOnHandAvailabilityInventDim",
+                        physicalQty,
+                        this.SalesUnit,
+                        this.ItemId,
+                        InventDim::dimReportStrAll(inventDimCriteria, inventDimParm.selectedDimFields().pack(), new xInfo().language())));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkReturnTrans</Name>
+				<Source><![CDATA[
+    public boolean checkReturnTrans()
+    {
+        boolean ret = true;
+
+        if (this.TransType == RorRshShopTransType::Return
+        && this.displayQtyReturnRemainder() < 0)
+        {
+            RorRshShopTrans dummyReturnTrans;
+            dummyReturnTrans.initReturnTransFromTmp(this, RorRshReturnQuality::Good);
+            dummyReturnTrans.Qty = (this.QtyReturnGood + this.QtyReturnDamaged + this.QtyReturnScrapped);
+
+            Qty availableForReturn = dummyReturnTrans.getAllAvailableForReturn();
+            Qty currentReturn = dummyReturnTrans.Qty;
+
+            if (availableForReturn < currentReturn)
+            {
+                ret = checkFailed(strFmt("@DNR:ShopReturnAllAvailableValidation",
+                    currentReturn,
+                    this.SalesUnit,
+                    this.ItemId,
+                    availableForReturn));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkDeliveryReturnMatch</Name>
+				<Source><![CDATA[
+    private boolean checkDeliveryReturnMatch()
+    {
+        boolean ret = true;
+        
+        if (this.TransType == RorRshShopTransType::Return && !RorRshShopTrans::existMatchingDeliveryForTmpReturn(this, true))
+        {
+            FreeText logText;
+            InventDim inventDim = this.inventDim();
+
+            if (inventDim.wMSLocationId)
+            {
+                logText = strFmt("@DNR:ShopNoMatchingDeliveryWMSLocation",
+                    this.ItemId,
+                    this.ShopCardId,
+                    inventDim.InventLocationId,
+                    inventDim.wMSLocationId);
+            }
+            else
+            {
+                logText = strFmt("@DNR:ShopNoMatchingDelivery",
+                    this.ItemId,
+                    this.ShopCardId,
+                    inventDim.InventLocationId);
+            }
+            
+            // This check is not blocking the return process.
+            RorRshShopTransLog::createLog(this.TableId, this.RecId, RorRshShopLogType::IncorrectReturn, logText);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateWrite</Name>
+				<Source><![CDATA[
+    public boolean validateWrite()
+    {
+        boolean ret;
+    
+        ret = super();
+
+        RorRshShopTransLog::deleteLog(this.TableId, this.RecId);
+
+        ret = ret && this.checkShopCard();
+        ret = ret && this.checkItemShopCardSetup();
+        ret = ret && this.checkSerialId();
+        ret = ret && this.checkReturnTrans();
+        ret = ret && this.checkQtyValid();
+            
+        if (ret)
+        {
+            this.runLogBasedValidation();
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runLogBasedValidation</Name>
+				<Source><![CDATA[
+    // Place for checks that are not blocking the process. They will be stored in a log for further analysis.
+    public void runLogBasedValidation()
+    {
+        this.checkDeliveryReturnMatch();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventDim</Name>
+				<Source><![CDATA[
+    public InventDim inventDim(boolean  _forUpdate = false)
+    {
+        return InventDim::find(this.InventDimId, _forUpdate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifyInventDim</Name>
+				<Source><![CDATA[
+    public boolean modifyInventDim(
+        InventDim            _inventDim,
+        FieldId              _dimFieldId,
+        boolean              _resetPrice = true)
+    {
+        Set dimFieldIdSet = new Set(Types::Integer);
+        dimFieldIdSet.add(_dimFieldId);
+
+        return this.modifyInventDimSet(_inventDim, dimFieldIdSet, _resetPrice);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifyInventDimSet</Name>
+				<Source><![CDATA[
+    public boolean modifyInventDimSet(
+        InventDim            _inventDim,
+        Set                  _dimFieldIdSet,
+        boolean              _resetPrice = true,
+        boolean              _skipInventDimDefaulting = false)
+    {
+        if (!this.ItemId)
+        {
+            return false;
+        }
+
+        InventDim inventDimLocal = InventDim::findOrCreate(_inventDim);
+
+        if (!InventDistinctProductValidator::construct().isDistinctProductFullySpecified(this.ItemId, inventDimLocal))
+        {
+            return false;
+        }
+             
+        this.setInventDimId(inventDimLocal.InventDimId, inventDimLocal);
+        this.modifiedField(fieldNum(RorRshTmpShopTrans, InventDimId));
+                                                  
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>linkInventDim2Dimension</Name>
+				<Source><![CDATA[
+    public void linkInventDim2Dimension(InventDim _newInventDim, InventDim _oldInventDim)
+    {
+        _newInventDim.setInventSiteFromParentIfModified(this, _oldInventDim);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInventDimId</Name>
+				<Source><![CDATA[
+    public void setInventDimId(InventDimId _inventDimId, InventDim _inventDim = InventDim::find(_inventDimId))
+    {
+        InventDim   currentInventDim = (this.InventDimId == _inventDimId ? _inventDim : this.inventDim());
+
+        this.InventDimId = _inventDimId;
+        this.linkInventDim2Dimension(_inventDim, currentInventDim);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setInventDimIdFromInventDim</Name>
+				<Source><![CDATA[
+    public void setInventDimIdFromInventDim(InventDim _inventDim)
+    {
+        InventDim   inventDim;
+
+        inventDim = InventDim::findOrCreate(_inventDim);
+        this.setInventDimId(inventDim.InventDimId, inventDim);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateModifyInventDim</Name>
+				<Source><![CDATA[
+    public boolean validateModifyInventDim(
+        InventDim           _inventDim,
+        FieldId             _dimFieldId)
+    {
+        Set dimFieldIdSet = new Set(Types::Integer);
+        dimFieldIdSet.add(_dimFieldId);
+
+        return this.validateModifyInventDimSet(_inventDim, dimFieldIdSet);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateModifyInventDimSet</Name>
+				<Source><![CDATA[
+    public boolean validateModifyInventDimSet(
+        InventDim           _inventDim,
+        Set                 _dimFieldIdSet)
+    {
+        boolean             ok = true;
+        
+        if (ok && (_dimFieldIdSet.in(fieldNum(InventDim, InventBatchId))))
+        {
+            ok = this.pmfValidateBatchId(_inventDim.InventBatchId);
+        }
+
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pmfValidateBatchId</Name>
+				<Source><![CDATA[
+    protected boolean pmfValidateBatchId(InventBatchId _inventBatchId)
+    {
+        boolean ret = true;
+
+        // Only validate WHS enabled Items if batch is above location.
+        if (!WHSInventEnabled::exist(this.ItemId)
+            ||  WHSReservationHierarchyInventDimUtil::isBatchAboveLocation(InventTable::find(this.ItemId)))
+        {
+            if (#PdsShelfEnabled)
+            {
+                CustAccount custAccount = this.shopCardTable().displayCustAccount();
+
+                ret = ret
+                && InventBatch::pdsCheckExpiryDate(
+                    _inventBatchId,
+                    this.ItemId,
+                    DateTimeUtil::date(DateTimeUtil::applyTimeZoneOffset(this.OnRentDateTime, DateTimeUtil::getUserPreferredTimeZone())),
+                    true,
+                    custAccount,
+                    false,
+                    this.inventDim());
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>shopCardTable</Name>
+				<Source><![CDATA[
+    public RorRshShopCardTable shopCardTable(boolean _forUpdate = false)
+    {
+        return RorRshShopCardTable::find(this.ShopCardId, _forUpdate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFormRentalShopTransDeliveryForReturn</Name>
+				<Source><![CDATA[
+    public void initFormRentalShopTransDeliveryForReturn(RorRshShopTrans _rentalShopTrans)
+    {
+        this.ShopCardId                         = _rentalShopTrans.ShopCardId;
+        this.ItemId                             = _rentalShopTrans.ItemId;
+        this.InventDimId                        = _rentalShopTrans.InventDimId;
+        this.QtyDelivery                        = _rentalShopTrans.Qty;
+        this.InventDimId                        = _rentalShopTrans.InventDimId;
+        this.TradeType                          = (_rentalShopTrans.TradeType == RORTradeType::Rental) ? RorRshShopTradeType::Rental : RorRshShopTradeType::SalesPurch;
+        this.SalesUnit                          = _rentalShopTrans.SalesUnit;
+        this.SalesPrice                         = _rentalShopTrans.SalesPrice;
+        this.OnRentDateTimeDelivery             = _rentalShopTrans.OnRentDateTime;
+        this.OffRentDateTimeDelivery            = _rentalShopTrans.OffRentDateTime;
+        this.ExpectedOffRentDateTimeDelivery    = _rentalShopTrans.ExpectedOffRentDateTime;
+        this.RentalGrossAmountDel               = _rentalShopTrans.RentalGrossAmount;
+        this.LineAmountDel                      = _rentalShopTrans.LineAmount;
+        this.LinePercentDel                     = _rentalShopTrans.LinePercent;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTransactionFromShopCard</Name>
+				<Source><![CDATA[
+    public static void populateTransactionFromShopCard(RorRshShopCardId _shopCardId, RorRshTmpShopTrans _shopCartTrans)
+    {
+        RecordInsertList       insertList = new RecordInsertList(tableNum(RorRshTmpShopTrans), false, false, false, false, false, _shopCartTrans);
+        RorRshShopTrans        rentalShopTrans;
+
+        ttsbegin;
+        while select rentalShopTrans
+        where rentalShopTrans.ShopCardId == _shopCardId
+        && rentalShopTrans.TransType == RorRshShopTransType::Delivery
+        {
+            _shopCartTrans.TransType = RorRshShopTransType::Return;
+            _shopCartTrans.initValue();
+            _shopCartTrans.initFormRentalShopTransDeliveryForReturn(rentalShopTrans);
+            _shopCartTrans.recalculateAvailableForReturn();
+            insertList.add(_shopCartTrans);
+        }
+
+        insertList.insertDatabase();
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findDeliveryRentalShopTrans</Name>
+				<Source><![CDATA[
+    public RorRshShopTrans findDeliveryRentalShopTrans(RorRshShopCardId _shopCardId, ItemId _itemId, InventSerialId _serialId)
+    {
+        RorRshShopTrans rentalShopTrans;
+        InventDim       inventDim;
+
+        select firstonly rentalShopTrans
+        where rentalShopTrans.ShopCardId    == _shopCardId
+        &&    rentalShopTrans.TransType     == RorRshShopTransType::Delivery
+        &&    rentalShopTrans.ItemId        == _itemId
+            join TableId from inventDim
+            where rentalShopTrans.InventDimId   == inventDim.inventDimId
+            &&    inventDim.inventSerialId      == _serialId;
+
+        return rentalShopTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkQtyValid</Name>
+				<Source><![CDATA[
+    public boolean checkQtyValid()
+    {
+        boolean ret = true;
+
+        switch (this.TransType)
+        {
+            case RorRshShopTransType::Delivery :
+                if (this.QtyDelivery <= 0)
+                {
+                    ret = checkFailed("@DNR:DNRInvalidDeliveryQty");
+                }
+                break;
+            case RorRshShopTransType::Return :
+                InventQty tmpReturnQty = this.QtyReturnDamaged + this.QtyReturnGood + this.QtyReturnScrapped + this.QtyReturnSurplus;
+                if (tmpReturnQty <= 0)
+                {
+                    ret = checkFailed("@DNR:DNRInvalidReturnQty");
+                }
+                break;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resetReturnQty</Name>
+				<Source><![CDATA[
+    private void resetReturnQty()
+    {
+        this.QtyReturnDamaged = 0;
+        this.QtyReturnGood = 0;
+        this.QtyReturnScrapped = 0;
+        this.QtyReturnSurplus = 0;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+	<Label>@DNR:RentalShopTrans</Label>
+	<SubscriberAccessLevel>
+		<Read>Allow</Read>
+	</SubscriberAccessLevel>
+	<TableGroup>WorksheetLine</TableGroup>
+	<TitleField1>ShopCardId</TitleField1>
+	<TitleField2>ItemId</TitleField2>
+	<ClusteredIndex>ShopCardIdIdx</ClusteredIndex>
+	<CreatedBy>Yes</CreatedBy>
+	<TableType>TempDB</TableType>
+	<DeleteActions />
+	<FieldGroups>
+		<AxTableFieldGroup>
+			<Name>AutoReport</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoLookup</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoIdentification</Name>
+			<AutoPopulate>Yes</AutoPopulate>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoSummary</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>AutoBrowse</Name>
+			<Fields />
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>QtyDelivery</Name>
+			<Label>@SYS4508</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>QtyDelivery</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>QtyReturn</Name>
+			<Label>@SYS16512</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>QtyAvailableForReturn</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>displayQtyReturnRemainder</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>QtyReturnGood</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>QtyReturnDamaged</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>QtyReturnSurplus</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>QtyReturnScrapped</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>Overview</Name>
+			<Label>@SYS9039</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>ShopCardId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TransType</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>TradeType</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ItemId</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesUnit</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>SalesPrice</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>RentalDateTime</Name>
+			<Label>@DNR6</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OnRentDateTime</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OffRentDateTime</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>RentalDateTimeDelivery</Name>
+			<Label>@DNR:RentalShopDeliveryDateTime</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>OnRentDateTimeDelivery</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>ExpectedOffRentDateTimeDelivery</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>OffRentDateTimeDelivery</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>RentalDeliveryPrice</Name>
+			<Label>@DNR:RentalShopDeliveryPrice</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>SalesPrice</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>RentalGrossAmountDel</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LinePercentDel</DataField>
+				</AxTableFieldGroupField>
+				<AxTableFieldGroupField>
+					<DataField>LineAmountDel</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+		<AxTableFieldGroup>
+			<Name>DeliveryDepot</Name>
+			<Label>@DNR4173</Label>
+			<Fields>
+				<AxTableFieldGroupField>
+					<DataField>InventLocationIdDelivery</DataField>
+				</AxTableFieldGroupField>
+			</Fields>
+		</AxTableFieldGroup>
+	</FieldGroups>
+	<Fields>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ShopCardId</Name>
+			<ExtendedDataType>RorRshShopCardId</ExtendedDataType>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>TransType</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<EnumType>RorRshShopTransType</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>ItemId</Name>
+			<ExtendedDataType>ItemId</ExtendedDataType>
+			<IgnoreEDTRelation>Yes</IgnoreEDTRelation>
+			<Mandatory>Yes</Mandatory>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>QtyDelivery</Name>
+			<ExtendedDataType>InventQty</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>OnRentDateTime</Name>
+			<ExtendedDataType>ROROnRentDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>QtyAvailableForReturn</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>InventQty</ExtendedDataType>
+			<Label>@DNR:AvailableForReturn</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>QtyReturnGood</Name>
+			<ExtendedDataType>InventQty</ExtendedDataType>
+			<HelpText>@DNR10004</HelpText>
+			<Label>@DNR10007</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>QtyReturnDamaged</Name>
+			<ExtendedDataType>InventQty</ExtendedDataType>
+			<HelpText>@DNR10005</HelpText>
+			<Label>@DNR10008</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>QtyReturnSurplus</Name>
+			<ExtendedDataType>InventQty</ExtendedDataType>
+			<HelpText>@DNR10001</HelpText>
+			<Label>@DNR10006</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>QtyReturnScrapped</Name>
+			<ExtendedDataType>InventQty</ExtendedDataType>
+			<HelpText>@DNR10002</HelpText>
+			<Label>@SYS67559</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InventSerialId</Name>
+			<ConfigurationKey>DNRDeletedObjects01_2020</ConfigurationKey>
+			<ExtendedDataType>InventSerialId</ExtendedDataType>
+			<IgnoreEDTRelation>Yes</IgnoreEDTRelation>
+			<IsObsolete>Yes</IsObsolete>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>SalesUnit</Name>
+			<ExtendedDataType>SalesUnit</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>OffRentDateTime</Name>
+			<ExtendedDataType>ROROffRentDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldEnum">
+			<Name>TradeType</Name>
+			<EnumType>RorRshShopTradeType</EnumType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InventLocationId</Name>
+			<ConfigurationKey>DNRDeletedObjects01_2020</ConfigurationKey>
+			<ExtendedDataType>InventLocationId</ExtendedDataType>
+			<IgnoreEDTRelation>Yes</IgnoreEDTRelation>
+			<IsObsolete>Yes</IsObsolete>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>wMSLocationId</Name>
+			<ConfigurationKey>DNRDeletedObjects01_2020</ConfigurationKey>
+			<ExtendedDataType>WMSLocationId</ExtendedDataType>
+			<IsObsolete>Yes</IsObsolete>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InventDimId</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>InventDimId</ExtendedDataType>
+			<IgnoreEDTRelation>Yes</IgnoreEDTRelation>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>SalesPrice</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SalesPrice</ExtendedDataType>
+			<Label>@DNR6202</Label>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>RentalGrossAmountDel</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RORRentalGrossAmount</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>LineAmountDel</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SalesLineAmount</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldReal">
+			<Name>LinePercentDel</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>SalesLinePercent</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>OnRentDateTimeDelivery</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>ROROnRentDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>OffRentDateTimeDelivery</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>ROROffRentDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldUtcDateTime">
+			<Name>ExpectedOffRentDateTimeDelivery</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RORExpectedOffRentDateTime</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldInt64">
+			<Name>PriceTimeUnitDelivery</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>RORPriceTimeUnit</ExtendedDataType>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InventSerialIdDelivery</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>InventSerialId</ExtendedDataType>
+			<IgnoreEDTRelation>Yes</IgnoreEDTRelation>
+			<IsObsolete>Yes</IsObsolete>
+		</AxTableField>
+		<AxTableField xmlns=""
+			i:type="AxTableFieldString">
+			<Name>InventLocationIdDelivery</Name>
+			<AllowEdit>No</AllowEdit>
+			<AllowEditOnCreate>No</AllowEditOnCreate>
+			<ExtendedDataType>InventLocationId</ExtendedDataType>
+			<IgnoreEDTRelation>Yes</IgnoreEDTRelation>
+		</AxTableField>
+	</Fields>
+	<FullTextIndexes />
+	<Indexes>
+		<AxTableIndex>
+			<Name>ShopCardIdIdx</Name>
+			<AllowDuplicates>Yes</AllowDuplicates>
+			<Fields>
+				<AxTableIndexField>
+					<DataField>ShopCardId</DataField>
+				</AxTableIndexField>
+			</Fields>
+		</AxTableIndex>
+	</Indexes>
+	<Mappings />
+	<Relations>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>InventTable</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>InventTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ItemId</Name>
+					<Field>ItemId</Field>
+					<RelatedField>ItemId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>ShopCard</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>RorRshShopCardTable</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>ShopCardId</Name>
+					<Field>ShopCardId</Field>
+					<RelatedField>ShopCardId</RelatedField>
+				</AxTableRelationConstraint>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintRelatedFixed">
+					<Name>Active</Name>
+					<RelatedField>Active</RelatedField>
+					<ValueStr>NoYes::Yes</ValueStr>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation>
+			<Name>SalesUnit</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<OnDelete>Restricted</OnDelete>
+			<RelatedTable>UnitOfMeasure</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelatedTableRole>UnitOfMeasureSymbol</RelatedTableRole>
+			<RelationshipType>Association</RelationshipType>
+			<Role>RentalUnit</Role>
+			<UseDefaultRoleNames>No</UseDefaultRoleNames>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>SalesUnit</Name>
+					<Field>SalesUnit</Field>
+					<RelatedField>Symbol</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+		</AxTableRelation>
+		<AxTableRelation xmlns=""
+			i:type="AxTableRelationForeignKey">
+			<Name>InventDim</Name>
+			<Cardinality>ZeroMore</Cardinality>
+			<RelatedTable>InventDim</RelatedTable>
+			<RelatedTableCardinality>ZeroOne</RelatedTableCardinality>
+			<RelationshipType>Association</RelationshipType>
+			<Constraints>
+				<AxTableRelationConstraint xmlns=""
+					i:type="AxTableRelationConstraintField">
+					<Name>InventDimId</Name>
+					<Field>InventDimId</Field>
+					<RelatedField>inventDimId</RelatedField>
+				</AxTableRelationConstraint>
+			</Constraints>
+			<Index>DimIdIdx</Index>
+		</AxTableRelation>
+	</Relations>
+	<StateMachines />
+</AxTable>

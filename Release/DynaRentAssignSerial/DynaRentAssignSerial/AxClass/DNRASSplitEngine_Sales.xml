@@ -1,0 +1,350 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRASSplitEngine_Sales</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class DNRASSplitEngine_Sales extends DNRASSplitEngine
+{
+    SalesLine callerSalesLine;
+    LineNumber lastLineNumber;
+    SalesLineCreationSequenceNumber lastSequenceNumber;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>createSplitLineAsync</Name>
+				<Source><![CDATA[
+    private static container createSplitLineAsync(container _params, System.Threading.CancellationToken _cancellationToken)
+    {
+        SalesLine salesLineLocal = con2Buf(conPeek(_params, 1));
+        Qty qty = conPeek(_params, 2);
+        SalesLineCreationSequenceNumber lineCreationSequenceNumber = conpeek(_params, 3);
+        LineNum lineNum = conpeek(_params, 4);
+
+        ttsbegin;
+
+        DNRASSplitEngine splitEngine = DNRASSplitEngine::construct(salesLineLocal, qty);
+        SalesLine newRentalLine = splitEngine.createSplitRentalLine(qty, lineNum, lineCreationSequenceNumber);
+
+        ttscommit;
+
+        return [newRentalLine.InventTransId];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSplitRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine createSplitRentalLine(Qty _splitQty, LineNumber _lineNum = 0, SalesLineCreationSequenceNumber _lineCreationSequenceNumber = 0, RORLineParent _parentLineRecId = 0)
+    {
+        ttsbegin;
+
+        SalesLine splitRentalLine = this.initSplitRentalLine(_splitQty);
+        splitRentalLine.LineNum = _lineNum ? _lineNum : SalesLine::lastLineNum(callerSalesLine.SalesId) + 1;
+        splitRentalLine.LineCreationSequenceNumber = _lineCreationSequenceNumber ? _lineCreationSequenceNumber : callerSalesLine.nextLineCreationSequence();
+        splitRentalLine.RORParentLineRecId = _parentLineRecId ? _parentLineRecId : splitRentalLine.RORParentLineRecId;
+
+        splitRentalLine.createLine(true);
+
+        if (splitRentalLine.RORTradeType != RORTradeType::SalesPurch)
+        {
+            RORRentalDateTimes rentalDateTimes = callerSalesLine.RORRentalDateTimesHost::rentalDateTimes();
+            RORRentalDateTimes rentalDateTimesNew = splitRentalLine.RORRentalDateTimesHost::rentalDateTimes(true);
+
+            rentalDateTimesNew.initFromRentalDateTimes(rentalDateTimes);
+            rentalDateTimesNew.doUpdate();
+
+            FINInvoicePeriodAmendment::copyAmendments(callerSalesLine, splitRentalLine);
+        }
+
+        DNRAdditionalNoteTable::copyNotes(callerSalesLine, splitRentalLine);
+
+        List splitLines = splitLinesMap.exists(callerSalesLine.RecId) ?
+                          splitLinesMap.lookup(callerSalesLine.RecId) :
+                          new List(Types::String);
+
+        splitLines.addEnd(splitRentalLine.InventTransId);
+        splitLinesMap.insert(callerSalesLine.RecId, splitLines);
+
+        ttscommit;
+        
+        return splitRentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateParentReference</Name>
+				<Source><![CDATA[
+    protected void updateParentReference(InventTransId _inventTransId, InventTransId _inventTransIdParent)
+    {
+        ttsbegin;
+
+        SalesLine salesLine = SalesLine::findInventTransId(_inventTransId, true);
+        salesLine.RORParentLineRecId = SalesLine::findInventTransId(_inventTransIdParent).RecId;
+        salesLine.update();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initSplitRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine initSplitRentalLine(Qty _splitQty)
+    {
+        SalesLine splitRentalLine;
+
+        splitRentalLine.data(callerSalesLine);
+
+        // The 'split' functionality is only supported until (and including) the 'confirmed' status, so we are only concerned with the below quantities.
+        splitRentalLine.SalesQty = _splitQty;
+        splitRentalLine.QtyOrdered = splitRentalLine.calcQtyOrdered();
+        splitRentalLine.RemainSalesPhysical = splitRentalLine.SalesQty;
+        splitRentalLine.RemainInventPhysical = splitRentalLine.QtyOrdered;
+
+        splitRentalLine.RORRentalGrossAmount = splitRentalLine.SalesPrice * splitRentalLine.SalesQty;
+        splitRentalLine.LineAmount = splitRentalLine.calcLineAmountForced();
+        splitRentalLine.RORDeliveryGrossAmount = (callerSalesLine.RORDeliveryGrossAmount / callerSalesLine.SalesQty) * splitRentalLine.SalesQty;
+        splitRentalLine.RORDeliveryNetAmount = splitRentalLine.RORDeliveryGrossAmount - ((splitRentalLine.RORDeliveryGrossAmount / 100) * splitRentalLine.RORDeliveryPercentage);
+        splitRentalLine.RORReturnGrossAmount = (callerSalesLine.RORReturnGrossAmount / callerSalesLine.SalesQty) * splitRentalLine.SalesQty;
+        splitRentalLine.RORReturnNetAmount = splitRentalLine.RORReturnGrossAmount - ((splitRentalLine.RORReturnGrossAmount / 100) * splitRentalLine.RORReturnPercentage);
+
+        splitRentalLine.RecId = 0;
+        splitRentalLine.LineNum = 0;
+        splitRentalLine.LineCreationSequenceNumber = 0;
+        splitRentalLine.InventTransId = '';
+
+        splitRentalLine.RORInsurancePctModified();
+
+        return splitRentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalLineOrig</Name>
+				<Source><![CDATA[
+    public void updateRentalLineOrig(Qty _splitQty)
+    {
+        ttsbegin;
+
+        callerSalesLine.selectForUpdate(true);
+
+        SalesOrderedQty salesQtyBeforeUpdate = callerSalesLine.SalesQty;
+
+        // The 'split' functionality is only supported until (and including) the 'confirmed' status, so we are only concerned with the below quantities.
+        callerSalesLine.SalesQty = _splitQty;
+        callerSalesLine.QtyOrdered = callerSalesLine.calcQtyOrdered();
+        callerSalesLine.RemainSalesPhysical = callerSalesLine.SalesQty;
+        callerSalesLine.RemainInventPhysical = callerSalesLine.QtyOrdered;
+
+        callerSalesLine.RORRentalGrossAmount = callerSalesLine.SalesPrice * callerSalesLine.SalesQty;
+        callerSalesLine.LineAmount = callerSalesLine.calcLineAmountForced();
+        callerSalesLine.RORDeliveryGrossAmount = (callerSalesLine.RORDeliveryGrossAmount / salesQtyBeforeUpdate) * callerSalesLine.SalesQty;
+        callerSalesLine.RORDeliveryNetAmount = callerSalesLine.RORDeliveryGrossAmount - ((callerSalesLine.RORDeliveryGrossAmount / 100) * callerSalesLine.RORDeliveryPercentage);
+        callerSalesLine.RORReturnGrossAmount = (callerSalesLine.RORReturnGrossAmount / salesQtyBeforeUpdate) * callerSalesLine.SalesQty;
+        callerSalesLine.RORReturnNetAmount = callerSalesLine.RORReturnGrossAmount - ((callerSalesLine.RORReturnGrossAmount / 100) * callerSalesLine.RORReturnPercentage);
+
+        callerSalesLine.RORInsurancePctModified();
+        callerSalesLine.update();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getChildLines</Name>
+				<Source><![CDATA[
+    protected Set getChildLines(RORRentalLine _parentLine)
+    {
+        Set ret = new Set(Types::Record);
+        SalesLine parentLine = _parentLine;
+        SalesLine childLine;
+
+        while select childLine
+        where childLine.SalesId == parentLine.SalesId
+        &&    childLine.RORParentLineRecId == parentLine.RecId
+        {
+            ret.add(childLine);
+
+            if (childLine.SalesQty)
+            {
+                qtyMap.insert(childLine.RecId, childLine.SalesQty);
+            }
+
+            if (childLine.RORHasChildren(false, false))
+            {
+                ret = Set::union(ret, this.getChildLines(childLine));
+            }
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>restoreParentRecIdReferences</Name>
+				<Source><![CDATA[
+    protected void restoreParentRecIdReferences()
+    {
+        SalesLine childLine, parentLine;
+        MapEnumerator mapEnumerator = splitLinesMap.getEnumerator();
+
+        while (mapEnumerator.moveNext())
+        {
+            RefRecId childLineRecId = mapEnumerator.currentKey();
+
+            select firstonly childLine
+            where childLine.RecId == childLineRecId
+                join RecId from parentLine
+                where parentLine.RecId == childLine.RORParentLineRecId;
+
+            if (parentLine.RecId && splitLinesMap.exists(parentLine.RecId))
+            {
+                List splitLines = mapEnumerator.currentValue();
+                ListEnumerator splitLinesEnumerator = splitLines.getEnumerator();
+
+                List splitLinesParent = splitLinesMap.lookup(parentLine.RecId);
+                ListEnumerator splitLinesParentEnumerator = splitLinesParent.getEnumerator();
+
+                // Note: The lists 'splitLines' and 'splitLinesParent' have the same length
+                while (splitLinesEnumerator.moveNext() && splitLinesParentEnumerator.moveNext())
+                {
+                    InventTransId inventTransId = splitLinesEnumerator.current();
+                    InventTransId inventTransIdParent = splitLinesParentEnumerator.current();
+
+                    this.updateParentReference(inventTransId, inventTransIdParent);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setActiveRentalLine</Name>
+				<Source><![CDATA[
+    protected void setActiveRentalLine(RORRentalLine _rentalLine)
+    {
+        callerSalesLine = _rentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    protected boolean validate()
+    {
+        return callerSalesLine.DNRASMaySplitLine();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitEngineClassId</Name>
+				<Source><![CDATA[
+    protected ClassId getSplitEngineClassId()
+    {
+        return classNum(DNRASSplitEngine_Sales);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitMethod</Name>
+				<Source><![CDATA[
+    protected MethodName getSplitMethod()
+    {
+        return staticMethodStr(DNRASSplitEngine_Sales, createSplitLineAsync);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getSplitParameters</Name>
+				<Source><![CDATA[
+    protected container getSplitParameters(RORRentalLine _rentalLine, Qty _splitQty, Counter _splitLineCounter)
+    {
+        LineNumber newLineNumber = lastLineNumber ?
+                                   lastLineNumber + 1 :
+                                   SalesLine::lastLineNum(callerSalesLine.SalesId) + _splitLineCounter;
+
+        SalesLineCreationSequenceNumber newSequenceNumber = lastSequenceNumber ?
+                                                            lastSequenceNumber + 1 :
+                                                            callerSalesLine.nextLineCreationSequence() - 1 + _splitLineCounter;
+        
+        lastLineNumber = newLineNumber;
+        lastSequenceNumber = newSequenceNumber;
+
+        return [buf2Con(callerSalesLine), _splitQty, newSequenceNumber, newLineNumber];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustReconfirmSplitLines</Name>
+				<Source><![CDATA[
+    public static boolean mustReconfirmSplitLines(SalesLine _salesLine)
+    {
+        return (_salesLine.BOBRentalSubStatus == BOBRentalSubStatus::Confirmed);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>confirmSplitLines</Name>
+				<Source><![CDATA[
+    public void confirmSplitLines()
+    {
+        ttsbegin;
+
+        if (!splitLinesMap.empty())
+        {
+            List confirmList = new List(Types::Record);
+            MapEnumerator splitLinesMapEnumerator = splitLinesMap.getEnumerator();
+            SalesTable salesTable;
+
+            while (splitLinesMapEnumerator.moveNext())
+            {
+                SalesLine salesLine = SalesLine::findRecId(splitLinesMapEnumerator.currentKey());
+                salesTable = salesTable ? salesTable : SalesTable::find(salesLine.SalesId);
+
+                if (salesLine.RecId)
+                {
+                    confirmList.addEnd(salesLine);
+                }
+
+                List splitLines = splitLinesMapEnumerator.currentValue();
+                ListEnumerator splitLinesEnumerator = splitLines.getEnumerator();
+
+                while (splitLinesEnumerator.moveNext())
+                {
+                    InventTransId inventTransId = splitLinesEnumerator.current();
+                    salesLine = SalesLine::findInventTransId(inventTransId);
+
+                    confirmList.addEnd(salesLine);
+                }
+            }
+
+            SalesFormLetter salesFormLetter = SalesFormLetter::construct(DocumentStatus::Confirmation);
+
+            salesFormLetter.parmLineList(confirmList.pack());
+            salesFormLetter.createFromLines(true);
+            salesFormLetter.update(salesTable);
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

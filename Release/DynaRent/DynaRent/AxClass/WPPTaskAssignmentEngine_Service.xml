@@ -1,0 +1,1101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPTaskAssignmentEngine_Service</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPTaskAssignmentEngine_Service extends WPPTaskAssignmentEngine
+{
+    WrkCtrGroupWrkCtr           planToType;
+    WPPResourceId               planToId;
+    WPPPlannedFromDateTime      planFromDateTime;
+    WPPPlannedToDateTime        planToDateTime;
+    Set                         planToIdSet;
+    boolean                     reassignmentSuccessful;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>assignToMultipleResources</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void assignToMultipleResources(WPPWorkOrderLine          _workOrderLine,
+                                          WrkCtrGroupWrkCtr         _planToType,
+                                          Set                       _planToIds,
+                                          WPPPlannedFromDateTime    _planFromDateTime,
+                                          WPPPlannedToDateTime      _planToDateTime,
+                                          WPPResourceId             _resourceIdForObjectAssignment)
+    {
+        SetEnumerator               enumerator;
+        WPPWorkOrderStatusUpdate    statusUpdate;
+        WPPWorkOrderLineResource    resourcePlanning;
+        WPPWorkOrderLine            workOrderLineRoot, workOrderLineToAssign;
+        WPPResourceId               resourceId;
+        DNRTmpIdValue               tmpIdValue;
+        WPPResourceTable            resourceTable;
+        WrkCtrGroupWrkCtr           currentResourceType;
+        boolean                     skipParentValidation;
+        SetEnumerator               workOrderLineSetEnumerator;
+    
+        planToIdSet  = _planToIds;
+    
+        if (addRelatedLinesToPlanningSet)
+        {
+            workOrderLineRoot = this.getWorkOrderLineRoot(_workOrderLine);
+        }
+    
+        // Create a set of work order lines that must be planned
+        workOrderLineSetEnumerator = this.generatePlanningSet(workOrderLineRoot, _workOrderLine).getEnumerator();
+        // Multiple tasks are planned in one go and parent's status does not need to be checked
+        skipParentValidation = true;
+    
+        ttsBegin;
+        while (workOrderLineSetEnumerator.moveNext())
+        {
+            delete_from tmpIdValue;
+    
+            workOrderLineToAssign = workOrderLineSetEnumerator.current();
+            workOrderLineToAssign.selectForUpdate(true);
+    
+            this.determinePlanningDates(workOrderLineToAssign,
+                                        _workOrderLine,
+                                        _planToType,
+                                        '',
+                                        _planFromDateTime,
+                                        _planToDateTime);
+    
+            if (this.validate(workOrderLineToAssign, resourceId, _planToType))
+            {
+                if (workOrderLineToAssign.Status < WPPWorkOrderLineStatus::Planned)
+                {
+                    statusUpdate = WPPWorkOrderStatusUpdate::construct(workOrderLineToAssign, WPPWorkOrderLineStatus::Planned);
+                    statusUpdate.init(!skipParentValidation);
+                }
+    
+                enumerator = _planToIds.getEnumerator();
+    
+                while (enumerator.moveNext())
+                {
+                    // No RecordInsertList, because doInsert is called
+                    resourceId = enumerator.current();
+                    resourceTable = WPPResourceTable::find(resourceId);
+                    // Retrieve the current type as well, because the set also contain the individual resources
+                    currentResourceType = resourceTable.IsIndividualResource ? WrkCtrGroupWrkCtr::WrkCtr : WrkCtrGroupWrkCtr::WrkCtrGroup;
+    
+                    if (currentResourceType == _planToType)
+                    {
+                        //Only insert if it does not exist.
+                        if (!WPPWorkOrderLineResource::existResource(workOrderLineToAssign.RecId, currentResourceType, resourceId))
+                        {
+                            resourcePlanning.ResourceType           = currentResourceType;
+                            resourcePlanning.ResourceId             = resourceId;
+                            resourcePlanning.PlannedFromDateTime    = planFromDateTime;
+                            resourcePlanning.PlannedToDateTime      = planToDateTime;
+                            resourcePlanning.WorkOrderLineRecId     = workOrderLineToAssign.RecId;
+                            resourcePlanning.LineNum                = this.getNewLineNum(_planToType, resourceId, _planFromDateTime);
+                            this.insertResourcePlanning(resourcePlanning);
+    
+                            // When planned on a resource group, also plan on the resources in the group
+                            if (_planToType == WrkCtrGroupWrkCtr::WrkCtrGroup
+                            &&  currentResourceType == WrkCtrGroupWrkCtr::WrkCtrGroup)
+                            {
+                                this.planOnResourcesInsideGroup(resourceId, workOrderLineToAssign.RecId);
+                            }
+    
+                            if (((_planToType == WrkCtrGroupWrkCtr::WrkCtr && resourceTable.ResourceCategory == WPPResourceCategory::BusinessObject)
+                            ||   resourceId == _resourceIdForObjectAssignment)
+                            && this.BOBAssignObject(workOrderLineToAssign, resourceId, _planToType))
+                            {
+                                this.BOBUpdateRentalDate(workOrderLineToAssign, resourcePlanning);
+                            }
+                        }
+                    }
+    
+                    // Keep track of the resources that were checked in the assign form
+                    tmpIdValue.Num = resourceId;
+                    tmpIdValue.insert();
+                }
+    
+                delete_from resourcePlanning
+                where resourcePlanning.WorkOrderLineRecId == workOrderLineToAssign.RecId
+                    notExists join tmpIdValue
+                    where tmpIdValue.Num == resourcePlanning.ResourceId;
+    
+                if (statusUpdate)
+                {
+                    statusUpdate.run();
+                }
+    
+                if (_planToType == WrkCtrGroupWrkCtr::WrkCtr)
+                {
+                    this.clearHourJournalLines(workOrderLineToAssign.RecId);
+    
+                    while select resourcePlanning
+                    where resourcePlanning.WorkOrderLineRecId == workOrderLineToAssign.RecId
+                    {
+                        this.createHourJournal(resourcePlanning);
+                    }
+                }
+            }
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assignToSingleResource</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderLineResource assignToSingleResource(WPPWorkOrderLine         _workOrderLine,
+                                                           WrkCtrGroupWrkCtr        _planToType,
+                                                           WPPResourceId            _planToId,
+                                                           WPPPlannedFromDateTime   _planFromDateTime,
+                                                           WPPPlannedToDateTime     _planToDateTime)
+    {
+        WPPWorkOrderStatusUpdate    statusUpdate;
+        WPPWorkOrderLine            workOrderLineRoot, workOrderLineToAssign;
+        WPPWorkOrderLineResource    resourcePlanning, resourceCnt;
+        WrkCtrGroupWrkCtr           currentResourceType;
+        WPPResourceTable            resourceTable;
+        boolean                     skipParentValidation;
+        SetEnumerator               workOrderLineSetEnumerator;
+    
+        if (addRelatedLinesToPlanningSet)
+        {
+            workOrderLineRoot = this.getWorkOrderLineRoot(_workOrderLine);
+        }
+    
+        // Create a set of work order lines that must be planned
+        workOrderLineSetEnumerator = this.generatePlanningSet(workOrderLineRoot, _workOrderLine).getEnumerator();
+        // Multiple tasks are planned in one go and parent's status does not need to be checked
+        skipParentValidation = true;
+    
+        while (workOrderLineSetEnumerator.moveNext())
+        {
+            workOrderLineToAssign = workOrderLineSetEnumerator.current();
+            workOrderLineToAssign.selectForUpdate(true);
+            resourceTable = WPPResourceTable::find(_planToId);
+            // Retrieve the current type as well, because the set also contain the individual resources
+            currentResourceType = resourceTable.IsIndividualResource ? WrkCtrGroupWrkCtr::WrkCtr : WrkCtrGroupWrkCtr::WrkCtrGroup;
+    
+            this.determinePlanningDates(workOrderLineToAssign,
+                                        _workOrderLine,
+                                        _planToType,
+                                        _planToId,
+                                        _planFromDateTime,
+                                        _planToDateTime);
+    
+            // update work order line status
+            statusUpdate = WPPWorkOrderStatusUpdate::construct(workOrderLineToAssign, WPPWorkOrderLineStatus::Planned);
+            statusUpdate.init(!skipParentValidation);
+    
+            if (appl.ttsLevel() > 0
+            ||  statusUpdate.prompt())
+            {
+                if (this.validate(workOrderLineToAssign, _planToId, _planToType))
+                {
+                    try
+                    {
+                        // Reset the resource planning to prevent duplicate hour journal lines
+                        resourcePlanning = null;
+    
+                        if (currentResourceType == _planToType
+                        &&  !WPPWorkOrderLineResource::existResource(workOrderLineToAssign.RecId, currentResourceType, _planToId))
+                        {
+                            ttsBegin;
+                            resourcePlanning.ResourceType           = _planToType;
+                            resourcePlanning.ResourceId             = _planToId;
+                            resourcePlanning.PlannedFromDateTime    = planFromDateTime;
+                            resourcePlanning.PlannedToDateTime      = planToDateTime;
+                            resourcePlanning.WorkOrderLineRecId     = workOrderLineToAssign.RecId;
+                            resourcePlanning.LineNum                = this.getNewLineNum(_planToType, _planToId, _planFromDateTime);
+                            this.insertResourcePlanning(resourcePlanning);
+    
+                            if (!calledFromRentalDateChange)
+                            {
+                                BOBObjectTable  objectTable;
+                                // When planned on a resource group, also plan on the resources in the group
+                                if (_planToType == WrkCtrGroupWrkCtr::WrkCtrGroup)
+                                {
+                                    this.planOnResourcesInsideGroup(_planToId, workOrderLineToAssign.RecId);
+                                   
+                                    select firstOnly ObjectId from objectTable
+                                    where objectTable.WPPResourceGroupRecId == resourceTable.RecId; 
+                                    
+                                }
+                                
+    
+                                if (((_planToType == WrkCtrGroupWrkCtr::WrkCtr && resourceTable.ResourceCategory == WPPResourceCategory::BusinessObject)
+                                   ||(_planToType == WrkCtrGroupWrkCtr::WrkCtrGroup && objectTable.ObjectId))
+                                && !workOrderLineToAssign.workOrderTable().BOBObjectTableRecId
+                                &&  this.BOBAssignObject(workOrderLineToAssign, _planToId, _planToType))
+                                {
+                                    this.BOBUpdateRentalDate(workOrderLineToAssign, resourcePlanning);
+                                }
+                            }
+    
+                            WPPWorkOrderLine::updateItemReqDates(resourcePlanning.WorkOrderLineRecId, resourcePlanning.PlannedFromDateTime);
+    
+                            WPPWorkOrderLine::updateItemReqInventLocation(resourcePlanning.WorkOrderLineRecId, resourcePlanning.ResourceId);
+
+                            statusUpdate.run();
+                            ttsCommit;
+                        }
+    
+                        // Outside transaction, because when the hour journal is not created
+                        // the task must still be planned
+                        if (_planToType == WrkCtrGroupWrkCtr::WrkCtr)
+                        {
+                            this.createHourJournal(resourcePlanning);
+                        }
+    
+                        if(_workOrderLine.ResourceQty > 1)
+                        {
+                            select count(RecId) from resourceCnt
+                            where resourceCnt.WorkOrderLineRecId == _workOrderLine.RecId
+                            &&    resourceCnt.ResourceType == WrkCtrGroupWrkCtr::WrkCtr;
+    
+                            if(_workOrderLine.ResourceQty > resourceCnt.RecId)
+                            {
+                                info(strFmt("@DNR8667", _workOrderLine.TaskId, workOrderLineToAssign.ResourceQty, resourceCnt.RecId));
+                            }
+                        }
+                    }
+                    catch (Exception::Error)
+                    {
+                        throw Exception::Error;
+                    }
+                }
+                else
+                {
+                    if (showMessage)
+                    {
+                        throw error(strFmt("@DNR6554", workOrderLineToAssign.TaskId, WPPWorkOrderLineStatus::Planned));
+                    }
+                }
+            }
+            else
+            {
+                info("@SYS25904");
+            }
+        }
+    
+        return resourcePlanning;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBAssignObject</Name>
+				<Source><![CDATA[
+    private boolean BOBAssignObject(WPPWorkOrderLine        _workOrderLine,
+                                    WPPResourceId           _resourceId,
+                                    WrkCtrGroupWrkCtr       _resourceType)
+    {
+        boolean             ret;
+        WPPResourceTable    resourceTable;
+        BOBObjectTable      objectTable;
+        WPPWorkOrderTable   workOrderTable;
+        SalesLine           salesLine;
+        RORRentalDateTimes  rentalDateTimes;
+    
+        if (this.BOBValidateAssignObject(_workOrderLine, _resourceId, _resourceType))
+        {
+            // unasign first
+            _workOrderLine.BOBAssignObject('', true);
+    
+            workOrderTable = _workOrderLine.workOrderTable();
+            if (workOrderTable.OrderTableId == tableNum(SalesLine))
+            {
+                salesLine = SalesLine::findRecId(workOrderTable.OrderRecId);
+            }
+    
+            if (salesLine
+            &&  (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental))
+            {
+                rentalDateTimes = salesLine.RORRentalDateTimes();
+                if (rentalDateTimes)
+                {
+                    rentalDateTimes.OnRentDateTime = DateTimeUtil::applyTimeZoneOffset(planFromDateTime, DateTimeUtil::getUserPreferredTimeZone());
+                    rentalDateTimes.OffRentDateTime = DateTimeUtil::applyTimeZoneOffset(planToDateTime, DateTimeUtil::getUserPreferredTimeZone());
+                }
+            }
+    
+            if (_resourceType == WrkCtrGroupWrkCtr::WrkCtr)
+            {
+                resourceTable = WPPResourceTable::find(_resourceId);
+    
+                if (resourceTable.ResourceCategory == WPPResourceCategory::BusinessObject)
+                {
+                    ret = _workOrderLine.BOBAssignObject(resourceTable.RelationAccount, true, rentalDateTimes);
+                }
+            }
+            else
+            {
+                select firstOnly ObjectId from objectTable
+                    exists join resourceTable
+                    where resourceTable.RecId == objectTable.WPPResourceGroupRecId
+                    &&    resourceTable.ResourceId == _resourceId;
+    
+                if (objectTable)
+                {
+                    ret = _workOrderLine.BOBAssignObject(objectTable.ObjectId, true, rentalDateTimes);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBUpdateRentalDate</Name>
+				<Source><![CDATA[
+    private void BOBUpdateRentalDate(WPPWorkOrderLine _workOrderLine, WPPWorkOrderLineResource _resourcePlanning, boolean _validationRequired = false)
+    {
+        boolean                     checkOK;
+        WPPWorkOrderTable           workOrderTable;
+        SalesLine                   salesLine;
+        RORRentalDateTimes          rentalDateTimes;
+        WPPResourceTable            resourceTable;
+        FieldId                     onRentFieldId, expectedOffRentFieldId, offRentFieldId;
+        ;
+    
+        if (_validationRequired)
+        {
+            if (_resourcePlanning.ResourceType == WrkCtrGroupWrkCtr::WrkCtr && WPPWorkOrderTaskTable::find(_workOrderLine.TaskId).BOBObjectAssignment)
+            {
+                resourceTable = WPPResourceTable::find(_resourcePlanning.ResourceId);
+            }
+    
+            if (resourceTable.ResourceCategory == WPPResourceCategory::BusinessObject
+            && _workOrderLine.workOrderTable().OrderTableId == tableNum(SalesLine)
+            && resourceTable.checkObjectId(_resourcePlanning.ResourceType))
+            {
+                checkOK = true;
+            }
+        }
+        else
+        {
+            // required checks were run in method BOBAssignObject
+            checkOK = true;
+        }
+    
+        if (!checkOK)
+        {
+            return;
+        }
+    
+        workOrderTable = _workOrderLine.workOrderTable();
+    
+        if (workOrderTable.OrderTableId == tableNum(SalesLine))
+        {
+            salesLine = SalesLine::findRecId(workOrderTable.OrderRecId);
+        }
+    
+        if (salesLine
+        &&  (salesLine.RORTradeType == RORTradeType::Rental || salesLine.RORTradeType == RORTradeType::SubRental))
+        {
+            [onRentFieldId, offRentFieldId, expectedOffRentFieldId] = RORRentalDateTimes::getPeriodFieldIds();
+    
+            ttsBegin;
+            rentalDateTimes = salesLine.RORRentalDateTimes(true);
+            if (rentalDateTimes)
+            {
+                rentalDateTimes.SynchronizeFromParent = NoYes::No;
+                rentalDateTimes.(onRentFieldId) = _resourcePlanning.PlannedFromDateTime;
+                rentalDateTimes.modifiedField(onRentFieldId);
+                rentalDateTimes.(offRentFieldId) = _resourcePlanning.PlannedToDateTime;
+                rentalDateTimes.modifiedField(offRentFieldId);
+    
+                rentalDateTimes.update();
+            }
+            ttsCommit;
+        }
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBValidateAssignObject</Name>
+				<Source><![CDATA[
+    private boolean BOBValidateAssignObject(WPPWorkOrderLine    _workOrderLine,
+                                            WPPResourceId       _resourceId,
+                                            WrkCtrGroupWrkCtr   _resourceType)
+    {
+        boolean             ret;
+        WPPResourceTable    resourceTable;
+        BOBObjectTable      objectTable;
+        WPPWorkOrderTable   workOrderTable;
+        SalesLine           salesLine;
+        InventDim           inventDim;
+        RefTableId          orderTableId;
+    
+        ret = true;
+
+        // We shall only assign objects to Rental order line
+        orderTableId = _workOrderLine.workOrderTable().OrderTableId;
+        
+        if(orderTableId && orderTableId != tableNum(SalesLine))
+        {
+            return false;
+        }
+    
+        if (_resourceType == WrkCtrGroupWrkCtr::WrkCtr)
+        {
+            if (WPPWorkOrderTaskTable::find(_workOrderLine.TaskId).BOBObjectAssignment
+            &&  orderTableId == tableNum(SalesLine))
+            {
+                resourceTable = WPPResourceTable::find(_resourceId);
+    
+                ret = resourceTable.ResourceCategory == WPPResourceCategory::BusinessObject
+                  &&  resourceTable.checkObjectId(_resourceType);
+            }
+            else
+            {
+                return false;
+            }
+        }
+        else
+        if (_resourceType == WrkCtrGroupWrkCtr::WrkCtrGroup)
+        {
+            select firstOnly InventSerialId from inventDim
+                join RecId from salesLine
+                where salesLine.InventDimId == inventDim.inventDimId
+                    join TableId from workOrderTable
+                    where workOrderTable.OrderTableId == salesLine.TableId
+                    &&    workOrderTable.OrderRecId   == salesLine.RecId
+                    &&    workOrderTable.WorkOrderId  == _workOrderLine.WorkOrderId;
+    
+            if (salesLine)
+            {
+                select firstOnly resourceTable
+                where resourceTable.ResourceId == _resourceId
+                    join InventSerialId from objectTable
+                    where objectTable.WPPResourceGroupRecId == resourceTable.RecId;
+    
+                // No object assigned yet
+                // or a different object assigned
+                if (resourceTable
+                &&  (!inventDim.inventSerialId ||inventDim.inventSerialId != objectTable.InventSerialId))
+                {
+                    ret = resourceTable.checkObjectId(_resourceType);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearHourJournalLines</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void clearHourJournalLines(RefRecId _workOrderLineToAssign)
+    {
+        WPPWorkOrderLineHourTransLink   workOrderLineHourTransLink;
+        ProjJournalTrans                projJournalTrans;
+        ProjJournalTable                projJournalTable;
+        ProjJournalId                   journalId;
+        ;
+    
+        select firstOnly journalId from projJournalTrans
+            exists join workOrderLineHourTransLink
+            where workOrderLineHourTransLink.WorkOrderLineRecId == _workOrderLineToAssign
+            &&    workOrderLineHourTransLink.RefRecId           == projJournalTrans.RecId
+            &&    workOrderLineHourTransLink.RefTableId         == projJournalTrans.TableId;
+    
+        journalId = projJournalTrans.JournalId;
+    
+        delete_from projJournalTrans
+            exists join workOrderLineHourTransLink
+            where workOrderLineHourTransLink.WorkOrderLineRecId == _workOrderLineToAssign
+            &&    workOrderLineHourTransLink.RefRecId           == projJournalTrans.RecId
+            &&    workOrderLineHourTransLink.RefTableId         == projJournalTrans.TableId;
+    
+        delete_from projJournalTable
+            where projJournalTable.JournalId == journalId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>determinePlanningDates</Name>
+				<Source><![CDATA[
+    private void determinePlanningDates(WPPWorkOrderLine        _workOrderLineToAssign,
+                                        WPPWorkOrderLine        _workOrderLine,
+                                        WrkCtrGroupWrkCtr       _planToType,
+                                        WPPResourceId           _planToId,
+                                        WPPPlannedFromDateTime  _planFromDateTime,
+                                        WPPPlannedToDateTime    _planToDateTime)
+    {
+        boolean                     adjustDateTime;
+        WPPRequestedStartDateTime   requestedStartDateTimeAssign, requestedStartDateTime;
+        WPPRequestedEndDateTime     requestedEndDateTimeAssign, requestedEndDateTime;
+        int64                       timeDifferenceStart, timeDifferenceEnd;
+        Timezone                    userPreferredTimeZone = DateTimeUtil::getUserPreferredTimeZone();
+    
+        // Date/time to plan on differ from the requested date/time
+        requestedStartDateTime = DateTimeUtil::applyTimeZoneOffset(_workOrderLine.RequestedStartDateTime, userPreferredTimeZone);
+        requestedEndDateTime = DateTimeUtil::applyTimeZoneOffset(_workOrderLine.RequestedEndDateTime, userPreferredTimeZone);
+    
+        adjustDateTime = (requestedStartDateTime != _planFromDateTime || requestedEndDateTime != _planToDateTime);
+    
+        if (adjustDateTime)
+        {
+            if (_workOrderLineToAssign.RecId == _workOrderLine.RecId)
+            {
+                planFromDateTime = _planFromDateTime;
+                planToDateTime = _planToDateTime;
+            }
+            else
+            {
+                // Date/time to plan on differ from the requested date/time
+                requestedStartDateTimeAssign = DateTimeUtil::applyTimeZoneOffset(_workOrderLineToAssign.RequestedStartDateTime, userPreferredTimeZone);
+                requestedEndDateTimeAssign = DateTimeUtil::applyTimeZoneOffset(_workOrderLineToAssign.RequestedEndDateTime, userPreferredTimeZone);
+    
+                timeDifferenceStart = DateTimeUtil::getDifference(_planFromDateTime, requestedStartDateTime);
+                timeDifferenceEnd   = DateTimeUtil::getDifference(_planToDateTime, requestedEndDateTime);
+    
+                // Adjust the date and time to plan on the current work order line
+                // when the actual planned work order line date/time is changed
+                planFromDateTime = DateTimeUtil::addSeconds(requestedStartDateTimeAssign, timeDifferenceStart);
+                planToDateTime = DateTimeUtil::addSeconds(requestedEndDateTimeAssign, timeDifferenceEnd);
+    
+            }
+    
+            planFromDateTime = DateTimeUtil::removeTimeZoneOffset(planFromDateTime, userPreferredTimeZone);
+            planToDateTime = DateTimeUtil::removeTimeZoneOffset(planToDateTime, userPreferredTimeZone);
+        }
+        else
+        {
+            planFromDateTime = _workOrderLineToAssign.RequestedStartDateTime;
+            planToDateTime = _workOrderLineToAssign.RequestedEndDateTime;
+        }
+
+        this.setVariables(_planToType, '', planFromDateTime, planToDateTime);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generatePlanningSet</Name>
+				<Source><![CDATA[
+    protected Set generatePlanningSet(WPPWorkOrderLine _workOrderLineRoot, WPPWorkOrderLine _workOrderLine)
+    {
+        Set                 set;
+        WPPWorkOrderLine    workOrderLine;
+    
+        set = new Set(Types::Record);
+    
+        if (_workOrderLineRoot)
+        {
+            set.add(_workOrderLineRoot);
+    
+            // Select the child work order lines with the from the same root,
+            // with the same status, but not the one that is actual planned;
+            // that one is added at the end of this method
+            while select workOrderLine
+            where workOrderLine.RootLineRecId == _workOrderLineRoot.RecId
+            &&    workOrderLine.Status        == _workOrderLine.Status
+            &&    workOrderLine.RecId         != _workOrderLine.RecId
+            {
+                set.add(workOrderLine);
+            }
+        }
+    
+        // Add the work order line that is actual planned
+        set.add(_workOrderLine);
+    
+        return set;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getNewLineNum</Name>
+				<Source><![CDATA[
+    protected LineNum getNewLineNum(WrkCtrGroupWrkCtr _planBy, WPPResourceId _resourceId, WPPPlannedFromDateTime _fromDateTime)
+    {
+        return (select maxOf(LineNum) from WPPWorkOrderLineResource
+                where WPPWorkOrderLineResource.ResourceType == _planBy
+                &&    WPPWorkOrderLineResource.ResourceId == _resourceId
+                &&    WPPWorkOrderLineResource.PlannedFromDateTime == _fromDateTime).LineNum + 1.0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getWorkOrderLineRoot</Name>
+				<Source><![CDATA[
+    private WPPWorkOrderLine getWorkOrderLineRoot(WPPWorkOrderLine _workOrderLine)
+    {
+        WPPWorkOrderLine    workOrderLineRoot;
+    
+        if (_workOrderLine.RootLineRecId)
+        {
+            select firstOnly workOrderLineRoot
+            where workOrderLineRoot.RecId == _workOrderLine.RootLineRecId;
+        }
+    
+        return workOrderLineRoot;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isPlanningOnResourceAllowed</Name>
+				<Source><![CDATA[
+    private boolean isPlanningOnResourceAllowed(WrkCtrGroupWrkCtr        _planToType,
+                                                WPPResourceId            _planToId,
+                                                WPPPlannedFromDateTime   _planFromDateTime,
+                                                WPPPlannedToDateTime     _planToDateTime)
+    {
+        WPPGetResourceAvailability  getResourceAvailability;
+        boolean                     fromDateTimeOK, toDateTimeOK;
+        Map                         workingTimesMap;
+        MapEnumerator               workingTimesMapEnumerator;
+        container                   workingTimesMain, workingTimesSub;
+        Counter                     workingTimesCounter;
+        FromDateTime                fromDateTime;
+        ToDateTime                  toDateTime;
+    
+        getResourceAvailability = WPPGetResourceAvailability::construct(_planToType, _planFromDateTime, _planToDateTime);
+        getResourceAvailability.run(_planToId);
+        workingTimesMap         = getResourceAvailability.parmWorkingTimesMap();
+    
+        workingTimesMapEnumerator = workingTimesMap.getEnumerator();
+    
+        while (workingTimesMapEnumerator.moveNext())
+        {
+            workingTimesMain = workingTimesMapEnumerator.currentValue();
+    
+            for (workingTimesCounter = 1; workingTimesCounter <= conLen(workingTimesMain); workingTimesCounter ++)
+            {
+                workingTimesSub = conPeek(workingTimesMain, workingTimesCounter);
+                [ fromDateTime, toDateTime ] = workingTimesSub;
+    
+                if (_planFromDateTime >= fromDateTime
+                &&  _planFromDateTime <= toDateTime)
+                {
+                    fromDateTimeOK = true;
+                }
+    
+                if (_planToDateTime >= fromDateTime
+                &&  _planToDateTime <= toDateTime)
+                {
+                    toDateTimeOK = true;
+                }
+            }
+        }
+    
+        return fromDateTimeOK && toDateTimeOK;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>moveTask</Name>
+				<Source><![CDATA[
+    protected void moveTask()
+    {
+        throw error("@SYS18879");
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmReassignmentSuccessful</Name>
+				<Source><![CDATA[
+    public boolean parmReassignmentSuccessful(boolean _reassignmentSuccessful = reassignmentSuccessful)
+    {
+        reassignmentSuccessful = _reassignmentSuccessful;
+    
+        return reassignmentSuccessful;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>planOnResourcesInsideGroup</Name>
+				<Source><![CDATA[
+    private void planOnResourcesInsideGroup(WPPResourceId           _resourceId,
+                                            WPPWorkOrderLineRecId   _workOrderLineRecId)
+    {
+        WPPResourceGroupResource    resourceGroupResource;
+        WPPWorkOrderLineResource    resourcePlanningDuplicates;
+        WPPWorkOrderLineResource    resourcePlanning;
+        
+        while select ResourceId from resourceGroupResource
+            where resourceGroupResource.ResourceGroup == _resourceId
+            notexists join resourcePlanningDuplicates
+            where resourcePlanningDuplicates.ResourceId == resourceGroupResource.ResourceId
+            &&    resourcePlanningDuplicates.WorkOrderLineRecId == _workOrderLineRecId
+        {
+            resourcePlanning.ResourceType           = WrkCtrGroupWrkCtr::WrkCtr;
+            resourcePlanning.ResourceId             = resourceGroupResource.ResourceId;
+            resourcePlanning.PlannedFromDateTime    = planFromDateTime;
+            resourcePlanning.PlannedToDateTime      = planToDateTime;
+            resourcePlanning.WorkOrderLineRecId     = _workOrderLineRecId;
+            resourcePlanning.LineNum                = this.getNewLineNum(WrkCtrGroupWrkCtr::WrkCtr, resourcePlanning.ResourceId, planFromDateTime);
+            this.insertResourcePlanning(resourcePlanning);
+    
+            this.createHourJournal(resourcePlanning);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reassign</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public void reassign(WPPWorkOrderLineResource   _plannedTask,
+                         WrkCtrGroupWrkCtr          _planToType,
+                         WPPResourceId              _planToId,
+                         WPPPlannedFromDateTime     _fromDateTime,
+                         WPPPlannedToDateTime       _toDateTime)
+    {
+        WPPWorkOrderLineResource        resourcePlanning;
+        ProjJournalTrans                projJournalTrans;
+        ProjJournalTable                projJournalTable;
+        WPPWorkOrderLine                workOrderLine;
+        WPPResourceTable                resourceTable;
+        WPPResourceGroupResource        resourceGroupResource;
+        LineNum                         newLineNum;
+        Num                             planToIdOrig;
+        WrkCtrGroupWrkCtr               planToTypeOrig;
+        ProjJournalId                   projJournalId;
+        ProjQtyEmpl                     projQty;
+    
+        planToTypeOrig   = _plannedTask.ResourceType;
+        planToIdOrig     = _plannedTask.ResourceId;
+    
+        this.setVariables(_planToType, _planToId, _fromDateTime, _toDateTime);
+    
+        if (this.validate(_plannedTask.workOrderLine(), _planToId, _planToType)
+        &&  this.validate_reassign(_plannedTask, _planToType, _planToId))
+        {
+            ttsBegin;
+            newLineNum = this.getNewLineNum(_planToType, _planToId, _fromDateTime);
+    
+            // Update the task that is moved
+            update_recordSet resourcePlanning
+            setting ResourceType = _planToType,
+                    ResourceId = _planToId,
+                    PlannedFromDateTime = _fromDateTime,
+                    PlannedToDateTime = _toDateTime,
+                    LineNum = newLineNum,
+                    ActualFromDateTime = DateTimeUtil::minValue(),
+                    ActualToDateTime = DateTimeUtil::minValue()
+            where resourcePlanning.RecId == _plannedTask.RecId;
+    
+            if (_planToType == WrkCtrGroupWrkCtr::WrkCtrGroup)
+            {
+                if (_planToId == planToIdOrig)
+                {
+                    // Update the resource planning records for the resouces are in the group
+                    update_recordSet resourcePlanning
+                    setting PlannedFromDateTime = _fromDateTime,
+                            PlannedToDateTime = _toDateTime,
+                            ActualFromDateTime = DateTimeUtil::minValue(),
+                            ActualToDateTime = DateTimeUtil::minValue()
+                    where resourcePlanning.WorkOrderLineRecId == _plannedTask.WorkOrderLineRecId
+                    &&    resourcePlanning.ResourceType       == WrkCtrGroupWrkCtr::WrkCtr
+                    &&    resourcePlanning.RecId              != _plannedTask.RecId; // Just to make sure we're not updating the moved record
+                }
+                else
+                {
+                    // Delete the resource planning records for the individual resources in the group
+                    // then recreate them again for the new group
+                    delete_from resourcePlanning
+                    where resourcePlanning.WorkOrderLineRecId == _plannedTask.WorkOrderLineRecId
+                    &&    resourcePlanning.ResourceType       == WrkCtrGroupWrkCtr::WrkCtr
+                    &&    resourcePlanning.RecId              != _plannedTask.RecId; // Just to make sure we're not deleting the moved record
+    
+                    this.planOnResourcesInsideGroup(_planToId, _plannedTask.WorkOrderLineRecId);
+
+                    //Assign the new BO to WorkOrder and Rental Line 
+                    workOrderLine = WPPWorkOrderLine::findRecId(_plannedTask.WorkOrderLineRecId);
+                    this.BOBAssignObject(workOrderLine, planToId, planToType);
+                }
+            }
+    
+            _plannedTask.deleteHourJournal(planToIdOrig);
+    
+            // Delete the hour journal lines of the resource within the original group
+            if (_planToType == WrkCtrGroupWrkCtr::WrkCtrGroup)
+            {
+                while select resourcePlanning
+                where resourcePlanning.ResourceType == WrkCtrGroupWrkCtr::WrkCtr
+                &&    resourcePlanning.WorkOrderLineRecId == _plannedTask.WorkOrderLineRecId
+                    exists join resourceTable
+                    where resourceTable.ResourceId == resourcePlanning.ResourceId
+                    &&    resourceTable.IsIndividualResource
+                        join TableId from resourceGroupResource
+                        where resourceGroupResource.ResourceId == resourceTable.ResourceId
+                        &&    resourceGroupResource.ResourceGroup == planToIdOrig
+                {
+                    resourcePlanning.deleteHourJournal();
+                }
+            }
+    
+            if (parameters.AutoGenerateJourTrans)
+            {
+                if (projJournalId && ProjJournalTable::exist(projJournalId))
+                {
+                    select sum(Qty) from projJournalTrans
+                    where projJournalTrans.JournalId == projJournalId;
+    
+                    projQty = projJournalTrans.Qty;
+    
+                    update_recordSet projJournalTable
+                    setting projQty = projQty
+                    where projJournalTable.JournalId == projJournalId;
+                }
+    
+                while select resourcePlanning
+                where resourcePlanning.WorkOrderLineRecId == _plannedTask.WorkOrderLineRecId
+                &&    resourcePlanning.ResourceType == WrkCtrGroupWrkCtr::WrkCtr
+                {
+                    if (_planToType == WrkCtrGroupWrkCtr::WrkCtrGroup
+                    ||  resourcePlanning.RecId == _plannedTask.RecId)
+                    {
+                        this.createHourJournal(resourcePlanning);
+                    }
+    
+                    if (planToTypeOrig == WrkCtrGroupWrkCtr::WrkCtr)
+                    {
+                        workOrderLine = WPPWorkOrderLine::findRecId(_plannedTask.WorkOrderLineRecId);
+    
+                        if (this.BOBAssignObject(workOrderLine, resourcePlanning.ResourceId, resourcePlanning.ResourceType))   
+                        {
+                            this.BOBUpdateRentalDate(workOrderLine, resourcePlanning, true);                            
+                        }
+
+                        WPPWorkOrderLine::updateItemReqInventLocation(workOrderLine.RecId, resourcePlanning.ResourceId);
+                    }
+                }
+            }
+    
+            reassignmentSuccessful = true;
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setVariables</Name>
+				<Source><![CDATA[
+    private void setVariables(WrkCtrGroupWrkCtr         _planToType,
+                              WPPResourceId             _planToId,
+                              WPPPlannedFromDateTime    _planFromDateTime,
+                              WPPPlannedToDateTime      _planToDateTime)
+    {
+        planToType       = _planToType;
+        planToId         = _planToId;
+        planFromDateTime = _planFromDateTime;
+        planToDateTime   = _planToDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unassign</Name>
+				<Source><![CDATA[
+    public void unassign(WPPWorkOrderLineResource _plannedTask, Common _planBoardSettings)
+    {
+        WPPWorkOrderLineStatus      newStatus;
+        WPPWorkOrderLine            workOrderLine, siblingWorkOrderLinePlanned;
+        WPPWorkOrderTable           workOrderTable;
+        WPPWorkOrderTaskTable       taskTable;
+        WPPServicePlanboardSettings spbSettings;
+        Map                         statusMap;
+        boolean                     isConfirmedEnabled, isCreatedEnabled;
+    
+        spbSettings = _planBoardSettings as WPPServicePlanboardSettings;
+    
+        select firstOnly WorkOrderStatusGroupId, BOBObjectAssignment from taskTable
+            join workOrderLine
+            where workOrderLine.TaskId == taskTable.TaskId
+            &&    workOrderLine.RecId  == _plannedTask.WorkOrderLineRecId
+                join BOBObjectTableRecId from workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId;
+    
+        statusMap          = WPPWorkOrderStatusSetup::getPossibleWorkOrderStatus(taskTable.WorkOrderStatusGroupId, workOrderLine.Status);
+        isCreatedEnabled   = statusMap.lookup(WPPWorkOrderLineStatus::Created);
+        isConfirmedEnabled = statusMap.lookup(WPPWorkOrderLineStatus::Confirmed);
+    
+        if (isConfirmedEnabled && spbSettings.TasksToShow == WPPTasksToShow::Confirmed)
+        {
+            newStatus = WPPWorkOrderLineStatus::Confirmed;
+        }
+        else
+        if (isCreatedEnabled && spbSettings.TasksToShow == WPPTasksToShow::ConfirmedAndCreated)
+        {
+            newStatus = WPPWorkOrderLineStatus::Created;
+        }
+        else
+        {
+            throw error("@DNR8702");
+        }
+    
+        WPPWorkOrderStatusUpdate statusUpdate = WPPWorkOrderStatusUpdate::construct(WPPWorkOrderLine::findRecId(_plannedTask.WorkOrderLineRecId), newStatus);
+        statusUpdate.init();
+    
+        if (statusUpdate.prompt())
+        {
+            statusUpdate.run();
+    
+            if (workOrderTable.BOBObjectTableRecId && taskTable.BOBObjectAssignment)
+            {
+                // Check whether a line is still planned, if so then the object should not be unassigned
+                // otherwise unassign the object
+                select firstOnly RecId from siblingWorkOrderLinePlanned
+                where ((workOrderLine.RootLineRecId && (siblingWorkOrderLinePlanned.RootLineRecId == workOrderLine.RootLineRecId || siblingWorkOrderLinePlanned.RecId == workOrderLine.RootLineRecId))
+                ||     siblingWorkOrderLinePlanned.RootLineRecId == workOrderLine.RecId)
+                &&     siblingWorkOrderLinePlanned.RecId         != workOrderLine.RecId
+                &&     siblingWorkOrderLinePlanned.Status        >= WPPWorkOrderLineStatus::Planned;
+    
+                if (!siblingWorkOrderLinePlanned)
+                {
+                    workOrderLine.BOBAssignObject('', true);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    protected boolean validate(WPPWorkOrderLine     _workOrderLine,
+                               WPPResourceId        _planToId,
+                               WrkCtrGroupWrkCtr    _planToType,
+                               boolean              _validateDate = true)
+    {
+        boolean             ret;
+        SetEnumerator       enumerator;
+        WPPResourceId       planToIdFromSet;
+        ErrorMsg            message;
+    
+        if (planToIdSet)
+        {
+            enumerator = planToIdSet.getEnumerator();
+    
+            while (enumerator.moveNext())
+            {
+                planToIdFromSet = enumerator.current();
+                ret = super(_workOrderLine, planToIdFromSet, _planToType);
+            }
+        }
+        else
+        {
+            ret = super(_workOrderLine, _planToId, _planToType);
+        }
+    
+        ret = WPPWorkOrderLineResource::checkPlannedDateTime(planFromDateTime, planToDateTime) && ret;
+    
+        if (ret && showMessage)
+        {
+            if (planFromDateTime < DateTimeUtil::getSystemDateTime())
+            {
+                warning(strFmt("@DNR7678", _workOrderLine.TaskId));
+            }
+        }
+    
+        if (parameters.SPBAvailabilityMode == WPPResourceAvailabilityMode::RetrieveAndWarn
+        ||  parameters.SPBAvailabilityMode == WPPResourceAvailabilityMode::RetrieveAndEnforce)
+        {
+            if (planToIdSet)
+            {
+                // Enumerator was already initialized
+                enumerator.reset();
+    
+                while (enumerator.moveNext())
+                {
+                    planToIdFromSet = enumerator.current();
+    
+                    if (!this.isPlanningOnResourceAllowed(WPPResourceTable::find(planToIdFromSet).IsIndividualResource ? WrkCtrGroupWrkCtr::WrkCtr : WrkCtrGroupWrkCtr::WrkCtrGroup,
+                                                          planToIdFromSet,
+                                                          planFromDateTime,
+                                                          planToDateTime))
+                    {
+                        message = "@DNR8115";
+                    }
+                }
+            }
+            else
+            {
+                if (!this.isPlanningOnResourceAllowed(planToType, _planToId, planFromDateTime, planToDateTime))
+                {
+                    message = "@DNR8115";
+                }
+            }
+    
+            if (message)
+            {
+                if (parameters.SPBAvailabilityMode == WPPResourceAvailabilityMode::RetrieveAndWarn)
+                {
+                    if (ret && showMessage)
+                    {
+                        warning(message);
+                    }
+                }
+                else
+                {
+                    ret = checkFailed(message);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate_reassign</Name>
+				<Source><![CDATA[
+    private boolean validate_reassign(WPPWorkOrderLineResource  _plannedTask,
+                                      WrkCtrGroupWrkCtr         _planToType,
+                                      WPPResourceId             _planToId)
+    {
+        boolean ret;
+    
+        ret = true;
+    
+        if (showMessage)
+        {
+            if (_plannedTask.ResourceId           != planToId
+            &&  (_plannedTask.PlannedFromDateTime != planFromDateTime
+            ||   _plannedTask.PlannedToDateTime   != planToDateTime))
+            {
+                info("@DNR8589");
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static WPPTaskAssignmentEngine_Service construct()
+    {
+        return new WPPTaskAssignmentEngine_Service();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

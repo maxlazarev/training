@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRASSalesFormletterParmDataPickingListClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classstr(SalesFormletterParmDataPickingList))]
+final public class DNRASSalesFormletterParmDataPickingListClass_Extension
+{
+    private Set confirmOrderSet = new Set(Types::Record);
+    private Set splitLineInventTransIds = new Set(Types::String);
+
+    // Chain-of-Command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>mustCreateParmLine</Name>
+				<Source><![CDATA[
+    protected boolean mustCreateParmLine(SalesLine _salesLineOrig)
+    {
+        boolean ret = next mustCreateParmLine(_salesLineOrig);
+        SalesTable salesTable = _salesLineOrig.salesTable();
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRASAssignSerial))
+        &&  ret
+        &&  salesTable.SalesType == SalesType::RORRental
+        &&  _salesLineOrig.RORTradeType != RORTradeType::SalesPurch
+        &&  _salesLineOrig.DNRASMaySplitLine())
+        {
+            ret = checkFailed(strFmt("@DNR:SerializedItemErrorPickingList",_salesLineOrig.LineNum, _salesLineOrig.ItemId));
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createParmLinesAndTable</Name>
+				<Source><![CDATA[
+    protected void createParmLinesAndTable()
+    {
+        splitLineInventTransIds = new Set(Types::String);
+
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRASAssignSerial))
+        &&  (!salesTable || (salesTable && salesTable.SalesType == SalesType::RORRental)))
+        {
+            chooseLines.reset();
+
+            QueryRun queryRun = new QueryRun(chooseLines.query());
+
+            while (queryRun.next())
+            {
+                SalesLine salesLine = queryRun.get(tableNum(SalesLine));
+
+                if (this.DNRASIsValidForSplit(salesLine))
+                {
+                    boolean mustReConfirm = DNRASSplitEngine_Sales::mustReconfirmSplitLines(salesLine);
+
+                    DNRASSplitEngine splitEngine = DNRASSplitEngine::construct(salesLine, salesLine.SalesQty - 1);
+                    splitEngine.run();
+
+                    this.DNRASAddSplitLinesToSet(splitEngine.parmSplitLinesMap());
+
+                    if (mustReConfirm)
+                    {
+                        SalesTable salesTableLocal = queryRun.get(tableNum(SalesTable));
+                        confirmOrderSet.add(salesTableLocal);
+                    }
+                }
+            }
+        }
+        
+        next createParmLinesAndTable();
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createData</Name>
+				<Source><![CDATA[
+    public void createData(boolean _append)
+    {
+        next createData(_append);
+        
+        if (isConfigurationkeyEnabled(configurationKeyNum(DNRASAssignSerial)))
+        {
+            this.DNRASConfirmOrders();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASAddSplitLinesToSet</Name>
+				<Source><![CDATA[
+    // Extension methods
+
+    private void DNRASAddSplitLinesToSet(Map _splitLinesMap)
+    {
+        if (_splitLinesMap.empty())
+        {
+            return;
+        }
+
+        MapEnumerator splitLinesMapEnumerator = _splitLinesMap.getEnumerator();
+
+        while (splitLinesMapEnumerator.moveNext())
+        {
+            SalesLine salesLine = SalesLine::findRecId(splitLinesMapEnumerator.currentKey());
+            splitLineInventTransIds.add(salesLine.InventTransId);
+
+            List splitLines = splitLinesMapEnumerator.currentValue();
+            ListEnumerator splitLinesEnumerator = splitLines.getEnumerator();
+
+            while (splitLinesEnumerator.moveNext())
+            {
+                InventTransId inventTransId = splitLinesEnumerator.current();
+                splitLineInventTransIds.add(inventTransId);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASIsValidForSplit</Name>
+				<Source><![CDATA[
+    private boolean DNRASIsValidForSplit(SalesLine _salesLine)
+    {
+        return (_salesLine.RORTradeType == RORTradeType::Rental 
+             && !splitLineInventTransIds.in(_salesLine.InventTransId)
+             && _salesLine.DNRASMaySplitLine());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRASConfirmOrders</Name>
+				<Source><![CDATA[
+    private void DNRASConfirmOrders()
+    {
+        SetEnumerator confirmOrderSetEnumerator = confirmOrderSet.getEnumerator();
+
+        while (confirmOrderSetEnumerator.moveNext())
+        {
+            SalesTable salesTableLocal = confirmOrderSetEnumerator.current();
+
+            SalesFormLetter salesFormLetter = SalesFormLetter::construct(DocumentStatus::Confirmation);
+            salesFormLetter.update(salesTableLocal);
+        }
+
+        confirmOrderSet = new Set(Types::Record);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

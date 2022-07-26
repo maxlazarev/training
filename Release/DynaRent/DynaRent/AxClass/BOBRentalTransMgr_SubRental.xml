@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>BOBRentalTransMgr_SubRental</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class BOBRentalTransMgr_SubRental extends BOBRentalTransManager
+{
+    PurchLine               purchLine;
+    PurchTable              purchTable;
+    RORRentalDateTimes      rentalDateTimes;
+    INVInvoiceStartEndBasis invoiceStartEndBasis;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>active</Name>
+				<Source><![CDATA[
+    protected BOBRentalTransActive active()
+    {
+        return (purchTable.PurchStatus == PurchStatus::Canceled ? BOBRentalTransActive::Closed : super());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>allowDisabledSubStatus</Name>
+				<Source><![CDATA[
+    protected boolean allowDisabledSubStatus()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyFrom</Name>
+				<Source><![CDATA[
+    protected BOBDateTimeCertainty certaintyFrom()
+    {
+        return (inventTrans.StatusReceipt == StatusReceipt::Received || inventTrans.StatusReceipt == StatusReceipt::Purchased ?
+                BOBDateTimeCertainty::Fixed :
+                BOBDateTimeCertainty::Firm);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>certaintyTo</Name>
+				<Source><![CDATA[
+    protected BOBDateTimeCertainty certaintyTo(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+        BOBDateTimeCertainty ret;
+    
+        switch(_newSubStatus)
+        {
+            case BOBRentalSubStatus::Ordered,
+                 BOBRentalSubStatus::Confirmed,
+                 BOBRentalSubStatus::Picked,
+                 BOBRentalSubStatus::Prepared,
+                 BOBRentalSubStatus::Outbound,
+                 BOBRentalSubStatus::Delivered,
+                 BOBRentalSubStatus::Built,
+                 BOBRentalSubStatus::EventStarted,
+                 BOBRentalSubStatus::EventEnded,
+                 BOBRentalSubStatus::Strike,
+                 BOBRentalSubStatus::Inbound:
+                TransDate offRentDate = DateTimeUtil::date(rentalDateTimes.OffRentDateTime);
+                ret = (offRentDate ? BOBDateTimeCertainty::Firm : BOBDateTimeCertainty::Tentative);
+                break;
+    
+            case BOBRentalSubStatus::Returned,
+                 BOBRentalSubStatus::ReturnInspected,
+                 BOBRentalSubStatus::Invoiced:
+                ret = BOBDateTimeCertainty::Fixed;
+                break;
+    
+            default:
+                throw error("@DNR6063");
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>fromDateTime</Name>
+				<Source><![CDATA[
+    protected FromDateTime fromDateTime()
+    {
+        FromDateTime ret;
+    
+        if(invoiceStartEndBasis == INVInvoiceStartEndBasis::DeliveryReturn
+        && subStatus >= BOBRentalSubStatus::Delivered
+        && inventTrans.BOBPckSlpUpdDateTime)
+        {
+            ret = inventTrans.BOBPckSlpUpdDateTime;
+        }
+        else
+        {
+            ret = rentalDateTimes.OnRentDateTime;
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromBuffer</Name>
+				<Source><![CDATA[
+    protected void initFromBuffer()
+    {
+        purchLine = buffer as PurchLine;
+        purchTable = purchLine.purchTable();
+        rentalDateTimes = (purchLine.RecId ?
+                           purchLine.RORRentalDateTimesHost::rentalDateTimes() :
+                           purchTable.RORRentalDateTimesHost::rentalDateTimes());
+        invoiceStartEndBasis = (purchLine.RecId ?
+                                FINRentalInvoiceProfile::find(purchLine.INVInvoiceProfileId).InvoiceStartEndBasis :
+                                FINRentalInvoiceProfile::find(purchTable.INVInvoiceProfileId).InvoiceStartEndBasis);
+    
+        bufferLocationId = purchLine.inventDim().InventLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inventLocationId</Name>
+				<Source><![CDATA[
+    protected InventLocationId inventLocationId()
+    {
+        return inventTrans.inventLocationId();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rentalTypeId</Name>
+				<Source><![CDATA[
+    protected BOBRentalTypeId rentalTypeId()
+    {
+        return purchLine.BOBRentalTypeId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>toDateTime</Name>
+				<Source><![CDATA[
+    protected ToDateTime toDateTime(BOBRentalSubStatus _newSubStatus = subStatus)
+    {
+        ToDateTime ret;
+    
+        if(invoiceStartEndBasis == INVInvoiceStartEndBasis::DeliveryReturn
+        && _newSubStatus >= BOBRentalSubStatus::Returned
+        && inventTrans.BOBReturnNoteUpdDateTime)
+        {
+            ret = inventTrans.BOBReturnNoteUpdDateTime;
+        }
+        else
+        {
+            TransDate offRentDate = DateTimeUtil::date(rentalDateTimes.OffRentDateTime);
+            ret = (offRentDate ? rentalDateTimes.OffRentDateTime : rentalDateTimes.ExpectedOffRentDateTime);
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>transType</Name>
+				<Source><![CDATA[
+    protected BOBRentalTransType transType()
+    {
+        return (purchLine.RORTradeType == RORTradeType::SubRental ?
+                BOBRentalTransType::SubRental :
+                BOBRentalTransType::Purch);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateBuffer</Name>
+				<Source><![CDATA[
+    protected void updateBuffer(boolean _doUpdateBuffer)
+    {
+        if(purchLine.RecId)
+        {
+            BOBRentalTrans rentalTrans;
+
+            select firstonly SubStatus, RecId from rentalTrans
+            order by SubStatus asc
+            where rentalTrans.InventTransOrigin == inventTrans.InventTransOrigin
+            &&    rentalTrans.TransType         != BOBRentalTransType::InventCounting;
+    
+            purchLine.BOBRentalSubStatus = (rentalTrans.RecId ? rentalTrans.SubStatus : subStatus);
+    
+            if(_doUpdateBuffer)
+            {
+                purchLine.doUpdate();
+            }
+        }
+        else // record is being inserted
+        {
+            purchLine.BOBRentalSubStatus = subStatus;
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINInvoicePeriodManager_Return</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[FINInvoicePeriodManagerAttribute(FINInvoicePeriodAction::Return)]
+class FINInvoicePeriodManager_Return extends FINInvoicePeriodManager
+{
+    Qty returnQty;
+    TransDateTime returnDateTime;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setReturnDetails</Name>
+				<Source><![CDATA[
+    public void setReturnDetails(TransDateTime _returnDateTime, Qty _returnQty)
+    {
+        returnDateTime = _returnDateTime;
+        returnQty = _returnQty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSelectForUpdateAbsent", "update happend in the method executeFullReturn()")]
+    public void run()
+    {
+        if (!returnQty)
+        {
+            // don't do anything
+            return;
+        }
+
+        FINInvoicePeriodQtyPhysical invPeriodQtyPhysical;
+        Qty returnRemainder = returnQty;
+
+        // TODO: validation preventing returning more than delivered will be programmed in posting classes.
+        while select forupdate invPeriodQtyPhysical
+        order by DeliveryDateTime desc
+        where invPeriodQtyPhysical.RefTableId == invoicePeriodHost.TableId
+        &&    invPeriodQtyPhysical.RefRecId == invoicePeriodHost.RecId
+        &&    invPeriodQtyPhysical.QtyRented
+        &&    !invPeriodQtyPhysical.IsReturned
+        {
+            if (!returnRemainder)
+            {
+                // everything returned
+                break;
+            }
+
+            Qty returnComparision = (returnRemainder - invPeriodQtyPhysical.QtyRented);
+            if (returnComparision == 0)
+            {
+                // full return
+                this.executeFullReturn(invPeriodQtyPhysical);
+                returnRemainder = 0;
+            }
+            else if (returnComparision < 0)
+            {
+                // partial return
+                this.executePartialReturn(invPeriodQtyPhysical, returnRemainder);
+                returnRemainder = 0;
+            }
+            else if (returnComparision > 0)
+            {
+                // return more than last delivery
+                // execute full return for the last delivery and continue with another delivery for remaining qty.
+                this.executeFullReturn(invPeriodQtyPhysical);
+                returnRemainder = returnComparision;
+            }
+        }
+
+        FINRAGContractLineTier::syncContractLineTiers(invoicePeriodHost);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executeFullReturn</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void executeFullReturn(FINInvoicePeriodQtyPhysical _invPeriodQtyPhysical)
+    {
+        _invPeriodQtyPhysical.ReturnDateTime = returnDateTime;
+        _invPeriodQtyPhysical.IsReturned = NoYes::Yes;
+        _invPeriodQtyPhysical.update();
+
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancialUpd;
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancialDel;
+        FINInvoicePeriodQtyFinancial invPeriodQtyFinancialReturn;
+
+        delete_from invPeriodQtyFinancialDel
+        where invPeriodQtyFinancialDel.InvPeriodQtyPhysicalRecId == _invPeriodQtyPhysical.RecId
+        &&   !invPeriodQtyFinancialDel.InvoiceId
+        &&    invPeriodQtyFinancialDel.PeriodStartDateTime > _invPeriodQtyPhysical.ReturnDateTime
+        &&   !invPeriodQtyFinancialDel.PeriodEndDateTime;
+
+        select firstonly RecId, PeriodStartDateTime, PeriodEndDateTime from invPeriodQtyFinancialUpd
+        order by PeriodEndDateTime desc
+        where invPeriodQtyFinancialUpd.InvPeriodQtyPhysicalRecId == _invPeriodQtyPhysical.RecId
+        &&    invPeriodQtyFinancialUpd.InvoiceId
+        &&    invPeriodQtyFinancialUpd.PeriodEndDateTime > _invPeriodQtyPhysical.ReturnDateTime;
+
+        if (invPeriodQtyFinancialUpd.RecId)
+        {
+
+            FINInvoicePeriodQtyFinancial::markUnMarkDateTimeForCredit(FINInvoiceTransPeriodStatus::PendingCredit,
+                                                                      _invPeriodQtyPhysical.ReturnDateTime,
+                                                                      invPeriodQtyFinancialUpd.PeriodEndDateTime,
+                                                                      invoicePeriodHost);
+
+            //remove the periods that remain open after the return date in case return date was 1 (or more) periods before the last invoiced date
+            delete_from invPeriodQtyFinancialDel
+            where invPeriodQtyFinancialDel.InvPeriodQtyPhysicalRecId == _invPeriodQtyPhysical.RecId
+            &&   !invPeriodQtyFinancialDel.InvoiceId
+            &&    invPeriodQtyFinancialDel.PeriodStartDateTime > _invPeriodQtyPhysical.ReturnDateTime;
+        }
+
+        update_recordset invPeriodQtyFinancialReturn
+        setting PeriodEndDateTime = _invPeriodQtyPhysical.ReturnDateTime
+        where invPeriodQtyFinancialReturn.InvPeriodQtyPhysicalRecId == _invPeriodQtyPhysical.RecId
+        &&    invPeriodQtyFinancialReturn.PeriodStartDateTime < _invPeriodQtyPhysical.ReturnDateTime
+        &&    invPeriodQtyFinancialReturn.PeriodEndDateTime > _invPeriodQtyPhysical.ReturnDateTime;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>executePartialReturn</Name>
+				<Source><![CDATA[
+    protected void executePartialReturn(FINInvoicePeriodQtyPhysical _invPeriodQtyPhysical, Qty _returnQty)
+    {
+        // If nothing was invoiced yet
+        FINInvoicePeriodQtyPhysical returnedInvPeriodQtyPhysical;
+
+        returnedInvPeriodQtyPhysical.data(_invPeriodQtyPhysical.data());
+        returnedInvPeriodQtyPhysical.ReturnDateTime = returnDateTime;
+        returnedInvPeriodQtyPhysical.QtyRented = _returnQty;
+        returnedInvPeriodQtyPhysical.IsReturned = NoYes::Yes;
+        returnedInvPeriodQtyPhysical.ParentRecId = _invPeriodQtyPhysical.RecId;
+        returnedInvPeriodQtyPhysical.insert();
+
+        FINInvoicePeriodQtyFinancial    invPeriodQtyFinancialUpd;
+        FINInvoicePeriodQtyFinancial    invPeriodQtyFinancialNew;
+        FINJournalizedInvoicePeriod     journalizedInvoicePeriodUpd;
+        FINJournalizedInvoicePeriod     journalizedInvoicePeriodNew;
+         
+        while select forupdate invPeriodQtyFinancialUpd
+        where invPeriodQtyFinancialUpd.InvPeriodQtyPhysicalRecId == _invPeriodQtyPhysical.RecId
+        &&   (invPeriodQtyFinancialUpd.InvoiceId || invPeriodQtyFinancialUpd.PeriodStartDateTime < returnDateTime)
+            outer join forupdate journalizedInvoicePeriodUpd
+            where journalizedInvoicePeriodUpd.SourceRefRecId == invPeriodQtyFinancialUpd.RecId
+            &&    journalizedInvoicePeriodUpd.InvPeriodQtyPhysicalRecId == invPeriodQtyFinancialUpd.InvPeriodQtyPhysicalRecId
+        {
+            if (journalizedInvoicePeriodUpd.getPeriodStatus() != FINInvoiceTransPeriodStatus::FullyInvoiced)
+            {
+                continue;
+            }
+
+            if (invPeriodQtyFinancialUpd.InvoiceId)
+            {
+                invPeriodQtyFinancialNew.clear();
+
+                if (invPeriodQtyFinancialUpd.PeriodEndDateTime > returnDateTime)
+                {
+                    if (invPeriodQtyFinancialUpd.PeriodStartDateTime < returnDateTime)
+                    {
+                        invPeriodQtyFinancialNew.PeriodStartDateTime        = invPeriodQtyFinancialUpd.PeriodStartDateTime;
+                        invPeriodQtyFinancialNew.PeriodEndDateTime          = returnedInvPeriodQtyPhysical.ReturnDateTime;
+                        invPeriodQtyFinancialNew.InvPeriodQtyPhysicalRecId  = returnedInvPeriodQtyPhysical.RecId;
+                        invPeriodQtyFinancialNew.insert();
+                    }
+
+                    FINInvoicePeriodQtyFinancial::markUnMarkDateTimeForCredit(FINInvoiceTransPeriodStatus::PendingCredit, 
+                                                                              invPeriodQtyFinancialUpd.PeriodStartDateTime, 
+                                                                              invPeriodQtyFinancialUpd.PeriodEndDateTime, 
+                                                                              invoicePeriodHost);
+                }
+                else
+                {
+                    invPeriodQtyFinancialNew.data(invPeriodQtyFinancialUpd.data());
+                    invPeriodQtyFinancialNew.QtyInvoiced    = returnedInvPeriodQtyPhysical.QtyRented;
+                    invPeriodQtyFinancialNew.LineAmount     = ((invPeriodQtyFinancialNew.LineAmount / _invPeriodQtyPhysical.QtyRented) * invPeriodQtyFinancialNew.QtyInvoiced);
+                    invPeriodQtyFinancialNew.DiscAmount     = ((invPeriodQtyFinancialNew.DiscAmount / _invPeriodQtyPhysical.QtyRented) * invPeriodQtyFinancialNew.QtyInvoiced);
+                    invPeriodQtyFinancialNew.InvPeriodQtyPhysicalRecId = returnedInvPeriodQtyPhysical.RecId;
+                    invPeriodQtyFinancialNew.insert();
+
+                    journalizedInvoicePeriodNew.clear();
+                    journalizedInvoicePeriodNew.data(journalizedInvoicePeriodUpd.data());
+                    journalizedInvoicePeriodNew.initFromPeriodQtyFinancial(invPeriodQtyFinancialNew);
+                    journalizedInvoicePeriodNew.RefTableId  = journalizedInvoicePeriodUpd.RefTableId;
+                    journalizedInvoicePeriodNew.RefRecId    = journalizedInvoicePeriodUpd.RefRecId;
+                    journalizedInvoicePeriodNew.insert();
+
+                    invPeriodQtyFinancialUpd.QtyInvoiced   -= _returnQty;
+                    invPeriodQtyFinancialUpd.LineAmount    -= invPeriodQtyFinancialNew.LineAmount;
+                    invPeriodQtyFinancialUpd.DiscAmount    -= invPeriodQtyFinancialNew.DiscAmount;
+                    invPeriodQtyFinancialUpd.update();
+
+                    journalizedInvoicePeriodUpd.initFromPeriodQtyFinancial(invPeriodQtyFinancialUpd);
+                    journalizedInvoicePeriodUpd.update();
+                }
+            }
+            else
+            {
+                if (invPeriodQtyFinancialUpd.PeriodStartDateTime < returnDateTime)
+                {
+                    invPeriodQtyFinancialNew.clear();
+                    invPeriodQtyFinancialNew.data(invPeriodQtyFinancialUpd.data());
+                    invPeriodQtyFinancialNew.PeriodEndDateTime          = returnedInvPeriodQtyPhysical.ReturnDateTime;
+                    invPeriodQtyFinancialNew.InvPeriodQtyPhysicalRecId  = returnedInvPeriodQtyPhysical.RecId;
+                    invPeriodQtyFinancialNew.insert();
+                }
+            }
+        }
+
+        _invPeriodQtyPhysical.QtyRented -= _returnQty;
+        _invPeriodQtyPhysical.update();
+
+        // TODO: if something was invoiced than maybe we need to leave FINInvoicePeriod_Qty as is until the last invoice and then split it creating 2 new records (returned and not returned)
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

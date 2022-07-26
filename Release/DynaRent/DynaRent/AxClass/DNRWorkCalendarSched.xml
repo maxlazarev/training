@@ -1,0 +1,745 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRWorkCalendarSched</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class DNRWorkCalendarSched
+{
+    #define.loopBreak(1000)
+
+    boolean     useCache;
+    Map         mapCalendarDateOpen;
+    Map         mapCalendarClosedForPickup;
+
+    int64       cacheInitDateTime;
+    container   globalCacheKey;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initFromGlobalCache</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Initializes the cached maps from the global object cache based on the specified key.
+    /// </summary>
+    /// <param name="_cacheKey">
+    ///     The cache key to use.
+    /// </param>
+    public void initFromGlobalCache(container _cacheKey = globalCacheKey)
+    {
+        SysGlobalObjectCache    globalObjectCache;
+        GlobalObjectCacheScope  globalObjectCacheScope;
+        container               globalObjectCacheKey;
+        container               globalObjectCacheValue;
+        container               daysOpenMapPacked;
+        container               daysClosedMapPacked;
+
+        if (useCache)
+        {
+            globalObjectCache      = new SysGlobalObjectCache();
+            globalObjectCacheScope = DNRWorkCalendarSched::getGlobalCacheScope();
+            globalObjectCacheKey   = _cacheKey;
+
+            globalObjectCacheValue = globalObjectCache.find(
+                globalObjectCacheScope,
+                globalObjectCacheKey);
+
+            if (globalObjectCacheValue == conNull())
+            {
+                //put the initial container values in the cache
+                globalObjectCache.insert(
+                    globalObjectCacheScope,
+                    globalObjectCacheKey,
+                    [mapCalendarDateOpen.pack(), mapCalendarClosedForPickup.pack()]);
+            }
+            else
+            {
+                [daysOpenMapPacked, daysClosedMapPacked] = globalObjectCacheValue;
+                mapCalendarDateOpen         = Map::create(daysOpenMapPacked);
+                mapCalendarClosedForPickup  = Map::create(daysClosedMapPacked);
+            }
+
+            cacheInitDateTime = DNRWorkCalendarSched::getDateTimeTicks();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isDateOpen</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Determines whether a date is open in a calendar.
+    /// </summary>
+    /// <param name="_calendarId">
+    ///    The calendar to examine.
+    /// </param>
+    /// <param name="_schedDate">
+    ///    The date to check for.
+    /// </param>
+    /// <param name="_skipGlobalCaching">
+    ///    A boolean value indicating whether to skip global caching.
+    /// </param>
+    /// <returns>
+    ///    true if the date is open; otherwise, false.
+    /// </returns>
+    /// <remarks>
+    ///    If <paramref name="_calendarId" /> is blank, the method returns true, which means that the date
+    ///    <paramref name="_schedDate" /> is considered open.
+    /// </remarks>
+    public boolean isDateOpen(
+        DNRCalendarId   _calendarId,
+        SchedDate       _schedDate,
+        boolean         _skipGlobalCaching = false)
+    {
+        str         key;
+
+        if (!_calendarId)
+        {
+            return true;
+        }
+
+        if (!_skipGlobalCaching)
+        {
+            this.initFromGlobalCache();
+        }
+
+        if (! useCache || ! mapCalendarDateOpen)
+        {
+            return DNRCalendarDate::isDateOpen(_calendarId,_schedDate);
+        }
+
+        key = _calendarId+'#'+int2str(date2num(_schedDate));
+
+        if (! mapCalendarDateOpen.exists(key))
+        {
+            mapCalendarDateOpen.insert(key,DNRCalendarDate::isDateOpen(_calendarId,_schedDate));
+        }
+
+        if (!_skipGlobalCaching)
+        {
+            this.saveToGlobalCache();
+        }
+
+        return mapCalendarDateOpen.lookup(key);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    [SuppressBpWarning('BPErrorClassNewNotProtected', 'The constructor is preserved public due to API compatibility.')]
+    public void new(boolean _useCache = true)
+    {
+        useCache = _useCache;
+
+        if (useCache)
+        {
+            mapCalendarDateOpen         = new Map(Types::String,Types::Enum);
+            mapCalendarClosedForPickup  = new Map(Types::String,Types::Enum);
+            cacheInitDateTime           = DNRWorkCalendarSched::getDateTimeTicks();
+            globalCacheKey              = DNRWorkCalendarSched::createGlobalCacheKey();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>saveToGlobalCache</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Saves the local cached calendar values to global object cache.
+    /// </summary>
+    /// <param name="_cacheKey">
+    ///     The cache key to use to access the global object cache.
+    /// </param>
+    public void saveToGlobalCache(container _cacheKey = globalCacheKey)
+    {
+        SysGlobalObjectCache    globalObjectCache;
+        GlobalObjectCacheScope  globalObjectCacheScope;
+        container               globalObjectCacheKey;
+        int64                   lastInvalidatedTimeStamp;
+
+        if (useCache)
+        {
+            globalObjectCache      = new SysGlobalObjectCache();
+            globalObjectCacheScope = DNRWorkCalendarSched::getGlobalCacheScope();
+            globalObjectCacheKey   = _cacheKey;
+            lastInvalidatedTimeStamp = DNRWorkCalendarSched::getLastInvalidatedTimeStamp();
+
+            //
+            // only save to cache if the timestamp of the last invalidation
+            // happend before the cache was initialized (the current cache is up-to-date)
+            //
+
+            if (cacheInitDateTime > lastInvalidatedTimeStamp)
+            {
+                globalObjectCache.insert(
+                    globalObjectCacheScope,
+                    globalObjectCacheKey,
+                    [mapCalendarDateOpen.pack(), mapCalendarClosedForPickup.pack()]);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>schedDate</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Returns the first <c>schedDate</c> where the working time is open.
+    /// </summary>
+    /// <param name="_schedDirection">
+    ///    Determines whether the date should be calculated backward or forward from the <paramref
+    ///    name="_schedDateFrom" />.
+    /// </param>
+    /// <param name="_schedDateFrom">
+    ///    The from date upon which calculations are based.
+    /// </param>
+    /// <param name="_days">
+    ///    The lead time.
+    /// </param>
+    /// <param name="_calendarDays">
+    ///    Determines whether to consider open and closed days when you add lead time to the from date to
+    ///    acquire the first <c>schedDate</c>.
+    /// </param>
+    /// <param name="_calendarId">
+    ///    The ID of primary calendar; optional.
+    /// </param>
+    /// <param name="_secondaryCalendarId">
+    ///    The ID of secondary calendar; optional.
+    /// </param>
+    /// <returns>
+    ///    The first <c>SchedDate</c> where the working time is open.
+    /// </returns>
+    /// <remarks>
+    ///    If both a primary calendar and a secondary calendar are provided, the <c>schedDate</c> will be the
+    ///    first date where there is an opening in both calendars. By using the argument <paramref
+    ///    name="_checkForPickup" />, it is possible also to require that the <c>schedDate</c> has to be open
+    ///    for pickup in either the primary calendar or the secondary calendar.
+    ///    If either of the
+    ///    <c>CalendarId</c> objects that are passed as arguments are blank, the calendar will be treated as a
+    ///    calendar with all days open. This is because of the way the <c>isDateOpen</c> method functions.
+    ///    To
+    ///    avoid infinite loops where two calendars never have a matching opening, an internal limit of 1,000
+    ///    days is used. If no open day is found within this limit, the original from date (Arg2) is returned.
+    /// </remarks>
+    public SchedDate schedDate(
+        SchedDirection      _schedDirection,
+        SchedDate           _schedDateFrom,
+        Days                _days,
+        CalendarDays        _calendarDays,
+        DNRCalendarId       _calendarId,
+        DNRCalendarId       _secondaryCalendarId = '')
+    {
+        SchedDate   schedDateTo;
+        Days        remainDays;
+        Integer     loopCounter;
+        SchedDate   retValue    = dateNull();
+
+        this.initFromGlobalCache(globalCacheKey);
+
+        if (!(_calendarDays && _calendarId))
+        {
+            schedDateTo = _schedDateFrom + (_schedDirection == SchedDirection::Forward ? _days : - _days);
+        }
+        else //find an open day in primary calendar
+        {
+            remainDays  = _days;
+            schedDateTo = _schedDateFrom;
+
+            while (remainDays > 0)
+            {
+                if (_schedDirection == SchedDirection::Forward)
+                {
+                    schedDateTo++;
+                }
+                else
+                {
+                    schedDateTo--;
+                }
+
+                if (this.isDateOpen(_calendarId,schedDateTo, true))
+                {
+                    remainDays--;
+                }
+
+                loopCounter++;
+                if (loopCounter > #loopBreak)
+                {
+                    schedDateTo = _schedDateFrom;
+                    break;
+                }
+            }
+        }
+
+        for (loopCounter = 0; loopCounter <= #loopBreak; loopCounter++)//find an open day in both sec AND prim calendar
+        {
+            if ( this.isDateOpen(_calendarId,schedDateTo, true))
+            {
+                if (_secondaryCalendarId)
+                {
+                    if (this.isDateOpen(_secondaryCalendarId,schedDateTo, true))
+                    {
+                        retValue = schedDateTo;
+                        break;
+                    }
+                }
+                else
+                {
+                    retValue = schedDateTo;
+                    break;
+                }
+            }
+
+            if (_schedDirection == SchedDirection::Forward)
+            {
+                schedDateTo++;
+            }
+            else
+            {
+                schedDateTo--;
+            }
+        }
+
+        this.saveToGlobalCache(globalCacheKey);
+        return retValue;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>schedTime</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Schedules forward or backward from a given date by a given number of seconds.
+    /// </summary>
+    /// <param name="_schedDirection">
+    /// The scheduling direction.
+    /// </param>
+    /// <param name="_schedDateTimeFrom">
+    /// The date and time to schedule from.
+    /// </param>
+    /// <param name="_seconds">
+    /// The number of seconds to schedule forward or backward from the schedule date and time.
+    /// </param>
+    /// <param name="_calendarDays">
+    /// A boolean value that indicates whether the scheduling must consider the calendar or not.
+    /// </param>
+    /// <param name="_calendarId">
+    /// The calendar used determine the result.
+    /// </param>
+    /// <param name="_useEffectivity">
+    /// A boolean value that indicates whether or not the effecticity defined on the calendar must be considered; optional.
+    /// </param>
+    /// <param name="_limitDateTime">
+    /// A date and time value that defines where to stop scheduling if no time slot can be found; optional.
+    /// </param>
+    /// <returns>
+    /// The scheduling result.
+    /// </returns>
+    public utcdatetime schedTime(
+        SchedDirection      _schedDirection,
+        utcdatetime         _schedDateTimeFrom,    //company timezone
+        real                _seconds,
+        CalendarDays        _calendarDays,
+        DNRCalendarId       _calendarId,
+        boolean             _useEffectivity = true,
+        utcdatetime         _limitDateTime  = _schedDirection == SchedDirection::Forward
+                                            ? DateTimeUtil::maxValue()
+                                            : DateTimeUtil::minValue())
+    {
+        #TimeConstants
+        utcdatetime             schedDateTimeTo;
+        real                    remainSeconds;
+        CapacityValue           capacity;
+        Integer                 loopCounter;
+        SchedDate               schedDate;
+        timeOfDay               schedTime;
+        SchedDate               schedDateFrom;
+        timeOfDay               schedTimeFrom;
+        SchedDate               limitDate = DateTimeUtil::date(_limitDateTime);
+        timeOfDay               limitTime = DateTimeUtil::time(_limitDateTime);
+        DNRCalendarDateLine     workCalendarDateLine;
+        boolean                 first = true;
+
+        this.initFromGlobalCache();
+
+        if (!(_calendarDays && _calendarId))
+        {
+            switch (_schedDirection)
+            {
+                case SchedDirection::Forward:
+                    schedDateTimeTo = min(_limitDateTime, DateTimeUtil::addSeconds(_schedDateTimeFrom,real2int(decRound(_seconds,0))));
+                    break;
+                default:
+                    schedDateTimeTo = max(_limitDateTime, DateTimeUtil::addSeconds(_schedDateTimeFrom,-real2int(decRound(_seconds,0))));
+                    break;
+            }
+        }
+        else //find an open day(s) and time(s) in calendar
+        {
+            schedDateFrom   = DateTimeUtil::date(_schedDateTimeFrom);
+            schedTimeFrom   = DateTimeUtil::time(_schedDateTimeFrom);
+            schedDate       = schedDateFrom;
+            remainSeconds   = _seconds;
+            schedDateTimeTo = _schedDateTimeFrom;
+
+            while (   remainSeconds > 0
+                   && ((schedDate       <= limitDate
+                   &&   _schedDirection == SchedDirection::Forward)
+                   ||  (schedDate       >= limitDate
+                   &&   _schedDirection == SchedDirection::Backward)))
+            {
+                if (this.isDateOpen(_calendarId,schedDate, true))
+                {
+                    if (_schedDirection == SchedDirection::Forward)
+                    {
+                        while select workCalendarDateLine
+                            order by FromTime
+                            where workCalendarDateLine.CalendarId == DNRWorkCalendar::defined(_calendarId,schedDate) &&
+                                  workCalendarDateLine.TransDate  == schedDate
+                        {
+                            if (first)
+                            {
+                                if (workCalendarDateLine.ToTime   >= schedTimeFrom)
+                                {
+                                    first = false;
+                                    //only use the remaining part of this slot for capacity calculation
+                                    workCalendarDateLine.FromTime = max(workCalendarDateLine.FromTime,schedTimeFrom);
+                                }
+                                else
+                                {
+                                    continue;
+                                }
+                            }
+
+                            if (schedDate == limitDate)
+                            {
+                                if (workCalendarDateLine.FromTime > limitTime)
+                                {
+                                    continue;
+                                }
+
+                                workCalendarDateLine.ToTime = min(limitTime,workCalendarDateLine.ToTime);
+                            }
+
+                            capacity = workCalendarDateLine.capacity(100,_useEffectivity);
+                            if (remainSeconds <= capacity)
+                            {
+                                if (_useEffectivity)
+                                {
+                                    if (workCalendarDateLine.Effectivity)
+                                    {
+                                        schedTime     = any2int(workCalendarDateLine.FromTime + (remainSeconds * 100/workCalendarDateLine.Effectivity));
+                                        remainSeconds = 0;
+                                    }
+                                }
+                                else
+                                {
+                                    schedTime     = workCalendarDateLine.FromTime + real2int(decRound(remainSeconds,0));
+                                    remainSeconds = 0;
+                                }
+                                break;
+                            }
+                            else
+                            {
+                                remainSeconds -= capacity;
+                            }
+                        }
+                    }
+                    else //backward
+                    {
+                        while select workCalendarDateLine
+                            order by ToTime desc
+                            where workCalendarDateLine.CalendarId == DNRWorkCalendar::defined(_calendarId,schedDate) &&
+                                  workCalendarDateLine.TransDate  == schedDate
+                        {
+                            if (first)
+                            {
+                                if (workCalendarDateLine.FromTime <= schedTimeFrom)
+                                {
+                                    first = false;
+                                    //only use the remaining part of this slot for capacity calculation
+                                    workCalendarDateLine.ToTime = min(schedTimeFrom,workCalendarDateLine.ToTime);
+                                }
+                                else
+                                {
+                                    continue;
+                                }
+                            }
+
+                            if (schedDate == limitDate)
+                            {
+                                if (workCalendarDateLine.ToTime < limitTime)
+                                {
+                                    continue;
+                                }
+
+                                workCalendarDateLine.FromTime = max(limitTime,workCalendarDateLine.FromTime);
+                            }
+
+                            capacity = workCalendarDateLine.capacity(100,_useEffectivity);
+                            if (remainSeconds <= capacity)
+                            {
+                                if (_useEffectivity)
+                                {
+                                    if (workCalendarDateLine.Effectivity)
+                                    {
+                                        schedTime     = any2int(workCalendarDateLine.ToTime - (remainSeconds * 100/workCalendarDateLine.Effectivity));
+                                        remainSeconds = 0;
+                                    }
+                                }
+                                else
+                                {
+                                    schedTime     = workCalendarDateLine.ToTime - real2int(decRound(remainSeconds,0));
+                                    remainSeconds = 0;
+                                }
+                                break;
+                            }
+                            else
+                            {
+                                remainSeconds -= capacity;
+                            }
+                        }
+                    }
+                }
+
+                loopCounter++;
+                if (   loopCounter > #loopBreak
+                    || (schedDate == limitDate
+                    &&  remainSeconds))
+                {
+                    //exceeded date/time or loop limit
+                    schedDateTimeTo = DateTimeUtil::newDateTime(schedDate,schedDate == limitDate ? limitTime : #secondsPerDay);
+                    break;
+                }
+                else
+                {
+                    if (remainSeconds)
+                    {
+                        //not done yet
+                        if (_schedDirection == SchedDirection::Forward)
+                        {
+                            schedDate++;
+                        }
+                        else
+                        {
+                            schedDate--;
+                        }
+                        first = false;
+                    }
+                    else
+                    {
+                        //scheduled within date/time and loop limits
+                        schedDateTimeTo = DateTimeUtil::newDateTime(schedDate,schedTime);
+                    }
+                }
+            }
+        }
+
+        this.saveToGlobalCache();
+        return schedDateTimeTo;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>schedTimeUTC</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///    Schedules a time that is forward or backward from a given date by a given number of seconds.
+    /// </summary>
+    /// <param name="_schedDirection">
+    ///    The scheduling direction.
+    /// </param>
+    /// <param name="_schedDateTimeFrom">
+    ///    The UTC date and the time from which to schedule.
+    /// </param>
+    /// <param name="_seconds">
+    ///    The number of seconds to schedule forward or backward from the schedule date and time.
+    /// </param>
+    /// <param name="_calendarDays">
+    ///    A Boolean value that indicates whether scheduling must consider the calendar.
+    /// </param>
+    /// <param name="_calendarId">
+    ///    The calendar to use to determine the result.
+    /// </param>
+    /// <param name="_useEffectivity">
+    ///    A Boolean value that indicates whether the effectivity that is defined on the calendar must be
+    ///    considered; optional.
+    /// </param>
+    /// <param name="_limitDateTime">
+    ///    A date and time value that defines where to stop a schedule if a time slot is not found; optional.
+    /// </param>
+    /// <returns>
+    ///    The scheduling result as a UTC date and time.
+    /// </returns>
+    /// <remarks>
+    ///    Calendars are related to the time zone of the company. This method applies the company time zone
+    ///    offset to the provided UTC date and removes it from the scheduling result to wrap the
+    ///    <c>DNRWorkCalendarSched.schedTime</c> method.
+    /// </remarks>
+    public utcdatetime schedTimeUTC(
+        SchedDirection _schedDirection,
+        utcdatetime    _schedDateTimeFrom,    //UTC
+        real           _seconds,
+        CalendarDays   _calendarDays,
+        DNRCalendarId  _calendarId,
+        boolean        _useEffectivity = true,
+        utcdatetime    _limitDateTime  = _schedDirection == SchedDirection::Forward
+                                            ? DateTimeUtil::maxValue()
+                                            : DateTimeUtil::minValue())
+    {
+        utcdatetime schedDateTimeFromTZ = DateTimeUtil::applyTimeZoneOffset(_schedDateTimeFrom,DateTimeUtil::getCompanyTimeZone());
+        utcdatetime limitDateTimeTZ     = _limitDateTime;
+        utcdatetime schedDateTimeToUTC;
+
+        this.initFromGlobalCache();
+
+        if (   _limitDateTime != DateTimeUtil::minValue()
+            && _limitDateTime != DateTimeUtil::maxValue())
+        {
+            limitDateTimeTZ = DateTimeUtil::applyTimeZoneOffset(_limitDateTime,DateTimeUtil::getCompanyTimeZone());
+        }
+
+        schedDateTimeToUTC = this.schedTime(_schedDirection,
+                                            schedDateTimeFromTZ,
+                                            _seconds,
+                                            _calendarDays,
+                                            _calendarId,
+                                            _useEffectivity,
+                                            limitDateTimeTZ);
+
+        //convert back from company timezone to UTC
+        schedDateTimeToUTC = DateTimeUtil::removeTimeZoneOffset(schedDateTimeToUTC,DateTimeUtil::getCompanyTimeZone());
+        this.saveToGlobalCache();
+        return schedDateTimeToUTC;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createGlobalCacheKey</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Creates a key that can be used to read and write the caching of the calendar.
+    /// </summary>
+    /// <returns>
+    ///     A container with the composition of the cache key.
+    /// </returns>
+    private static container createGlobalCacheKey()
+    {
+        return [classstr(DNRWorkCalendarSched)];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getDateTimeTicks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Gets the current date time in milliseconds.
+    /// </summary>
+    /// <returns>
+    ///     An int64 value.
+    /// </returns>
+    private static int64 getDateTimeTicks()
+    {
+        System.DateTime now     = System.DateTime::get_Now();
+        int64           ticks   = now.get_Ticks();
+
+        return ticks;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getGlobalCacheScope</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Gets the global object cache scope for the caching to use the calendar.
+    /// </summary>
+    /// <returns>
+    ///     The name of the scope for the global object cache.
+    /// </returns>
+    public static GlobalObjectCacheScope getGlobalCacheScope()
+    {
+        return classstr(DNRWorkCalendarSched) + getcurrentpartition();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLastInvalidatedTimeStamp</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Gets the timestamp of the last invalidate action that was done to the caching mechanism.
+    /// </summary>
+    /// <returns>
+    ///     The milisseconds representing the date and time of the last invalidation.
+    /// </returns>
+    private static int64 getLastInvalidatedTimeStamp()
+    {
+        int64               lastInvalidatedTimeStamp;
+        SysGlobalObjectCache globalObjectCache      = new SysGlobalObjectCache();
+        GlobalObjectCacheScope cacheScope           = DNRWorkCalendarSched::getGlobalCacheScope();
+        container            timestampCacheKey      = [identifierStr(timestamp)];
+        container            globalObjectCacheValue = globalObjectCache.find(cacheScope, timestampCacheKey);
+
+        if (globalObjectCacheValue == conNull())
+        {
+            globalObjectCache.insert(cacheScope, timestampCacheKey, [DNRWorkCalendarSched::getDateTimeTicks()]);
+        }
+        else
+        {
+            [lastInvalidatedTimeStamp] = globalObjectCacheValue;
+        }
+
+        return lastInvalidatedTimeStamp;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>invalidateGlobalCacheScope</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Invalidates the calendar settings stored in the global cache.
+    /// </summary>
+    public static void invalidateGlobalCacheScope()
+    {
+        SysGlobalObjectCache    globalObjectCache = new SysGlobalObjectCache();
+
+        globalObjectCache.clear(DNRWorkCalendarSched::getGlobalCacheScope());
+        DNRWorkCalendarSched::setLastInvalidatedTimeStamp(DNRWorkCalendarSched::getDateTimeTicks());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setLastInvalidatedTimeStamp</Name>
+				<Source><![CDATA[
+    /// <summary>
+    ///     Sets the timestamp of the last invalidate action that was done to the caching mechanism.
+    /// </summary>
+    /// <param name="_lastInvalidatedTimeStamp">
+    ///     The number of ticks representing the timestamp of the date for invalidation.
+    /// </param>
+    private static void setLastInvalidatedTimeStamp(int64 _lastInvalidatedTimeStamp)
+    {
+        SysGlobalObjectCache globalObjectCache      = new SysGlobalObjectCache();
+        GlobalObjectCacheScope cacheScope           = DNRWorkCalendarSched::getGlobalCacheScope();
+        container            timestampCacheKey      = [identifierStr(timestamp)];
+
+        globalObjectCache.insert(cacheScope, timestampCacheKey, [_lastInvalidatedTimeStamp]);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

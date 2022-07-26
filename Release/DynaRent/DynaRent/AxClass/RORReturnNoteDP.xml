@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORReturnNoteDP</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[SRSReportParameterAttribute(classStr(RORReturnNoteContract))]
+public class RORReturnNoteDP extends SrsReportDataProviderPreProcess
+{
+    CustRORReturnNoteJour               returnNoteJour;
+    CustRORReturnNoteTrans              returnNoteTrans;
+
+    VendRORReturnNoteJour               returnNoteJourSubRental;
+    VendRORReturnNoteTrans              returnNoteTransSubRental;
+
+    RORReturnNoteHeaderTmp              returnNoteHeaderTmp;
+    RORReturnNoteDetailsTmp             returnNoteDetailsTmp;
+    RORRentalDateTimes                  rentalDateTimes;
+    FormletterJournalPrint              formletterJournalPrint;
+    CompanyInfo                         companyInfo;
+    recId                               formLetterRecId;
+    RecId                               recId;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getReturnNoteDetailsTmp</Name>
+				<Source><![CDATA[
+    [SRSReportDataSetAttribute(tableStr(RORReturnNoteDetailsTmp))]
+    public RORReturnNoteDetailsTmp getReturnNoteDetailsTmp()
+    {
+        select returnNoteDetailsTmp;
+        return returnNoteDetailsTmp;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getReturnNoteHeaderTmp</Name>
+				<Source><![CDATA[
+    [SRSReportDataSetAttribute(tableStr(RORReturnNoteHeaderTmp))]
+    public RORReturnNoteHeaderTmp getReturnNoteHeaderTmp()
+    {
+        select returnNoteHeaderTmp;
+        return returnNoteHeaderTmp;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processReport</Name>
+				<Source><![CDATA[
+    public void processReport()
+    {
+        QueryRun                tradeLoopTrans;
+        SalesLine               salesLine;
+        RORReturnNoteContract   contract;
+    
+        returnNoteHeaderTmp.setConnection(this.parmUserConnection());
+        returnNoteDetailsTmp.setConnection(this.parmUserConnection());
+    
+        contract                    = this.parmDataContract() as RORReturnNoteContract;
+        recId                       = contract.parmRecordId();
+        formLetterRecId             = contract.parmFormLetterRecordId();
+
+        companyInfo                 = CompanyInfo::find();
+
+        if(contract.parmTableId() == tableNum(CustRORReturnNoteJour))
+        {
+            this.unpackSalesFormLetter();
+    
+            returnNoteJour  = CustRORReturnNoteJour::findRecId(recId);
+    
+            this.setReturnNoteHeaderTmp();
+    
+            tradeLoopTrans = new TradeLoopTrans(returnNoteJour, tableNum(CustRORReturnNoteTrans)).buildQueryRun();
+    
+            while (tradeLoopTrans.next())
+            {
+                returnNoteTrans = tradeLoopTrans.get(tableNum(CustRORReturnNoteTrans));
+                rentalDateTimes = RORRentalDateTimes::findReference(returnNoteTrans.TableId, returnNoteTrans.RecId);
+    
+                if (!rentalDateTimes)
+                {
+                    select firstonly rentalDateTimes
+                    where rentalDateTimes.RefTableId == tableNum(SalesLine)
+                        exists join salesLine
+                        where salesLine.RecId == rentalDateTimes.RefRecId
+                        &&    salesLine.InventTransId == returnNoteTrans.InventTransId;
+                }
+    
+                this.setReturnNoteDetailsTmp();
+            }
+        }
+        else
+        {
+            this.processReportForSubRental(contract);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setReturnNoteDetailsTmp</Name>
+				<Source><![CDATA[
+    protected void setReturnNoteDetailsTmp()
+    {
+        returnNoteDetailsTmp.DeliveryDate    = returnNoteTrans.DeliveryDate;
+        returnNoteDetailsTmp.ItemId          = returnNoteTrans.ItemId;
+        returnNoteDetailsTmp.Name            = returnNoteTrans.Name;
+        returnNoteDetailsTmp.Qty             = returnNoteTrans.Qty;
+        returnNoteDetailsTmp.SalesUnitTxt    = returnNoteTrans.salesUnitTxt();
+        returnNoteDetailsTmp.InventSerialId  = returnNoteTrans.inventDim().inventSerialId;
+        returnNoteDetailsTmp.OffRentDateTime = rentalDateTimes.OffRentDateTime;
+        returnNoteDetailsTmp.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setReturnNoteHeaderTmp</Name>
+				<Source><![CDATA[
+    protected void setReturnNoteHeaderTmp()
+    {
+        returnNoteHeaderTmp.CompanyAddress          = companyInfo.postalAddress().Address;
+        returnNoteHeaderTmp.CompanyCoRegNum         = companyInfo.CoRegNum;
+        returnNoteHeaderTmp.CompanyGiro             = companyInfo.Giro;
+        returnNoteHeaderTmp.CompanyLogo             = FormLetter::companyLogo();
+        returnNoteHeaderTmp.CompanyName             = companyInfo.name();
+        returnNoteHeaderTmp.CompanyPhone            = companyInfo.phone();
+        returnNoteHeaderTmp.CompanyTeleFax          = companyInfo.teleFax();
+        returnNoteHeaderTmp.CustomerRef             = returnNoteJour.CustomerRef;
+        returnNoteHeaderTmp.DeliveryAddress         = returnNoteJour.deliveryAddress();
+        returnNoteHeaderTmp.DeliveryName            = returnNoteJour.DeliveryName;
+        returnNoteHeaderTmp.DocumentDate            = returnNoteJour.DocumentDate;
+        returnNoteHeaderTmp.PrintLogo               = (conLen(FormLetter::companyLogo()) > 0);
+        returnNoteHeaderTmp.PurchaseOrder           = returnNoteJour.PurchaseOrder;
+        returnNoteHeaderTmp.ReturnNoteId            = returnNoteJour.ReturnNoteId;
+        returnNoteHeaderTmp.SalesAdministrator      = HcmWorker::find(returnNoteJour.WorkerSalesTaker).PersonnelNumber;
+        returnNoteHeaderTmp.SalesId                 = returnNoteJour.SalesId;
+        returnNoteHeaderTmp.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpackSalesFormLetter</Name>
+				<Source><![CDATA[
+    private void unpackSalesFormLetter()
+    {
+        SRSTmpDataStore srsTmpDataStore;
+    
+        if (formLetterRecId)
+        {
+            ttsBegin;
+            select forupdate firstonly Value from srsTmpDataStore
+            where srsTmpDataStore.RecId == formLetterRecId;
+    
+            if (srsTmpDataStore.RecId)
+            {
+                formletterJournalPrint = SalesConfirmJournalPrint::construct();
+                formletterJournalPrint.unpack(srsTmpDataStore.Value);
+                srsTmpDataStore.delete();
+            }
+            ttsCommit;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setReturnNoteHeaderTmpSubRental</Name>
+				<Source><![CDATA[
+    protected void setReturnNoteHeaderTmpSubRental()
+    {
+        returnNoteHeaderTmp.CompanyAddress          = companyInfo.postalAddress().Address;
+        returnNoteHeaderTmp.CompanyCoRegNum         = companyInfo.CoRegNum;
+        returnNoteHeaderTmp.CompanyGiro             = companyInfo.Giro;
+        returnNoteHeaderTmp.CompanyLogo             = FormLetter::companyLogo();
+        returnNoteHeaderTmp.CompanyName             = companyInfo.name();
+        returnNoteHeaderTmp.CompanyPhone            = companyInfo.phone();
+        returnNoteHeaderTmp.CompanyTeleFax          = companyInfo.teleFax();
+        returnNoteHeaderTmp.DeliveryAddress         = returnNoteJourSubRental.deliveryAddress();
+        returnNoteHeaderTmp.DeliveryName            = returnNoteJourSubRental.DeliveryName;
+        returnNoteHeaderTmp.DocumentDate            = returnNoteJourSubRental.DocumentDate;
+        returnNoteHeaderTmp.PrintLogo               = (conLen(FormLetter::companyLogo()) > 0);
+        returnNoteHeaderTmp.ReturnNoteId            = returnNoteJourSubRental.ReturnNoteId;
+        returnNoteHeaderTmp.SalesAdministrator      = HcmWorker::find(returnNoteJourSubRental.Requester).PersonnelNumber;
+        returnNoteHeaderTmp.SalesId                 = returnNoteJourSubRental.PurchId;
+        returnNoteHeaderTmp.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setReturnNoteDetailsTmpSubRental</Name>
+				<Source><![CDATA[
+    protected void setReturnNoteDetailsTmpSubRental()
+    {
+        returnNoteDetailsTmp.DeliveryDate    = returnNoteTransSubRental.ReturnDate;
+        returnNoteDetailsTmp.ItemId          = returnNoteTransSubRental.ItemId;
+        returnNoteDetailsTmp.Name            = returnNoteTransSubRental.Name;
+        returnNoteDetailsTmp.Qty             = returnNoteTransSubRental.Qty;
+        returnNoteDetailsTmp.SalesUnitTxt    = returnNoteTransSubRental.purchUnitTxt();
+        returnNoteDetailsTmp.InventSerialId  = returnNoteTransSubRental.inventDim().inventSerialId;
+        
+        returnNoteDetailsTmp.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processReportForSubRental</Name>
+				<Source><![CDATA[
+    public void processReportForSubRental(RORReturnNoteContract   _contract)
+    {
+        QueryRun    tradeLoopTrans;
+        PurchLine   purchLine;
+
+        returnNoteJourSubRental = VendRORReturnNoteJour::findRecId(_contract.parmRecordId());
+
+        this.setReturnNoteHeaderTmpSubRental();
+    
+        tradeLoopTrans = new TradeLoopTrans(returnNoteJourSubRental, tableNum(VendRORReturnNoteTrans)).buildQueryRun();
+    
+        while (tradeLoopTrans.next())
+        {
+            returnNoteTransSubRental = tradeLoopTrans.get(tableNum(VendRORReturnNoteTrans));
+            rentalDateTimes = RORRentalDateTimes::findReference(returnNoteTransSubRental.TableId, returnNoteTransSubRental.RecId);
+    
+            if (!rentalDateTimes)
+            {
+                select firstonly rentalDateTimes
+                where rentalDateTimes.RefTableId == tableNum(PurchLine)
+                    exists join purchLine
+                    where purchLine.RecId == rentalDateTimes.RefRecId
+                    &&    purchLine.InventTransId == returnNoteTrans.InventTransId;
+            }
+    
+            this.setReturnNoteDetailsTmpSubRental();
+        }
+            
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

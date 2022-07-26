@@ -1,0 +1,542 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>RORFuelDeliveryDialog</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class RORFuelDeliveryDialog extends FormRun
+{
+    RORRentalFuelMgtView    callerView;
+    SalesLine               callerSalesLine, salesLineFuel;
+    InventDim               callerSalesLineInventDim;
+
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        RORParameters parameters;
+        ;
+
+        if(element.args().dataset() == tableNum(RORRentalFuelMgtView))
+        {
+            callerView = element.args().record();
+            callerSalesLine = callerView.salesLine();
+            parameters = RORParameters::find();
+
+            if(parameters.ItemIdFuel)
+            {
+                salesLineFuel = SalesLine::findRecId(callerView.RecIdFuelLine);
+            }
+
+            if(salesLineFuel)
+            {
+                super();
+
+                dlgSalesId.text(callerSalesLine.SalesId);
+                dlgLineNum.realValue(callerSalesLine.LineNum);
+                dlgItemId.text(callerSalesLine.ItemId);
+
+                dlgItemIdFuel.text(parameters.ItemIdFuel);
+                dlgSalesQty.realValue(salesLineFuel.SalesQty);
+                dlgSalesUnit.text(salesLineFuel.SalesUnit);
+
+                callerSalesLineInventDim = callerSalesLine.inventDim();
+                dlgSalesInventSiteId.text(callerSalesLineInventDim.InventSiteId);
+                dlgSalesInventLocationId.text(callerSalesLineInventDim.InventLocationId);
+            }
+            else
+            {
+                throw error(strFmt("@DNR6652", callerSalesLine.InventTransId));
+            }
+        }
+        else
+        {
+            throw error(strFmt("@SYS19096", element.name(), tableStr(RORRentalFuelMgtView)));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        super();
+
+        dlgSalesQty.setFocus();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>closeOk</Name>
+				<Source><![CDATA[
+    public void closeOk()
+    {
+        SalesFormLetter_PackingSlip postPackingSlip;
+        List                        list;
+        FormDataSource              formDataSource;
+        SalesQty                    salesQty;
+        RecId                       callerViewRecId;
+
+        if (element.validate())
+        {
+            super();
+
+            salesQty = dlgSalesQty.realValue();
+            callerViewRecId = callerView.RecId;
+
+            InventDim inventDimFuelLine;
+            inventDimFuelLine.initValue();
+            inventDimFuelLine.initFromInventDim(callerSalesLineInventDim);
+            inventDimFuelLine.InventSiteId      = dlgSalesInventSiteId.text();
+            inventDimFuelLine.InventLocationId  = dlgSalesInventLocationId.text();
+            inventDimFuelLine.wMSLocationId     = dlgSalesWMSLocationId.text();
+
+            inventDimFuelLine = InventDim::findOrCreate(inventDimFuelLine);
+
+            ttsbegin;
+
+            salesLineFuel.selectForUpdate(true);
+            salesLineFuel.SalesQty = salesQty;
+            salesLineFuel.modifiedField(fieldNum(SalesLine, SalesQty));
+            salesLineFuel.SalesDeliverNow = salesQty;
+            salesLineFuel.modifiedField(fieldNum(SalesLine, SalesDeliverNow)); // This will update the InventDeliverNow as well
+            salesLineFuel.RemainSalesPhysical = salesQty;
+            salesLineFuel.InventDimId = inventDimFuelLine.inventDimId;
+
+            salesLineFuel.update();
+
+            list = new List(Types::Record);
+            list.addEnd(salesLineFuel);
+
+            postPackingSlip = SalesFormLetter::construct(DocumentStatus::PackingSlip);
+            postPackingSlip.createFromLines(true);
+            postPackingSlip.parmLineList(list.pack());
+            postPackingSlip.RORParmPostFuelLine(true);
+            postPackingSlip.parmVersioningUpdateType(VersioningUpdateType::Initial);
+            postPackingSlip.update(salesLineFuel.salesTable(), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), SalesUpdate::DeliverNow);
+
+            ttscommit;
+
+            if(postPackingSlip.getOutputContract().parmNumberOfOrdersPosted())
+            {
+                info(strFmt("@DNR6579",
+                            salesQty,
+                            dlgSalesUnit.text(),
+                            callerSalesLine.SalesId,
+                            callerSalesLine.LineNum,
+                            callerSalesLine.ItemId));
+
+                if (callerView.isFormDataSource())
+                {
+                    formDataSource = callerView.dataSource();
+                    formDataSource.reread();
+                    //formDataSource.research(true);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    protected boolean validate()
+    {
+        boolean ret = true;
+
+        ret = ret && this.validateSalesQty();
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateSalesQty</Name>
+				<Source><![CDATA[
+    private boolean validateSalesQty()
+    {
+        boolean ret = true;
+
+        if (dlgSalesQty.realValue() <= 0.0)
+        {
+            ret = checkFailed("@DNR:SalesQtyCannotBeLessThanOrEqualToZero");
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="" />
+		<DataControls xmlns="">
+			<Control>
+				<Name>dlgSalesInventSiteId</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>modified</Name>
+						<Source><![CDATA[
+        /// <summary>
+        /// Action on modification of the Site id field on dialog
+        /// </summary>
+        /// <returns></returns>
+        public boolean modified()
+        {
+            boolean ret;
+    
+            ret = super();
+
+            dlgSalesInventLocationId.text("");
+            dlgSalesWMSLocationId.text("");
+    
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>dlgSalesInventLocationId</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>lookup</Name>
+						<Source><![CDATA[
+        /// <summary>
+        /// Lookup for the Warehouse id field on dialog box
+        /// </summary>
+        public void lookup()
+        {
+            SysTableLookup      sysTableLookup  = SysTableLookup::newParameters(tableNum(InventLocation), this);
+            Query               query           = new Query();
+
+            QueryBuildDataSource qbdsInventLocation = query.addDataSource(tableNum(InventLocation));
+
+            if (dlgSalesInventSiteId.text())
+            {
+                qbdsInventLocation.addRange(fieldNum(InventLocation, InventSiteId)).value(dlgSalesInventSiteId.text());
+            }
+
+            sysTableLookup.addLookupfield(fieldNum(InventLocation, InventLocationId));
+            sysTableLookup.addLookupfield(fieldNum(InventLocation, InventSiteId));
+
+            sysTableLookup.parmQuery(query);
+            sysTableLookup.performFormLookup();
+        }
+
+]]></Source>
+					</Method>
+					<Method>
+						<Name>modified</Name>
+						<Source><![CDATA[
+        /// <summary>
+        ///  Action on Warehouse id field modificaiton
+        /// </summary>
+        /// <returns></returns>
+        public boolean modified()
+        {
+            boolean ret;
+        
+            ret = super();
+
+            dlgSalesWMSLocationId.text("");
+        
+            return ret;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>dlgSalesWMSLocationId</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>lookup</Name>
+						<Source><![CDATA[
+        /// <summary>
+        ///  Lookup for Location id field on the dialog box
+        /// </summary>
+        public void lookup()
+        {
+            SysTableLookup      sysTableLookup  = SysTableLookup::newParameters(tableNum(WMSLocation), this);
+            Query               query           = new Query();
+
+            QueryBuildDataSource qbdsWMStLocation = query.addDataSource(tableNum(WMSLocation));
+
+            if (dlgSalesInventLocationId.text())
+            {
+                qbdsWMStLocation.addRange(fieldNum(WMSLocation, InventLocationId)).value(dlgSalesInventLocationId.text());
+            }
+
+            sysTableLookup.addLookupfield(fieldNum(WMSLocation, wMSLocationId));
+            sysTableLookup.addLookupfield(fieldNum(WMSLocation, InventLocationId));
+
+            sysTableLookup.parmQuery(query);
+            sysTableLookup.performFormLookup();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources />
+	<Design>
+		<BackgroundColor xmlns="">WindowBackground</BackgroundColor>
+		<Caption xmlns="">@DNR6570</Caption>
+		<DialogSize xmlns="">Medium</DialogSize>
+		<Frame xmlns="">Dialog</Frame>
+		<HideToolbar xmlns="">Yes</HideToolbar>
+		<Pattern xmlns="">DropDialog</Pattern>
+		<PatternVersion xmlns="">1.2</PatternVersion>
+		<SaveSize xmlns="">No</SaveSize>
+		<Style xmlns="">DropDialog</Style>
+		<WindowResize xmlns="">Dynamic</WindowResize>
+		<WindowType xmlns="">Popup</WindowType>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormGroupControl">
+				<Name>DialogContent</Name>
+				<ElementPosition>715827882</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Pattern>Custom</Pattern>
+				<Type>Group</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormGroupControl">
+						<Name>GroupParent</Name>
+						<ElementPosition>1288490187</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>Group</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>dlgSalesId</Name>
+								<AllowEdit>No</AllowEdit>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>858993458</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>Auto</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<ExtendedDataType>SalesId</ExtendedDataType>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormRealControl">
+								<Name>dlgLineNum</Name>
+								<AllowEdit>No</AllowEdit>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1288490187</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>Real</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>Auto</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<ExtendedDataType>LineNum</ExtendedDataType>
+								<NoOfDecimals>-1</NoOfDecimals>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>dlgItemId</Name>
+								<AllowEdit>No</AllowEdit>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1717986916</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>Auto</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<ExtendedDataType>ItemId</ExtendedDataType>
+							</AxFormControl>
+						</Controls>
+						<Caption>@DNR7440</Caption>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormGroupControl">
+						<Name>GroupPosting</Name>
+						<ElementPosition>1717986916</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Type>Group</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormStringControl">
+								<Name>dlgItemIdFuel</Name>
+								<AllowEdit>No</AllowEdit>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<ElementPosition>1073741822</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>String</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>Auto</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<ExtendedDataType>ItemId</ExtendedDataType>
+								<Label>@DNR2433</Label>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>GroupPostingLocation</Name>
+								<Type>Group</Type>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>dlgSalesInventSiteId</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<ExtendedDataType>InventSiteId</ExtendedDataType>
+										<Mandatory>Yes</Mandatory>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>dlgSalesInventLocationId</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<ExtendedDataType>InventLocationId</ExtendedDataType>
+										<Mandatory>Yes</Mandatory>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>dlgSalesWMSLocationId</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<Type>String</Type>
+										<FormControlExtension
+											i:nil="true" />
+										<ExtendedDataType>WMSLocationId</ExtendedDataType>
+									</AxFormControl>
+								</Controls>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormGroupControl">
+								<Name>GroupPostingQty</Name>
+								<ElementPosition>1610612733</ElementPosition>
+								<FilterExpression>%1</FilterExpression>
+								<HeightMode>Auto</HeightMode>
+								<Type>Group</Type>
+								<VerticalSpacing>-1</VerticalSpacing>
+								<WidthMode>Auto</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Controls>
+									<AxFormControl xmlns=""
+										i:type="AxFormRealControl">
+										<Name>dlgSalesQty</Name>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<ElementPosition>1073741822</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>Real</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<ExtendedDataType>SalesQty</ExtendedDataType>
+										<NoOfDecimals>-1</NoOfDecimals>
+									</AxFormControl>
+									<AxFormControl xmlns=""
+										i:type="AxFormStringControl">
+										<Name>dlgSalesUnit</Name>
+										<AllowEdit>No</AllowEdit>
+										<AutoDeclaration>Yes</AutoDeclaration>
+										<ElementPosition>1610612733</ElementPosition>
+										<FilterExpression>%1</FilterExpression>
+										<HeightMode>Auto</HeightMode>
+										<Type>String</Type>
+										<VerticalSpacing>-1</VerticalSpacing>
+										<WidthMode>Auto</WidthMode>
+										<FormControlExtension
+											i:nil="true" />
+										<DisplayLength>3</DisplayLength>
+										<DisplayLengthMode>Fixed</DisplayLengthMode>
+										<ExtendedDataType>SalesUnit</ExtendedDataType>
+										<ShowLabel>No</ShowLabel>
+									</AxFormControl>
+								</Controls>
+								<Columns>2</Columns>
+								<FrameType>None</FrameType>
+							</AxFormControl>
+						</Controls>
+						<Caption>@SYS5943</Caption>
+					</AxFormControl>
+				</Controls>
+				<Style>DialogContent</Style>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormButtonGroupControl">
+				<Name>ButtonGroup</Name>
+				<ElementPosition>1073741822</ElementPosition>
+				<FilterExpression>%1</FilterExpression>
+				<Type>ButtonGroup</Type>
+				<VerticalSpacing>-1</VerticalSpacing>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>OKButton</Name>
+						<ElementPosition>1431655764</ElementPosition>
+						<FilterExpression>%1</FilterExpression>
+						<HeightMode>Auto</HeightMode>
+						<Skip>Yes</Skip>
+						<Type>CommandButton</Type>
+						<VerticalSpacing>-1</VerticalSpacing>
+						<WidthMode>Auto</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>OK</Command>
+						<DefaultButton>Yes</DefaultButton>
+					</AxFormControl>
+				</Controls>
+				<ArrangeMethod>HorizontalRight</ArrangeMethod>
+				<Style>DialogCommitContainer</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

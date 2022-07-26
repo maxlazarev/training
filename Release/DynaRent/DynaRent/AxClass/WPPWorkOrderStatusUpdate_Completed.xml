@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPWorkOrderStatusUpdate_Completed</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class WPPWorkOrderStatusUpdate_Completed extends WPPWorkOrderStatusUpdate
+{   
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkUpdatePurch</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckNestedLoopInCode", "Cannot be refactored without altering functionality of method")]
+    protected void checkUpdatePurch()
+    {
+        PurchTable      purchTableLocal;
+        PurchLine       purchLineLocal;
+        PurchFormLetter formLetterLocal;
+        InventTable     inventTable;
+        EcoResProduct   ecoResProduct;
+        List            purchLineList;
+        NumberSeq       packingSlipNumberSeq;
+        ProjParameters  projParameters;
+        WPPParameters   wppParameters;
+        ;
+        super();
+    
+        if(parameters.ReceiveServiceItemsOnTaskCompletion && workOrderLine.ProjId)
+        {
+            projParameters = ProjParameters::find();
+    
+            // Method PurchFormLetter_PackingSlip.endUpdate() may in some situtations pop up a dialog box in the
+            // middle of our tts transaction, which is nasty business. In order to prevent this from happening
+            // we only choose to automatically post our product receipts in case that dialog won't be appearing.
+            if(projParameters.AutomaticItemConsumption || !projParameters.CreateItemReqForPO)
+            {
+                packingSlipNumberSeq = NumberSeq::newGetNum(PurchParameters::numRefPurchPackingSlipId());
+    
+                wppParameters = WPPParameters::find();
+    
+                while select purchTableLocal
+                where purchTableLocal.ProjId == workOrderLine.ProjId
+                &&    purchTableLocal.PurchaseType == PurchaseType::Purch
+                {
+                    purchLineList = new List(Types::Record);
+    
+                    while select purchLineLocal
+                    where purchLineLocal.PurchId == purchTableLocal.PurchId
+                        exists join inventTable
+                        where inventTable.ItemId == purchLineLocal.ItemId
+                            join TableId from ecoResProduct
+                            where ecoResProduct.RecId == inventTable.Product
+                            &&    ecoResProduct.ProductType == EcoResProductType::Service
+                    {
+                        purchLineList.addEnd(purchLineLocal);
+                    }
+    
+                    formLetterLocal = purchFormLetter::construct(DocumentStatus::PackingSlip);
+                    formLetterLocal.createFromLines(true);
+                    formLetterLocal.parmShowDialog(false);
+                    formLetterLocal.parmLineList(purchLineList.pack());
+                    formLetterLocal.WPPparmWorkOrderId(workOrderLine.WorkOrderId);
+                    formLetterLocal.WPPParmWorkOrderLineRecId(workOrderLine.RecId);
+                    formLetterLocal.update(purchTableLocal, packingSlipNumberSeq.num(), DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()), wppParameters.RORDefaultPurchUpdate);
+                }
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postUpdate</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    protected void postUpdate()
+    {
+        super();
+        BOBMaintenanceManager::runFromCommon(workOrderLine);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validate</Name>
+				<Source><![CDATA[
+    protected boolean validate()
+    {
+        WPPWorkOrderTaskTable   workOrderTaskTable;
+        WPPWorkOrderLine        workOrderLinePickUp, workOrderLineDelivery;
+        WPPWorkOrderTable       workOrderTable;
+        BOBObjectTable          objectTable;
+        WPPTaskType             taskType;
+        BOBRentalType           rentalType;
+        boolean                 ret = super();
+    
+        if (ret)
+        {
+            taskType = workOrderLine.workOrderTaskTable().TaskType;
+    
+            if (taskType == WPPTaskType::Load || taskType == WPPTaskType::Delivery)
+            {
+                select firstonly TableId from workOrderTable
+                where workOrderTable.WorkOrderId == workOrderLine.WorkOrderId
+                    join ObjectId, RecId from objectTable
+                    where objectTable.RecId == workOrderTable.BOBObjectTableRecId
+                    &&   !objectTable.InventSerialId
+                        exists join rentalType
+                        where rentalType.RentalTypeId == objectTable.RentalTypeId
+                        &&    rentalType.Classification == BOBRentalTypeClassification::Serialized;
+
+                if (objectTable.RecId)
+                {
+                    switch (taskType)
+                    {
+                        case WPPTaskType::Delivery:
+                            select firstOnly TableId from workOrderTable
+                            where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                            &&    workOrderTable.WorkOrderId         != workOrderLine.WorkOrderId
+                                join TaskId, WorkOrderId from workOrderLinePickUp
+                                where workOrderLinePickUp.WorkOrderId          == workOrderTable.WorkOrderId
+                                &&    workOrderLinePickUp.Status               <  WPPWorkOrderLineStatus::Completed
+                                &&    workOrderLinePickUp.RequestedEndDateTime
+                                &&    workOrderLinePickUp.RequestedEndDateTime <= workOrderLine.RequestedStartDateTime
+                                    exists join workOrderTaskTable
+                                    where workOrderTaskTable.TaskId   == workOrderLinePickUp.TaskId
+                                    &&    workOrderTaskTable.TaskType == WPPTaskType::Load;
+    
+                            if (workOrderLinePickUp.RecId)
+                            {
+                                //Unable to update status to %1, because object %2 is assigned to task %3 on work order %4 and is not %5 yet.
+                                ret = checkFailed(strFmt("@DNR6932", this.workOrderLineStatus(),
+                                                                     objectTable.ObjectId,
+                                                                     workOrderLinePickUp.TaskId,
+                                                                     workOrderLinePickUp.WorkOrderId,
+                                                                     this.workOrderLineStatus()));
+                            }
+                            break;
+    
+                        case WPPTaskType::Load:
+                            select firstOnly TableId from workOrderTable
+                            where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                            &&    workOrderTable.WorkOrderId         == workOrderLine.WorkOrderId
+                                join TaskId, WorkOrderId from workOrderLineDelivery
+                                where workOrderLineDelivery.WorkOrderId          == workOrderTable.WorkOrderId
+                                &&    workOrderLineDelivery.Status               <  WPPWorkOrderLineStatus::Completed
+                                &&    workOrderLineDelivery.RequestedEndDateTime <= workOrderLine.RequestedStartDateTime
+                                    exists join workOrderTaskTable
+                                    where workOrderTaskTable.TaskId   == workOrderLineDelivery.TaskId
+                                    &&    workOrderTaskTable.TaskType == WPPTaskType::Delivery;
+    
+                            if (!workOrderLineDelivery)
+                            {
+                                select firstOnly TableId from workOrderTable
+                                where workOrderTable.BOBObjectTableRecId == objectTable.RecId
+                                    join TaskId, WorkOrderId from workOrderLineDelivery
+                                    where workOrderLineDelivery.WorkOrderId          == workOrderTable.WorkOrderId
+                                    &&    workOrderLineDelivery.Status               <  WPPWorkOrderLineStatus::Completed
+                                    &&    workOrderLineDelivery.RequestedEndDateTime <= workOrderLine.RequestedStartDateTime
+                                        exists join workOrderTaskTable
+                                        where workOrderTaskTable.TaskId   == workOrderLineDelivery.TaskId
+                                        &&    workOrderTaskTable.TaskType == WPPTaskType::Delivery;
+                            }
+    
+                            if (workOrderLineDelivery.RecId)
+                            {
+                                //Unable to update status to %1, because object %2 is assigned to task %3 on work order %4 and is not %5 yet.
+                                ret = checkFailed(strFmt("@DNR6932", this.workOrderLineStatus(),
+                                                                     objectTable.ObjectId,
+                                                                     workOrderLineDelivery.TaskId,
+                                                                     workOrderLineDelivery.WorkOrderId,
+                                                                     this.workOrderLineStatus()));
+                            }
+                            break;
+    
+                        default:
+                            // Do nothing
+                            break;
+                    }
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>workOrderLineStatus</Name>
+				<Source><![CDATA[
+    public WPPWorkOrderLineStatus workOrderLineStatus()
+    {
+        return WPPWorkOrderLineStatus::Completed;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

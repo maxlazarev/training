@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>ROROrderAmendmentDialogType_LostOrder</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class ROROrderAmendmentDialogType_LostOrder extends ROROrderAmendmentDialogType
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>deleteLinkedWorkOrder</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void deleteLinkedWorkOrder()
+    {
+        PurchTable          purchTable;
+        PurchLine           purchLine;
+        SalesTable          salesTable;
+        SalesLine           salesLine;
+        WPPWorkOrderTable   workOrderTable;
+    
+        // Check everything again just to make sure
+        switch (common.TableId)
+        {
+            case tableNum(PurchTable):
+                delete_from workOrderTable
+                    exists join purchLine
+                    where purchLine.TableId == workOrderTable.OrderTableId
+                    &&    purchLine.RecId   == workOrderTable.OrderRecId
+                        join TableId from purchTable
+                        where purchTable.PurchId == purchLine.PurchId
+                        &&    purchTable.RecId   == common.RecId;
+                        //&&    purchTable.WPPRentalProject;
+                break;
+    
+            case tableNum(SalesTable):
+                delete_from workOrderTable
+                    exists join salesLine
+                    where salesLine.TableId == workOrderTable.OrderTableId
+                    &&    salesLine.RecId   == workOrderTable.OrderRecId
+                        join TableId from salesTable
+                        where salesTable.SalesId == salesLine.SalesId
+                        &&    salesTable.RecId   == common.RecId;
+                        //&&    salesTable.WPPRentalProject;
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getWarningText</Name>
+				<Source><![CDATA[
+    public InfologText getWarningText()
+    {
+        return '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reasonType</Name>
+				<Source><![CDATA[
+    public DNRReasonType reasonType()
+    {
+        return DNRReasonType::LostOrder;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        ttsBegin;
+        super();
+    
+        this.deleteLinkedWorkOrder();
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>showInfoMessage</Name>
+				<Source><![CDATA[
+    public void showInfoMessage()
+    {
+        PurchLine   purchLine;
+        PurchTable  purchTable;
+        SalesLine   salesLine;
+        SalesTable  salesTable;
+        Query       query;
+        Num         salesPurchId = this.getSalesPurchId();
+        SalesPurch  salesPurch   = (common.TableId == tableNum(SalesTable) || common.TableId == tableNum(SalesLine)) ? SalesPurch::Sales : SalesPurch::Purch;
+    
+        if (salesPurchId)
+        {
+            switch (salesPurch)
+            {
+                case SalesPurch::Purch:
+                    while select SalesId from salesTable
+                    group by SalesId
+                    where salesTable.SalesType == SalesType::RORRental
+                        exists join purchLine
+                        where purchLine.PurchId     == salesPurchId
+                        &&    purchLine.InventRefId == salesTable.SalesId
+                    {
+                        query = new Query();
+                        query.addBaseQuery(queryStr(RORSalesTable));
+                        query.dataSourceTable(tableNum(SalesTable)).addRange(fieldNum(SalesTable, SalesId)).value(salesTable.SalesId);
+    
+                        throw error(strFmt("@DNR6346",
+                                            strLwr("@DNR5973"),
+                                            strLwr("@DNR1539"),
+                                            salesTable.SalesId,
+                                            strLwr("@DNR1715")),
+                                            '');//,
+                                            //SysInfoAction_FormRunQuery::newFormnameQuery(formStr(RORSalesTableListPage), query));
+                    }
+                    break;
+    
+                case SalesPurch::Sales:
+                    while select PurchId from purchTable
+                    group by PurchId
+                    where purchTable.PurchaseType == PurchaseType::RORSubRental
+                        exists join salesLine
+                        where salesLine.SalesId     == salesPurchId
+                        &&    salesLine.InventRefId == purchTable.PurchId
+                    {
+                        query = new Query();
+                        query.addBaseQuery(queryStr(RORPurchTable));
+                        query.dataSourceTable(tableNum(PurchTable)).addRange(fieldNum(PurchTable, PurchId)).value(purchTable.PurchId);
+    
+                        throw error(strFmt("@DNR6346",
+                                            strLwr("@DNR5966"),
+                                            strLwr("@DNR1715"),
+                                            purchTable.PurchId,
+                                            strLwr("@DNR1539")),
+                                            '');
+                    }
+                    break;
+    
+                default:
+                    throw error(Error::missingParameter(null));
+            }
+        }
+        else
+        {
+            throw error(Error::missingParameter(null));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateSourceTable</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    protected void updateSourceTable()
+    {
+        PurchTable                  purchTable;
+        PurchLine                   purchLine;
+        SalesTable                  salesTable;
+        SalesLine                   salesLine;
+        InventTrans                 inventTrans;
+        InventTransOriginSalesLine  inventTransOriginSalesLine;
+        InventTransOriginPurchLine  inventTransOriginPurchLine;
+        InventMovement              inventMovement;
+    
+        switch (common.TableId)
+        {
+            case tableNum(PurchTable):
+                purchTable = PurchTable::findRecId(common.RecId, true);
+                purchTable.PurchStatus = PurchStatus::Canceled;
+                purchTable.update();
+    
+                update_recordSet purchLine
+                setting PurchStatus = PurchStatus::Canceled,
+                        ReturnStatus = ReturnStatusLine::Canceled,
+                        RemainPurchPhysical = 0,
+                        RemainPurchFinancial = 0
+                where purchLine.PurchId == purchTable.PurchId;
+    
+                while select inventTrans
+                    join TableId from inventTransOriginPurchLine
+                    where inventTransOriginPurchLine.InventTransOrigin == inventTrans.InventTransOrigin
+                        join purchLine
+                        where purchLine.dataAreaId == inventTransOriginPurchLine.PurchLineDataAreaId
+                        &&    purchLine.InventTransId == inventTransOriginPurchLine.PurchLineInventTransId
+                        &&    purchLine.PurchId == purchTable.PurchId
+                {
+                    inventMovement = InventMovement::construct(purchLine);
+                    BOBRentalTransManager::newInventMovement(inventMovement, inventTrans).synchronize();
+                }
+                break;
+    
+            case tableNum(SalesTable):
+                salesTable = SalesTable::findRecId(common.RecId, true);
+                salesTable.SalesStatus = SalesStatus::Canceled;
+                salesTable.update();
+    
+                update_recordSet salesLine
+                setting SalesStatus = SalesStatus::Canceled,
+                        ReturnStatus = ReturnStatusLine::Canceled,
+                        RemainSalesPhysical = 0,
+                        RemainSalesFinancial = 0
+                where salesLine.SalesId == salesTable.SalesId;
+    
+                while select inventTrans
+                    join TableId from inventTransOriginSalesLine
+                    where inventTransOriginSalesLine.InventTransOrigin == inventTrans.InventTransOrigin
+                        join salesLine
+                        where salesLine.dataAreaId == inventTransOriginSalesLine.SalesLineDataAreaId
+                        &&    salesLine.InventTransId == inventTransOriginSalesLine.SalesLineInventTransId
+                        &&    salesLine.SalesId == salesTable.SalesId
+                {
+                    inventMovement = InventMovement::construct(salesLine);
+                    BOBRentalTransManager::newInventMovement(inventMovement, inventTrans).synchronize();
+                }
+                break;
+    
+            default:
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canRunInNewSession</Name>
+				<Source><![CDATA[
+    protected boolean canRunInNewSession()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

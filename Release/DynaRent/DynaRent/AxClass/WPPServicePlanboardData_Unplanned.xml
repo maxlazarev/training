@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>WPPServicePlanboardData_Unplanned</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public class WPPServicePlanboardData_Unplanned extends WPPServicePlanboardData
+{
+    boolean     mustFilterOnBusObj;
+    boolean     mustFilterOnAddress;
+    boolean     mustFilterOnWorkOrderType;
+    RefRecId    removeWorkOrderRecId;
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>getCacheKey</Name>
+				<Source><![CDATA[
+    protected anytype getCacheKey(Common _common)
+    {
+        switch(_common.TableId)
+        {
+            case tableNum(WPPTmpServicePlanboardData): // for retrieving from the cache
+                WPPTmpServicePlanboardData tmpServicePlanboardData = _common as WPPTmpServicePlanboardData;
+                return tmpServicePlanboardData.WPPTaskId;
+
+            case tableNum(WPPCellBackgroundColor): // for populating the cache
+                WPPCellBackgroundColor cellBackgroundColor = _common as WPPCellBackgroundColor;
+                return cellBackgroundColor.TaskId;
+
+            default:
+                throw error(Error::wrongUseOfFunction(funcName()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>layoutManagerCode</Name>
+				<Source><![CDATA[
+    protected WPPLayoutManagerCode layoutManagerCode(WPPTmpServicePlanboardData _tmpData, WPPServicePlanboardSettings _settings)
+    {
+        return _settings.LayoutMgrCodeUnplanned;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populatePlanboard</Name>
+				<Source><![CDATA[
+    public void populatePlanboard(WPPServicePlanboardSettings _settings)
+    {
+        // TODO: decide whether to implement this (only necessary if we need to support a graphical 'unplanned' section
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateTmpData</Name>
+				<Source><![CDATA[
+    public void populateTmpData(WPPServicePlanboardSettings _settings)
+    {
+        WPPWorkOrderTable           workOrderTable;
+        WPPWorkOrderLine            workOrderLine;
+        WPPWorkOrderTaskTable       taskTable;
+        BOBObjectTable              objectTable;
+        BOBObjectAvailabilityLog    objectAvailLog;
+        BOBCurrentAvailabilityView  objectAvailView;
+        BOBObjectLocationLog        objectLocLog;
+        BOBCurrentLocationView      objectLocView;
+        LogisticsPostalAddress      dlvAddress;
+        InventTable                 inventTable;
+        EcoResProduct               ecoResProduct;
+        ProjGroup                   projGroup;
+        CustTable                   custTable;
+        VendTable                   vendTable;
+        //FromDateTime                calendarFromDateTime;
+        //ToDateTime                  calendarToDateTime;
+
+        mustFilterOnBusObj = (_settings.BOBRentalTypeId || _settings.ItemId);
+        mustFilterOnAddress = (_settings.AddressCity || _settings.AddressCountyId || _settings.AddressStateId || _settings.AddressCountryRegionId);
+        mustFilterOnWorkOrderType = (_settings.WorkOrderType != WPPWorkOrderType::None);
+
+        //if (_settings.DisplayMode == WPPPlanboardDisplayMode::Graphical)
+        //{
+        //    calendarFromDateTime = calendar.get_ViewStartDate();
+        //    calendarToDateTime = calendar.get_ViewEndDate();
+        //}
+
+        //this.populateLayoutMgrMaps(_settings.LayoutMgrCodeUnplanned);
+        if (removeWorkOrderRecId != 0)
+        {
+            delete_from tmpData
+                where tmpData.WPPWorkOrderLineRecId == removeWorkOrderRecId;
+
+            return;
+        }
+
+        delete_from tmpData;
+
+        // populate work order information
+        insert_recordset tmpData (WPPWorkOrderId, WPPCompanyId, WPPWarehouse, WPPOrganizationParty, CustVendAccountType, BOBObjectTableRecId,
+                                  WPPVenueCode, WPPDeliveryAddress, WPPOrderTableId, WPPOrderRecId, WPPActualPostingDate, WPPMaintenanceDate,
+                                  WPPProjGroupId, WPPExecutionGroupId, WPPProjId, WPPTaskId, WPPReqStartDateTime, WPPReqEndDateTime,
+                                  WPPWorkOrderLineRecId, WPPTaskDescription)
+        select WorkOrderId, CompanyId, InventLocationId, OrganizationParty, CustVendAccountType, BOBObjectTableRecId, RORVenueCode,
+               LogisticsLocationRecId, OrderTableId, OrderRecId, ActualPostingDate, MaintenanceDateExpected, ProjGroupId from workOrderTable
+        where (!_settings.WorkOrderId || workOrderTable.WorkOrderId == _settings.WorkOrderId)
+        &&    (!_settings.ProjGroupId || workOrderTable.ProjGroupId == _settings.ProjGroupId)
+        &&    (!_settings.InventLocationId || workOrderTable.InventLocationId == _settings.InventLocationId)
+        &&    (!_settings.ReturnInventLocationId || workOrderTable.RORReturnInventLocationId == _settings.ReturnInventLocationId)
+        &&    (!mustFilterOnBusObj || workOrderTable.BOBObjectTableRecId)
+            join ExecutionGroupId, ProjId, TaskId, RequestedStartDateTime, RequestedEndDateTime, RecId from workOrderLine
+            where workOrderLine.WorkOrderId == workOrderTable.WorkOrderId
+            &&   (workOrderLine.Status == WPPWorkOrderLineStatus::Confirmed || (_settings.TasksToShow == WPPTasksToShow::ConfirmedAndCreated && workOrderLine.Status == WPPWorkOrderLineStatus::Created))
+            &&    workOrderLine.RequestedStartDateTime > dateTimeNull
+            &&    workOrderLine.RequestedEndDateTime > workOrderLine.RequestedStartDateTime
+            //&&  (!calendarFromDateTime || workOrderLine.RequestedEndDateTime >= calendarFromDateTime)
+            //&&  (!calendarToDateTime || workOrderLine.RequestedStartDateTime <= calendarToDateTime)
+            &&  (!_settings.ExecutionGroupId || workOrderLine.ExecutionGroupId == _settings.ExecutionGroupId)
+            &&  (!_settings.TaskId || workOrderLine.TaskId == _settings.TaskId)
+            &&  (!_settings.ProjId || workOrderLine.ProjId == _settings.ProjId)
+                join Description from taskTable
+                where taskTable.TaskId == workOrderLine.TaskId
+                &&    taskTable.TaskType == WPPTaskType::Service;
+
+        // in case we need to filter on work order type, remove the previously inserted records that do not match our criteria
+        // we cannot incorporate this in the insert_recordset statement, because that would require a conditional inner/outer join
+        if (mustFilterOnWorkOrderType)
+        {
+            delete_from tmpData
+                exists join projGroup
+                where projGroup.ProjGroupId == tmpData.WPPProjGroupId
+                &&    projGroup.WPPWorkOrderType != _settings.WorkOrderType;
+        }
+
+        update_recordset tmpData
+        setting CustVendAccount = custTable.AccountNum
+        where tmpData.WPPOrganizationParty
+        &&    tmpData.CustVendAccountType == CustVendACType::Cust
+            join AccountNum from custTable
+            where custTable.Party == tmpData.WPPOrganizationParty;
+
+        update_recordset tmpData
+        setting CustVendAccount = vendTable.AccountNum
+        where tmpData.WPPOrganizationParty
+            &&    tmpData.CustVendAccountType == CustVendACType::Vend
+            join AccountNum from vendTable
+            where vendTable.Party == tmpData.WPPOrganizationParty;
+
+        // populate business object information
+        update_recordSet tmpData
+        setting BOBObjectId             = objectTable.ObjectId,
+                BOBFleetNumber          = objectTable.FleetNumber,
+                BOBCategory             = objectTable.Category,
+                BOBRentalTypeId         = objectTable.RentalTypeId,
+                BOBOrganizationParty    = objectTable.OrganizationParty,
+                BOBExternalId           = objectTable.ExternalObjectId,
+                BOBInventSerialId       = objectTable.InventSerialId,
+                BOBIsAvailable          = objectAvailLog.IsAvailable
+        where tmpData.BOBObjectTableRecId
+            join ObjectId, FleetNumber, Category, RentalTypeId, OrganizationParty, ExternalObjectId, InventSerialId from objectTable
+            where objectTable.RecId == tmpData.BOBObjectTableRecId
+            &&   (!_settings.InventSerialId || objectTable.InventSerialId == _settings.InventSerialId)
+            &&   (!_settings.FleetNumber || objectTable.FleetNumber == _settings.FleetNumber)
+            &&   (!_settings.BOBRentalTypeId || objectTable.RentalTypeId == _settings.BOBRentalTypeId)
+                join IsAvailable from objectAvailLog
+                where objectAvailLog.ObjectId == objectTable.ObjectId
+                    exists join objectAvailView
+                    where objectAvailView.ObjectId == objectAvailLog.ObjectId
+                    &&    objectAvailView.MaxOfCreatedDateTime == objectAvailLog.createdDateTime;
+
+        // in case we need to filter on business object fields, remove the previously inserted records that do not match our criteria
+        // we cannot incorporate this in the insert_recordset statement, because the join mode is conditionally inner or outer
+        if (mustFilterOnBusObj)
+        {
+            delete_from tmpData
+            where !tmpData.BOBObjectId;
+        }
+
+        // populate current business object location
+        update_recordSet tmpData
+        setting BOBCurrentLocation = objectLocLog.PostalAddress
+        where tmpData.BOBObjectId
+            join PostalAddress from objectLocLog
+            where objectLocLog.ObjectId == tmpData.BOBObjectId
+                exists join objectLocView
+                where objectLocView.ObjectId == objectLocLog.ObjectId
+                &&    objectLocView.MaxOfFromDateTime == objectLocLog.FromDateTime;
+
+        // populate work order address information
+        update_recordSet tmpData
+        setting WPPDlvStreetNumber      = dlvAddress.StreetNumber,
+                WPPDlvStreet            = dlvAddress.Street,
+                WPPDlvZipCode           = dlvAddress.ZipCode,
+                WPPDlvCity              = dlvAddress.City,
+                WPPDlvCounty            = dlvAddress.County,
+                WPPDlvState             = dlvAddress.State,
+                WPPDlvCountryRegionId   = dlvAddress.CountryRegionId
+        where tmpData.WPPDeliveryAddress
+            join StreetNumber, Street, ZipCode, City, County, State, CountryRegionId from dlvAddress
+            where dlvAddress.RecId == tmpData.WPPDeliveryAddress;
+
+        // in case we need to filter on address fields, remove the previously inserted records that do not match our criteria
+        // we cannot incorporate this in the insert_recordset statement, because the join mode is conditionally inner or outer
+        if (mustFilterOnAddress)
+        {
+            delete_from tmpData
+            where (!_settings.AddressCity            || tmpData.WPPDlvCity            == _settings.AddressCity)
+            ||    (!_settings.AddressCountyId        || tmpData.WPPDlvCounty          == _settings.AddressCountyId)
+            ||    (!_settings.AddressStateId         || tmpData.WPPDlvState           == _settings.AddressStateId)
+            ||    (!_settings.AddressCountryRegionId || tmpData.WPPDlvCountryRegionId == _settings.AddressCountryRegionId);
+        }
+
+        tmpData.skipDatabaseLog(true);
+        tmpData.skipDataMethods(true);
+        tmpData.skipEvents(true);
+
+        update_recordSet tmpData
+        setting BOBItemId   = inventTable.ItemId,
+                BOBItemName = inventTable.NameAlias
+        where tmpData.BOBRentalTypeId
+        join TableId from ecoResProduct
+        where ecoResProduct.BOBRentalTypeId == tmpData.BOBRentalTypeId
+            join ItemId, NameAlias from inventTable
+            where inventTable.DataAreaId == tmpData.WPPCompanyId
+            &&  (!_settings.ItemId || inventTable.ItemId == _settings.ItemId)
+            &&    inventTable.Product == ecoResProduct.RecId;
+
+        super(_settings);
+
+        removeWorkOrderRecId = 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setWorkOrderLineRecId</Name>
+				<Source><![CDATA[
+    public void setWorkOrderLineRecId(RefRecId _workOrderLineRecId)
+    {
+        removeWorkOrderRecId = _workOrderLineRecId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

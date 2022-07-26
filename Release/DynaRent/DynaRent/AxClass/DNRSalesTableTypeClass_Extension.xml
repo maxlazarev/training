@@ -1,0 +1,697 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRSalesTableTypeClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(SalesTableType))]
+public final class DNRSalesTableTypeClass_Extension
+{
+    private DNRSalesTableTypeStrategy strategy;
+
+    private NoYes   ignoreCustCreditCheck;
+    private boolean confirmationRequired;
+
+    // chain-of-command wrapper methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>checkUpdate</Name>
+				<Source><![CDATA[
+    public boolean checkUpdate(boolean _useWarning, boolean _interCompanyCheck, boolean _treatInvoicedOrderUpdateWarningAsError)
+    {
+        boolean ret = next checkUpdate(_useWarning, salesTable.SalesType == SalesType::RORRental ? false : _interCompanyCheck, _treatInvoicedOrderUpdateWarningAsError);
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mayConfirmationBeUpdated</Name>
+				<Source><![CDATA[
+    boolean mayConfirmationBeUpdated()
+    {
+        boolean ok = next mayConfirmationBeUpdated();
+
+        // RLAM - Only repeat the method if MSFT confition fails but our succeeds
+        if( // MSFT confition
+            !(!(salesTable.SalesStatus  == SalesStatus::Invoiced 
+              || salesTable.SalesStatus  == SalesStatus::Delivered
+              || salesTable.SalesStatus  == SalesStatus::Canceled)
+            && (salesTable.mcrOrderStopped == NoYes::No
+              || !isConfigurationkeyEnabled(configurationKeyNum(MCRCallCenter))))
+            // Our condition
+            && confirmationRequired)
+        {
+            ok = true;
+
+            if(salesCycle)
+            {
+                salesPurchCycle = SalesPurchCycle::findBySalesPurchaseCycle(SalesPurchCycleAction::Confirmation, SalesPurchCycleModuleParameter::Cust, salesTable.CustAccount);
+
+                if (salesPurchCycle)
+                {
+                    if (!salesPurchCycle.Active)
+                    {
+                        ok = false;
+                    }
+                }
+                else
+                {
+                    if (!SalesPurchCycle::findBySalesPurchaseCycle(SalesPurchCycleAction::Confirmation, SalesPurchCycleModuleParameter::CustParameter, '').Active)
+                    {
+                        ok = false;
+                    }
+                }
+            }
+        }
+
+        return ok;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canTypeBeChanged</Name>
+				<Source><![CDATA[
+    public boolean canTypeBeChanged()
+    {
+        boolean ret = next canTypeBeChanged();
+
+        if (ret)
+        {
+            ret = SalesTableType::RORCheckSalesType(this.parmSalesTable());
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initValue</Name>
+				<Source><![CDATA[
+    public void  initValue()
+    {
+        //*** Repeated code
+        SalesParameters salesParameters = SalesParameters::find();
+
+        next initValue();
+
+        salesTable.SalesPoolId             = DNRWorkerDefaults::SalesPoolId(salesParameters);
+        salesTable.FINCreditCheckStatus    = FINCreditCheckStatus::RequestLimit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inserted</Name>
+				<Source><![CDATA[
+    public void inserted()
+    {
+        smmBusRelTable  busRelTable;
+        RORVenueTable   venueTable;
+        
+        next inserted();
+    
+        if(!salesTable.OneTimeCustomer)
+        {
+            busRelTable = smmBusRelTable::findCust(salesTable.CustAccount);
+    
+            if(busRelTable)
+            {
+                DNRAdditionalNoteTable::copyNotes(busRelTable, salesTable);
+            }
+        }
+    
+        if(salesTable.RORVenueCode)
+        {
+            venueTable = RORVenueTable::find(salesTable.RORVenueCode);
+            DNRAdditionalNoteTable::copyNotes(venueTable, salesTable);
+            WPPTaskRequirements::copyTaskRequirements(venueTable, salesTable);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modifiedField</Name>
+				<Source><![CDATA[
+    public void modifiedField(FieldId _fieldId, TableId _tableId, boolean _uiEnabled)
+    {
+        next modifiedField(_fieldId, _tableId, _uiEnabled);
+
+        this.RORModifiedField(salesTable, _fieldId);
+    
+        switch (_fieldId)
+        {
+            case fieldNum(SalesTable, FINCreditCheckStatus):
+                if (salesTable.orig().FINCreditCheckStatus != salesTable.FINCreditCheckStatus)
+                {
+                    this.WPPCopyCreditCheckStatus(salesTable.SalesId, salesTable.FINCreditCheckStatus);
+                    SalesTable::WPPupdateWorkOrder(salesTable);
+                }
+                break;
+    
+            case fieldNum(SalesTable, CustAccount),
+                fieldNum(SalesTable, DeliveryPostalAddress):
+                SalesTable::WPPupdateWorkOrder(salesTable);
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>syncPurchTable</Name>
+				<Source><![CDATA[
+    AxPurchTable syncPurchTable(SalesTable _salesTable, PurchTable _purchTable, boolean _forceAddressSync)
+    {
+        AxPurchTable ret = next syncPurchTable(_salesTable, _purchTable, _forceAddressSync);
+        boolean create;
+
+        if (!_purchTable)
+        {
+            create = true;
+        }
+
+        if (create || _salesTable.fieldChanged(fieldNum(SalesTable, InterCompanyAllowIndirectCreation)))
+        {
+            if (create
+            && _salesTable.InterCompanyDirectDelivery
+            && _salesTable.SalesType == SalesType::RORRental)
+            {
+                // in sub rental order supplementary lines might be created
+                ret.parmInterCompanyAllowIndirectCreation(NoYes::Yes);
+            }
+        }
+
+        if (create || _salesTable.fieldChanged(fieldNum(SalesTable, RORVenueCode)))
+        {
+            ret.parmRORVenueCode(_salesTable.RORVenueCode);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updated</Name>
+				<Source><![CDATA[
+    public void updated(SalesTable _salesTableOrig)
+    {
+        salesTable      salesTableOrig = this.RORSalesTableOrig();
+        smmBusRelTable  busRelTable;
+        RORVenueTable   venueTable;
+        
+        next updated(_salesTableOrig);
+    
+        if(!salesTable.OneTimeCustomer && salesTable.CustAccount != salesTableOrig.CustAccount)
+        {
+            busRelTable = smmBusRelTable::findCust(salesTable.CustAccount);
+            DNRAdditionalNoteTable::copyNotes(busRelTable, salesTable);
+        }
+    
+        if(salesTable.RORVenueCode && salesTable.RORVenueCode != salesTableOrig.RORVenueCode)
+        {
+            venueTable = RORVenueTable::find(salesTable.RORVenueCode);
+            DNRAdditionalNoteTable::copyNotes(venueTable, salesTable);
+            WPPTaskRequirements::copyTaskRequirements(venueTable, salesTable);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateDelete</Name>
+				<Source><![CDATA[
+    boolean validateDelete(boolean _mcrCancel)
+    {
+        // Get infolog line befoe validateDelete.
+        int infoLogLineCounter = infolog.line();
+        boolean ret = next validateDelete(_mcrCancel);
+
+        if (this.RORmustRecreateValidateDeleteWarning())
+        {
+            this.RORrecreateValidateDeleteWarning(infoLogLineCounter);
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORmustRecreateValidateDeleteWarning</Name>
+				<Source><![CDATA[
+    // extension methods
+    private boolean RORmustRecreateValidateDeleteWarning()
+    {
+        return (salesTable.SalesType == SalesType::RORRental);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORrecreateValidateDeleteWarning</Name>
+				<Source><![CDATA[
+    private void RORrecreateValidateDeleteWarning(int _infoLogLineCounter)
+    {
+        boolean ok = true;
+        Set warningSet = new Set(Types::String);
+               
+        if (salesTable.isInterCompanyOrder()
+        &&  salesTable.SkipUpdate         != InterCompanySkipUpdate::InterCompany
+        &&  salesTable.SkipUpdate         != InterCompanySkipUpdate::Both
+        &&  salesTable.InterCompanyOrigin == InterCompanyOrigin::Derived)
+        {
+            warningSet.add("@DNR6918");
+            ok = false;
+        }
+
+        // Open return order cannot be deleted
+        if (salesTable.returnItem()
+            && salesTable.ReturnStatus == ReturnStatusHeader::Open)
+        {
+            warningSet.add("@SYS106101");
+            ok = false;
+        }
+
+        if (SalesParmTable::checkActivePerSalesId(salesTable.SalesId))
+        {
+            warningSet.add("@DNR:salesTableNotPostedTrans");
+            ok = false;
+        }
+
+        if (!ok)
+        {
+            // Deleting a prefix line will delete its sublines all together.
+            infolog.clear(_infoLogLineCounter);
+            
+            setPrefix(strFmt("%1: %2", "@DNR10", salesTable.SalesId));
+
+            SetEnumerator enumerator = warningSet.getEnumerator();
+
+            while (enumerator.moveNext())
+            {
+                str warningText = enumerator.current();
+                checkFailed(warningText);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORremoveStandardValidateDeleteWarning</Name>
+				<Source><![CDATA[
+    private void RORremoveStandardValidateDeleteWarning()
+    {
+        Counter infoLogLineCounter;
+        Counter infoLogLineToDelete;
+                
+        SysInfologEnumerator sysInfoLogEnumerator = SysInfologEnumerator::newData(infolog.infologData());
+               
+        // Loop over the (error) messages in the info log.
+        // Delete the relevant error message from the info log.
+        while(sysInfoLogEnumerator.moveNext())
+        {
+            infologLineCounter += 1;
+
+            if (sysInfoLogEnumerator.currentMessage() == #prefixfield(SalesTable, SalesId))
+            {
+                infoLogLineToDelete = infoLogLineCounter;
+                infolog.clear(infoLogLineToDelete);
+            }
+
+            if (sysInfoLogEnumerator.currentMessage() == "@SYS98650")
+            {
+                infoLogLineToDelete = infoLogLineCounter;
+                infolog.clear(infoLogLineToDelete);
+            }
+
+            if (sysInfoLogEnumerator.currentMessage() == "@SYS106101")
+            {
+                infoLogLineToDelete = infoLogLineCounter;
+                infolog.clear(infoLogLineToDelete);
+            }
+
+            if (sysInfoLogEnumerator.currentMessage() == "@SYS121715")
+            {
+                infoLogLineToDelete = infoLogLineCounter;
+                infolog.clear(infoLogLineToDelete);
+            }
+        }        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORCheckSalesType</Name>
+				<Source><![CDATA[
+    private static boolean RORCheckSalesType(SalesTable _salesTable)
+    {
+        boolean     ret = true;
+        DictEnum    dictEnum;
+    
+        if (_salesTable.SalesType == SalesType::RORRental
+        &&  _salesTable.orig().salesType != SalesType::RORRental)
+        {
+            dictEnum = new DictEnum(enumNum(SalesType));
+            ret = checkFailed(strFmt("@DNR6715", dictEnum.value2Label(enum2int(SalesType::RORRental)), "@DNR6238", "@DNR5976"));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORModifiedField</Name>
+				<Source><![CDATA[
+    private void RORModifiedField(SalesTable salesTable, FieldId _fieldId)
+    {
+        switch(_fieldId)
+        {
+            case fieldNum(SalesTable, DNRCalendarId):
+                // Check dates against calendar.  If first time entering a calendar then auto-update dates if blocked
+                salesTable.RORRentalDateTimesHost::checkUpdateRentalDates(!salesTable.orig().DNRCalendarId);
+                break;
+    
+            case fieldNum(SalesTable, InventLocationId):
+                salesTable.RORInitFromInventLocation();
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPCopyCreditCheckStatus</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    private void WPPCopyCreditCheckStatus(SalesId                 _salesId,
+                                          FINCreditCheckStatus    _creditCheckStatus)
+    {
+        WPPWorkOrderTable   workOrderTable;
+        SalesLine           salesLine;
+    
+        // Copy the Credit check status to the related work order
+        update_recordSet workOrderTable
+        setting FINCreditCheckStatus = _creditCheckStatus
+            exists join salesLine
+            where salesLine.TableId == workOrderTable.OrderTableId
+            &&    salesLine.RecId   == workOrderTable.OrderRecId
+            &&    salesLine.SalesId == _salesId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRcheckCustRequisition</Name>
+				<Source><![CDATA[
+    public boolean DNRcheckCustRequisition(boolean _showMsg = true)
+    {
+        boolean     ret;
+    
+        CustTable               custTable = salesTable.custTable_CustAccount();
+        DNRCustRequisitionLevel custRequisitionLevel;
+        ;
+        if (salesTable.PurchOrderFormNum || !custTable.DNRCustRequisition)
+        {
+            ret = true;
+        }
+        else
+        {
+            if (salesTable.SalesType == SalesType::RORRental)
+            {
+                custRequisitionLevel = custTable.DNRCustRequisition[2];
+            }
+            else
+            {
+                custRequisitionLevel = custTable.DNRCustRequisition[1];
+            }
+    
+            switch (custRequisitionLevel)
+            {
+                case DNRCustRequisitionLevel::Preferred :
+                    if (_showMsg)
+                    {
+                        warning("@DNR2189");
+                    }
+                    ret = true;
+                    break;
+    
+                case DNRCustRequisitionLevel::Required :
+                    if (_showMsg)
+                    {
+                        error("@DNR2190");
+                    }
+                    ret = false;
+                    break;
+    
+                default:
+                    ret = true;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>FINparmIgnoreCustCreditCheck</Name>
+				<Source><![CDATA[
+    public boolean FINparmIgnoreCustCreditCheck(NoYes _ignoreCustCreditCheck = ignoreCustCreditCheck)
+    {
+        ignoreCustCreditCheck = _ignoreCustCreditCheck;
+        return ignoreCustCreditCheck;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORParmConfirmationRequired</Name>
+				<Source><![CDATA[
+    public NoYesId RORParmConfirmationRequired(NoYesId _confirmationRequired = confirmationRequired)
+    {
+        confirmationRequired = _confirmationRequired;
+        return confirmationRequired;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORSalesTableOrig</Name>
+				<Source><![CDATA[
+    public salesTable RORSalesTableOrig()
+    {
+        return salesTable.orig();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>WPPParmProjId</Name>
+				<Source><![CDATA[
+    public ProjId WPPParmProjId(ProjId _projId = projId)
+    {
+        projId = _projId;
+        return projId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosBuild</Name>
+				<Source><![CDATA[
+    client server static int RORPosBuild()
+    {
+        return 12;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosEventEnd</Name>
+				<Source><![CDATA[
+    client server static int RORPosEventEnd()
+    {
+        return 14;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosEventStart</Name>
+				<Source><![CDATA[
+    client server static int RORPosEventStart()
+    {
+        return 13;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosInbound</Name>
+				<Source><![CDATA[
+    client server static int RORPosInbound()
+    {
+        return 16;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosOutbound</Name>
+				<Source><![CDATA[
+    client server static int RORPosOutbound()
+    {
+        return 11;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosPreperation</Name>
+				<Source><![CDATA[
+    client server static int RORPosPreperation()
+    {
+        return 10;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosReturned</Name>
+				<Source><![CDATA[
+    client server static int RORPosReturned()
+    {
+        return 17;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosReturnInspection</Name>
+				<Source><![CDATA[
+    client server static int RORPosReturnInspection()
+    {
+        return 18;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORPosStrike</Name>
+				<Source><![CDATA[
+    client server static int RORPosStrike()
+    {
+        return 15;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRparmConfirmationRequired</Name>
+				<Source><![CDATA[
+    [SysObsolete("This method is no longer used.", false)]
+    public boolean DNRparmConfirmationRequired(boolean _confirmationRequired = confirmationRequired)
+    {
+        confirmationRequired = _confirmationRequired;
+        return confirmationRequired;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORexistUnConfirmedAmendments</Name>
+				<Source><![CDATA[
+    public boolean RORexistUnConfirmedAmendments()
+    {
+        return this.parmSalesTableTypeStrategy().RORexistUnConfirmedAmendments();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORexistUnConfirmedChanges</Name>
+				<Source><![CDATA[
+    public boolean RORexistUnConfirmedChanges()
+    {
+        return this.parmSalesTableTypeStrategy().RORexistUnConfirmedChanges();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORhasLineToCreatePurchOrder</Name>
+				<Source><![CDATA[
+    public boolean RORhasLineToCreatePurchOrder()
+    {
+        return this.parmSalesTableTypeStrategy().RORhasLineToCreatePurchOrder();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORmayReturnNoteBeUpdated</Name>
+				<Source><![CDATA[
+    public boolean RORmayReturnNoteBeUpdated()
+    {
+        return this.parmSalesTableTypeStrategy().RORmayReturnNoteBeUpdated();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>RORupdateAmendmentLog</Name>
+				<Source><![CDATA[
+    public void RORupdateAmendmentLog(ConfirmId _confirmId)
+    {
+        this.parmSalesTableTypeStrategy().RORupdateAmendmentLog(_confirmId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmSalesCycle</Name>
+				<Source><![CDATA[
+    public boolean DNRParmSalesCycle()
+    {
+        return salesCycle;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>DNRParmSalesPurchCycle</Name>
+				<Source><![CDATA[
+    public SalesPurchCycle DNRParmSalesPurchCycle()
+    {
+        return salesPurchCycle;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmSalesTableTypeStrategy</Name>
+				<Source><![CDATA[
+    private DNRSalesTableTypeStrategy parmSalesTableTypeStrategy()
+    {
+        if (!strategy)
+        {
+            strategy = DNRSalesTableTypeStrategy::construct(this);
+        }
+
+        return strategy;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

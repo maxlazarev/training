@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>DNRAssetSplitClass_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+[ExtensionOf(classStr(AssetSplit))]
+public final class DNRAssetSplitClass_Extension
+{
+    // extension methods
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>BOBGetJournalNum</Name>
+				<Source><![CDATA[
+    private LedgerJournalId BOBGetJournalNum()
+    {
+        return journalNum;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>BOBSplitAndPost</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckSkipStatementValidation", "Cannot use skip method without altering functional behavior")]
+    public static server void BOBSplitAndPost(AssetId       _assetIdFrom,
+                                              AssetId       _assetIdTo,
+                                              Qty           _splitQty,
+                                              TransDate     _transDate)
+    {
+        LedgerJournalTable              ledgerJournalTable;
+        LedgerJournalTrans              ledgerJournalTrans;
+        LedgerJournalTrans_Asset        ledgerJournalTransAsset;
+        AssetSplit                      assetSplit;
+        AssetTable                      assetTable;
+        AssetBook                       assetBook;
+        AssetBookTable                  assetBookTable;
+        AssetParameters                 parameters = AssetParameters::find();
+        AssetBookTableDerivedJournal    derivedValueModel;
+        // AssetDepBookTableDerivedJour    derivedDepBook;
+    
+        ttsBegin;
+    
+        while select Quantity from assetTable
+        where assetTable.AssetId == _assetIdFrom
+            join  assetBook
+            where assetBook.AssetId == assetTable.AssetId
+            &&    assetBook.Status == AssetStatus::Open
+                join CurrentOperationsTax from assetBookTable
+                where assetBookTable.BookId == assetBook.BookId
+        {
+            if(!assetTable.Quantity)
+            {
+                throw error(strFmt("@DNR8148", assetTable.AssetId));
+            }
+    
+            assetSplit = AssetSplit::construct();
+            assetSplit.initInstance(assetBook);
+            assetSplit.parmAssetId(_assetIdTo);
+            assetSplit.parmBookId(assetBook.BookId);
+            assetSplit.parmPercent(_splitQty / assetTable.Quantity * 100);
+            assetSplit.parmTransDate(_transDate);
+    
+            switch(assetBookTable.CurrentOperationsTax)
+            {
+                case CurrentOperationsTax::Current:
+                    assetSplit.parmJournalName(parameters.BOBSplitAssetJourNameCurrent);
+                    break;
+    
+                case CurrentOperationsTax::Operations:
+                    assetSplit.parmJournalName(parameters.BOBSplitAssetJourNameOperations);
+                    break;
+    
+                case CurrentOperationsTax::Tax:
+                    assetSplit.parmJournalName(parameters.BOBSplitAssetJourNameTax);
+                    break;
+    
+                default:
+                    warning(strFmt("@SYS88512", assetBookTable.CurrentOperationsTax));
+                    break;
+            }
+    
+            assetSplit.runOperation();
+    
+            ledgerJournalTable = LedgerJournalTable::find(assetSplit.BOBGetJournalNum());
+    
+            if(assetBookTable.CurrentOperationsTax == CurrentOperationsTax::Current)
+            {
+                // decrease the quantity of the source fixed asset
+                update_recordSet ledgerJournalTrans
+                setting Qty = -_splitQty
+                where ledgerJournalTrans.JournalNum == ledgerJournalTable.JournalNum
+                    exists join ledgerJournalTransAsset
+                    where ledgerJournalTransAsset.RefRecId == ledgerJournalTrans.RecId
+                    &&    ledgerJournalTransAsset.AssetId == _assetIdFrom
+                    &&    ledgerJournalTransAsset.TransType == AssetTransTypeJournal::AcquisitionAdj;
+    
+                // increase the quantity of the target fixed asset
+                update_recordSet ledgerJournalTrans
+                setting Qty = _splitQty
+                where ledgerJournalTrans.JournalNum == ledgerJournalTable.JournalNum
+                    exists join ledgerJournalTransAsset
+                    where ledgerJournalTransAsset.RefRecId == ledgerJournalTrans.RecId
+                    &&    ledgerJournalTransAsset.AssetId == _assetIdTo
+                    &&    ledgerJournalTransAsset.TransType == AssetTransTypeJournal::Acquisition;
+
+                
+                // Update the Warehouse to avoid validation during Rental Transaction Sync
+                DNRPrimitiveDisposableContext   context = DNRPrimitiveDisposableContext::current();
+                
+                if(context && context.DNRparmString())
+                {
+                    InventLocationId    inventLocationId = context.DNRparmString();
+                    
+                    update_recordSet ledgerJournalTransAsset
+                    setting BOBInventLocationId = inventLocationId
+                    where   ledgerJournalTransAsset.AssetId == _assetIdTo
+                    &&      ledgerJournalTransAsset.TransType == AssetTransTypeJournal::Acquisition
+                        exists join ledgerJournalTrans
+                        where ledgerJournalTrans.RecId == ledgerJournalTransAsset.RefRecId
+                        &&    ledgerJournalTrans.JournalNum == ledgerJournalTable.JournalNum;
+                }
+            }
+    
+            // remove any transactions in derived value models
+            delete_from derivedValueModel
+                exists join ledgerJournalTrans
+                where ledgerJournalTrans.RecId == derivedValueModel.RefRecId
+                &&    ledgerJournalTrans.JournalNum == ledgerJournalTable.JournalNum;
+    
+            // remove any transactions in derived depreciation books
+            /*
+            delete_from derivedDepBook
+                exists join ledgerJournalTrans
+                where ledgerJournalTrans.RecId == derivedDepBook.RefRecId
+                &&    ledgerJournalTrans.JournalNum == ledgerJournalTable.JournalNum;
+            */
+    
+            // post journal
+            LedgerJournalCheckPost::newLedgerJournalTable(ledgerJournalTable, NoYes::Yes).runOperation();
+        }
+    
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

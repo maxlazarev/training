@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>FINLedgerManualReallocation</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+class FINLedgerManualReallocation extends Runbase
+{
+    // dialog fields
+    DialogField                 dfModelId;
+    DialogField                 dfTransDate;
+    DialogField                 dfMustOpenJournal;
+    DialogGroup                 dgModel;
+
+    // dialog values
+    FINMDAModelId               modelId;
+    TransDate                   transDate;
+    boolean                     doModelBased;
+    boolean                     mustOpenJournal;
+
+    GeneralJournalEntry         generalJournalEntry;
+    GeneralJournalAccountEntry  generalJournalAccountEntry;
+    List                        resultList = new List(Types::Record);
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setCaller</Name>
+				<Source><![CDATA[
+    public void setCaller(GeneralJournalAccountEntry _generalJournalAccountEntry)
+    {
+        generalJournalAccountEntry = _generalJournalAccountEntry;
+        generalJournalEntry = GeneralJournalEntry::find(generalJournalAccountEntry.GeneralJournalEntry);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dialog</Name>
+				<Source><![CDATA[
+    public Object dialog()
+    {
+        DialogRunbase dialog = super();
+        dialog.caption("@DNR988");
+        dialog.addGroup("@SYS19924");
+        dfTransDate = dialog.addFieldValue(extendedTypeStr(TransDate), generalJournalEntry.AccountingDate, "@SYS14475");
+    
+        DialogGroup dgOptions = dialog.addGroup("@SYS54716");
+        dfMustOpenJournal = dialog.addFieldValue(enumStr(NoYes), NoYes::Yes, "@DNR1047");
+    
+        dgModel = dialog.addGroup("@SYS9923", dgOptions);
+        dgModel.frameType(FormFrameType::Auto);
+        dgModel.frameOptionButton(FormFrameOptionButton::Radio);
+        dgModel.widthMode(1); // column width
+        dfModelId = dialog.addField(extendedTypeStr(FINMDAModelId));
+    
+        DialogGroup dgReverse = dialog.addGroup("@SYS8776", dgOptions);
+        dgReverse.frameType(FormFrameType::Auto);
+        dgReverse.frameOptionButton(FormFrameOptionButton::Radio);
+        dgReverse.widthMode(1); // column width
+        dgReverse.hideIfEmpty(false);
+    
+        return dialog;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getFromDialog</Name>
+				<Source><![CDATA[
+    public boolean getFromDialog()
+    {
+        modelId         = dfModelId.value();
+        transDate       = dfTransDate.value();
+        mustOpenJournal = dfMustOpenJournal.value();
+        doModelBased    = (dgModel.optionValue() == 1);
+    
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        if (!this.validateValues())
+        {
+            throw error("@SYS21628");
+        }
+
+        TransDate generalJournalEntryAccountingDate = generalJournalEntry.AccountingDate;
+        AcknowledgementDate generalJournalEntryAcknowledgementDate = generalJournalEntry.AcknowledgementDate;
+        generalJournalEntry.AccountingDate = transDate;
+        generalJournalEntry.AcknowledgementDate = transDate;
+    
+        if (doModelBased)
+        {
+            this.doMDA();
+        }
+        else
+        {
+            this.doReverseTrans();
+        }
+
+        generalJournalEntry.AccountingDate = generalJournalEntryAccountingDate;
+        generalJournalEntry.AcknowledgementDate = generalJournalEntryAcknowledgementDate;
+    
+        this.generateJournals();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>doMDA</Name>
+				<Source><![CDATA[
+    protected void doMDA()
+    {
+        FINTmpVoucherProcessorEngineParm parm;
+        parm.initFromGeneralJournalAccountEntry(generalJournalAccountEntry);
+        parm.TransDate = transDate;
+
+        FINMDAEngine mdaEngine = FINMDAEngine::construct();
+        mdaEngine.setInput(generalJournalEntry, null, 0, null);
+        mdaEngine.parmAllocationModelId(modelId);
+        mdaEngine.processSingleTrans(parm);
+        resultList = mdaEngine.getResult();
+
+        if (!mdaEngine.getPostingRuleToCount(modelId))
+        {
+            throw error(strFmt("@DNR1015", modelId));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>doReverseTrans</Name>
+				<Source><![CDATA[
+    protected void doReverseTrans()
+    {
+        FINTmpLedgerJournalGeneratorParm tmpLedgerJournalGeneratorParm;
+        tmpLedgerJournalGeneratorParm.initLedgerJournalGeneratorParm(
+            generalJournalEntry.SubledgerVoucherDataAreaId,
+            generalJournalAccountEntry.LedgerDimension,
+            generalJournalAccountEntry.Quantity,
+            - generalJournalAccountEntry.TransactionCurrencyAmount,
+            generalJournalAccountEntry.TransactionCurrencyCode,
+            LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(generalJournalAccountEntry.LedgerDimension),
+            generalJournalEntry.PostingLayer,
+            generalJournalEntry.AccountingDate,
+            LedgerTransType::None);
+
+        resultList.addEnd(tmpLedgerJournalGeneratorParm);
+
+        FINTmpLedgerJournalGeneratorParm tmpLedgerJournalGeneratorParmOrig;
+        tmpLedgerJournalGeneratorParmOrig.initLedgerJournalGeneratorParm(
+            generalJournalEntry.SubledgerVoucherDataAreaId,
+            generalJournalAccountEntry.LedgerDimension,
+            generalJournalAccountEntry.Quantity,
+            generalJournalAccountEntry.TransactionCurrencyAmount,
+            generalJournalAccountEntry.TransactionCurrencyCode,
+            LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(generalJournalAccountEntry.LedgerDimension),
+            generalJournalEntry.PostingLayer,
+            generalJournalEntry.AccountingDate,
+            LedgerTransType::None);
+
+        resultList.addEnd(tmpLedgerJournalGeneratorParmOrig);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>generateJournals</Name>
+				<Source><![CDATA[
+    protected void generateJournals()
+    {
+        if (resultList && !resultList.empty())
+        {
+            FINLedgerJournalGenerator journalGenerator = FINLedgerJournalGenerator::construct(resultList);
+            journalGenerator.parmMustAutoPostJournals(false);
+            journalGenerator.parmMustOpenJournals(mustOpenJournal);
+            journalGenerator.parmMustShowJournalInfoLog(true);
+            journalGenerator.setOriginVoucher(generalJournalEntry.SubledgerVoucherDataAreaId, generalJournalEntry.SubledgerVoucher);
+            journalGenerator.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateValues</Name>
+				<Source><![CDATA[
+    public boolean validateValues()
+    {
+        boolean ret = true;
+    
+        if (!transDate)
+        {
+            ret = checkFailed(strFmt("@SYS50104", "@SYS67"));
+        }
+    
+        if (doModelBased && !modelId)
+        {
+            ret = checkFailed(strFmt("@SYS50104", "@SYS93415"));
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        if (!_args || _args.dataset() != tableNum(GeneralJournalAccountEntry) || !_args.record())
+        {
+            throw error(strFmt("@MCR27651", "@DNR:ManualMDA", tablePName(GeneralJournalAccountEntry)));
+        }
+    
+        FINLedgerManualReallocation manualReallocation = new FINLedgerManualReallocation();
+        manualReallocation.setCaller(_args.record());
+    
+        if (manualReallocation.prompt())
+        {
+            manualReallocation.run();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

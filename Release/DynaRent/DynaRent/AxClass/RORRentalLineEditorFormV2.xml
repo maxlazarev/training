@@ -1,0 +1,2487 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>RORRentalLineEditorFormV2</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+abstract class RORRentalLineEditorFormV2
+{
+    // caller information
+    RORRentalLine           callerRentalLine;
+    SalesPurchTable         callerHeader;
+    RORRentalLineEditMode   editMode;
+
+    // temporary tables
+    RORRentalEditorHeader   mainKitHeader;
+    RecId                   recIdMainKit;
+    RORRentalEditorLine     mainKitRentalEditorLine;
+
+    // additional lines variables
+    boolean                 forceDisplay;
+    RecordViewCache         recordViewCache;
+    boolean                 hasPotentialLinesToCreate;
+    boolean                 areLinesPreviouslyCreated;
+    //DNRDeletedObjects01_2022. Variable has been made obsolete
+    LineNum                 sorting;
+    NumberOf                numLinesCreated;
+    NumberOf                numComponentsCreated;
+    NumberOf                numLinesDeleted;
+    NumberOf                numComponentsDeleted;
+
+    // price calculation variables
+    RORRentalLine           rentalLineKit;
+    RAGParameters           ragParameters;
+
+    // miscellaneous variables
+    RORParameters           parameters;
+    container               packedRentalEditorLineList;
+
+    // used for amendment
+    SysOperationProgress    progressBar;
+
+    // used to initialize main kit header
+    RORInsurancePercentage  insurancePercentage;
+    RORInsuranceCalcBasis   insuranceCalcBasis;
+    RORInsureRentalStops    insureRentalStops;
+    Price                   transportPrice;
+    Price                   returnTransportPrice;
+    Price                   warrantyPrice;
+
+    boolean                 fetchInsuranceFromContract;
+    boolean                 wasEditedBefore;
+    LineNum                 lineNumLimit;
+
+    ParmId                  parmId;
+    LineNum                 lastContractItemLineNum;
+    LineNum                 lastLineNum;
+    boolean                 linesModifiedByOtherUsers;
+
+    boolean                 convertPrices;
+    boolean                 keepCallerOrigPrices;
+
+    //DNRDeletedObjects01_2022. Variable has been made obsolete
+    boolean                 populateRecursively;
+    RORTmpExpandedRentalEditorLines tmpExpandedLines;
+    Map                     expandedRecordsMap;
+    RecordSortedList        rentalEditorLineInsertList = new RecordSortedList(tableNum(RORRentalEditorLine));
+    SystemSequence          systemSequence = new SystemSequence();
+
+
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initInventDimIdOnComponent</Name>
+				<Source><![CDATA[
+    [HookableAttribute(true)]
+    protected void initInventDimIdOnComponent(SalesPurchLine _salesPurchLineComponent, RORRentalEditorLine _rentalEditorLine)
+    {
+        InventDim inventDim;
+        SalesPurchLineInterface salesPurchLineInterface = _salesPurchLineComponent.salesPurchLineInterface();
+        
+        inventDim = salesPurchLineInterface.inventDim();
+        inventDim.InventLocationId  = _rentalEditorLine.InventLocationId;
+        inventDim.InventSiteId      = _rentalEditorLine.InventSiteId;
+        
+        inventDim = InventDim::findOrCreate(inventDim);
+
+        _salesPurchLineComponent.setInventDimId(inventDim.inventDimId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addMainKit</Name>
+				<Source><![CDATA[
+    private RORRentalEditorLine addMainKit()
+    {
+        InventDim   inventDim = InventDim::find(callerRentalLine.InventDimId);
+    
+        mainKitRentalEditorLine.initFromRentalLine(callerRentalLine, true, true);
+    
+        if (callerRentalLine.KitComponentType == RORKitComponentType::Component ||
+        callerRentalLine.KitComponentType == RORKitComponentType::KitComponent)
+        {
+            mainKitRentalEditorLine.ParentLineRecId = callerRentalLine.ParentLineRecId;
+        }
+    
+        mainKitRentalEditorLine.ParmId  = this.parmId();
+    
+        mainKitRentalEditorLine.WasPreviouslyIncluded = (editMode == RORRentalLineEditMode::Modify);
+    
+        mainKitRentalEditorLine.LineNum             = 1;
+        mainKitRentalEditorLine.KitLevel            = 0;
+        mainKitRentalEditorLine.MainKitReference    = callerRentalLine.RecId;
+        //mainKitRentalEditorLine.ItemIdKit           = callerRentalLine.ItemId;
+        mainKitRentalEditorLine.Include             = NoYes::Yes;
+        mainKitRentalEditorLine.KitRequiredLevel    = RORKitRequiredLevel::Mandatory;
+        mainKitRentalEditorLine.InventLocationId    = inventDim.InventLocationId;
+        mainKitRentalEditorLine.InventSiteId        = inventDim.InventSiteId;
+    
+        mainKitRentalEditorLine.initFromTmpContractLine(this.initContractData(mainKitRentalEditorLine));
+    
+        if (convertPrices)
+        {
+            mainKitRentalEditorLine.RORRentalLine::RAGSetContractInfo(false, false);
+        }
+
+        if (keepCallerOrigPrices)
+        {
+            // restore some price elements from orig line
+            mainKitRentalEditorLine.LineDisc               = callerRentalLine.LineDisc;
+            mainKitRentalEditorLine.LinePercent            = callerRentalLine.LinePercent;
+            mainKitRentalEditorLine.LineAmount             = callerRentalLine.LineAmount;
+            mainKitRentalEditorLine.RentalPrice            = callerRentalLine.Price;
+            mainKitRentalEditorLine.RentalGrossAmount      = callerRentalLine.RentalGrossAmount;
+        }
+        
+        mainKitRentalEditorLine.IsPriceCalculated          = true;
+        mainKitRentalEditorLine.insert();
+    
+        mainKitRentalEditorLine.DNRSetAdditionalNotes(callerRentalLine);
+    
+        recIdMainKit            = mainKitRentalEditorLine.RecId;
+    
+        return mainKitRentalEditorLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addMainKitHeader</Name>
+				<Source><![CDATA[
+    private void addMainKitHeader(RORRentalEditorLine _rentalEditorLine)
+    {
+        // values from main kit
+        mainKitHeader.HeaderId      = _rentalEditorLine.HeaderId;
+        mainKitHeader.RefTableId    = _rentalEditorLine.RefTableId;
+        mainKitHeader.RefRecId      = _rentalEditorLine.RefRecId;
+    
+        mainKitHeader.SessionNum    = sessionId();
+        mainKitHeader.ParmId         = this.parmId();
+        mainKitHeader.CurrencyCode  = _rentalEditorLine.CurrencyCode;
+    
+        mainKitHeader.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addManualComponent</Name>
+				<Source><![CDATA[
+    public void addManualComponent(FormDataSource _dataSource)
+    {
+        RORRentalEditorLine                 selectedLine;
+        RORRentalEditorLine                 kitLine;
+        RORRentalEditorLine                 editorRentalLine;
+        RORRentalEditorLine                 editorRentalLineOther;
+        LineNum                             lineNum;
+    
+        selectedLine.data(_dataSource.cursor());
+    
+        // select the kit line to which the new component should be added
+        if (selectedLine.KitComponentType == RORKitComponentType::Kit ||
+            selectedLine.KitComponentType == RORKitComponentType::KitComponent ||
+            selectedLine.LineNum == 1)
+        {
+            kitLine.data(selectedLine);
+        }
+    
+        // if there is a kit line, add the new component to it
+        if (kitLine.RecId)
+        {
+            _dataSource.positionToRecord(editorRentalLine);
+            _dataSource.create(true);
+    
+            selectedLine = _dataSource.cursor();
+            // init from parent
+            selectedLine.ParentLineRecId = kitLine.RecId;
+            selectedLine.TradeType = kitLine.TradeType;
+            selectedLine.InventLocationId = kitLine.InventLocationId;
+            selectedLine.InventSiteId = kitLine.InventSiteId;
+            selectedLine.LineNum = this.getLineNum(kitLine);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>adjustRentalQty</Name>
+				<Source><![CDATA[
+    private boolean adjustRentalQty(ItemId  _itemId)
+    {
+        boolean             ret;
+        SalesTable          salesTable;
+        SalesQuotationTable salesQuotationTable;
+        RORVenueTable       venueTable;
+    
+        ret = true;
+    
+        if (InventTable::find(_itemId).RORBasePriceOnDistance)
+        {
+            if (callerRentalLine.TableId == tableNum(SalesLine))
+            {
+                select firstOnly RecId from venueTable
+                where venueTable.TransportDistanceQty
+                    exists join salesTable
+                    where salesTable.RORVenueCode == venueTable.VenueCode
+                    &&    salesTable.SalesId == callerRentalLine.HeaderId;
+    
+                    ret = !venueTable.RecId;
+            }
+            else
+            if (callerRentalLine.TableId == tableNum(SalesQuotationLine))
+            {
+                select firstOnly RecId from venueTable
+                where venueTable.TransportDistanceQty
+                    exists join salesQuotationTable
+                    where salesQuotationTable.RORVenueCode == venueTable.VenueCode
+                    &&    salesQuotationTable.QuotationId == callerRentalLine.HeaderId;
+    
+                    ret = !venueTable.RecId;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canOpenForm</Name>
+				<Source><![CDATA[
+    private boolean canOpenForm()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkAddedDeletedLines</Name>
+				<Source><![CDATA[
+    protected void checkAddedDeletedLines()
+    {
+        RORRentalLine       sourceLine = callerRentalLine.RORLineBuffer();
+        RORRentalEditorLine rentalEditorLine;
+    
+        select firstOnly RecId from rentalEditorLine
+        where rentalEditorLine.ParmId == this.parmId()
+        && rentalEditorLine.HeaderId == callerRentalLine.HeaderId
+        && rentalEditorLine.MainKitReference == callerRentalLine.RecId
+        && rentalEditorLine.Include
+        && !rentalEditorLine.RefRecId
+            exists join sourceLine
+            where sourceLine.HeaderId == rentalEditorLine.HeaderId
+            && sourceLine.SuppItemTableRecid == rentalEditorLine.SuppItemTableRecId;
+    
+        if (rentalEditorLine)
+        {
+            linesModifiedByOtherUsers = false;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkCanCloseForm</Name>
+				<Source><![CDATA[
+    public boolean checkCanCloseForm(RORRentalEditorHeader _mainKitHeader)
+    {
+        boolean ret = true;
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkPreviouslyCreated</Name>
+				<Source><![CDATA[
+    private void checkPreviouslyCreated()
+    {
+        RORRentalLine rentalLineCheck = callerRentalLine.RORLineBuffer();
+        ;
+    
+        if (callerRentalLine)
+        {
+            select firstonly ParentLineRecId from rentalLineCheck
+            where rentalLineCheck.HeaderId          == callerRentalLine.HeaderId
+            &&    rentalLineCheck.ParentLineRecId   == callerRentalLine.RecId;
+    
+            areLinesPreviouslyCreated = (rentalLineCheck.ParentLineRecId != 0);
+        }
+        else
+        {
+            // this line hasn't yet been inserted and therefore can't have previously created children
+            areLinesPreviouslyCreated = false;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkSetTaxGroups</Name>
+				<Source><![CDATA[
+    protected abstract void checkSetTaxGroups()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertManuallyAddedlines</Name>
+				<Source><![CDATA[
+    protected void insertManuallyAddedlines()
+    {
+        RORRentalLine       rentalLineCheck = callerRentalLine.RORLineBuffer();
+        RORRentalEditorLine component, parentComponent;
+        SuppItemTable       suppItemTable;
+        ParmId              parmIdLoc = this.parmId();
+
+        while select rentalLineCheck
+        where rentalLineCheck.HeaderId == callerRentalLine.HeaderId
+        &&   (rentalLineCheck.LineType == RORLineType::Normal
+        ||    rentalLineCheck.LineType == RORLineType::Warranty)
+            join KitLevel,lineNum,RecId from parentComponent
+            where parentComponent.RefRecId
+            &&    parentComponent.RefRecId == rentalLineCheck.ParentLineRecId
+                notexists join component
+                where component.ParmId == parmIdLoc
+                &&  component.HeaderId == rentalLineCheck.HeaderId
+                &&  component.InventTransId == rentalLineCheck.InventTransId
+        {
+            component.initFromRentalLine(rentalLineCheck, true, true);
+            component.Include = NoYes::Yes;
+            component.initFromTmpContractLine(this.initContractData(component));
+            component.ParmId                = mainKitHeader.ParmId;
+            component.MainKitReference      = callerRentalLine.RecId;
+            component.KitRequiredLevel      = rentalLineCheck.LineType == RORLineType::Warranty ? RORKitRequiredLevel::Recommended : RORKitRequiredLevel::Optional;
+            component.LineNum               = this.getLineNum(parentComponent);
+            component.ParentLineRecId       = parentComponent ? parentComponent.RecId : recIdMainKit;
+            component.VisibleLineRecId      = component.ParentLineRecId;
+            component.KitLevel              = parentComponent.KitLevel + 1;
+
+            component.insert();
+
+            component.DNRSetAdditionalNotes(rentalLineCheck);
+        }
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkUpdateChildrenPreviouslyIncluded</Name>
+				<Source><![CDATA[
+    protected void checkUpdateChildrenPreviouslyIncluded(Map _mapParentRecId, RefRecId _parentRecId, Level _kitLevel = 1)
+    {
+        RORRentalLine           rentalLineCheck = callerRentalLine.RORLineBuffer();
+        RORRentalEditorLine     component;
+        RecId                   recIdParent;
+        LineNum                 lineNum = 1;
+        lineNum                 contractItemsLineNum = 1;
+        RORRentalEditorLine     parentComponent;
+        SuppItemTable           suppItemTable;
+    
+        void incrementLineNum()
+        {
+            if (component.LineType != RORLineType::Normal)
+            {
+                contractItemsLineNum = component.LineNum;
+            }
+            else
+            {
+                lineNum = component.LineNum;
+            }
+        }
+        ;
+    
+        // this check will come from the RecordViewCache
+        while select rentalLineCheck
+        where rentalLineCheck.HeaderId          == callerRentalLine.HeaderId // ensures it will use the cache
+        &&    rentalLineCheck.ParentLineRecId   == _parentRecId
+            outer join RORKitRequiredLevel from suppItemTable
+            where suppItemTable.RecId == rentalLineCheck.SuppItemTableRecid
+        {
+            recIdParent = (_mapParentRecId.exists(rentalLineCheck.ParentLineRecId)) ? _mapParentRecId.lookup(rentalLineCheck.ParentLineRecId) : recIdMainKit;
+    
+            select firstonly forupdate component
+            where component.ParmId == this.parmId()
+            &&    component.ParentLineRecId == recIdParent
+            &&    component.ItemId          == rentalLineCheck.ItemId
+            &&    component.InventTransId   == ''
+            &&    (!rentalLineCheck.SuppItemTableRecid || component.SuppItemTableRecid == rentalLineCheck.SuppItemTableRecid);
+    
+            component.initFromRentalLine(rentalLineCheck, true, true);
+    
+            if (component.KitComponentType == RORKitComponentType::Component
+            && component.orig().KitComponentType == RORKitComponentType::KitComponent)
+            {
+                // line could be added previously without lines but in RLE it should be set to kitComponent
+                component.KitComponentType = RORKitComponentType::KitComponent;
+            }
+            component.Include = NoYes::Yes;
+            component.initFromTmpContractLine(this.initContractData(component));
+    
+            
+            if (component)
+            {
+                component.WasPreviouslyIncluded = NoYes::Yes;
+                component.update();
+            }
+            else
+            {
+                component.ParmId            = mainKitHeader.ParmId;
+                component.MainKitReference  = callerRentalLine.RecId;
+                component.ParentLineRecId   = recIdParent;
+                component.KitRequiredLevel  = component.LineType == RORLineType::Normal ?
+                                            suppItemTable ? suppItemTable.RORKitRequiredLevel : RORKitRequiredLevel::Optional
+                                            : RORKitRequiredLevel::Recommended;
+                component.KitLevel          = _kitLevel;
+                component.AllowQtyEdit      = rentalLineCheck.AllowQtyEdit;
+
+                select firstonly KitLevel,lineNum,RecId from parentComponent
+                where parentComponent.RecId == recIdParent;
+
+                component.LineNum           = this.getLineNum(parentComponent);
+                component.VisibleLineRecId  = component.ParentLineRecId;
+
+                component.insert();
+            }
+
+            component.DNRSetAdditionalNotes(rentalLineCheck);
+
+            incrementLineNum();
+    
+            _mapParentRecId.insert(rentalLineCheck.RecId, component.RecId);
+    
+            if (rentalLineCheck.KitComponentType != RORKitComponentType::Component)
+            {
+                // recursive call
+                this.checkUpdateChildrenPreviouslyIncluded(_mapParentRecId, rentalLineCheck.RecId, _kitLevel + 1);
+            }
+        }
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>checkUpdatePreviouslyIncluded</Name>
+				<Source><![CDATA[
+    protected void checkUpdatePreviouslyIncluded()
+    {
+        Map mapParentRecId = new Map(Types::Int64, Types::Int64); // key, recId
+        RORRentalEditorLine component;
+        ;
+    
+        // add reference for the top level line
+        mapParentRecId.insert(callerRentalLine.RecId, recIdMainKit);
+    
+        if (callerRentalLine.KitComponentType != RORKitComponentType::Component)
+        {
+            this.checkUpdateChildrenPreviouslyIncluded(mapParentRecId, callerRentalLine.RecId);
+    
+            if (areLinesPreviouslyCreated)
+            {
+                // don't include automatically recommended lines if kit was already previously created and set up
+                update_recordSet component
+                setting Include = NoYes::No
+                where component.ParmId == this.parmId()
+                &&    component.Include
+                &&    !component.InventTransId
+                &&    component.KitRequiredLevel != RORKitRequiredLevel::Mandatory;
+            }
+        }
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearRentalEditorHeaderBuffer</Name>
+				<Source><![CDATA[
+    private void clearRentalEditorHeaderBuffer()
+    {
+        select firstonly mainKitHeader
+        where mainKitHeader.HeaderId    == rentalLineKit.HeaderId
+        && mainKitHeader.RefTableId     == rentalLineKit.TableId
+        && mainKitHeader.RefRecId       == rentalLineKit.RecId;
+    
+        if (mainKitHeader)
+        {
+            insuranceCalcBasis      = mainKitHeader.InsuranceCalcBasis;
+            insurancePercentage     = mainKitHeader.InsurancePercentage;
+            insureRentalStops       = mainKitHeader.InsureRentalStops;
+            transportPrice          = mainKitHeader.TransportPrice;
+            returnTransportPrice    = mainKitHeader.ReturnTransportPrice;
+            warrantyPrice           = mainKitHeader.WarrantyPrice;
+    
+            wasEditedBefore = true;
+        }
+        else
+        {
+            fetchInsuranceFromContract = true;
+        }
+    
+        delete_from mainKitHeader
+        where mainKitHeader.HeaderId    == rentalLineKit.HeaderId
+        && mainKitHeader.RefTableId     == rentalLineKit.TableId
+        && mainKitHeader.RefRecId       == rentalLineKit.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearRentalEditorLineBuffer</Name>
+				<Source><![CDATA[
+    public void clearRentalEditorLineBuffer()
+    {
+        RORRentalEditorLine rentalEditorLine;
+    
+        delete_from rentalEditorLine
+        where rentalEditorLine.ParmId == this.parmId()
+        && rentalEditorLine.HeaderId == rentalLineKit.HeaderId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>copyLine</Name>
+				<Source><![CDATA[
+    public void copyLine(RORRentalEditorLine _rentalEditorLine)
+    {
+        RORRentalEditorLine   rentalEditorLineCopy;
+    
+        rentalEditorLineCopy.data(_rentalEditorLine);
+        rentalEditorLineCopy.LineNum = rentalEditorLineCopy.RORRentalLine::getNextLineNum(_rentalEditorLine.LineNum);
+        rentalEditorLineCopy.insert();
+    
+        ttsBegin;
+        rentalEditorLineCopy.RORRentalLine::updateKitComponentPricing(RORKitPricingActionType::CreateLines, true, true, false);
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createLine</Name>
+				<Source><![CDATA[
+    abstract protected container createLine(RORRentalEditorLine     _rentalEditorLine,
+                                            RORKitComponentType     _kitComponentType,
+                                            RORRentalLine           _lineParent,
+                                            LineNum                 _lastLineNum)
+    {
+        // returns [key, lineNum]
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createRentalContractItemLines</Name>
+				<Source><![CDATA[
+    private void createRentalContractItemLines()
+    {
+        RORRentalEditorLine rentalEditorLine;
+        LineNum             highestLineNum = mainKitRentalEditorLine.LineNum;
+            
+        rentalEditorLine = mainKitRentalEditorLine.RORRentalLine::getWarrantyLine();
+    
+        if (!rentalEditorLine)
+        {
+            highestLineNum += 0.1;
+            rentalEditorLine = mainKitRentalEditorLine.RORCreateExtraLine(mainKitRentalEditorLine.TradeType, RORKitComponentType::Standalone, ragParameters.ItemIdWarranty, highestLineNum);
+        }
+        else
+        {
+            highestLineNum = rentalEditorLine.LineNum;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSelectedLines</Name>
+				<Source><![CDATA[
+    protected void createSelectedLines()
+    {
+        RORRentalLine       lineParent;
+        RORRentalEditorLine rentalEditorLine;
+    
+        ListEnumerator      listEnumerator = List::create(packedRentalEditorLineList).getEnumerator();
+        Map                 mapCreatedLines = new Map(Types::Int64, Types::String); // RecId, LineKey
+    
+        Num                 lineKey;
+        RORKitComponentType kitComponentType;
+        LineNum             lineNum;
+        RORRentalLine       sourceLine;
+        RORRentalDateTimes  rentalDateTimes;
+        RAGParameters       ragParametersLocal = RAGParameters::find();
+    
+        this.checkAddedDeletedLines();
+    
+        while (listEnumerator.moveNext())
+        {
+            rentalEditorLine = listEnumerator.current();
+
+            if (rentalEditorLine.ItemId == ragParametersLocal.ItemIdInsurance
+            || rentalEditorLine.ItemId == ragParametersLocal.ItemIdTransport
+            || rentalEditorLine.ItemId == ragParametersLocal.ItemIdReturnTransport)
+            {
+                // Don't create Transport/Insurance lines
+                continue;
+            }
+    
+            progressBar.update(true);
+            progressBar.setText(strFmt("@SYS14077", rentalEditorLine.ItemId));
+
+            kitComponentType = rentalEditorLine.KitComponentType;
+            sourceLine = this.previouslyCreatedLine(rentalEditorLine);
+    
+            // existing line, so we may need to update
+            if (sourceLine)
+            {
+                ttsBegin;
+                sourceLine.selectForUpdate(true);
+                lineNum = this.updateLine(sourceLine, kitComponentType, rentalEditorLine);
+                ttsCommit;
+    
+                // include previously-created component in map using stored InventTrans from temp table population
+                lineKey = rentalEditorLine.InventTransId;
+            }
+            // newly added line, so create new one
+            else
+            {
+                // find "real" parent reference
+                if (rentalEditorLine.ParentLineRecId)
+                {
+                    lineParent = (rentalEditorLine.ParentLineRecId == recIdMainKit) ? callerRentalLine : this.findLineById(mapCreatedLines.lookup(rentalEditorLine.ParentLineRecId));
+                }
+    
+                [ lineKey, lineNum ] = this.createLine(rentalEditorLine, kitComponentType, lineParent, rentalEditorLine.LineType == RORLineType::Normal ? lastLineNum : lastContractItemLineNum);
+    
+                numLinesCreated ++;
+    
+                if(rentalEditorLine.KitComponentType == RORKitComponentType::Component ||
+                   rentalEditorLine.KitComponentType == RORKitComponentType::KitComponent)
+                {
+                    numComponentsCreated ++;
+                }
+                        
+                delete_from rentalDateTimes
+                where rentalDateTimes.RefTableId == rentalEditorLine.TableId
+                &&    rentalDateTimes.RefRecId   == rentalEditorLine.RecId;
+            }
+    
+            this.setLastLineNum(rentalEditorLine, lineNum);
+            this.updateContractWithChanges(rentalEditorLine, this.findLineById(lineKey));
+    
+            mapCreatedLines.insert(rentalEditorLine.RecId, lineKey);
+            progressBar.incCount();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteRentalContractItemLines</Name>
+				<Source><![CDATA[
+    private void deleteRentalContractItemLines()
+    {
+        RORRentalEditorLine rentalEditorLine;
+        ItemId warrantyItemId = RAGParameters::find().ItemIdWarranty;
+            
+        delete_from rentalEditorLine
+        where rentalEditorLine.ParmId == this.parmId()
+        && rentalEditorLine.HeaderId == mainKitRentalEditorLine.HeaderId
+        && rentalEditorLine.MainKitReference == mainKitRentalEditorLine.MainKitReference
+        && !rentalEditorLine.RentalPrice
+        && rentalEditorLine.ItemId == warrantyItemId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>endProgressBar</Name>
+				<Source><![CDATA[
+    private void endProgressBar()
+    {
+        progressBar.setText(strFmt("@SYS14077", callerRentalLine.ItemId));
+        progressBar.update(true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isNormalLine</Name>
+				<Source><![CDATA[
+    public boolean isNormalLine(RORRentalLine _rentalLine)
+    {
+        boolean ret = true;
+        RAGParameters ragParametersLocal = RAGParameters::find();
+    
+        if (_rentalLine.ItemId == ragParametersLocal.ItemIdInsurance
+        || _rentalLine.ItemId == ragParametersLocal.ItemIdTransport
+        || _rentalLine.ItemId == ragParametersLocal.ItemIdReturnTransport
+        || _rentalLine.ItemId == ragParametersLocal.ItemIdWarranty)
+        {
+            ret = false;
+        }
+
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findKitComponentType</Name>
+				<Source><![CDATA[
+    private RORKitComponentType findKitComponentType(RORRentalLine _rentalLine, RORRentalEditorLine _rentalEditorLine = null)
+    {
+        RORKitComponentType kitComponentType = _rentalLine.KitComponentType;
+        RORRentalEditorLine rentalEditorLine = _rentalEditorLine;
+        RORRentalLine       parentRentalLine = _rentalLine.RORLineBuffer();
+        RORKitStandalone    kitStandalone = BOBRentalType::findFromItemId(_rentalLine.ItemId).RORKitStandalone;
+        ItemId warrantyItemId = RAGParameters::find().ItemIdWarranty;
+        
+        if (!_rentalEditorLine && _rentalLine.TableId == tableNum(RORRentalEditorLine))
+        {
+            rentalEditorLine = _rentalLine;
+        }
+    
+        if (this.isNormalLine(_rentalLine) &&  kitStandalone != RORKitStandalone::Standalone)
+        {
+            if (!_rentalEditorLine && _rentalLine.TableId != tableNum(RORRentalEditorLine))
+            {
+                select firstOnly rentalEditorLine
+                where rentalEditorLine.ParmId == this.parmId()
+                && rentalEditorLine.HeaderId == _rentalLine.HeaderId
+                && rentalEditorLine.InventTransId == _rentalLine.InventTransId;
+            }
+    
+            if (rentalEditorLine)
+            {
+                if (_rentalLine.ParentLineRecId)
+                {
+                    select firstOnly parentRentalLine
+                    where parentRentalLine.TableId == _rentalLine.TableId
+                    && parentRentalLine.RecId == _rentalLine.ParentLineRecId;
+                }
+    
+                if (parentRentalLine && parentRentalLine.KitComponentType == RORKitComponentType::Standalone)
+                {
+                    kitComponentType = RORKitComponentType::Standalone;
+                }
+                else if (rentalEditorLine.hasIncludedChildren())
+                {
+                    kitComponentType = (_rentalLine.ParentLineRecId && _rentalLine.TradeType != RORTradeType::SalesPurch) ?  RORKitComponentType::KitComponent : RORKitComponentType::Kit;
+                }
+                else if ((rentalEditorLine.KitComponentType == RORKitComponentType::Component ||
+                rentalEditorLine.KitComponentType == RORKitComponentType::KitComponent)
+                && rentalEditorLine.RecId == mainKitRentalEditorLine.RecId)
+                {
+                    kitComponentType = callerRentalLine.KitComponentType;
+                }
+                else
+                {
+                    kitComponentType = (_rentalLine.ParentLineRecId) ?
+                        RORKitComponentType::Component :
+                        kitStandalone == RORKitStandalone::Kit ? RORKitComponentType::Kit : RORKitComponentType::Standalone;
+                }
+            }
+        }
+        else
+        {
+            if (rentalEditorLine && rentalEditorLine.ParentLineRecId)
+            {
+                select firstOnly parentRentalLine
+                where parentRentalLine.TableId == _rentalLine.TableId
+                && parentRentalLine.RecId == _rentalLine.ParentLineRecId;
+            }
+    
+            if (parentRentalLine && parentRentalLine.TradeType == _rentalLine.TradeType)
+            {
+                kitComponentType = RORKitComponentType::Component;
+            }
+            else if ((rentalEditorLine.KitComponentType == RORKitComponentType::Component ||
+            rentalEditorLine.KitComponentType == RORKitComponentType::KitComponent)
+            && rentalEditorLine.RecId == mainKitRentalEditorLine.RecId)
+            {
+                kitComponentType = callerRentalLine.KitComponentType;
+            }
+            else
+            {
+                kitComponentType = RORKitComponentType::Standalone;
+            }
+        }
+    
+        return kitComponentType;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findLineById</Name>
+				<Source><![CDATA[
+    abstract protected RORRentalLine findLineById(InventTransId _inventTransId)
+    {
+    
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getCallerRentalLine</Name>
+				<Source><![CDATA[
+    public RORRentalLine getCallerRentalLine()
+    {
+        return callerRentalLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getRecIdMainKit</Name>
+				<Source><![CDATA[
+    public RecId getRecIdMainKit()
+    {
+        return recIdMainKit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>includeLinesFromContract</Name>
+				<Source><![CDATA[
+    private void includeLinesFromContract(RefRecId _parentRecId)
+    {
+        RORRentalEditorLine   rentalLineFromContract;
+        ItemId warrantyItemId = RAGParameters::find().ItemIdWarranty;
+    
+        while select forupdate rentalLineFromContract
+        where rentalLineFromContract.ParmId == this.parmId()
+        && rentalLineFromContract.HeaderId == callerRentalLine.HeaderId
+        && rentalLineFromContract.ParentLineRecId == _parentRecId
+        && (rentalLineFromContract.ItemId == warrantyItemId  ||
+            (rentalLineFromContract.KitComponentType == RORKitComponentType::KitComponent && rentalLineFromContract.Include))
+        {
+            if (rentalLineFromContract.KitComponentType == RORKitComponentType::KitComponent)
+            {
+                this.includeLinesFromContract(rentalLineFromContract.RecId);
+            }
+            else
+            {
+                rentalLineFromContract.Include = NoYes::Yes;
+                rentalLineFromContract.update();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        RORRentalEditorLine mainKitLine;
+        ;
+    
+        rentalLineKit = callerRentalLine.RORRentalLine::getAdditionalLineParent();
+        parameters = RORParameters::find();
+        rentalEditorLineInsertList.sortOrder(fieldNum(RORRentalEditorLine, RecId));
+
+        lastContractItemLineNum = callerRentalLine.RORRentalLine::getLineNum();
+        lastLineNum = lastContractItemLineNum; 
+        expandedRecordsMap = new Map(Types::Int64, Types::Int64);
+        
+        ttsBegin;
+    
+        this.clearRentalEditorHeaderBuffer();
+        this.initCache();
+        this.checkPreviouslyCreated();
+        mainKitLine = this.addMainKit();
+        this.addMainKitHeader(mainKitLine);
+
+        ttsCommit; //The tts block is closed here as the populateFromItem process can run in async mode where the tts value needs to be 0
+
+        systemSequence.suspendRecIds(tableNum(RORRentalEditorLine));
+
+        this.populateFromItem(callerRentalLine.ItemId, mainKitLine);
+
+        systemSequence.removeRecIdSuspension(tableNum(RORRentalEditorLine));
+
+        ttsbegin;
+
+        //populate rental dates for the RLE lines as some of them might be blank due to performance optimization
+        this.updateRentalDates(mainKitLine);
+
+        this.initKitPrices();
+
+        if (areLinesPreviouslyCreated)
+        {
+            this.insertManuallyAddedlines();
+        }
+
+        RORKitPriceManager::construct(mainKitRentalEditorLine, mainKitRentalEditorLine.KitComponentType == RORKitComponentType::Standalone ? RORKitPriceUpdateType::Standalone : RORKitPriceUpdateType::FromComponent, RORKitPricingActionType::CreateLines).run();
+    
+        this.checkSetTaxGroups();
+
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateRentalDates</Name>
+				<Source><![CDATA[
+    protected void updateRentalDates(RORRentalEditorLine _mainKitLine)
+    {
+        RORRentalEditorLine rleLines;
+        RORRentalDateTimes  rentalDTCaller, rentalDTUpdate;
+        utcDatetime         dateTimeNull = dateTimeUtil::minValue();
+        ParmId              parmIdLoc = this.parmId();
+
+        select rentalDTCaller
+        where rentalDTCaller.RefRecId   == _mainKitLine.RecId
+        &&    rentalDTCaller.RefTableId == _mainKitLine.TableId;
+
+        rentalDTUpdate.skipDataMethods();
+        rentalDTUpdate.skipEvents();
+
+        update_recordset rentalDTUpdate
+        setting OnRentDateTime          = rentalDTCaller.OnRentDateTime,
+                ExpectedOffRentDateTime = rentalDTCaller.ExpectedOffRentDateTime,
+                OffRentDateTime         = rentalDTCaller.OffRentDateTime
+        join TableId from rleLines
+        where rleLines.RecId    == rentalDTUpdate.RefRecId
+        &&    rleLines.TableId  == rentalDTUpdate.RefTableId
+        &&    rleLines.ParmId   == parmIdLoc
+        &&    !rleLines.Include;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initCache</Name>
+				<Source><![CDATA[
+    protected void initCache()
+    {
+        RORRentalLine rentalLineCache = callerRentalLine.RORLineBuffer();
+        ;
+    
+        // add all lines from current order to the RecordViewCache
+        select nofetch rentalLineCache
+        where rentalLineCache.HeaderId == callerRentalLine.HeaderId;
+    
+        recordViewCache = new RecordViewCache(rentalLineCache);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initContractData</Name>
+				<Source><![CDATA[
+    private RAGTmpContractLine initContractData(RORRentalEditorLine _rentalEditorLine)
+    {
+        Common                  common = _rentalEditorLine.salesPurchLine();
+        RORRentalLine           rentalLine = common;
+        RAGTmpContractLine      tmpContractLine;
+        ;
+
+        if(_rentalEditorLine.TradeType != RORTradeType::SalesPurch)
+        { 
+            tmpContractLine = RAGContractData::getTmpContractLineFromRentalLine(rentalLine ? rentalLine : _rentalEditorLine);
+        }
+    
+        return tmpContractLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFromCallerHeader</Name>
+				<Source><![CDATA[
+    abstract public void initFromCallerHeader(RORRentalEditorLine _rentalEditorLine)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initKitPrices</Name>
+				<Source><![CDATA[
+    private void initKitPrices()
+    {
+        mainKitRentalEditorLine.selectForUpdate(true);
+                
+        if (areLinesPreviouslyCreated)
+        {
+            mainKitRentalEditorLine.initFromRentalLine(callerRentalLine);
+            mainKitRentalEditorLine.update();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initProgressBar</Name>
+				<Source><![CDATA[
+    private void initProgressBar()
+    {
+        #AVIFiles
+        RORRentalEditorLine    rentalEditorLine;
+        ;
+    
+        select count(RecId) from rentalEditorLine
+        where rentalEditorLine.ParmId == this.parmId()
+        && rentalEditorLine.HeaderId == rentalLineKit.HeaderId
+        && rentalEditorLine.include;
+    
+        progressBar = SysOperationProgress::newGeneral(#AVIUpdate, "@DNR4527", rentalEditorLine.RecId + 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>INVsetMultiplierRate</Name>
+				<Source><![CDATA[
+    public void INVsetMultiplierRate(
+        RORRentalEditorLine _editorRentalLine)
+    {
+        SalesQuotationLine      salesQuotationLine;
+        SalesLine               salesLine;
+    
+        RORRentalDateTimes      rentalDateTimes;
+        FINRentalInvoiceProfile     invoiceProfile;
+            
+        invoiceProfile = FINRentalInvoiceProfile::find(callerRentalLine.INVInvoiceProfileId);
+    
+        if (invoiceProfile.PriceTierMultiplierCalcMethod == INVPriceTierMultiplierCalcMethod::Creating)
+        {
+            switch (callerRentalLine.TableId)
+            {
+                case tableNum(SalesLine):
+                    salesLine = SalesLine::findInventTransId(callerRentalLine.InventTransId);
+                    rentalDateTimes = salesLine.RORRentalDateTimesHost::rentalDateTimes();
+                    break;
+    
+                case tableNum(SalesQuotationLine):
+                    salesQuotationLine = SalesQuotationLine::findInventTransId(callerRentalLine.InventTransId);
+                    rentalDateTimes = salesQuotationLine.RORRentalDateTimesHost::rentalDateTimes();
+                    break;
+            }
+    
+            if (rentalDateTimes)
+            {
+                _editorRentalLine.RORRentalLine::updateCalendarPeriodsMultiplierRate(
+                    rentalDateTimes,
+                    invoiceProfile,
+                    _editorRentalLine.LineType == RORLineType::Transport ? RAGAgreementType::TransportTier : RAGAgreementType::PriceTier,
+                    null,
+                    false,
+                    DateTimeUtil::minValue(),
+                    DateTimeUtil::minValue());
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mainKitHeaderInUseUserId</Name>
+				<Source><![CDATA[
+    public JournalBlockInUseUserId mainKitHeaderInUseUserId()
+    {
+        return mainKitHeader.SessionNum ? new xSession(mainKitHeader.SessionNum).userId() : '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustHaveEffectiveFromValue</Name>
+				<Source><![CDATA[
+    private boolean mustHaveEffectiveFromValue()
+    {
+        boolean             ret = false;
+        RORRentalEditorLine rentalEditorLine;
+        RORRentalLine       sourceLine = callerRentalLine.RORLineBuffer();
+        ;
+    
+        while select rentalEditorLine
+        where rentalEditorLine.ParmId == this.parmId()
+        && rentalEditorLine.HeaderId == callerRentalLine.HeaderId
+        && rentalEditorLine.MainKitReference == callerRentalLine.RecId
+        && rentalEditorLine.InventTransId
+            join  sourceLine
+            where sourceLine.InventTransId == rentalEditorLine.InventTransId
+        {
+            if (sourceLine.RentalGrossAmount    != rentalEditorLine.RentalGrossAmount
+            ||  sourceLine.RentQty              != rentalEditorLine.RentalQty
+            ||  sourceLine.CalendarId           != rentalEditorLine.DNRCalendarId
+            ||  sourceLine.INVRentalModeId      != rentalEditorLine.INVRentalModeId
+            ||  sourceLine.RORRentalLine::editNetAmount(false, 0) != rentalEditorLine.RORRentalLine::editNetAmount(false, 0))
+            {
+                ret = true;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new(RORRentalLine _rentalLine)
+    {
+        Common common;
+    
+        callerRentalLine = _rentalLine;
+        common = _rentalLine.RORGetHeader();
+        callerHeader = common;
+        hasPotentialLinesToCreate = false;
+        ragParameters = RAGParameters::find();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmConvertPrices</Name>
+				<Source><![CDATA[
+    public boolean parmConvertPrices(boolean _convertPrices = convertPrices)
+    {
+        convertPrices = _convertPrices;
+    
+        return convertPrices;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmEditMode</Name>
+				<Source><![CDATA[
+    public RORRentalLineEditMode parmEditMode(RORRentalLineEditMode _editMode = editMode)
+    {
+        editMode = _editMode;
+        return editMode;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmForceDisplay</Name>
+				<Source><![CDATA[
+    public boolean parmForceDisplay(boolean _forceDisplay = forceDisplay)
+    {
+        forceDisplay = _forceDisplay;
+        return forceDisplay;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmId</Name>
+				<Source><![CDATA[
+    public ParmId parmId()
+    {
+        if (!parmId)
+        {
+            parmId = NumberSeq::newGetNum(CompanyInfo::numRefParmId()).num();
+        }
+        return parmId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmPackedRentalEditorLineList</Name>
+				<Source><![CDATA[
+    public container parmPackedRentalEditorLineList(container _packedRentalEditorLineList = packedRentalEditorLineList)
+    {
+        packedRentalEditorLineList = _packedRentalEditorLineList;
+    
+        return packedRentalEditorLineList;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>populateFromItem</Name>
+				<Source><![CDATA[
+    [SuppressBPWarningAttribute("BPCheckInsertMethodInLoop", "selectedComponents.setTmp(); has been set as a Tmp table" )]
+    protected void populateFromItem(ItemId                  _itemIdKit,
+                                    RORRentalEditorLine     _currentParent = null,
+                                    Level                   _kitLevel = 1)
+    {
+        RORRentalEditorLine     selectedComponents;
+        InventTable             inventTable;
+        EcoResProduct           ecoResProduct;
+        RAGtmpContractLine      tmpContractLine;
+        SuppItem                suppItem;
+        TmpSuppItem             tmpSuppItem;
+        Common                  common = callerRentalLine;
+        SalesPurchLine          salesPurchLineDummy;
+        RORKitComponentType     kitComponentType;
+        RORTradeType            tradeType;
+        BOBRentalType           rentalType;
+        RORRentalEditorHeader   selectedComponentsHeader;
+        RORTradeType            filterTradeType = _kitLevel == 1 ? callerRentalLine.TradeType : _currentParent.TradeType;
+        LineNum                 lineNum = _currentParent.LineNum;
+        RORRentalLine           rentalLineCheck = callerRentalLine.RORLineBuffer();
+    
+        if (_itemIdKit)
+        {
+            // create a line for supplentary item itself
+            // a SalesPurchLine instance is needed to use SuppItem class functionality, so create a dummy record
+            common = new SysDictTable(common.TableId).makeRecord();
+            common.data(callerRentalLine); // This is needed so that we dont pass the reference of original record
+            salesPurchLineDummy = common; // copy from main kit and then modify the required fields
+            salesPurchLineDummy.salesPurchLineInterface().DNRassignItemId(_itemIdKit);
+    
+            suppItem = SuppItem::newSuppItem(callerHeader, HeadingLine::Line);
+
+            suppItem.DNRparmTradeType(filterTradeType); // Used in /Classes/SuppItem/Methods/calcSuppItem
+            suppItem.DNRCalcSuppItem(salesPurchLineDummy);
+            suppItem.DNRparmTradeType(RORTradeType::SalesPurch);
+            
+            tmpSuppItem = suppItem.tmpSuppItem();
+
+            this.updateTmpSuppItemBulk(tmpSuppItem);
+
+            // loop through all supplementary items which are linked to a product which has components,
+            // AND are set to auto-create. Other items are not relevant in the prompt dialog
+            while select tmpSuppItem
+            order by RORTradeType desc, RORKitRequiredLevel desc, RORKitStandalone asc, RecId asc
+                outer join rentalLineCheck
+                where rentalLineCheck.HeaderId == callerRentalLine.HeaderId
+                &&  rentalLineCheck.ParentLineRecId == _currentParent.RefRecId
+                &&  rentalLineCheck.SuppItemTableRecid == tmpSuppItem.SuppItemTableRecid
+            {
+                selectedComponents.clear();
+
+                if (rentalLineCheck)
+                {
+                    selectedComponents.initFromRentalLine(rentalLineCheck, true, true);
+                    selectedComponents.Include = NoYes::Yes;
+                    selectedComponents.initFromTmpContractLine(this.initContractData(selectedComponents));
+                    selectedComponents.WasPreviouslyIncluded = NoYes::Yes;
+                }
+                else
+                {
+                    tradeType = tmpSuppItem.RORTradeType;
+
+                    if (editMode == RORRentalLineEditMode::Create)
+                    {
+                        selectedComponents.Include = (tmpSuppItem.RORKitRequiredLevel == RORKitRequiredLevel::Optional || (_currentParent && !_currentParent.Include)) ? NoYes::No : NoYes::Yes;
+                    }
+
+                    if (_currentParent)
+                    {
+                        if (_kitLevel > 1
+                        && _currentParent.TradeType == RORTradeType::SalesPurch
+                        && _currentParent.KitComponentType == RORKitComponentType::Standalone)
+                        {
+                            // treat as if there would be no parent
+                            kitComponentType = tmpSuppItem.RORKitStandalone == RORKitStandalone::Kit ? RORKitComponentType::Kit : RORKitComponentType::Standalone;
+                        }
+                        else
+                        {
+                            kitComponentType = (_currentParent.TradeType != RORTradeType::SalesPurch && tradeType == RORTradeType::SalesPurch) ?
+                                tmpSuppItem.RORKitStandalone == RORKitStandalone::Kit ? RORKitComponentType::Kit : RORKitComponentType::Standalone :
+                                RORKitComponentType::Component;
+    
+                            if ((tradeType == _currentParent.TradeType)
+                            &&  (selectedComponents.Include ||
+                            editMode != RORRentalLineEditMode::Create ||
+                            _currentParent.RecId != mainKitRentalEditorLine.RecId ||
+                            mainKitRentalEditorLine.KitComponentType == RORKitComponentType::Kit))
+                            {
+                                this.updateParentKitComponentType(_currentParent);
+                            }
+    
+                            if (_currentParent.KitComponentType == RORKitComponentType::Standalone && kitComponentType == RORKitComponentType::Component)
+                            {
+                                kitComponentType = RORKitComponentType::Standalone;
+                            }
+                        }
+                    }
+                    else // no parent
+                    {
+                        kitComponentType = tmpSuppItem.RORKitStandalone == RORKitStandalone::Kit ? RORKitComponentType::Kit : RORKitComponentType::Standalone;
+                    }
+
+                    selectedComponents.RefTableId           = callerRentalLine.TableId;
+                    selectedComponents.RefRecId             = 0;
+                    selectedComponents.HeaderId             = callerRentalLine.HeaderId;                    
+                    selectedComponents.CurrencyCode         = callerRentalLine.CurrencyCode;
+                    selectedComponents.InventSiteId         = (_currentParent && _currentParent.InventSiteId) ? _currentParent.InventSiteId : callerHeader.salesPurchTableInterface().DNrparmInventSiteId();
+                    selectedComponents.TradeType            = tradeType;
+                    selectedComponents.ItemId               = tmpSuppItem.ItemId;
+                    selectedComponents.modifiedItemId();
+                    selectedComponents.AllowQtyEdit         = tmpSuppItem.RORAllowQtyEdit;
+
+                    this.initFromCallerHeader(selectedComponents);
+
+                    if (callerRentalLine.PriceTimeUnit)
+                    {
+                        selectedComponents.PriceTimeUnit    = callerRentalLine.PriceTimeUnit;
+                    }
+
+                    selectedComponents.KitComponentType     = kitComponentType;
+                    // Values from rental type should overwrite defaults from header.
+                    selectedComponents.RORRentalLine::initFromRentalType(inventTable.ItemId);
+                    SuppItemTable suppItemTable = tmpSuppItem.DNRsuppItemTable();
+                    Qty           qtyMultiplier = 1;
+
+                    if (suppItemTable.SuppItemQty && _currentParent.QtyOrdered)
+                    {
+                        qtyMultiplier = _currentParent.QtyOrdered;
+                    }
+    
+                    if (this.adjustRentalQty(selectedComponents.ItemId))
+                    {
+                        selectedComponents.QtyOrdered        = tmpSuppItem.Qty * qtyMultiplier;
+                        selectedComponents.RentalQty         = tmpSuppItem.Qty * qtyMultiplier;
+                    }
+                    else
+                    {
+                        selectedComponents.QtyOrdered        = selectedComponents.RentalQty * qtyMultiplier;
+                    }
+
+                    if (!selectedComponents.InventLocationId)
+                    {
+                        selectedComponents.InventLocationId = callerHeader.salesPurchTableInterface().DNRparmInventLocationId();
+                    }
+
+                    if (_currentParent)
+                    {
+                        selectedComponents.LineType         = _currentParent.LineType;
+                        selectedComponents.INVRentalModeId  = _currentParent.INVRentalModeId;
+                        selectedComponents.InventLocationId = _currentParent.InventLocationId;
+                        selectedComponents.InventSiteId     = _currentParent.InventSiteId;
+                    }
+                    else
+                    {
+                        selectedComponents.LineType         = callerRentalLine.LineType;
+                        selectedComponents.INVRentalModeId  = callerRentalLine.INVRentalModeId;
+                    }
+
+                    selectedComponents.INVRateMultiplierTier = 1;
+
+                    if(tmpSuppItem.SuppItemFree)
+                    {
+                        selectedComponents.RORRentalLine::editDiscPercent(true, 100);
+                    }
+                }
+
+                lineNum = this.getLineNum(_currentParent, lineNum);
+                selectedComponents.MainKitReference     = callerRentalLine.RecId;
+                selectedComponents.ParmId               = this.parmId();
+                selectedComponents.SuppItemTableRecid   = tmpSuppItem.SuppItemTableRecid;                    
+                selectedComponents.LineNum              = lineNum;
+                selectedComponents.KitLevel             = _kitLevel;
+                selectedComponents.KitRequiredLevel     = tmpSuppItem.RORKitRequiredLevel;
+                selectedComponents.ParentLineRecId      = _currentParent ? _currentParent.RecId : recIdMainKit;
+                selectedComponents.VisibleLineRecId     = selectedComponents.ParentLineRecId;  
+  
+                selectedComponents.RecId = systemSequence.reserveValues(1, tableNum(RORRentalEditorLine)); 
+
+                if (rentalLineCheck)
+                {
+                    selectedComponents.DNRSetAdditionalNotes(rentalLineCheck);
+                }
+                hasPotentialLinesToCreate = true;                
+
+                if (_kitLevel > 15)
+                {
+                    // Clear already inserted records in RentalEditorLine before throwing Exception
+                    delete_from selectedComponentsHeader
+                    where selectedComponentsHeader.ParmId == this.parmId();
+                    // Throw the exception because of Recursive Supplementry item reference detected
+                    throw error(strFmt("@DNR:SupplemetaryRentalItemsFetchError", callerRentalLine.ItemId));
+                }
+
+                // if subkits exist then also add the components to the selection form
+                this.populateFromItem(selectedComponents.ItemId, selectedComponents, _kitLevel + 1);
+
+                rentalEditorLineInsertList.ins(selectedComponents);
+            }
+
+            if (_kitLevel == 1)
+            {
+                //the ttsblock is moved here to let the aSync mode work as the separate thread is not able to find the records if not committed here
+                ttsbegin;
+                rentalEditorLineInsertList.insertDatabase();
+                ttscommit;
+
+                this.processRAGContractData();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processRAGContractData</Name>
+				<Source><![CDATA[
+    protected void processRAGContractData()
+    {
+        RORRentalEditorLine rentalEditorLine;
+        RAGtmpContractLine  tmpContractLine;
+
+        boolean skipNotIncluded = RAGParameters::find().SkipRAGCalcForOtionalRLEComponents;
+        boolean modifyMode = editMode == RORRentalLineEditMode::Modify;
+
+        ttsbegin;
+        while select forupdate rentalEditorLine
+        where rentalEditorLine.ParmId == this.parmId()
+        && rentalEditorLine.RecId != mainKitRentalEditorLine.RecId // For the main item, calculations have already been performed at the source and copied to the RLE
+        && (!modifyMode || rentalEditorLine.InventTransId == "")
+        && (!skipNotIncluded || rentalEditorLine.Include == NoYes::Yes)
+        && rentalEditorLine.QtyOrdered > 0
+        {
+            this.processRentalEditorLineRAGContractData(rentalEditorLine);
+            rentalEditorLine.IsPriceCalculated = true;
+            rentalEditorLine.doUpdate();
+        }
+        ttscommit;
+
+        if (skipNotIncluded)
+        {
+            runAsync(classNum(RORRentalLineEditorFormV2),
+                    staticMethodStr(RORRentalLineEditorFormV2, calcOptionalRLEPricesAsync),
+                    [buf2Con(mainKitRentalEditorLine)]);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>calcOptionalRLEPricesAsync</Name>
+				<Source><![CDATA[
+    public static void calcOptionalRLEPricesAsync(container _params, System.Threading.CancellationToken _cancellationToken)
+    {
+        RORRentalEditorLine mainKitRentalEditorLineLoc = con2Buf(conPeek(_params, 1));
+
+        if (!mainKitRentalEditorLineLoc)
+        {
+            return;
+        }
+
+        //Calculating the prices for the optional lines OR not included lines only
+        RORRentalEditorLine rentalEditorLine;
+        InventTable         inventTable;
+
+        while select forupdate rentalEditorLine
+        where rentalEditorLine.ParmId == mainKitRentalEditorLineLoc.parmId
+        && rentalEditorLine.RecId != mainKitRentalEditorLineLoc.RecId // For the main item, calculations have already been performed at the source and copied to the RLE
+        && (rentalEditorLine.InventTransId == "")
+        && (rentalEditorLine.Include == NoYes::No)
+        && rentalEditorLine.QtyOrdered > 0
+            join inventTable
+            where inventTable.ItemId == rentalEditorLine.ItemId
+        {
+            //Init contract Data
+            Common                  common = rentalEditorLine.salesPurchLine();
+            RORRentalLine           rentalLine = common;
+            RAGTmpContractLine      tmpContractLine;
+
+            rentalEditorLine.selectForUpdate(true);
+
+            if (rentalEditorLine.TradeType != RORTradeType::SalesPurch)
+            {
+                tmpContractLine = RAGContractData::getTmpContractLineFromRentalLine(rentalLine ? rentalLine : rentalEditorLine);
+
+                rentalEditorLine.initFromTmpContractLine(tmpContractLine);
+            }
+
+            boolean             ret = true;
+            RORVenueTable       venueTable;
+            SalesTable          salesTable;
+            SalesQuotationTable salesQuotationTable;
+    
+            if (inventTable.RORBasePriceOnDistance)
+            {
+                if (rentalEditorLine.TableId == tableNum(SalesLine))
+                {
+                    select firstOnly RecId from venueTable
+                    where venueTable.TransportDistanceQty
+                        exists join salesTable
+                        where salesTable.RORVenueCode == venueTable.VenueCode
+                        &&    salesTable.SalesId == rentalEditorLine.HeaderId;
+    
+                    ret = !venueTable.RecId;
+                }
+                else if (rentalEditorLine.TableId == tableNum(SalesQuotationLine))
+                {
+                    select firstOnly RecId from venueTable
+                    where venueTable.TransportDistanceQty
+                        exists join salesQuotationTable
+                        where salesQuotationTable.RORVenueCode == venueTable.VenueCode
+                        &&    salesQuotationTable.QuotationId == rentalEditorLine.HeaderId;
+    
+                    ret = !venueTable.RecId;
+                }
+            }
+
+            if (ret)
+            {
+                rentalEditorLine.setPriceDisc(null, false);
+            }
+
+            rentalEditorLine.INVSetTierMultiplierRateOnCreation();
+            rentalEditorLine.IsPriceCalculated = true;
+            
+            ttsbegin;
+            rentalEditorLine.doUpdate();
+            ttscommit;
+        }
+
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processRAGContractData_SubKit</Name>
+				<Source><![CDATA[
+    public void processRAGContractData_SubKit(RecId _parentLineRecId)
+    {
+        RORRentalEditorLine rentalEditorLine;
+        RAGtmpContractLine tmpContractLine;
+
+        ttsbegin;
+
+        while select forupdate rentalEditorLine
+        where rentalEditorLine.ParmId == this.parmId()
+        && (!_parentLineRecId || rentalEditorLine.ParentLineRecId == _parentLineRecId)
+        {
+            if (rentalEditorLine.Include || rentalEditorLine.QtyOrdered == 0)
+            {
+                continue; //the included line's price has already been calculated in first place
+            }
+
+            if (rentalEditorLine.TradeType != RORTradeType::SalesPurch && rentalEditorLine.BOBRentalTypeId)
+            {
+                rentalEditorLine.selectForUpdate(true);
+                
+                this.processRentalEditorLineRAGContractData(rentalEditorLine);
+
+                rentalEditorLine.doUpdate();
+            }
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processRentalEditorLineRAGContractData</Name>
+				<Source><![CDATA[
+    public void processRentalEditorLineRAGContractData(RORRentalEditorLine _rentalEditorLine)
+    {
+        RAGtmpContractLine tmpContractLine = this.initContractData(_rentalEditorLine);
+        _rentalEditorLine.initFromTmpContractLine(tmpContractLine);
+
+        if (convertPrices || this.adjustRentalQty(_rentalEditorLine.ItemId))
+        {
+            _rentalEditorLine.setPriceDisc(null, false);
+        }
+
+        _rentalEditorLine.INVSetTierMultiplierRateOnCreation();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>previouslyCreatedLine</Name>
+				<Source><![CDATA[
+    protected RORRentalLine previouslyCreatedLine(RORRentalEditorLine _rentalEditorLine)
+    {
+        RORRentalLine   sourceLine = callerRentalLine.RORLineBuffer();
+    
+        if (_rentalEditorLine.RefRecId)
+        {
+            if (_rentalEditorLine.RefRecId == callerRentalLine.RecId)
+            {
+                return callerRentalLine;
+            }
+            else
+            {
+                // Check if wasn't deleted
+                select firstOnly sourceLine
+                where sourceLine.RecId == _rentalEditorLine.RefRecId;
+            }
+    
+            // if (!sourceLine) then Line will be re-created
+        }
+        else if (linesModifiedByOtherUsers && _rentalEditorLine.SuppItemTableRecid)
+        {
+            // Check if was added by another user
+            select firstOnly sourceLine
+            where sourceLine.HeaderId == callerRentalLine.HeaderId
+            && sourceLine.SuppItemTableRecid == _rentalEditorLine.SuppItemTableRecid;
+    
+            // if (sourceLine) then Line will be updated
+        }
+    
+        return sourceLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>prompt</Name>
+				<Source><![CDATA[
+    public boolean prompt()
+    {
+        boolean ret;
+        Args    args;
+        FormRun formRun;
+        ;
+    
+        if (hasPotentialLinesToCreate || forceDisplay)
+        {
+            args = new Args();
+            args.name(formStr(RORRentalLineEditorV2));
+            args.caller(this);
+    
+            formRun = ClassFactory::formRunClassOnClient(args);
+            formRun.init();
+            formRun.run();
+            formRun.wait(/*true*/);
+    
+            ret = formRun.closedOk();
+        }
+        else
+        {
+            ret = true; // otherwise saving of line will be cancelled
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>removeUnselectedLines</Name>
+				<Source><![CDATA[
+    protected void removeUnselectedLines()
+    {
+        RORRentalLine       rentalLineDelete = callerRentalLine.RORLineBuffer();
+        RORRentalEditorLine rentalEditorLine;
+        boolean             updateContract;
+
+
+        while select forUpdate rentalLineDelete
+        where rentalLineDelete.LineType == RORLineType::Normal
+            exists join rentalEditorLine
+            where rentalEditorLine.ParmId == this.parmId()
+            && rentalEditorLine.HeaderId == callerRentalLine.HeaderId
+            && rentalEditorLine.MainKitReference == callerRentalLine.RecId
+            && !rentalEditorLine.Include
+            && rentalEditorLine.RefTableId == rentalLineDelete.TableId
+            && rentalEditorLine.RefRecId == rentalLineDelete.RecId
+        {
+            if (rentalLineDelete.validateDelete())
+            {
+                rentalLineDelete.delete();
+            }
+        }
+    
+        // Rental agreement items are sometimes deleted directly in RLE form.
+        // Update also rental contract
+        while select rentalLineDelete
+        where rentalLineDelete.LineType != RORLineType::Normal
+        && rentalLineDelete.HeaderId == callerRentalLine.HeaderId
+        && rentalLineDelete.ParentLineRecId == callerRentalLine.RecId
+            notExists join rentalEditorLine
+            where rentalEditorLine.ParmId == this.parmId()
+            && rentalEditorLine.HeaderId == callerRentalLine.HeaderId
+            && rentalEditorLine.MainKitReference == callerRentalLine.RecId
+            && rentalEditorLine.Include
+            && rentalEditorLine.RefTableId == rentalLineDelete.TableId
+            && (rentalEditorLine.RefRecId == rentalLineDelete.RecId ||
+                (!rentalEditorLine.RefRecId && rentalEditorLine.LineType == rentalLineDelete.LineType))
+        {
+            if (rentalLineDelete.LineType == RORLineType::Insurance
+            &&  mainKitRentalEditorLine.InsurancePercentage)
+            {
+                mainKitRentalEditorLine.InsurancePercentage = 0;
+                updateContract = true;
+            }
+            if (rentalLineDelete.LineType == RORLineType::Transport
+            &&  rentalLineDelete.ItemId == ragParameters.ItemIdTransport
+            &&  mainKitRentalEditorLine.TransportPrice)
+            {
+                mainKitRentalEditorLine.TransportPrice = 0;
+                updateContract = true;
+            }
+            if (rentalLineDelete.LineType == RORLineType::Transport
+            &&  rentalLineDelete.ItemId == ragParameters.ItemIdReturnTransport
+            &&  mainKitRentalEditorLine.ReturnTransportPrice)
+            {
+                mainKitRentalEditorLine.ReturnTransportPrice = 0;
+                updateContract = true;
+            }
+            if (rentalLineDelete.LineType == RORLineType::Warranty
+            &&  mainKitRentalEditorLine.WarrantyPrice)
+            {
+                mainKitRentalEditorLine.WarrantyPrice = 0;
+                updateContract = true;
+            }
+        }
+    
+        if (updateContract)
+        {
+            this.updateContractWithChanges(mainKitRentalEditorLine, callerRentalLine);
+        }
+    
+        delete_from rentalLineDelete
+        where rentalLineDelete.LineType != RORLineType::Normal
+        && rentalLineDelete.HeaderId == callerRentalLine.HeaderId
+        && rentalLineDelete.ParentLineRecId == callerRentalLine.RecId
+            notExists join rentalEditorLine
+            where rentalEditorLine.ParmId == this.parmId()
+            && rentalEditorLine.HeaderId == callerRentalLine.HeaderId
+            && rentalEditorLine.MainKitReference == callerRentalLine.RecId
+            && rentalEditorLine.Include
+            && rentalEditorLine.RefTableId == rentalLineDelete.TableId
+            && (rentalEditorLine.RefRecId == rentalLineDelete.RecId ||
+               (!rentalEditorLine.RefRecId && rentalEditorLine.LineType == rentalLineDelete.LineType));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        // reselect record to make sure that current version is stored in class instance.
+        select firstOnly mainKitHeader
+        where mainKitHeader.ParmId == this.parmId()
+        && mainKitHeader.RefTableId == callerRentalLine.TableId
+        && mainKitHeader.RefRecId == callerRentalLine.RecId;
+    
+        ttsbegin;
+    
+        this.initProgressBar();
+        this.createSelectedLines();
+        this.removeUnselectedLines();
+        this.clearInvoicePeriod(callerRentalLine);
+        this.updateHeader();
+        this.endProgressBar();
+    
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearInvoicePeriod</Name>
+				<Source><![CDATA[
+    public void clearInvoicePeriod(Common _callerRentalLine)
+    {
+        // Removes invoice period related records after closing RLE form
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setLastLineNum</Name>
+				<Source><![CDATA[
+    private void setLastLineNum(RORRentalEditorLine _rentalEditorLine, LineNum _lineNum)
+    {
+        if (_rentalEditorLine.LineType == RORLineType::Normal)
+        {
+            lastLineNum = _lineNum;
+        }
+        else
+        {
+            lastContractItemLineNum = _lineNum;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateCallerRentalLine</Name>
+				<Source><![CDATA[
+    private void updateCallerRentalLine()
+    {
+        RORRentalEditorLine rentalEditorLine;
+        RORKitComponentType kitComponentType
+        ;
+    
+        select firstOnly rentalEditorLine
+        where rentalEditorLine.ParmId == this.parmId()
+        && rentalEditorLine.HeaderId == callerRentalLine.HeaderId
+        && rentalEditorLine.InventTransId == callerRentalLine.InventTransId;
+    
+        callerRentalLine.selectForUpdate(true);
+    
+        // calculate KitComponentType based on whether this line has included children
+        kitComponentType = this.findKitComponentType(callerRentalLine, rentalEditorLine);
+    
+        if (kitComponentType != callerRentalLine.KitComponentType)
+        {
+            callerRentalLine.KitComponentType = kitComponentType;
+    
+        }
+    
+        callerRentalLine.RORRentalLine::initPricingFromRentalLine(rentalEditorLine);
+    
+        if(callerRentalLine.TradeType != RORTradeType::SalesPurch)
+        {
+            callerRentalLine.RORRentalLine::rentalPricesModified();
+        }
+    
+        callerRentalLine.update();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateContractWithChanges</Name>
+				<Source><![CDATA[
+    protected void updateContractWithChanges(RORRentalEditorLine _rentalEditorLine, RORRentalLine _rentalLine)
+    {
+        RAGTmpContractLine      tmpContractLine;
+        RAGContractTable        contractTable;
+        RAGContractDataParm     contractDataParm;
+        
+        if(_rentalLine.TradeType != RORTradeType::SalesPurch && _rentalLine.LineType == RORLineType::Normal && _rentalEditorLine.RecId == recIdMainKit)
+        {
+            tmpContractLine = RAGContractData::getTmpContractLineFromRentalLine(_rentalLine);
+            tmpContractLine.insert(); // insert so we can later on use the orig() method to see what was changed
+            tmpContractLine.initFromRORRentalEditorLine(_rentalEditorLine);
+    
+            if(!tmpContractLine.getModifications().empty()) // check contract elements for any changes
+            {
+                contractTable = RAGContractTable::findOrCreateFromRentalLine(_rentalLine, tmpContractLine);
+                tmpContractLine.modifyTmpContractLine();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateHeader</Name>
+				<Source><![CDATA[
+    protected void updateHeader()
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateLine</Name>
+				<Source><![CDATA[
+    protected abstract LineNum updateLine(
+        Common                  _common,
+        RORKitComponentType     _kitComponentType,
+        RORRentalEditorLine     _rentalEditorLine = null)
+    {
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateParentKitComponentType</Name>
+				<Source><![CDATA[
+    private void updateParentKitComponentType(RORRentalEditorLine _currentParent)
+    {
+        ttsBegin;
+        switch (_currentParent.KitComponentType)
+        {
+            case RORKitComponentType::Component:
+                // Sales/purch lines do not update prices of rental kit
+                _currentParent.KitComponentType = _currentParent.TradeType == RORTradeType::SalesPurch ?
+                    _currentParent.KitLevel >=2 ? RORKitComponentType::KitComponent : RORKitComponentType::Kit :
+                    RORKitComponentType::KitComponent;
+                _currentParent.RORRentalLine::rentalPricesModified();
+                // Will be recalculated later in KitPricing class
+                _currentParent.RentalGrossAmount = 0;
+                break;
+        }
+        ttsCommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static RORRentalLineEditorFormV2 construct(RORRentalLine           _rentalLine,
+                                                    boolean                 _convertPrices,
+                                                    RORRentalLineEditMode   _editMode = RORRentalLineEditMode::Modify,
+                                                    boolean                 _keepCallerOrigPrices = false)
+    {
+        RORRentalLineEditorFormV2 formClass;
+        ;
+    
+        switch(_rentalLine.TableId)
+        {
+            case tableNum(SalesLine):
+                formClass = new RORRentalLineEditorFormV2_RentalLine(_rentalLine);
+                break;
+    
+            case tableNum(PurchLine):
+                formClass = new RORRentalLineEditorFormV2_SubRentalLine(_rentalLine);
+                break;
+    
+            case tableNum(SalesQuotationLine):
+                formClass = new RORRentalLineEditorFormV2_RentalQuotLine(_rentalLine);
+                break;
+    
+            default:
+                throw error(strFmt("@SYS31187", tableId2Name(_rentalLine.TableId)));
+        }
+    
+        formClass.parmEditMode(_editMode);
+        formClass.parmConvertPrices(_convertPrices);
+        formClass.parmKeepCallerOrigPrices(_keepCallerOrigPrices);
+        formClass.init();
+    
+        return formClass;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSupplementaryItemsLines</Name>
+				<Source><![CDATA[
+    public static void createSupplementaryItemsLines(RORRentalLine _rentalLine, boolean _keepCallerOrigPrices = false)
+    {
+        RORRentalLineEditorFormV2 rentalLineEditorForm = RORRentalLineEditorFormV2::construct(_rentalLine, true, RORRentalLineEditMode::Create, _keepCallerOrigPrices);
+        List rentalEditorLineList = new List(Types::Record);
+        RORRentalEditorLine rentalEditorLineLocal;
+        ;        
+        ttsbegin;
+
+        while select rentalEditorLineLocal
+        order by LineNum
+        where rentalEditorLineLocal.ParmId == rentalLineEditorForm.parmId()
+        && rentalEditorLineLocal.HeaderId == rentalLineEditorForm.getCallerRentalLine().HeaderId
+        && rentalEditorLineLocal.Include == NoYes::Yes
+        {
+            rentalEditorLineList.addEnd(rentalEditorLineLocal);
+        }
+    
+        rentalLineEditorForm.parmPackedRentalEditorLineList(rentalEditorLineList.pack());
+    
+        rentalLineEditorForm.initProgressBar();
+        rentalLineEditorForm.createSelectedLines();
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        RORRentalLineEditorFormV2       rentalLineEditor;
+        RORRentalLine                   rentalLineKit, currentLine;
+        FormDataSource                  dataSource;
+        RORKitPriceManager              kitPriceManager;
+        boolean                         researchAndRehighlight;
+        Object                          callerForm;
+        boolean                         convertPrices;
+        ;
+    
+        if (!_args || !_args.record())
+        {
+            throw error(strFmt("@SYS29104", classStr(RORRentalLineEditorFormV2)));
+        }
+    
+        currentLine = _args.record();
+    
+        convertPrices = true;
+    
+        if (_args.caller() && classIdGet(_args.caller()) == classNum(FormRun))
+        {
+            callerForm = _args.caller();
+    
+            if (formHasMethod(callerForm, identifierStr(convertPrices)))
+            {
+                convertPrices = callerForm.convertPrices();
+            }
+        }
+    
+        rentalLineKit = currentLine.RORRentalLine::getAdditionalLineParent();
+    
+        //Always convert prices for kits
+        if (!convertPrices)
+        {
+            convertPrices = (rentalLineKit.KitComponentType == RORKitComponentType::Kit);
+        }
+
+        // For a sales/Purch Line never call the Rental Agreements logic
+        if (rentalLineKit.TradeType == RORTradeType::SalesPurch)
+        {
+            convertPrices = false;
+        }
+    
+        boolean keepCallerOrigPrices = rentalLineKit.RORRentalLine::mustKeepCallerOrigPrices();
+
+        rentalLineEditor = RORRentalLineEditorFormV2::construct(rentalLineKit, convertPrices, _args.parmEnum(), keepCallerOrigPrices);
+        // always display even if there's no components or supplementary items set up
+        rentalLineEditor.parmForceDisplay(true);
+    
+        try
+        {
+            if (rentalLineEditor.prompt())
+            {
+                rentalLineEditor.run();
+    
+                currentLine.reread();
+    
+                if (rentalLineKit.ParentLineRecId)
+                {
+                    // Prices need to be racalculated in case RLE form would be called from sub-kit
+                    if (rentalLineKit.isPriceFixed || rentalLineKit.isPriceNet)
+                    {
+                        kitPriceManager = RORKitPriceManager::construct(rentalLineKit, RORKitPriceUpdateType::FromKit, RORKitPricingActionType::AddLine);
+                    }
+                    else
+                    {
+                        kitPriceManager = RORKitPriceManager::construct(rentalLineKit, RORKitPriceUpdateType::FromComponent, RORKitPricingActionType::AddLine);
+                    }
+    
+                    if (kitPriceManager)
+                    {
+                        kitPriceManager.run();
+                    }
+                }
+    
+                researchAndRehighlight = true;
+            }
+            else if(rentalLineEditor.parmEditMode() == RORRentalLineEditMode::Create)
+            {
+                ttsBegin;
+                rentalLineEditor.clearInvoicePeriod(rentalLineKit);
+                // if the rental line editor was automatically opened from a new record,
+                // and the user hit cancel, then delete the calling record
+                currentLine.delete();
+                ttsCommit;
+                researchAndRehighlight = true;
+            }
+            else
+            {
+                rentalLineEditor.clearInvoicePeriod(rentalLineKit);
+            }
+        }
+        catch
+        {
+            rentalLineEditor.clearRentalEditorLineBuffer();
+        }
+    
+        if (researchAndRehighlight && FormDataUtil::isFormDataSource(currentLine))
+        {
+            if (callerForm)
+            {
+                callerForm.datasource().reread();
+                callerForm.datasource().refresh();
+            }
+            if (currentLine)
+            {
+                RefRecId callerLineRecId = currentLine.RecId;
+            
+                dataSource = FormDataUtil::getFormDataSource(currentLine);
+                dataSource.research();
+                dataSource.rereadJoinHierarchy();
+
+                RORRentalLine callerLine = rentalLineEditor.selectCallerLine(callerLineRecId);
+                dataSource.positionToRecord(callerLine);
+            }
+        }
+    
+        rentalLineEditor.clearRentalEditorLineBuffer();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mustAutoShowRentalLineEditor</Name>
+				<Source><![CDATA[
+    public static boolean mustAutoShowRentalLineEditor(RORRentalLine _rentalLine)
+    {
+        boolean ret;
+    
+        // only automatically open the editor when a new record is being inserted
+        if(!_rentalLine.RecId && _rentalLine.TradeType != RORTradeType::SalesPurch)
+        {
+            switch(RORParameters::find().AutoOpenRentalLineEditor)
+            {
+                case RORAutoOpenRentalLineEditor::OnCreation:
+                    ret = true;
+                    break;
+    
+                case RORAutoOpenRentalLineEditor::OnKitCreation:
+                    ret = (_rentalLine.KitComponentType == RORKitComponentType::Kit || _rentalLine.KitComponentType == RORKitComponentType::KitComponent);
+                    break;
+            }
+        }
+    
+        return ret;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmKeepCallerOrigPrices</Name>
+				<Source><![CDATA[
+    public boolean parmKeepCallerOrigPrices(boolean _keepCallerOrigPrices = keepCallerOrigPrices)
+    {
+        keepCallerOrigPrices = _keepCallerOrigPrices;
+
+        return keepCallerOrigPrices;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getChangesMap</Name>
+				<Source><![CDATA[
+    public Map getChangesMap(INVInvoicePeriodHost _invoicePeriodHost, INVInvoicePeriodHost _origBuffer)
+    {
+        boolean isKit = _invoicePeriodHost.KitComponentType == RORKitComponentType::Kit || _invoicePeriodHost.KitComponentType == RORKitComponentType::KitComponent;
+        boolean canChangePrice = !isKit || _invoicePeriodHost.IsPriceFixed;
+        Map changesMap = new Map(Types::Container, Types::Container);
+                   
+        if ((_invoicePeriodHost.Price           != _origBuffer.Price && canChangePrice)
+        || (_invoicePeriodHost.LinePercent      != _origBuffer.LinePercent && canChangePrice)
+        || _invoicePeriodHost.RentalModeId      != _origBuffer.RentalModeId
+        || _invoicePeriodHost.CalendarId        != _origBuffer.CalendarId)
+        {
+            TransDateTime   effectiveDateTimeFrom       = mainKitHeader.EffectiveDateTimeFrom;
+            TransDateTime   effectiveDateTimeTo         = mainKitHeader.EffectiveDateTimeTo;
+
+            if (effectiveDateTimeFrom == DateTimeUtil::minValue() || effectiveDateTimeTo == DateTimeUtil::minValue())
+            {
+                RORRentalDateTimes rentalDateTimes = RORRentalDateTimes::findReference(_invoicePeriodHost.TableId, _invoicePeriodHost.RecId);
+                if (rentalDateTimes)
+                {
+                    FieldId onRentFieldId, expectedOffRentFieldId, offRentFieldId;
+
+                    [onRentFieldId, offRentFieldId, expectedOffRentFieldId] = RORRentalDateTimes::getPeriodFieldIds();
+
+                    effectiveDateTimeFrom   = (effectiveDateTimeFrom == DateTimeUtil::minValue() ? rentalDateTimes.(onRentFieldId) : effectiveDateTimeFrom);
+                    effectiveDateTimeTo     = (effectiveDateTimeTo == DateTimeUtil::minValue() ? (rentalDateTimes.(offRentFieldId) ? rentalDateTimes.(offRentFieldId) : DateTimeUtil::maxValue()) : effectiveDateTimeTo);
+                }
+            }
+
+            if (_invoicePeriodHost.Price != _origBuffer.Price && canChangePrice)
+            {
+                if (_invoicePeriodHost.PriceTimeUnit != _origBuffer.PriceTimeUnit)
+                {
+                    RORAmendmentReasonText reasonText = strFmt("@DNR:ChangedValueFromTo", 
+                                                                "@DNR44",
+                                                                UnitOfMeasure::find(_origBuffer.PriceTimeUnit).Symbol,
+                                                                UnitOfMeasure::find(_invoicePeriodHost.PriceTimeUnit).Symbol);
+                    changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'RentalPrice'], [_invoicePeriodHost.Price, _origBuffer.Price, reasonText]);
+                }
+                else
+                {
+                    changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'RentalPrice'], [_invoicePeriodHost.Price, _origBuffer.Price, '']);
+                }
+            }
+
+            if (_invoicePeriodHost.LinePercent != _origBuffer.LinePercent && canChangePrice)
+            {
+                changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'LinePercent'], [_invoicePeriodHost.LinePercent, _origBuffer.LinePercent, '']);
+            }
+
+            if (_invoicePeriodHost.RentalModeId != _origBuffer.RentalModeId)
+            {
+                changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'RentalModeId'], [_invoicePeriodHost.RentalModeId, _origBuffer.RentalModeId, '']);
+            }
+
+            if (_invoicePeriodHost.CalendarId != _origBuffer.CalendarId)
+            {
+                changesMap.insert([effectiveDateTimeFrom, effectiveDateTimeTo, 'CalendarId'], [_invoicePeriodHost.CalendarId, _origBuffer.CalendarId, '']);
+            }
+        }
+
+        return changesMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>selectCallerLine</Name>
+				<Source><![CDATA[
+    protected RORRentalLine selectCallerLine(RefRecId _callerLineRecId)
+    {
+        // Implemented in subclasses
+        RORRentalLine emptyLine;
+        return emptyLine;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>AddNextLevelSupplemetaryItems</Name>
+				<Source><![CDATA[
+    public void AddNextLevelSupplemetaryItems(ItemId                  _itemIdKit,
+                                              RORRentalEditorLine     _currentParent,
+                                              Level                   _kitLevel)
+    {
+        ttsbegin;
+
+        if (_itemIdKit)
+        {
+            SuppItem                suppItem;
+            TmpSuppItem             tmpSuppItem;
+            Common                  common = callerRentalLine;
+            SalesPurchLine          salesPurchLineDummy;
+            RORTradeType            filterTradeType = _kitLevel == 1 ? callerRentalLine.TradeType : _currentParent.TradeType;
+            RORRentalEditorLine     rentalEditorLine;
+
+            if (_currentParent && !expandedRecordsMap.exists(_currentParent.RecId))
+            {
+                expandedRecordsMap.insert(_currentParent.RecId, _currentParent.ParentLineRecId);
+                this.insertExpandedLine(_currentParent.RecId, _currentParent.ParentLineRecId);
+            }
+
+            // create a line for supplentary item itself
+            // a SalesPurchLine instance is needed to use SuppItem class functionality, so create a dummy record
+            common = new SysDictTable(common.TableId).makeRecord();
+            common.data(callerRentalLine); // This is needed so that we dont pass the reference of original record
+            salesPurchLineDummy = common; // copy from main kit and then modify the required fields
+            salesPurchLineDummy.salesPurchLineInterface().DNRassignItemId(_itemIdKit);
+    
+            suppItem = SuppItem::newSuppItem(callerHeader, HeadingLine::Line);
+
+            suppItem.DNRparmTradeType(filterTradeType); // Used in /Classes/SuppItem/Methods/calcSuppItem
+            suppItem.DNRCalcSuppItem(salesPurchLineDummy);
+            suppItem.DNRparmTradeType(RORTradeType::SalesPurch);
+            
+            tmpSuppItem = suppItem.tmpSuppItem();
+
+            // loop through all supplementary items which are linked to a product which has components,
+            // AND are set to auto-create. Other items are not relevant in the prompt dialog
+            while select tmpSuppItem
+            order by RORTradeType desc, RORKitRequiredLevel desc, RORKitStandalone asc, RecId asc
+            {
+                select firstonly rentalEditorLine
+                where rentalEditorLine.ParentLineRecId  == _currentParent.RecId 
+                  &&  rentalEditorLine.ItemId           == tmpSuppItem.ItemId;
+
+                if (rentalEditorLine)
+                {
+                    this.AddNextLevelSupplemetaryItems(tmpSuppItem.ItemId, rentalEditorLine, _kitLevel + 1);
+                }
+            }
+        }
+
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>updateTmpSuppItemBulk</Name>
+				<Source><![CDATA[
+    private void updateTmpSuppItemBulk(TmpSuppItem _TmpSuppItem)
+    {
+        InventTable     inventTable;
+        EcoResProduct   ecoResProduct;
+        BOBRentalType   rentalType;
+
+        update_recordset _TmpSuppItem
+        setting
+            RORTradeType = callerRentalLine.TradeType
+        join TableId from inventTable
+        where inventTable.ItemId == _TmpSuppItem.ItemId
+        &&    inventTable.RORItemTradeType == RORItemTradeType::FromOrder;
+
+        update_recordset _TmpSuppItem
+        setting
+            RORTradeType = RORTradeType::SalesPurch
+        join TableId from inventTable
+        where inventTable.ItemId == _TmpSuppItem.ItemId
+        &&    inventTable.RORItemTradeType == RORItemTradeType::SalesPurch;
+
+        update_recordset _TmpSuppItem
+        setting
+            RORTradeType = RORTradeType::Rental
+        join TableId from inventTable
+        where inventTable.ItemId == _TmpSuppItem.ItemId
+        &&    inventTable.RORItemTradeType == RORItemTradeType::RentalSubRental;
+
+        update_recordset _TmpSuppItem
+        setting
+            RORKitStandalone = rentalType.RORKitStandalone
+        join TableId from inventTable
+        where inventTable.ItemId == _TmpSuppItem.ItemId
+            join TableId from ecoResProduct
+            where ecoResProduct.RecId == inventTable.Product
+                join rentalType
+                where rentalType.RentalTypeId == ecoResProduct.BOBRentalTypeId;
+
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLineNum</Name>
+				<Source><![CDATA[
+    private LineNum getLineNum(RORRentalEditorLine _currentParent, LineNum _lastLineNum = 0)
+    {
+        RORRentalEditorLine     nextRentalEditorLine;
+        RORRentalEditorLine     currentParentLine;
+        LineNum                 newLineNum;
+
+        if (_lastLineNum == 0)
+        {
+            select maxof(LineNum) from nextRentalEditorLine
+            where nextRentalEditorLine.ParmId == this.parmId()
+            &&    nextRentalEditorLine.ParentLineRecId == _currentParent.RecId;
+
+            newLineNum = nextRentalEditorLine ? nextRentalEditorLine.LineNum : _currentParent.LineNum;
+        }
+        else
+        {
+            newLineNum = _lastLineNum;
+        }
+
+        if (_currentParent.RecId == recIdMainKit)
+        {            
+            newLineNum = newLineNum + 1.0;
+        }
+        else
+        {
+            newLineNum = newLineNum + 1/power(100, _currentParent.KitLevel);
+        }
+
+        if (_lastLineNum != 0)
+        {
+            select firstonly RecId from nextRentalEditorLine
+            where nextRentalEditorLine.ParmId == this.parmId()
+            &&    nextRentalEditorLine.ParentLineRecId == _currentParent.RecId
+            &&    nextRentalEditorLine.LineNum == newLineNum;
+
+            if (nextRentalEditorLine.RecId)
+            {
+                newLineNum = this.getLineNum(_currentParent, newLineNum);
+            }
+        }
+
+        return newLineNum;         
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmPopulateRecursively</Name>
+				<Source><![CDATA[
+    [SysObsolete("DNRDeletedObjects01_2022. Method has been made obsolete", false)]
+    public boolean parmPopulateRecursively(boolean _populateRecursively = populateRecursively)
+    {
+        populateRecursively = _populateRecursively;
+        return populateRecursively;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTMPExpandedRentalEditorLines</Name>
+				<Source><![CDATA[
+    public RORTmpExpandedRentalEditorLines parmTMPExpandedRentalEditorLines(RORTmpExpandedRentalEditorLines _tmpExpandedLines = tmpExpandedLines)
+    {
+        tmpExpandedLines = _tmpExpandedLines;
+        return tmpExpandedLines;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertExpandedLine</Name>
+				<Source><![CDATA[
+    public void insertExpandedLine(RecId _LineRecId = 0,RecId _ParentLineRecId = 0)
+    {
+        tmpExpandedLines.clear();
+        tmpExpandedLines.ParmId = parmId;
+        tmpExpandedLines.LineRecId = _LineRecId;
+        tmpExpandedLines.ParentLineRecId = _parentLineRecId;
+        tmpExpandedLines.write();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmExpandedRecordsMap</Name>
+				<Source><![CDATA[
+    public Map parmExpandedRecordsMap(Map _expandedRecordsMap = expandedRecordsMap)
+    {
+        expandedRecordsMap = _expandedRecordsMap;
+        return expandedRecordsMap;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>getLastLineNum</Name>
+				<Source><![CDATA[
+    protected LineNum getLastLineNum()
+    {
+        LineNum             lastLinenumlOC;
+
+        switch (callerRentalLine.TableId)
+        {
+            case tableNum(SalesLine):
+                SalesLine   salesLineCaller = callerRentalLine;
+                SalesLine   salesLineLastLineNum;
+
+                select firstonly LineNum from salesLineLastLineNum
+                order by LineNum desc
+                where salesLineLastLineNum.SalesId == salesLineCaller.SalesId;
+
+                lastLinenumlOC  = salesLineLastLineNum.LineNum;
+                break;
+            
+            case tableNum(SalesQuotationLine):
+                SalesQuotationLine   salesQuotationLineCaller = callerRentalLine;
+                SalesQuotationLine   salesQuotationLineLastLineNum;
+
+                select firstonly LineNum from salesQuotationLineLastLineNum
+                order by LineNum desc
+                where salesQuotationLineLastLineNum.QuotationId == salesQuotationLineCaller.QuotationId;
+
+                lastLinenumlOC  = salesQuotationLineLastLineNum.LineNum;
+                break;
+            
+            case tableNum(PurchLine):
+                PurchLine   purchLineCaller = callerRentalLine;
+                PurchLine   purchLineLastLineNum;
+
+                select firstonly LineNumber from purchLineLastLineNum
+                order by LineNumber desc
+                where purchLineLastLineNum.PurchId == purchLineCaller.PurchId;
+
+                lastLinenumlOC  = purchLineLastLineNum.LineNumber;
+                break;
+            
+            default:
+                throw Error ("@DNR:InvalidMethodCall");
+
+        }
+
+        return lastLinenumlOC;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>
